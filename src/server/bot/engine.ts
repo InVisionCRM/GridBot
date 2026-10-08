@@ -226,6 +226,7 @@ export class GridEngine {
     const limits = { ...this.state.limits, ...(p.limits ?? {}) };
     const errs = [...validateLimits(limits), ...validateGridParams(p.lowerPrice, p.upperPrice, p.gridCount, p.totalCapitalUsd)];
     const stable = p.stable ?? this.state.stable;
+    if (this.state.config && stable !== this.state.stable) throw new Error(`This grid trades ${this.hub.label(this.state.stable)}; its pair can't change. Add a new grid for ${this.hub.label(stable)}.`);
     const def = this.hub.def(stable);
     if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push('Live mode needs PRIVATE_KEY in .env');
     if (errs.length) throw new Error(errs.join('; '));
