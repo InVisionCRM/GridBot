@@ -1,8 +1,7 @@
-# PulseChain Grid Bot — multi-chain
+# GridBot
 
-Server-side grid + trend bots for EVM DEXes. Auto-signs with your key. It started on PulseX V2 (PLS/stable) and now runs on
-**PulseChain, Robinhood Chain, Ethereum, Base, Arbitrum One, BNB Chain, Polygon and Optimism**, on Uniswap-V2-style and
-Uniswap-V3-style DEXes, with **custom tokens on every chain**. On PulseChain a pair can trade on **PulseX V1, PulseX V2,
+Server-side grid + trend bots for EVM DEXes. Auto-signs with your key. It runs on **PulseChain, Ethereum and Robinhood
+Chain**, on Uniswap-V2-style and Uniswap-V3-style DEXes, with **custom tokens on every chain**. On PulseChain a pair can trade on **PulseX V1, PulseX V2,
 9mm V2 or 9mm V3**, using the best pool or one you pick. Chains run in parallel, each with its own nonce queue. Within a chain, one tx is in flight at a time.
 
 > Tip: use a dedicated hot wallet that holds only what the bot trades, plus gas on each chain you use.
@@ -24,23 +23,30 @@ pm2 logs grid-bot
 
 Dev: `npm run dev` (UI :5173, API :3847).
 
-**Guide:** the **Guide** button in the top bar opens an in-app explainer. It covers how the grid works, the cost math and start gate, presets, settings, how to read the dashboard, operating it, and an FAQ. Its numbers are imported from the code (fees, gate thresholds, limits, preset params).
+## Using the app
+
+- **Home**: total value, bot profit and what the same money would have made by just holding. Notices for anything that needs you (low gas, errors, a grid that left its range, a wallet that doesn't cover live bots). One row per bot with Stop / Resume.
+- **New bot**: choose a grid or a trend bot. Grids start from a preset or a custom range; capital is entered in dollars. One sentence tells you what each completed buy-then-sell nets after fees, impact and gas. Paper / Live sits next to the Start button; live always asks first. Limits live under *Advanced*.
+- **Bot detail**: profit vs holding, the chart (grid levels and fills, or the trend bot's entry / stop / take-profit lines), the bot's own log, levels, fills (compact, or *All columns*), and for grids **Change range**, which restarts a stopped grid on its own pair and mode.
+- **Tools**: Charts, Backtest, Analytics, Markets (custom tokens, pool picker, chain registry) and Alerts.
+- **Top bar**: chain filter (All / PLS / HOOD / ETH, with a dot when gas is low), signing address or *Paper only*, the Activity feed, the Guide, and **Stop all** (or *Stop all on* the filtered chain). Stopping never sells holdings.
+- **Guide**: a short in-app explainer. Its numbers are imported from the code (fees, start-check thresholds, limits, preset params).
 
 ## Multi-chain
 
-- **Chains.** Every chain in the registry below is on by default. `CHAINS=pulsechain,base,arbitrum` limits the set (PulseChain is always on). A chain marked TESTNET shows a badge, and if it has no verified DEX it stays visible with trading unavailable and the reason shown.
+- **Chains.** PulseChain, Robinhood Chain and Ethereum are on by default. `CHAINS=ethereum` (for example) limits the set; PulseChain is always on. Bots, alerts and custom tokens saved for a chain that isn't loaded stay stopped and show as unavailable until you remove them.
 - **RPCs.** `RPC_URL_<SLUG>` (comma-separated list allowed) comes first, then the built-in public fallbacks. On PulseChain the legacy `RPC_URL` also works. The reader rotates endpoints on transport errors and 429s, uses a 12 s timeout, and limits concurrency per chain. Simulations with state overrides try every endpoint, because support varies by RPC.
-- **Keys.** One `PRIVATE_KEY` signs on every chain (same EVM address). The optional `PRIVATE_KEY_<SLUG>` (e.g. `PRIVATE_KEY_BASE`) overrides it for that chain. Keys are read only in `src/server/env.ts`, removed from `process.env` immediately, redacted from logs, and never sent to the UI (`tests/noSecrets.test.ts`).
-- **Queues.** Each chain has its own `TxGate` + nonce queue, so chains trade in parallel while one chain never has two txs in flight. **KILL ALL** stops everything. The chain bar has a **per-chain STOP**.
-- **Gas.** The gas balance is polled per chain, with a warning in the feed when it drops below the chain's threshold (50k PLS; 0.01 ETH on Ethereum; 0.0005 ETH on L2s; 0.005 BNB; 1 POL). Gas is converted to the market's base and quote units through the chain's native/USD market. On L2s the cost and start gates add the L1 data fee: OP-stack `GasPriceOracle.getL1Fee` on Base/Optimism, Arbitrum `NodeInterface.gasEstimateL1Component` on Arbitrum/Robinhood.
-- **Markets.** The key `chain:BASE/QUOTE` (e.g. `base:ETH/USDC`) is used by every feature: grids, trend bots, backtests, charts, market panels, alerts, analytics and the journal. The existing PulseChain keys (`DAI`, `HEX`, …) and `data/state.json` load unchanged as chain 369.
-- **UI.** The chain selector in the top bar filters every tab. Chain badges and explorer links per chain. The portfolio shows aggregated ≈USD with a per-chain breakdown (equity, capital, PnL, gas, wallet). DEX/version + fee tags appear on each grid, trend bot, pool and fill.
+- **Keys.** One `PRIVATE_KEY` signs on every chain (same EVM address). The optional `PRIVATE_KEY_<SLUG>` (e.g. `PRIVATE_KEY_ETHEREUM`) overrides it for that chain. Keys are read only in `src/server/env.ts`, removed from `process.env` immediately, redacted from logs, and never sent to the UI (`tests/noSecrets.test.ts`).
+- **Queues.** Each chain has its own `TxGate` + nonce queue, so chains trade in parallel while one chain never has two txs in flight. **Stop all** stops everything; with a chain selected it stops only that chain.
+- **Gas.** The gas balance is polled per chain, with a warning in the feed when it drops below the chain's threshold (50k PLS; 0.01 ETH on Ethereum; 0.0005 ETH on Robinhood). Gas is converted to the market's base and quote units through the chain's native/USD market. On Robinhood (an Arbitrum Orbit L2) the cost and start gates add the L1 component from `NodeInterface.gasEstimateL1Component`.
+- **Markets.** The key `chain:BASE/QUOTE` (e.g. `ethereum:ETH/USDC`) is used by every feature: grids, trend bots, backtests, charts, market panels, alerts, analytics and the journal. The existing PulseChain keys (`DAI`, `HEX`, …) and `data/state.json` load unchanged as chain 369.
+- **UI.** The chain filter in the top bar applies to every screen. Chain badges and explorer links per chain. Tools → Analytics shows aggregated ≈USD with a per-chain breakdown. DEX/version + fee tags appear on each grid, trend bot, pool and fill.
 
 ## DEX adapters
 
 One interface (`src/server/dex/types.ts`): `findPools`, `state`, `quote`, `buildSwap`.
 
-- **V2** (`v2.ts`): `factory.getPair`, `getReserves`, `router.getAmountsOut`, `swapExact{ETHForTokens,TokensForETH,TokensForTokens}`. The fee is set per DEX (PulseX V1/V2 0.29%, 9mm V2 0.25%, PancakeSwap V2 0.25%, Uniswap/QuickSwap V2 0.30%). `check:onchain` measures each fee from reserves against `getAmountsOut`.
+- **V2** (`v2.ts`): `factory.getPair`, `getReserves`, `router.getAmountsOut`, `swapExact{ETHForTokens,TokensForETH,TokensForTokens}`. The fee is set per DEX (PulseX V1/V2 0.29%, 9mm V2 0.25%, Uniswap V2 0.30%). `check:onchain` measures each fee from reserves against `getAmountsOut`.
 - **V3** (`v3.ts`): `factory.getPool` on every configured tier, then `slot0` + `liquidity`. Quotes come from **QuoterV2** `quoteExactInputSingle` at the real size. Swaps go through `multicall(deadline, …)` on SwapRouter02 / PancakeSwap-style SmartRouter (`exactInputSingle`, `exactInput` for paths, `unwrapWETH9` for native out). Tiers: Uniswap 100/500/3000/10000, PancakeSwap 100/500/2500/10000, 9mm 100/500/2500/10000/20000.
 - The cost gate, start gate, trend cost gate and backtests use the market's real LP fee, the chain's gas units and price, the L1 data fee and the native→USD price.
 
@@ -59,7 +65,7 @@ Sources:
 - PulseX V1 + V2: the V1 router is labelled **Official** on [PulseScan](https://scan.pulsechain.com/address/0x98bf93ebf5c380C0e6Ae8e192A7e2AE08edAcc02) and was deployed by the same deployer (`0x30e22a…c72539`) as the V2 router/factory. The V1/V2 router + factory list is in the community [PulseChain docs (PulseX page)](https://hexikani.github.io/pulsechain-docs/pulsex.html). The official [docs.pulsex.com](https://docs.pulsex.com) did not respond from the build machine (empty/500), so its address page could not be read directly.
 - 9mm: official deployments repo [9mm-exchange/deployments `pulsechain/v2.json`](https://github.com/9mm-exchange/deployments/blob/main/pulsechain/v2.json) and [`pulsechain/v3.json`](https://github.com/9mm-exchange/deployments/blob/main/pulsechain/v3.json). The V3 `SwapRouter` (`0x7bE8…1bEA`, older Pancake interface with deadline in the struct) is verified but not used. The bot uses the SmartRouter (IV3SwapRouter interface).
 
-**Pool selection.** Every market has a **Pools** button in the Markets tab. It lists every pool for that pair across all DEXes on the chain (both 9mm V3 tiers included): TVL, mid price, output for a ≈$250 buy, % vs best, impact.
+**Pool selection.** Every market has a **Pools** button in Tools → Markets. It lists every pool for that pair across all DEXes on the chain (both 9mm V3 tiers included): TVL, mid price, output for a ≈$250 buy, % vs best, impact.
 - **Auto: best quote** picks the pool with the largest output at that size, which accounts for both fee and depth (TVL breaks ties).
 - **Use** sets a manual override.
 - **Reset to default** returns a built-in market to its registry pool. Built-in PulseChain markets default to PulseX V2, so existing grids behave exactly as before until you switch.
@@ -70,7 +76,7 @@ Sources:
 
 ## Custom tokens + safety
 
-Markets tab → *Add custom token*: pick a chain, paste an address, optionally pick the quote token (default: whichever of wrapped native / stables / existing tokens has the deepest pool).
+Tools → Markets → *Add custom token*: pick a chain, paste an address, optionally pick the quote token (default: whichever of wrapped native / stables / existing tokens has the deepest pool).
 
 1. **Metadata.** Code exists at the address; `decimals()` is **always read on-chain** (uint8 or uint256 return; missing / >36 refused; 0 and >18 warned; cached per chain+address; a mismatch with the stored market refuses to quote). `symbol()`/`name()` (bytes32 fallback), `totalSupply()`, `balanceOf()`. Proxies are flagged: EIP-1967 (incl. beacon), EIP-1822, OpenZeppelin legacy, EIP-1167 minimal proxies and small non-standard delegatecall proxies. Common views for `maxTxAmount` / `maxWallet` / `paused` / `tradingEnabled` / `isBlacklisted` are probed too.
 2. **Pools.** V2 `getPair` on every V2 DEX, V3 `getPool` on every tier of every V3 DEX. Each pool shows TVL (valued at one reference price so a broken pool can't report a huge TVL), mid price and impact. Off-market pools are marked.
@@ -78,7 +84,7 @@ Markets tab → *Add custom token*: pick a chain, paste an address, optionally p
 4. **Depth.** Buy/sell impact at $100, $500 and $1k.
 5. **Risk badge.** `low` · `medium` (proxy, modest pool) · `high` (thin pool, $100 moves price >3%) · `blocked` · `unknown`.
 
-**Fee-on-transfer policy: support on V2, prove-or-block on V3.** Buy / transfer / sell taxes are measured separately. On V2 forks (PulseX V1/V2, 9mm V2, Uniswap/Pancake/QuickSwap V2) a tax up to `MAX_TOKEN_TAX_PCT` (default 10%) per side is allowed live: swaps use the router's `*SupportingFeeOnTransferTokens` methods, `amountOutMin` is set **after** tax, both taxes are part of every cost / start / spacing / trend / backtest gate, and PnL is booked from the wallet's balance change (actual received). On V3, a taxed token is live only if the simulated buy → transfer → sell through that exact pool succeeded (`v3-proven`); otherwise paper-only. A tax above the cap, a honeypot, paused trading, or an unverifiable simulation is paper-only. While a bot runs on a custom token the tax test re-runs every `TAX_RECHECK_MIN` minutes (default 30) and immediately after a reverted swap or a fill short of the post-tax quote; a rising tax (or honeypot / pause) pauses every bot on that market with an alert. Tested in `tests/decimalsTaxes.test.ts` + `tests/multichain.test.ts`; on-chain, FLOKI (BNB Chain) is measured as a tax token.
+**Fee-on-transfer policy: support on V2, prove-or-block on V3.** Buy / transfer / sell taxes are measured separately. On V2 forks (PulseX V1/V2, 9mm V2, Uniswap V2) a tax up to `MAX_TOKEN_TAX_PCT` (default 10%) per side is allowed live: swaps use the router's `*SupportingFeeOnTransferTokens` methods, `amountOutMin` is set **after** tax, both taxes are part of every cost / start / spacing / trend / backtest gate, and PnL is booked from the wallet's balance change (actual received). On V3, a taxed token is live only if the simulated buy → transfer → sell through that exact pool succeeded (`v3-proven`); otherwise paper-only. A tax above the cap, a honeypot, paused trading, or an unverifiable simulation is paper-only. While a bot runs on a custom token the tax test re-runs every `TAX_RECHECK_MIN` minutes (default 30) and immediately after a reverted swap or a fill short of the post-tax quote; a rising tax (or honeypot / pause) pauses every bot on that market with an alert. Tested in `tests/decimalsTaxes.test.ts` + `tests/multichain.test.ts`; on-chain, STA (Statera, Ethereum) is measured as a 1% tax token.
 
 Custom markets persist in `data/custom.json` and work in grids, trend bots, backtests (GeckoTerminal with on-chain V2/V3 rebuild fallback), charts, market panels, alerts and analytics. **Re-check** re-runs the safety probe. **Remove** works once no bot or alert uses the market.
 
@@ -130,19 +136,6 @@ RPC fallbacks: `https://rpc.mainnet.chain.robinhood.com` · explorer https://rob
 
 Sources: [Robinhood Chain — connecting (chain ID, RPC, explorer)](https://docs.robinhood.com/chain/connecting) · [Robinhood Chain — contracts (WETH, USDG)](https://docs.robinhood.com/chain/contracts) · [Uniswap v3 Robinhood deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-robinhood-deployments) · [Uniswap/contracts deployments/4663.md (v2 + v3)](https://github.com/Uniswap/contracts/blob/main/deployments/4663.md) · [PancakeSwap v3 addresses (Robinhood column)](https://developer.pancakeswap.finance/contracts/v3/addresses) · [Uniswap V3](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-robinhood-deployments) · [Uniswap V2](https://github.com/Uniswap/contracts/blob/main/deployments/4663.md) · [PancakeSwap V3](https://developer.pancakeswap.finance/contracts/v3/addresses)
 
-### Robinhood Chain Testnet — chain 46630 (TESTNET) · Arbitrum/Orbit L2 · gas ETH · `RPC_URL_ROBINHOOD_TESTNET` / `PRIVATE_KEY_ROBINHOOD_TESTNET`
-
-**Trading unavailable:** TESTNET — no official DEX deployment found: the mainnet Uniswap/PancakeSwap addresses have no code on 46630 and no testnet router/quoter is published (checked 2026-10-08).
-
-| Contract | Address | Fee |
-|---|---|---|
-| Wrapped native WETH | `0x7943e237c7F95DA44E0301572D358911207852Fa` | |
-| USDG (6 dec) | `0x7E955252E15c84f5768B83c41a71F9eba181802F` | |
-
-RPC fallbacks: `https://rpc.testnet.chain.robinhood.com` · explorer https://explorer.testnet.chain.robinhood.com
-
-Sources: [Robinhood Chain — connecting](https://docs.robinhood.com/chain/connecting) · [Robinhood Chain — contracts](https://docs.robinhood.com/chain/contracts)
-
 ### Ethereum — chain 1 · L1 · gas ETH · `RPC_URL_ETHEREUM` / `PRIVATE_KEY_ETHEREUM`
 
 L1 gas makes small grids uneconomic — the start gate will usually block them.
@@ -163,95 +156,6 @@ L1 gas makes small grids uneconomic — the start gate will usually block them.
 RPC fallbacks: `https://ethereum-rpc.publicnode.com`, `https://eth.drpc.org`, `https://cloudflare-eth.com` · explorer https://etherscan.io
 
 Sources: [Uniswap v3 Ethereum deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments) · [Uniswap v2 deployments](https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses) · [Tether supported protocols](https://tether.to/en/supported-protocols) · [Uniswap V3](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments) · [Uniswap V2](https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments)
-
-### Base — chain 8453 · OP-stack L2 · gas ETH · `RPC_URL_BASE` / `PRIVATE_KEY_BASE`
-
-| Contract | Address | Fee |
-|---|---|---|
-| Wrapped native WETH | `0x4200000000000000000000000000000000000006` | |
-| USDC (6 dec) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | |
-| Uniswap V3 factory | `0x33128a8fC17869897dcE68Ed026d694621f6FDfD` | tiers 100 / 500 / 3000 / 10000 |
-| Uniswap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x2626664c2603336E57B271c5C0b26F421741e481` | |
-| Uniswap V3 QuoterV2 | `0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a` | |
-| Uniswap V2 factory | `0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6` | 0.3% |
-| Uniswap V2 router | `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24` | |
-| Default market ETH/USDC pool (uniswap-v3) | `0xd0b53D9277642d899DF5C87A3966A349A798F224` | 0.05% |
-
-RPC fallbacks: `https://mainnet.base.org`, `https://base-rpc.publicnode.com`, `https://base.drpc.org` · explorer https://basescan.org
-
-Sources: [Base docs — network information](https://docs.base.org/base-chain/quickstart/connecting-to-base) · [Uniswap v3 Base deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-base-deployments) · [Uniswap v2 deployments](https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses) · [Uniswap V3](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-base-deployments) · [Uniswap V2](https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments)
-
-### Arbitrum One — chain 42161 · Arbitrum/Orbit L2 · gas ETH · `RPC_URL_ARBITRUM` / `PRIVATE_KEY_ARBITRUM`
-
-| Contract | Address | Fee |
-|---|---|---|
-| Wrapped native WETH | `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1` | |
-| USDC (6 dec) | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | |
-| USDT (6 dec) | `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9` | |
-| Uniswap V3 factory | `0x1F98431c8aD98523631AE4a59f267346ea31F984` | tiers 100 / 500 / 3000 / 10000 |
-| Uniswap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45` | |
-| Uniswap V3 QuoterV2 | `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` | |
-| Uniswap V2 factory | `0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9` | 0.3% |
-| Uniswap V2 router | `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24` | |
-| Default market ETH/USDC pool (uniswap-v3) | `0xC6962004f452bE9203591991D15f6b388e09E8D0` | 0.05% |
-
-RPC fallbacks: `https://arb1.arbitrum.io/rpc`, `https://arbitrum-one-rpc.publicnode.com`, `https://arbitrum.drpc.org` · explorer https://arbiscan.io
-
-Sources: [Arbitrum docs — RPC endpoints](https://docs.arbitrum.io/build-decentralized-apps/reference/node-providers) · [Uniswap v3 Arbitrum deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-arbitrum-deployments) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses) · [Uniswap V3](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-arbitrum-deployments) · [Uniswap V2](https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments)
-
-### BNB Chain — chain 56 · L1 · gas BNB · `RPC_URL_BSC` / `PRIVATE_KEY_BSC`
-
-| Contract | Address | Fee |
-|---|---|---|
-| Wrapped native WBNB | `0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c` | |
-| USDT (18 dec) | `0x55d398326f99059fF775485246999027B3197955` | |
-| USDC (18 dec) | `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d` | |
-| PancakeSwap V3 factory | `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` | tiers 100 / 500 / 2500 / 10000 |
-| PancakeSwap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x13f4EA83D0bd40E75C8222255bc855a974568Dd4` | |
-| PancakeSwap V3 QuoterV2 | `0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997` | |
-| PancakeSwap V2 factory | `0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73` | 0.25% |
-| PancakeSwap V2 router | `0x10ED43C718714eb63d5aA57B78B54704E256024E` | |
-| Default market BNB/USDT pool (pancakeswap-v3) | `0x172fcD41E0913e95784454622d1c3724f546f849` | 0.01% |
-
-RPC fallbacks: `https://bsc-dataseed.bnbchain.org`, `https://bsc-rpc.publicnode.com`, `https://bsc-dataseed1.defibit.io`, `https://bsc.drpc.org` · explorer https://bscscan.com
-
-Sources: [BNB Chain docs — RPC](https://docs.bnbchain.org/bnb-smart-chain/developers/json_rpc/json-rpc-endpoint/) · [PancakeSwap v3 addresses](https://developer.pancakeswap.finance/contracts/v3/addresses) · [PancakeSwap v2 addresses](https://developer.pancakeswap.finance/contracts/v2/addresses) · [PancakeSwap V3](https://developer.pancakeswap.finance/contracts/v3/addresses) · [PancakeSwap V2](https://developer.pancakeswap.finance/contracts/v2/addresses)
-
-### Polygon PoS — chain 137 · L1 · gas POL · `RPC_URL_POLYGON` / `PRIVATE_KEY_POLYGON`
-
-polygon-rpc.com now returns 401 without a key; publicnode/drpc are used.
-
-| Contract | Address | Fee |
-|---|---|---|
-| Wrapped native WPOL | `0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270` | |
-| USDC (6 dec) | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | |
-| USDT (6 dec) | `0xc2132D05D31c914a87C6611C10748AEb04B58e8F` | |
-| Uniswap V3 factory | `0x1F98431c8aD98523631AE4a59f267346ea31F984` | tiers 100 / 500 / 3000 / 10000 |
-| Uniswap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45` | |
-| Uniswap V3 QuoterV2 | `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` | |
-| QuickSwap V2 factory | `0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32` | 0.3% |
-| QuickSwap V2 router | `0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff` | |
-| Default market POL/USDC pool (uniswap-v3) | `0xB6e57ed85c4c9dbfEF2a68711e9d6f36c56e0FcB` | 0.05% |
-
-RPC fallbacks: `https://polygon-bor-rpc.publicnode.com`, `https://polygon.drpc.org` · explorer https://polygonscan.com
-
-Sources: [Polygon docs — RPC endpoints](https://docs.polygon.technology/pos/reference/rpc-endpoints/) · [Uniswap v3 Polygon deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-polygon-deployments) · [QuickSwap contracts](https://docs.quickswap.exchange/overview/contracts-and-addresses) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses) · [Uniswap V3](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-polygon-deployments) · [QuickSwap V2](https://docs.quickswap.exchange/overview/contracts-and-addresses)
-
-### OP Mainnet — chain 10 · OP-stack L2 · gas ETH · `RPC_URL_OPTIMISM` / `PRIVATE_KEY_OPTIMISM`
-
-| Contract | Address | Fee |
-|---|---|---|
-| Wrapped native WETH | `0x4200000000000000000000000000000000000006` | |
-| USDC (6 dec) | `0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85` | |
-| USDT (6 dec) | `0x94b008aA00579c1307B0EF2c499aD98a8ce58e58` | |
-| Uniswap V3 factory | `0x1F98431c8aD98523631AE4a59f267346ea31F984` | tiers 100 / 500 / 3000 / 10000 |
-| Uniswap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45` | |
-| Uniswap V3 QuoterV2 | `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` | |
-| Default market ETH/USDC pool (uniswap-v3) | `0xc1738D90E2E26C35784A0d3E3d8A9f795074bcA4` | 0.3% |
-
-RPC fallbacks: `https://mainnet.optimism.io`, `https://optimism-rpc.publicnode.com`, `https://optimism.drpc.org` · explorer https://optimistic.etherscan.io
-
-Sources: [Optimism docs — networks](https://docs.optimism.io/superchain/networks) · [Uniswap v3 Optimism deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-optimism-deployments) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses) · [Uniswap V3](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-optimism-deployments)
 
 ## Strategies
 
@@ -279,18 +183,18 @@ Every market trades either way round. Labels show the base first, plus what the 
 | **PLS/HEX** (classic, key `HEX`) | HEX per PLS | HEX | spend HEX for PLS / sell that PLS for HEX | HEX |
 | **HEX/PLS** (flipped, key `HEX~`) | PLS per HEX | PLS | spend PLS for HEX / sell only that level's HEX lot for PLS | PLS (≈USD shown) |
 
-- **How to start:** Grids → Pair **PLS/HEX** → press **⇄** → **HEX/PLS** · Spends: PLS · Stacks: HEX. Capital is entered in PLS.
+- **How to start:** New bot → Grid → Custom → Pair **PLS/HEX** → press **⇄** → **HEX/PLS** · Spends: PLS · Stacks: HEX. Capital is entered in dollars and converted to PLS.
   Or use the **Stack HEX with PLS** preset (also PLSX, eHEX): ±12% × 12, $100 converted to PLS, checked on the best-quoting pool across PulseX V1/V2 and 9mm (the market switches to that pool, Auto mode, when started).
 - **Gas reserve:** when the bot spends the gas token, a reserve is kept aside: max(2% of capital, fixed PLS). Set it in the form ("2%", "50000", or "3% 50000") or through the limits `gasReservePct` / `gasReserveNative`. A live start is blocked if capital + reserve (+ PLS other live bots already use) is more than the PLS balance.
 - **Swaps:** PLS goes in as `msg.value` (`swapExactETHForTokens`) and comes out unwrapped (`swapExactTokensForETH`). Taxed tokens use the `…SupportingFeeOnTransferTokens` variants. On V3 the router wraps PLS from `msg.value` and unwraps with `unwrapWETH9`. Buys need no approval; sells approve the token.
 - **Exact inversion:** amounts stay in each token's own units (HEX 8, PLS 18). Flipped prices come from on-chain quotes in the flipped direction, so they include the fee the other way and are not just 1/x. Candles are inverted (o=1/o, h=1/l, l=1/h, c=1/c; volume ÷ typical price). Charts, indicators, backtests, market panels, alerts, the cost gate, the start gate and the units guard all run on the flipped series.
-- The flip toggle is on the pair picker in Grids, Trend, Backtest, Charts, Markets (per row and for all rows) and Alerts.
+- The flip toggle is on the pair picker in New bot, Backtest, Charts, Markets (per row and for all rows) and Alerts.
 - **Existing grids keep their orientation.** Stored keys never contain `~`, so every saved grid/bot/alert loads exactly as before.
-- **Custom markets** (e.g. `pulse:TOKEN/WPLS`) are already token-first: they spend WPLS and stack the token, and they trade WPLS as an ERC-20, as before. ⇄ turns them into WPLS/TOKEN. For these markets, keep **WPLS** (not native PLS) in the wallet. The gas reserve applies only to markets that spend native PLS/ETH/BNB.
+- **Custom markets** (e.g. `pulse:TOKEN/WPLS`) are already token-first: they spend WPLS and stack the token, and they trade WPLS as an ERC-20, as before. ⇄ turns them into WPLS/TOKEN. For these markets, keep **WPLS** (not native PLS) in the wallet. The gas reserve applies only to markets that spend native PLS or ETH.
 
 ## Economics gate (pre-start)
 
-The Add grid form and every preset show, for the **worst** interval:
+New bot (custom range and every preset) shows, for the **worst** interval, as one plain sentence plus a detail line:
 - per-level size
 - spacing %
 - round-trip fee
@@ -301,7 +205,7 @@ The Add grid form and every preset show, for the **worst** interval:
 Required: spacing ≥ 1.0% **and** net ≥ 0.25% of level size.
 
 - **Live:** hard block, no override (server-side, in `GridEngine.start`).
-- **Paper:** blocked unless you tick *simulate anyway*; the grid then carries a `PAPER ONLY` warning.
+- **Paper:** blocked unless you tick *Simulate anyway* under Advanced; the grid then carries a `PAPER ONLY` warning.
 - **Legacy live grids:** a live grid saved before this gate with spacing under 1.0% (e.g. the old ±2.5%×36 tight scalp) is stopped on load and cannot be resumed.
 
 ## Fills and diagnostics
@@ -320,16 +224,16 @@ Per-grid stats: round-trips, wins, average net per round-trip, total fees, total
 Safety at execution:
 - **Lot guard:** a grid sell is only sent if quoted proceeds − sell gas > that interval's lot cost. Otherwise it holds and re-arms.
 - **Units guard:** if the router's **tax-free** pool price differs from spot by more than 1.5× (decimals or inversion bug), the trade is refused before signing. A 10% tax never trips it.
-- **Decimals & taxes:** see Guide → *Decimals & taxes*. Every on-chain amount is a bigint in the token's own units; 0 / 6 / 8 / 9 / 18 / 24 decimals are covered by tests on both sides, both token orders, V2 and V3.
+- **Decimals & taxes:** see *Custom tokens + safety* above. Every on-chain amount is a bigint in the token's own units; 0 / 6 / 8 / 9 / 18 / 24 decimals are covered by tests on both sides, both token orders, V2 and V3.
 - Paper charges approve gas the same way live does.
 
-PnL is shown in each grid's quote token. Σ totals are converted to ≈USD via DAI.
+PnL is shown in ≈USD (each bot's quote converted at today's rate), with the quote-token amount where no USD route exists.
 
 ## Multi-pair
 
-- **Add grid** per pair: PLS/DAI, PLS/USDC, PLS/USDT, **PLS/HEX**, **PLS/eHEX**, **PLS/PLSX**. Each has its own range, grid count (2–50) and capital, in quote-token units.
-- Grid presets: 10 / 12 / 16 / 20.
-- Per-grid **STOP** / **Resume**. **KILL ALL** halts every grid. One tx is in flight globally (shared nonce).
+- One grid per pair and range: PLS/DAI, PLS/USDC, PLS/USDT, **PLS/HEX**, **PLS/eHEX**, **PLS/PLSX**, the Ethereum and Robinhood markets, and custom tokens. Each has its own range, level count (2–50) and capital (entered in dollars, converted to the quote token at today's rate). The default custom range is ±8% × 12 (1.25% between levels).
+- Per-grid **Stop** / **Resume**. **Stop all** halts every bot. One tx is in flight per chain.
+- **Change range** (bot detail) restarts a stopped grid on its own pair and mode; the server refuses a pair change, and a live restart re-checks that the wallet covers it.
 - State lives in `data/state.json` (all grids). A restart resumes them.
 - Paper mode needs no key. Live needs `PRIVATE_KEY` in `.env` (never sent to the UI).
 
@@ -337,7 +241,7 @@ Limits: price-impact cap (≤5%), slippage, deadline. No dollar limits.
 
 ## Trend bot (long-only)
 
-The Trend tab runs momentum bots next to the grids. They share the server, signing key, tx queue and nonce.
+Trend bots run next to the grids (New bot → Trend bot; default 4h candles, $100). They share the server, signing key, tx queue and nonce.
 
 - **Strategies.** EMA cross, EMA+RSI, MACD, Donchian breakout, plus an optional higher-timeframe EMA filter. Signals are evaluated once per newly closed candle, never on the forming one, so they don't repaint.
 - **Exits.** ATR stop and TP at an R multiple, both checked on every poll price; trailing ATR stop (ratchets on closed highs); max hold; signal exit; cooldown; manual Close.
@@ -345,7 +249,7 @@ The Trend tab runs momentum bots next to the grids. They share the server, signi
 - **Cost gate.** The expected move (TP distance, or k×ATR) must clear the 0.579% round-trip fee + impact both ways from live reserves + gas + slippage allowance + min edge. Blocked signals are logged with the numbers.
 - **Safety checks.** The same units guard, impact cap, slippage, deadline and decimals handling as the grids. A broadcast tx is reconciled by hash.
 - **Inventory.** Separate from the grids: a bot only spends its own cash and only sells PLS it bought. A live start checks that the address balance covers every live allocation (grids + trend bots).
-- **State.** Persisted in `data/state.json` (v3; migrates v1/v2) and resumed on boot. STOP is per bot; KILL ALL stops grids and trend bots.
+- **State.** Persisted in `data/state.json` (v3; migrates v1/v2) and resumed on boot. Stop is per bot; Stop all stops grids and trend bots.
 
 ## Candles
 
@@ -364,7 +268,7 @@ npm run candles:backfill -- --pair DAI --days 90 --source onchain   # stop the s
 npm run candles:backfill -- --pair HEX --source gecko
 ```
 
-The Charts tab also has backfill buttons when a pair has no data.
+Tools → Charts also has backfill buttons when a pair has no data.
 
 ## Backtester
 
@@ -406,7 +310,7 @@ The Charts tab also has backfill buttons when a pair has no data.
 
 - **Charts.** lightweight-charts v5 with pair/timeframe switches; EMA/Donchian/Bollinger overlays; RSI/MACD panes; grid levels and fills; trend entries/exits; stop/TP/trail lines; equity + drawdown per bot and for the whole portfolio. The last candle follows live ticks.
 - **Analytics.** Portfolio ≈USD (live PLS/DAI cross), today/7d/all-time, vs HODL, allocation, funds coverage, per-bot stats, journal with filters and `/api/analytics/journal.csv`. Market panels show depth, volume, ATR%, trend and a regime hint (efficiency ratio).
-- **Live.** Server-sent events (`/api/bot/stream`) with a 3 s polling fallback; animated activity feed; ticker; heartbeat rings; animated PnL; fill flash.
+- **Live.** Server-sent events (`/api/bot/stream`) with a 3 s polling fallback; Activity drawer; status dots that dim when a price read is stale; a short highlight when a fill lands. Routine price ticks update quietly.
 - **Notifications and alerts.** Opt-in browser notifications (tab must be open). Alerts: price above/below, RSI above/below, grid out of range. All motion respects `prefers-reduced-motion`.
 
 ## Checks
@@ -415,14 +319,13 @@ The Charts tab also has backfill buttons when a pair has no data.
 npm test                # unit + integration (mocked chains: multi-DEX V2/V3 mock, PulseX mock)
 npm run check:onchain   # read-only, no key: PulseChain presets; PulseX V1/V2 + 9mm V2/V3 (factory links, fee measured,
                         # tiers, quotes, best-pool + override per DEX); every chain (chainId, DEX contracts, default
-                        # market price + L1 fee); custom tokens: AERO on Base, FLOKI on BNB Chain (tax), PLSX on PulseChain;
+                        # market price + L1 fee); custom tokens: PAXG + STA (1% tax) on Ethereum, PLSX on PulseChain;
                         # flipped HEX/PLS, PLSX/PLS, eHEX/PLS buy + sell quotes on the deepest pool (native legs) + Stack presets
 npm run build
 ```
 
 ## Known limitations
 
-- **Robinhood Chain testnet (46630):** no official DEX deployment, so it is not tradable (shown with the reason). Robinhood mainnet (4663) trades on Uniswap V3/V2 and PancakeSwap V3.
 - **Single-hop only.** Each market trades one pool directly, with no multi-hop routing or split orders. A best-quote pick is per market and is not re-evaluated on every trade (use Auto again, or the Pools view, to re-pick).
 - **Fee-on-transfer tokens trade live on V2** (SupportingFee methods, min-out after tax, taxes in every gate, PnL from actuals) and on V3 only when proven. Rebasing tokens are not detected beyond the transfer test. Unusual maxTx / blacklist views may be missed.
 - **Safety simulation needs `eth_call` state overrides.** Some public RPCs reject them; the token is then `unknown` (paper-only) until an RPC that supports them is configured.

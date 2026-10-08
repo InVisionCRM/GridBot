@@ -14,9 +14,10 @@ import { http } from './api';
 import { px, num, ago } from './fmt';
 import type { Ticks } from './useStream';
 import { ChainBadge, MarketOptions, chainOf, feeLabel, flipKey, isFlipKey, mk, orientedKey, unflipKey } from './chains';
+import { IND, T, alpha, chartBase } from './theme';
 
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-const C = { up: '#3dd68c', down: '#ff7b72', fast: '#f5c842', slow: '#7c5cff', dc: '#3dd6c6', bb: '#9aa8c7', grid: 'rgba(124,92,255,0.45)', stop: '#ff5d6c', tp: '#3dd68c', entry: '#e8eefc' };
+const C = { up: T.profit, down: T.loss, fast: IND.fast, slow: IND.slow, dc: IND.band, bb: IND.band, grid: alpha(T.muted, 0.45), stop: T.loss, tp: T.profit, entry: T.text, flat: alpha(T.muted, 0.35) };
 const fmtPx = (p: number) => px(p, 5);
 const ts = (s: number) => s as UTCTimestamp;
 
@@ -72,17 +73,16 @@ export function Chart(p: ChartProps) {
     if (!el.current || !candles.length) return;
     const ch = createChart(el.current, {
       height: p.height ?? 460, autoSize: true,
-      layout: { background: { color: 'transparent' }, textColor: '#9aa8c7', fontFamily: 'DM Sans, system-ui, sans-serif', panes: { separatorColor: '#2a3657' } },
-      grid: { vertLines: { color: 'rgba(42,54,87,0.35)' }, horzLines: { color: 'rgba(42,54,87,0.35)' } },
-      rightPriceScale: { borderColor: '#2a3657' },
-      timeScale: { borderColor: '#2a3657', timeVisible: tf !== '1d', secondsVisible: false },
+      ...chartBase,
+      grid: { vertLines: { color: alpha(T.line, 0.6) }, horzLines: { color: alpha(T.line, 0.6) } },
+      timeScale: { borderColor: T.line, timeVisible: tf !== '1d', secondsVisible: false },
       crosshair: { mode: 0 },
       localization: { priceFormatter: fmtPx, timeFormatter: (t: number) => new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }) },
     });
     chart.current = ch;
     const priceFormat = { type: 'custom' as const, formatter: fmtPx, minMove: 1e-12 };
     const k = candles;
-    const data = k.map((x) => ({ time: ts(x.t), open: x.o, high: x.h, low: x.l, close: x.c, ...(x.f ? { color: 'rgba(154,168,199,0.35)', wickColor: 'rgba(154,168,199,0.35)', borderColor: 'rgba(154,168,199,0.35)' } : {}) }));
+    const data = k.map((x) => ({ time: ts(x.t), open: x.o, high: x.h, low: x.l, close: x.c, ...(x.f ? { color: C.flat, wickColor: C.flat, borderColor: C.flat } : {}) }));
     const c = ch.addSeries(CandlestickSeries, { upColor: C.up, downColor: C.down, borderUpColor: C.up, borderDownColor: C.down, wickUpColor: C.up, wickDownColor: C.down, priceFormat }, 0);
     c.setData(data);
     cs.current = c;
@@ -96,25 +96,25 @@ export function Chart(p: ChartProps) {
     if (ov.vol) {
       const v = ch.addSeries(HistogramSeries, { priceScaleId: 'vol', priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false }, 0);
       v.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-      v.setData(k.map((x) => ({ time: ts(x.t), value: x.v, color: x.c >= x.o ? 'rgba(61,214,140,0.35)' : 'rgba(255,123,114,0.35)' })));
+      v.setData(k.map((x) => ({ time: ts(x.t), value: x.v, color: alpha(x.c >= x.o ? C.up : C.down, 0.3) })));
     }
     if (ov.ema) { line(ema(closes, fast), C.fast, 0, 2, LineStyle.Solid, `EMA${fast}`); line(ema(closes, slow), C.slow, 0, 2, LineStyle.Solid, `EMA${slow}`); }
     if (ov.dc) { const d = donchian(k, 20); line(d.upper, C.dc, 0, 1, LineStyle.Dashed); line(d.lower, C.dc, 0, 1, LineStyle.Dashed); }
     if (ov.bb) { const b = bollinger(closes, 20, 2); line(b.upper, C.bb, 0, 1, LineStyle.Dotted); line(b.mid, C.bb, 0, 1, LineStyle.Dotted); line(b.lower, C.bb, 0, 1, LineStyle.Dotted); }
     let pane = 1;
     if (ov.rsi) {
-      const r = line(rsi(closes, 14), '#c39bff', pane, 1, LineStyle.Solid, 'RSI14');
+      const r = line(rsi(closes, 14), IND.rsi, pane, 1, LineStyle.Solid, 'RSI14');
       r.applyOptions({ priceFormat: { type: 'price', precision: 1, minMove: 0.1 } });
-      r.createPriceLine({ price: 70, color: 'rgba(255,123,114,0.5)', lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
-      r.createPriceLine({ price: 30, color: 'rgba(61,214,140,0.5)', lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
+      r.createPriceLine({ price: 70, color: alpha(C.down, 0.5), lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
+      r.createPriceLine({ price: 30, color: alpha(C.up, 0.5), lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: '' });
       pane++;
     }
     if (ov.macd) {
       const m = macd(closes);
       const h = ch.addSeries(HistogramSeries, { priceFormat, lastValueVisible: false, priceLineVisible: false }, pane);
-      h.setData(m.hist.map((v, i) => (v == null ? { time: ts(k[i].t) } : { time: ts(k[i].t), value: v, color: v >= 0 ? 'rgba(61,214,140,0.5)' : 'rgba(255,123,114,0.5)' })));
-      line(m.line, '#3dd6c6', pane, 1, LineStyle.Solid, 'MACD');
-      line(m.signal, '#f5c842', pane, 1, LineStyle.Solid, 'signal');
+      h.setData(m.hist.map((v, i) => (v == null ? { time: ts(k[i].t) } : { time: ts(k[i].t), value: v, color: alpha(v >= 0 ? C.up : C.down, 0.5) })));
+      line(m.line, IND.macd, pane, 1, LineStyle.Solid, 'MACD');
+      line(m.signal, IND.signal, pane, 1, LineStyle.Solid, 'signal');
       pane++;
     }
     const panes = ch.panes();
@@ -171,7 +171,7 @@ export function Chart(p: ChartProps) {
       for (const tr of t.trades ?? []) {
         if (tr.failed || snap(tr.timestamp) < s0) continue;
         const buy = tr.side === 'buy';
-        mk.push({ time: ts(snap(tr.timestamp)), position: buy ? 'belowBar' : 'aboveBar', color: buy ? '#7c5cff' : tr.realizedPnlUsd >= 0 ? C.up : C.down, shape: buy ? 'arrowUp' : 'arrowDown', size: 1.3, text: buy ? 'TREND buy' : `${tr.reason} ${tr.realizedPnlUsd >= 0 ? '+' : ''}${num(tr.realizedPnlUsd, 3)}` });
+        mk.push({ time: ts(snap(tr.timestamp)), position: buy ? 'belowBar' : 'aboveBar', color: buy ? C.entry : tr.realizedPnlUsd >= 0 ? C.up : C.down, shape: buy ? 'arrowUp' : 'arrowDown', size: 1.3, text: buy ? 'buy' : `${tr.reason} ${tr.realizedPnlUsd >= 0 ? '+' : ''}${num(tr.realizedPnlUsd, 3)}` });
       }
       if (t.position) {
         const r = t.position.risk;
@@ -183,7 +183,7 @@ export function Chart(p: ChartProps) {
     for (const t of p.btTrades ?? []) {
       // backtest times are candle open times in seconds
       if (snap(t.exitT * 1000) < s0) continue;
-      if (snap(t.entryT * 1000) >= s0) mk.push({ time: ts(snap(t.entryT * 1000)), position: 'belowBar', color: '#7c5cff', shape: 'arrowUp', size: 1.1, text: 'buy' });
+      if (snap(t.entryT * 1000) >= s0) mk.push({ time: ts(snap(t.entryT * 1000)), position: 'belowBar', color: C.entry, shape: 'arrowUp', size: 1.1, text: 'buy' });
       mk.push({ time: ts(snap(t.exitT * 1000)), position: 'aboveBar', color: t.pnlPct >= 0 ? C.up : C.down, shape: 'arrowDown', size: 1.1, text: `${t.reason} ${t.pnlPct >= 0 ? '+' : ''}${(t.pnlPct * 100).toFixed(1)}%` });
     }
     mk.sort((a, b) => (a.time as number) - (b.time as number));
@@ -242,9 +242,9 @@ export function EquityChart({ series, height = 260, drawdown = true, format = (v
     if (!el.current) return;
     const ch = createChart(el.current, {
       height, autoSize: true,
-      layout: { background: { color: 'transparent' }, textColor: '#9aa8c7', fontFamily: 'DM Sans, system-ui, sans-serif', panes: { separatorColor: '#2a3657' } },
-      grid: { vertLines: { visible: false }, horzLines: { color: 'rgba(42,54,87,0.35)' } },
-      rightPriceScale: { borderColor: '#2a3657' }, timeScale: { borderColor: '#2a3657', timeVisible: true },
+      ...chartBase,
+      grid: { vertLines: { visible: false }, horzLines: { color: alpha(T.line, 0.6) } },
+      timeScale: { borderColor: T.line, timeVisible: true },
       localization: { priceFormatter: format },
     });
     const uniq = (d: [number, number][]) => {
@@ -260,7 +260,7 @@ export function EquityChart({ series, height = 260, drawdown = true, format = (v
     if (drawdown && series[0]?.data.length) {
       let peak = -Infinity;
       const dd = series[0].data.map(([t, v]) => { peak = Math.max(peak, v); return [t, peak > 0 ? -(1 - v / peak) * 100 : 0] as [number, number]; });
-      const d = ch.addSeries(HistogramSeries, { color: 'rgba(255,93,108,0.55)', priceFormat: { type: 'custom', formatter: (v: number) => `${v.toFixed(1)}%`, minMove: 0.01 }, priceLineVisible: false, lastValueVisible: false, title: 'drawdown' }, 1);
+      const d = ch.addSeries(HistogramSeries, { color: alpha(T.loss, 0.5), priceFormat: { type: 'custom', formatter: (v: number) => `${v.toFixed(1)}%`, minMove: 0.01 }, priceLineVisible: false, lastValueVisible: false, title: 'drawdown' }, 1);
       d.setData(uniq(dd));
       ch.panes()[0]?.setStretchFactor(3);
     }

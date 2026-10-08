@@ -5,9 +5,10 @@ import { AnimatedNumber, Spark } from './motion';
 import { EquityChart } from './Chart';
 import { cls, num, pct, px, time, usd } from './fmt';
 import { ChainBadge, chainOf, explorerTx, feeLabel, lbl, MarketOptions, mk, RiskBadge, useChainFilter } from './chains';
+import { IND, T } from './theme';
 
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-const COLORS = ['#7c5cff', '#3dd6c6', '#f5c842', '#3dd68c', '#ff7b72', '#c39bff', '#9aa8c7'];
+const COLORS = [T.text, IND.slow, T.warn, IND.band, T.muted, IND.fast, T.line2];
 
 function Kpi({ label, children, sub }: { label: string; children: React.ReactNode; sub?: React.ReactNode }) {
   return <div className="kpi"><span>{label}</span><div className="kpi-v">{children}</div>{sub && <small className="muted">{sub}</small>}</div>;
@@ -59,7 +60,7 @@ export function Analytics({ status: s }: { status: AnyObj }) {
   }, [chain]);
   useEffect(() => { void http(`/api/analytics/journal?limit=300&${qs}`).then(setJ).catch(() => undefined); }, [qs, sig]);
 
-  const T = ov?.totals;
+  const tot = ov?.totals;
   const per = ov?.periods;
   const allocTotal = (ov?.allocation ?? []).reduce((a: number, x: AnyObj) => a + x.usd, 0);
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF((x) => ({ ...x, [k]: e.target.value }));
@@ -75,15 +76,15 @@ export function Analytics({ status: s }: { status: AnyObj }) {
       <div className="card">
         <h3>Portfolio <span className="muted small">all bots on all chains · ≈USD (stables $1; other quotes via each chain's native/stable market)</span></h3>
         <div className="kpi-row">
-          <Kpi label="Total equity ≈$"><AnimatedNumber value={T?.equityUsd} format={(x) => usd(x)} className="big" /></Kpi>
-          <Kpi label="Allocated" sub={`${ov?.bots?.length ?? 0} bots`}>{usd(T?.capitalUsd)}</Kpi>
-          <Kpi label="Realized"><AnimatedNumber value={T?.realizedUsd} format={(x) => usd(x, true)} className={cls(T?.realizedUsd)} /></Kpi>
-          <Kpi label="Unrealized"><AnimatedNumber value={T?.unrealizedUsd} format={(x) => usd(x, true)} className={cls(T?.unrealizedUsd)} /></Kpi>
+          <Kpi label="Total equity ≈$"><AnimatedNumber value={tot?.equityUsd} format={(x) => usd(x)} className="big" /></Kpi>
+          <Kpi label="Allocated" sub={`${ov?.bots?.length ?? 0} bots`}>{usd(tot?.capitalUsd)}</Kpi>
+          <Kpi label="Realized"><AnimatedNumber value={tot?.realizedUsd} format={(x) => usd(x, true)} className={cls(tot?.realizedUsd)} /></Kpi>
+          <Kpi label="Unrealized"><AnimatedNumber value={tot?.unrealizedUsd} format={(x) => usd(x, true)} className={cls(tot?.unrealizedUsd)} /></Kpi>
           <Kpi label="Today"><P k="today" /></Kpi>
           <Kpi label="7 days"><P k="d7" /></Kpi>
           <Kpi label="All-time"><P k="all" /></Kpi>
-          <Kpi label="Fees / gas">{usd(T?.feesUsd)} / {usd(T?.gasUsd)}</Kpi>
-          <Kpi label="vs HODL base" sub={T?.hodlUsd ? `HODL ${usd(T.hodlUsd)}` : undefined}><b className={cls(T?.vsHodlPct)}>{pct(T?.vsHodlPct, 2, true)}</b></Kpi>
+          <Kpi label="Fees / gas">{usd(tot?.feesUsd)} / {usd(tot?.gasUsd)}</Kpi>
+          <Kpi label="vs HODL base" sub={tot?.hodlUsd ? `HODL ${usd(tot.hodlUsd)}` : undefined}><b className={cls(tot?.vsHodlPct)}>{pct(tot?.vsHodlPct, 2, true)}</b></Kpi>
         </div>
         {allocTotal > 0 && (
           <div className="alloc">
@@ -105,7 +106,7 @@ export function Analytics({ status: s }: { status: AnyObj }) {
             ))}</tbody>
           </table>
         )}
-        <EquityChart series={[{ name: 'portfolio ≈$', data: ov?.portfolio ?? [], color: '#7c5cff' }]} height={240} format={(v) => usd(v)} />
+        <EquityChart series={[{ name: 'portfolio ≈$', data: ov?.portfolio ?? [], color: T.text }]} height={240} format={(v) => usd(v)} />
         <p className="muted small">Max drawdown {pct(ov?.portfolioDrawdown, 2)} · {ov?.notes?.join(' ')}</p>
         {s.allocations?.rows?.length > 0 && (
           <p className={`small ${s.allocations.ok ? 'muted' : 'neg'}`}>Live funds coverage: {s.allocations.rows.map((r: AnyObj) => `${r.token} ${num(r.allocated, 4)} / ${r.wallet == null ? '?' : num(r.wallet, 4)} ${r.ok === false ? '✗' : '✓'}`).join(' · ')} — {s.allocations.note}</p>

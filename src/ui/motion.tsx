@@ -1,4 +1,4 @@
-/** Small motion primitives. All respect prefers-reduced-motion. */
+/** Small motion primitives. Motion is kept for real events (a fill); routine price ticks change values quietly. */
 import { useEffect, useRef, useState } from 'react';
 
 export function useReducedMotion() {
@@ -13,50 +13,41 @@ export function useReducedMotion() {
   return r;
 }
 
-/** Tweened number with a brief up/down flash when it changes. */
-export function AnimatedNumber({ value, format, className = '', duration = 650 }: { value: number | null | undefined; format: (x: number) => string; className?: string; duration?: number }) {
+/** Number that eases to its new value (no colour flash). */
+export function AnimatedNumber({ value, format, className = '', duration = 450 }: { value: number | null | undefined; format: (x: number) => string; className?: string; duration?: number }) {
   const reduced = useReducedMotion();
   const [shown, setShown] = useState(value ?? 0);
-  const [flash, setFlash] = useState<'' | 'up' | 'down'>('');
   const from = useRef(value ?? 0);
   useEffect(() => {
     if (value == null) return;
     const start = from.current;
     if (start === value) return;
-    setFlash(value > start ? 'up' : 'down');
-    const ft = setTimeout(() => setFlash(''), 900);
-    if (reduced) { setShown(value); from.current = value; return () => clearTimeout(ft); }
+    if (reduced) { setShown(value); from.current = value; return; }
     let raf = 0;
     const t0 = performance.now();
     const step = (t: number) => {
       const k = Math.min(1, (t - t0) / duration);
-      const e = 1 - (1 - k) ** 3;
-      const v = start + (value - start) * e;
+      const v = start + (value - start) * (1 - (1 - k) ** 3);
       setShown(v);
       from.current = v;
       if (k < 1) raf = requestAnimationFrame(step); else from.current = value;
     };
     raf = requestAnimationFrame(step);
-    return () => { cancelAnimationFrame(raf); clearTimeout(ft); };
+    return () => cancelAnimationFrame(raf);
   }, [value, reduced, duration]);
   if (value == null) return <span className={className}>—</span>;
-  return <span className={`anum ${className} ${flash ? `flash-${flash}` : ''}`}>{format(shown)}</span>;
+  return <span className={`num ${className}`}>{format(shown)}</span>;
 }
 
-/** Heartbeat ring: pulses on every tick (`beat` changes); colour by state; dims when stale. */
-export function Heartbeat({ beat, state, staleMs = 30_000, title }: { beat: number | null | undefined; state: 'running' | 'stopped' | 'idle' | 'error' | string; staleMs?: number; title?: string }) {
+/** Still status dot coloured by state; dims when the last price read is older than `staleMs`. */
+export function StatusDot({ beat, state, staleMs = 30_000, title }: { beat: number | null | undefined; state: string; staleMs?: number; title?: string }) {
   const [, force] = useState(0);
   useEffect(() => { const id = setInterval(() => force((x) => x + 1), 5000); return () => clearInterval(id); }, []);
   const stale = !beat || Date.now() - beat > staleMs;
-  return (
-    <span className={`hb hb-${state} ${stale && state === 'running' ? 'hb-stale' : ''}`} title={title ?? (beat ? `last tick ${Math.round((Date.now() - beat) / 1000)}s ago` : 'no tick yet')}>
-      <span key={beat ?? 0} className="hb-ring" />
-      <span className="hb-dot" />
-    </span>
-  );
+  return <span className={`hb hb-${state} ${stale && state === 'running' ? 'hb-stale' : ''}`} title={title ?? (beat ? `last price ${Math.round((Date.now() - beat) / 1000)}s ago` : 'no price yet')} />;
 }
 
-/** Flash a row/cell when `k` changes (e.g. trade count). */
+/** True for `ms` after `k` changes (e.g. trade count), skipping the first render. */
 export function useFlash(k: unknown, ms = 1200) {
   const [on, setOn] = useState(false);
   const first = useRef(true);

@@ -15,14 +15,14 @@ const FILTERS: Record<string, (e: ActivityEvent) => boolean> = {
   system: (e) => ['started', 'stopped', 'error', 'info', 'candles'].includes(e.type),
 };
 
-export function Activity({ events, compact = false, connected, status }: { events: ActivityEvent[]; compact?: boolean; connected: boolean; status?: Record<string, any> }) { // eslint-disable-line @typescript-eslint/no-explicit-any
+export function Activity({ events, connected, status }: { events: ActivityEvent[]; connected: boolean; status?: Record<string, any> }) { // eslint-disable-line @typescript-eslint/no-explicit-any
   const [f, setF] = useState<keyof typeof FILTERS>('all');
   const { chain } = useChainFilter();
   const [showTicks, setShowTicks] = useState(false);
-  const list = useMemo(() => [...events].reverse().filter((e) => FILTERS[f](e) && (showTicks || e.type !== 'tick' || f === 'signals') && (chain === 'all' || e.chainId == null || e.chainId === chain)).slice(0, compact ? 80 : 300), [events, f, showTicks, compact, chain]);
+  const list = useMemo(() => [...events].reverse().filter((e) => FILTERS[f](e) && (showTicks || e.type !== 'tick' || f === 'signals') && (chain === 'all' || e.chainId == null || e.chainId === chain)).slice(0, 300), [events, f, showTicks, chain]);
   const now = Date.now();
   return (
-    <div className={`activity ${compact ? 'compact' : ''}`}>
+    <div className="activity">
       <div className="activity-head">
         <strong>Activity</strong>
         <span className={`conn ${connected ? 'on' : 'off'}`} title={connected ? 'live (server-sent events)' : 'polling fallback'}>{connected ? 'LIVE' : 'POLL'}</span>
