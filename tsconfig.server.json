@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noUnusedLocals": true,
+    "types": ["node"]
+  },
+  "include": ["src/server/**/*", "src/live/**/*", "src/engine/**/*", "src/types/**/*", "scripts/**/*"]
+}

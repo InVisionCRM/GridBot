@@ -265,9 +265,28 @@ converted to quote units from live prices.
 | **HEX / eHEX / PLSX** | Each · ±12% · 12 · $100 (≈45k HEX / ≈120k eHEX / ≈14.5M PLSX) | 1.82% / ~1.2% |
 | **HEX+eHEX+PLSX** | All three at once, $100 each | same |
 | **Stable ladder** | DAI+USDC · ±10% · 12 · $50 each | 1.54% / ~0.88% DAI, ~0.79% USDC |
+| **Stack HEX / PLSX / eHEX with PLS** ⇄ | Flipped (HEX/PLS …) · ±12% · 12 · $100 → ≈11.6M PLS · best pool | 1.82% / ~1.20% HEX (PulseX V1), ~1.30% PLSX (9mm V3 0.25%), ~1.19% eHEX (PulseX V2) |
 
 USDT is left out of the ladder because its WPLS pool is only about $1.5k per side. At $8–20 per level, impact (0.8–2.5% per round-trip) is bigger than the edge.
 `npm run check:onchain` re-checks every preset against live reserves (read-only).
+
+## Orientation ⇄ (base/quote flip): start with only PLS, stack HEX
+
+Every market trades either way round. Labels show the base first, plus what the bot spends and stacks.
+
+| Orientation | Price | Capital | Buys / sells | PnL |
+|---|---|---|---|---|
+| **PLS/HEX** (classic, key `HEX`) | HEX per PLS | HEX | spend HEX for PLS / sell that PLS for HEX | HEX |
+| **HEX/PLS** (flipped, key `HEX~`) | PLS per HEX | PLS | spend PLS for HEX / sell only that level's HEX lot for PLS | PLS (≈USD shown) |
+
+- **How to start:** Grids → Pair **PLS/HEX** → press **⇄** → **HEX/PLS** · Spends: PLS · Stacks: HEX. Capital is entered in PLS.
+  Or use the **Stack HEX with PLS** preset (also PLSX, eHEX): ±12% × 12, $100 converted to PLS, checked on the best-quoting pool across PulseX V1/V2 and 9mm (the market switches to that pool, Auto mode, when started).
+- **Gas reserve:** when the bot spends the gas token, a reserve is kept aside: max(2% of capital, fixed PLS). Set it in the form ("2%", "50000", or "3% 50000") or through the limits `gasReservePct` / `gasReserveNative`. A live start is blocked if capital + reserve (+ PLS other live bots already use) is more than the PLS balance.
+- **Swaps:** PLS goes in as `msg.value` (`swapExactETHForTokens`) and comes out unwrapped (`swapExactTokensForETH`). Taxed tokens use the `…SupportingFeeOnTransferTokens` variants. On V3 the router wraps PLS from `msg.value` and unwraps with `unwrapWETH9`. Buys need no approval; sells approve the token.
+- **Exact inversion:** amounts stay in each token's own units (HEX 8, PLS 18). Flipped prices come from on-chain quotes in the flipped direction, so they include the fee the other way and are not just 1/x. Candles are inverted (o=1/o, h=1/l, l=1/h, c=1/c; volume ÷ typical price). Charts, indicators, backtests, market panels, alerts, the cost gate, the start gate and the units guard all run on the flipped series.
+- The flip toggle is on the pair picker in Grids, Trend, Backtest, Charts, Markets (per row and for all rows) and Alerts.
+- **Existing grids keep their orientation.** Stored keys never contain `~`, so every saved grid/bot/alert loads exactly as before.
+- **Custom markets** (e.g. `pulse:TOKEN/WPLS`) are already token-first: they spend WPLS and stack the token, and they trade WPLS as an ERC-20, as before. ⇄ turns them into WPLS/TOKEN. For these markets, keep **WPLS** (not native PLS) in the wallet. The gas reserve applies only to markets that spend native PLS/ETH/BNB.
 
 ## Economics gate (pre-start)
 
@@ -396,7 +415,8 @@ The Charts tab also has backfill buttons when a pair has no data.
 npm test                # unit + integration (mocked chains: multi-DEX V2/V3 mock, PulseX mock)
 npm run check:onchain   # read-only, no key: PulseChain presets; PulseX V1/V2 + 9mm V2/V3 (factory links, fee measured,
                         # tiers, quotes, best-pool + override per DEX); every chain (chainId, DEX contracts, default
-                        # market price + L1 fee); custom tokens: AERO on Base, FLOKI on BNB Chain (tax), PLSX on PulseChain
+                        # market price + L1 fee); custom tokens: AERO on Base, FLOKI on BNB Chain (tax), PLSX on PulseChain;
+                        # flipped HEX/PLS, PLSX/PLS, eHEX/PLS buy + sell quotes on the deepest pool (native legs) + Stack presets
 npm run build
 ```
 
@@ -420,4 +440,3 @@ npm run build
 | PLSX | `0x95B303987A60C71504D99Aa1b13B4DA07b0790ab` | 18 | WPLS | ~41B WPLS; DAI pool ~$18k |
 
 Checked 2026-10-07 via `factory.getPair`, `symbol()`/`decimals()`, `getAmountsOut` on PulseX V2. Sources: PulseChain FAQ, PulseX docs, scan.pulsechain.com.
-# GridBot
