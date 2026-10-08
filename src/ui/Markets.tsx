@@ -118,7 +118,7 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
   const [flipRow, setFlipRow] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    if (!f.chainId && tradable.length) setF((x) => ({ ...x, chainId: String(chain !== 'all' && tradable.some((c) => c.id === chain) ? chain : tradable.find((c) => c.key === 'base')?.id ?? tradable[0].id) }));
+    if (!f.chainId && tradable.length) setF((x) => ({ ...x, chainId: String(chain !== 'all' && tradable.some((c) => c.id === chain) ? chain : tradable[0].id) }));
   }, [chain, tradable, f.chainId]);
   useEffect(() => { if (showReg && !reg.length) void http('/api/chains').then((r) => setReg(r.chains)).catch(() => undefined); }, [showReg, reg.length]);
 

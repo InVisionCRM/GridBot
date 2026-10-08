@@ -6,7 +6,7 @@ export const ROUTER = new Interface([
   'function swapExactETHForTokens(uint amountOutMin, address[] path, address to, uint deadline) payable returns (uint[] amounts)',
   'function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] path, address to, uint deadline) returns (uint[] amounts)',
   'function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] path, address to, uint deadline) returns (uint[] amounts)',
-  // Fee-on-transfer variants (UniswapV2Router02; present on PulseX V1/V2, 9mm V2, Pancake/QuickSwap V2): the router checks
+  // Fee-on-transfer variants (UniswapV2Router02; present on PulseX V1/V2, 9mm V2, Uniswap V2): the router checks
   // the recipient's balance change against amountOutMin instead of the pool's computed output.
   'function swapExactTokensForTokensSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, address[] path, address to, uint deadline)',
   'function swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, address[] path, address to, uint deadline) payable',
@@ -59,7 +59,5 @@ export const V3_ROUTER = new Interface([
   'function factory() view returns (address)',
   'function WETH9() view returns (address)',
 ]);
-export const OP_GAS_ORACLE = new Interface(['function getL1Fee(bytes) view returns (uint256)']);
-export const OP_GAS_ORACLE_ADDR = '0x420000000000000000000000000000000000000F';
 export const ARB_NODE_INTERFACE = new Interface(['function gasEstimateL1Component(address to, bool contractCreation, bytes data) payable returns (uint64 gasEstimateForL1, uint256 baseFee, uint256 l1BaseFeeEstimate)']);
 export const ARB_NODE_INTERFACE_ADDR = '0x00000000000000000000000000000000000000C8';

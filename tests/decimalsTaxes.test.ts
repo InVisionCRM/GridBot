@@ -59,7 +59,7 @@ describe('decimals: parse + convert + cache', () => {
     const reader = { async call() { calls++; return '0x' + '0'.repeat(62) + '12'; } };
     expect(await readDecimals(reader, 1, '0xAbc')).toBe(18);
     expect(await readDecimals(reader, 1, '0xABC')).toBe(18); // case-insensitive
-    expect(await readDecimals(reader, 56, '0xAbc')).toBe(18); // other chain → new call
+    expect(await readDecimals(reader, 4663, '0xAbc')).toBe(18); // other chain → new call
     expect(calls).toBe(2);
   });
   it('toUnits (string) still rejects extra precision; amountToUnits is the float path', () => {

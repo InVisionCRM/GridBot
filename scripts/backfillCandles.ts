@@ -1,7 +1,7 @@
 /**
  * Backfill candles into data/candles/. Stop the server first (it holds the same files in memory).
  *   npm run candles:backfill -- --pair DAI --days 60 --source onchain
- *   npm run candles:backfill -- --pair base:ETH/USDC --source gecko
+ *   npm run candles:backfill -- --pair ethereum:ETH/USDC --source gecko
  * --pair is any market key (legacy PulseChain quote symbol, chain default, or a custom market from data/custom.json).
  */
 import { dirname, resolve } from 'node:path';

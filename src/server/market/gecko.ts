@@ -3,7 +3,7 @@
  *   GET https://api.geckoterminal.com/api/v2/networks/{slug}/pools/{pool}/ohlcv/{day|hour|minute}
  *       ?aggregate=1|4|5|15&limit≤1000&before_timestamp=<sec>&currency=token&token=<base token>
  * → [t, o, h, l, c, v] newest first; price = quote per base token, volume in QUOTE token units.
- * slug per chain: pulsechain, eth, base, arbitrum, bsc, polygon_pos, optimism, robinhood (see chains.ts).
+ * slug per chain: pulsechain, eth, robinhood (see chains.ts).
  * Limits: 30 calls/min public, ≤1000 candles/call, ~6 months of history. We throttle to ≤24/min and
  * back off 65 s on 429. Prices are trade/mid prices; × (1 − fee) to match the grid's sell-side getPrice units.
  */

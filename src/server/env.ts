@@ -60,7 +60,7 @@ function parseKey(raw: string | undefined, name: string): string | null {
 
 /**
  * Multi-chain signers: PRIVATE_KEY (same EVM address on every chain) plus optional per-chain overrides
- * PRIVATE_KEY_<envSlug> (e.g. PRIVATE_KEY_BASE). Every PRIVATE_KEY* variable is removed from process.env
+ * PRIVATE_KEY_<envSlug> (e.g. PRIVATE_KEY_ETHEREUM). Every PRIVATE_KEY* variable is removed from process.env
  * immediately and registered for log redaction; keys never leave this module except inside Wallet objects.
  */
 export function createSigners(chains: { id: number; envSlug: string; provider: JsonRpcProvider }[]): Map<number, Wallet> {

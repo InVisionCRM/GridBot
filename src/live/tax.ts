@@ -8,7 +8,7 @@
  *   transfer = wallet → wallet
  *
  * POLICY (documented in README "Decimals & taxes"):
- *   - V2 forks (PulseX V1/V2, 9mm V2, Uniswap/Pancake/QuickSwap V2): taxed tokens up to MAX_TAX per side may trade
+ *   - V2 forks (PulseX V1/V2, 9mm V2, Uniswap V2): taxed tokens up to MAX_TAX per side may trade
  *     live. Swaps use the router's *SupportingFeeOnTransferTokens methods, amountOutMin is computed AFTER tax, and
  *     both taxes are part of every cost gate.
  *   - V3 pools: taxed tokens are blocked live unless the simulated buy → transfer → sell through that exact V3 pool

@@ -5,7 +5,7 @@
 import type { ChainConfig } from '../../live/chains';
 import type { ChainReader, TxSender } from '../bot/chain';
 import { SharedNonce, TxGate } from '../bot/txGate';
-import { ARB_NODE_INTERFACE, ARB_NODE_INTERFACE_ADDR, ERC20, OP_GAS_ORACLE, OP_GAS_ORACLE_ADDR } from '../dex/abis';
+import { ARB_NODE_INTERFACE, ARB_NODE_INTERFACE_ADDR, ERC20 } from '../dex/abis';
 import type { DexAdapter } from '../dex/types';
 import { V2Adapter } from '../dex/v2';
 import { V3Adapter } from '../dex/v3';
@@ -51,23 +51,16 @@ export class ChainRuntime {
   get tradable() { return this.cfg.trading.enabled && this.adapters.size > 0; }
 
   /**
-   * L1 component of an L2 tx (cached 60 s per calldata size bucket):
-   *  - OP stack: GasPriceOracle.getL1Fee(data) wei, charged separately from gasUsed × gasPrice.
-   *  - Arbitrum / Orbit: NodeInterface.gasEstimateL1Component → extra L2 gas (already inside gasUsed on receipts).
+   * L1 component of an Arbitrum / Orbit L2 tx (cached 60 s per calldata size bucket):
+   * NodeInterface.gasEstimateL1Component → extra L2 gas (already inside gasUsed on receipts, so never separate).
    */
   async l1Fee(to: string, data: string, gasPrice: bigint): Promise<{ wei: bigint; separate: boolean }> {
     if (this.cfg.stack === 'l1') return { wei: 0n, separate: false };
     const size = Math.ceil(data.length / 256);
     if (this.l1Cache && this.l1Cache.size === size && Date.now() - this.l1Cache.at < 60_000) return this.l1Cache.v;
-    let v: { wei: bigint; separate: boolean };
-    if (this.cfg.stack === 'op') {
-      const raw = await this.reader.call({ to: OP_GAS_ORACLE_ADDR, data: OP_GAS_ORACLE.encodeFunctionData('getL1Fee', [data]) });
-      v = { wei: OP_GAS_ORACLE.decodeFunctionResult('getL1Fee', raw)[0] as bigint, separate: true };
-    } else {
-      const raw = await this.reader.call({ to: ARB_NODE_INTERFACE_ADDR, data: ARB_NODE_INTERFACE.encodeFunctionData('gasEstimateL1Component', [to, false, data]) });
-      const gasL1 = ARB_NODE_INTERFACE.decodeFunctionResult('gasEstimateL1Component', raw)[0] as bigint;
-      v = { wei: gasL1 * gasPrice, separate: false };
-    }
+    const raw = await this.reader.call({ to: ARB_NODE_INTERFACE_ADDR, data: ARB_NODE_INTERFACE.encodeFunctionData('gasEstimateL1Component', [to, false, data]) });
+    const gasL1 = ARB_NODE_INTERFACE.decodeFunctionResult('gasEstimateL1Component', raw)[0] as bigint;
+    const v = { wei: gasL1 * gasPrice, separate: false };
     this.l1Cache = { at: Date.now(), size, v };
     return v;
   }

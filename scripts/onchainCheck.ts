@@ -24,7 +24,7 @@ const warn = (m: string) => { console.log(`  ! ${m}`); warnings++; };
 const ok = (c: boolean, m: string) => { console.log(`${c ? '  ✓' : '  ✗'} ${m}`); if (!c) failures++; };
 const DUMMY = '0x000000000000000000000000000000000000dEaD';
 const V3F = new Interface(['function feeAmountTickSpacing(uint24) view returns (int24)']);
-const NATIVE_USD: Record<string, [number, number]> = { PLS: [1e-6, 1e-3], ETH: [500, 20_000], BNB: [100, 5_000], POL: [0.02, 10], MATIC: [0.02, 10] };
+const NATIVE_USD: Record<string, [number, number]> = { PLS: [1e-6, 1e-3], ETH: [500, 20_000] };
 
 
 for (const net of Object.values(NETWORKS)) {
@@ -187,8 +187,8 @@ async function chainCheck(hub: Hub, rt: ChainRuntime) {
 
 async function customTokens(hub: Hub) {
   const cases: { chainId: number; address: string; label: string; expect: 'ok' | 'fot' }[] = [
-    { chainId: 8453, address: '0x940181a94A35A4569E4529A3CDfB74e38FD98631', label: 'AERO on Base', expect: 'ok' },
-    { chainId: 56, address: '0xfb5B838b6cfEEdC2873aB27866079AC55363D37E', label: 'FLOKI on BNB Chain (has a transfer tax)', expect: 'fot' },
+    { chainId: 1, address: '0x45804880De22913dAFE09f4980848ECE6EcbAf78', label: 'PAXG on Ethereum (upgradeable proxy, no tax)', expect: 'ok' },
+    { chainId: 1, address: '0xa7DE087329BFcda5639247F96140f9DAbe3DeED1', label: 'STA on Ethereum (1% transfer burn)', expect: 'fot' },
     { chainId: 369, address: '0x95B303987A60C71504D99Aa1b13B4DA07b0790ab', label: 'PLSX on PulseChain (PulseX V1/V2 + 9mm)', expect: 'ok' },
   ];
   for (const t of cases) {
