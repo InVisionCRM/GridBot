@@ -1,0 +1,15 @@
+# Secrets: your private key lives here. Never commit it.
+.env
+.env.*
+!.env.example
+
+# Bot state, fills and candle history (local to your machine)
+data/
+
+# Dependencies and build output
+node_modules/
+dist/
+
+# Logs and OS clutter
+*.log
+.DS_Store
