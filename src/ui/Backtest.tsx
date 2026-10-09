@@ -5,11 +5,11 @@ import { TFS, type TF } from '../market/candles';
 import { http, botApi } from './api';
 import { Orientation, PairPicker, chainOf, ChainBadge, feeLabel, mk, unflipKey } from './chains';
 import { Chart, EquityChart } from './Chart';
-import { TrendConfigEditor } from './TrendBots';
+import { TrendConfigEditor } from './TrendConfig';
+import { IND, T, alpha } from './theme';
+import type { AnyObj, BtPrefill } from './model';
 import { cls, dur, num, pct, px, qty, time, usd } from './fmt';
 
-type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-export interface BtPrefill { pair: string; tf: TF; cfg: TrendConfig; nonce: number }
 const AXES: Record<string, [string, string]> = { ema: ['fast', 'slow'], ema_rsi: ['fast', 'slow'], macd: ['macdFast', 'macdSlow'], donchian: ['donchianEntry', 'donchianExit'] };
 const AXIS_DEFAULTS: Record<string, string> = {
   fast: '5,8,10,13,20,30', slow: '20,30,40,50,80,100', macdFast: '6,8,12,16', macdSlow: '20,26,35,50',
@@ -23,9 +23,9 @@ function Metric({ k, v, sub, c }: { k: string; v: string; sub?: string; c?: stri
 export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefill: BtPrefill | null; onUse: (p: { pair: string; tf: TF; cfg: TrendConfig; capitalUsd: number; created?: string }) => void }) {
   const [kind, setKind] = useState<'trend' | 'grid'>('trend');
   const [pair, setPair] = useState('DAI');
-  const [tf, setTf] = useState<TF>('1h');
+  const [tf, setTf] = useState<TF>('4h');
   const [days, setDays] = useState('0');
-  const [capUsd, setCapUsd] = useState('1000');
+  const [capUsd, setCapUsd] = useState('100');
   const [cfg, setCfg] = useState<TrendConfig>({ ...DEFAULT_TREND });
   const [grid, setGrid] = useState({ lower: '', upper: '', count: '12' });
   const [costs, setCosts] = useState({ useImpact: true, useGas: true, slippageBps: '10' });
@@ -83,8 +83,8 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
   const sym = pm.quote;
   const k = res?.usdPerQuote;
   const series = res ? [
-    { name: kind === 'trend' ? 'strategy' : 'grid', data: res.equity.map((e: AnyObj) => [e.t * 1000, e.v]) as [number, number][], color: '#7c5cff' },
-    { name: `buy & hold ${pm.base}`, data: res.equity.map((e: AnyObj) => [e.t * 1000, e.bh]) as [number, number][], color: '#9aa8c7', dashed: true },
+    { name: kind === 'trend' ? 'strategy' : 'grid', data: res.equity.map((e: AnyObj) => [e.t * 1000, e.v]) as [number, number][], color: T.text },
+    { name: `buy & hold ${pm.base}`, data: res.equity.map((e: AnyObj) => [e.t * 1000, e.bh]) as [number, number][], color: IND.slow, dashed: true },
   ] : [];
   // Flipped series are the original's candles inverted: same count / range / source.
   const pairSummary = summary.find((x) => x.pair === unflipKey(pair))?.series.find((x: AnyObj) => x.tf === tf);
@@ -93,7 +93,7 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
   const rows: AnyObj[] = sweep?.rows ?? [];
   const maxAbs = Math.max(0.0001, ...rows.map((r) => Math.abs(r.totalReturn)));
   const cell = (x: number, y: number) => rows.find((r) => r.x === x && r.y === y);
-  const color = (v: number) => (v >= 0 ? `rgba(61,214,140,${0.12 + 0.75 * Math.min(1, v / maxAbs)})` : `rgba(255,93,108,${0.12 + 0.75 * Math.min(1, -v / maxAbs)})`);
+  const color = (v: number) => alpha(v >= 0 ? T.profit : T.loss, 0.12 + 0.6 * Math.min(1, Math.abs(v) / maxAbs));
 
   return (
     <div className="bt-tab">
@@ -153,7 +153,7 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
             {kind === 'trend' && (
               <div className="actions">
                 <button type="button" className="btn primary" disabled={!!busy} onClick={() => use(true)}>Use these settings → start paper bot</button>
-                <button type="button" className="btn" onClick={() => use(false)}>Edit in Trend tab</button>
+                <button type="button" className="btn" onClick={() => use(false)}>Edit as a new trend bot</button>
               </div>
             )}
           </div>

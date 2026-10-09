@@ -22,20 +22,20 @@ import { MultiDexMock, type Tok } from './helpers/multiDex';
 import { MockChain } from './helpers/mockChain';
 
 const NET = NETWORKS.mainnet;
-const BASE = chainByKey('base')!;
-const BSC = chainByKey('bsc')!;
-const uni = BASE.dexes.find((d) => d.id === 'uniswap-v3')!;
-const WETH: Tok = { address: BASE.wrappedNative.address, symbol: 'WETH', decimals: 18 };
-const USDCs = BASE.stables.find((s) => s.symbol === 'USDC')!;
+const ETH = chainByKey('ethereum')!;
+const PLS = chainByKey('pulsechain')!;
+const uni = ETH.dexes.find((d) => d.id === 'uniswap-v3')!;
+const WETH: Tok = { address: ETH.wrappedNative.address, symbol: 'WETH', decimals: 18 };
+const USDCs = ETH.stables.find((s) => s.symbol === 'USDC')!;
 const USDC: Tok = { address: USDCs.address, symbol: 'USDC', decimals: 6 };
-const BASE_DEF = defaultMarkets().find((m) => m.chainId === 8453)!;
+const ETH_DEF = defaultMarkets().find((m) => m.chainId === 1)!;
 const ME = '0x1234567890123456789012345678901234567890';
 
-function baseWorld() {
+function ethWorld() {
   const m = new MultiDexMock();
   [WETH, USDC].forEach((t) => m.addToken(t));
   m.addV3('uniswap-v3', { factory: uni.factory, quoter: uni.quoter! });
-  m.v3Pool('uniswap-v3', WETH, 5_000, USDC, 15_000_000, 500, BASE_DEF.pool.address); // ETH ≈ $3000
+  m.v3Pool('uniswap-v3', WETH, 5_000, USDC, 15_000_000, 500, ETH_DEF.pool.address); // ETH ≈ $3000
   return m;
 }
 
@@ -57,35 +57,34 @@ describe('Chain registry', () => {
     }
     expect(CHAINS[0].id).toBe(LEGACY_CHAIN_ID);
   });
-  it('covers PulseChain, Ethereum, Base, Arbitrum, BNB Chain, Polygon, Optimism and Robinhood (mainnet + testnet)', () => {
-    for (const k of ['pulsechain', 'ethereum', 'base', 'arbitrum', 'bsc', 'polygon', 'optimism', 'robinhood', 'robinhood-testnet']) expect(chainByKey(k), k).toBeTruthy();
+  it('covers exactly PulseChain, Robinhood Chain and Ethereum', () => {
+    expect(CHAINS.map((c) => c.key)).toEqual(['pulsechain', 'robinhood', 'ethereum']);
+    expect(defaultMarkets().map((m) => m.chainId).sort()).toEqual([1, 4663]);
   });
-  it('Robinhood testnet is labelled TESTNET and not tradable, with the reason', () => {
-    const t = chainByKey('robinhood-testnet')!;
-    expect(t.status).toBe('testnet');
-    expect(t.trading.enabled).toBe(false);
-    expect(t.trading.reason).toMatch(/TESTNET/);
-    expect(new ChainRuntime(t, new MultiDexMock(), null).tradable).toBe(false);
+  it('a chain with trading disabled is not tradable', () => {
+    const off = { ...ETH, trading: { enabled: false, reason: 'test: no DEX' }, dexes: [] };
+    expect(new ChainRuntime(off, new MultiDexMock(), null).tradable).toBe(false);
   });
   it('RPC_URL_<SLUG> overrides come first, then the built-in fallbacks (deduped)', () => {
-    const urls = rpcUrlsFor(BASE, { RPC_URL_BASE: 'https://my-base.example, https://second.example', RPC_URL: 'https://ignored.example' });
-    expect(urls.slice(0, 2)).toEqual(['https://my-base.example', 'https://second.example']);
+    const urls = rpcUrlsFor(ETH, { RPC_URL_ETHEREUM: 'https://my-eth.example, https://second.example', RPC_URL: 'https://ignored.example' });
+    expect(urls.slice(0, 2)).toEqual(['https://my-eth.example', 'https://second.example']);
     expect(urls).not.toContain('https://ignored.example');
-    expect(urls.slice(2)).toEqual(BASE.rpcs);
+    expect(urls.slice(2)).toEqual(ETH.rpcs);
     expect(rpcUrlsFor(CHAINS[0], { RPC_URL: 'https://pls.example' })[0]).toBe('https://pls.example');
   });
 });
 
 describe('DEX adapters', () => {
-  it('V2 uses the per-DEX fee (PancakeSwap V2 = 25 bps)', async () => {
-    const cake = BSC.dexes.find((d) => d.id === 'pancakeswap-v2')!;
+  it('V2 uses the per-DEX fee (9mm V2 = 25 bps)', async () => {
+    const nine = PLS.dexes.find((d) => d.id === '9mm-v2')!;
     const m = new MultiDexMock();
-    const W: Tok = { address: BSC.wrappedNative.address, symbol: 'WBNB', decimals: 18 }, T: Tok = { address: BSC.stables[0].address, symbol: 'USDT', decimals: 18 };
-    m.addV2('pancakeswap-v2', { router: cake.router, factory: cake.factory, feeBps: 25, wrapped: W.address });
-    m.v2Pair('pancakeswap-v2', W, 1000, T, 600_000);
-    const ad = new V2Adapter(m, cake, W.address);
+    const dai = PLS.stables.find((x) => x.symbol === 'DAI')!;
+    const W: Tok = { address: PLS.wrappedNative.address, symbol: 'WPLS', decimals: 18 }, T: Tok = { address: dai.address, symbol: 'DAI', decimals: 18 };
+    m.addV2('9mm-v2', { router: nine.router, factory: nine.factory, feeBps: 25, wrapped: W.address });
+    m.v2Pair('9mm-v2', W, 1_000_000, T, 10);
+    const ad = new V2Adapter(m, nine, W.address);
     const [pool] = await ad.findPools(W.address, T.address);
-    expect(pool).toMatchObject({ dex: 'pancakeswap-v2', kind: 'v2', feeBps: 25 });
+    expect(pool).toMatchObject({ dex: '9mm-v2', kind: 'v2', feeBps: 25 });
     const q = await ad.quote(pool, W.address, T.address, 10n ** 18n);
     const st = await ad.state(pool, W.address, T.address);
     const wIs0 = st.token0.toLowerCase() === W.address.toLowerCase();
@@ -93,7 +92,7 @@ describe('DEX adapters', () => {
   });
 
   it('V3 finds pools on every tier; QuoterV2 quotes; native-in/out swaps go through multicall', async () => {
-    const m = baseWorld();
+    const m = ethWorld();
     m.v3Pool('uniswap-v3', WETH, 10, USDC, 30_000, 3000);
     const ad = new V3Adapter(m, uni, WETH.address);
     const pools = await ad.findPools(WETH.address, USDC.address);
@@ -174,60 +173,60 @@ describe('Economics use the market fee', () => {
 });
 
 describe('Multi-chain operation', () => {
-  it('PRIVATE_KEY + PRIVATE_KEY_BASE: per-chain override, shared elsewhere, env scrubbed', () => {
+  it('PRIVATE_KEY + PRIVATE_KEY_ETHEREUM: per-chain override, shared elsewhere, env scrubbed', () => {
     const a = Wallet.createRandom(), b = Wallet.createRandom();
     process.env.PRIVATE_KEY = a.privateKey;
-    process.env.PRIVATE_KEY_BASE = b.privateKey;
-    const s = createSigners([{ id: 369, envSlug: 'PULSECHAIN', provider: null as never }, { id: 8453, envSlug: 'BASE', provider: null as never }]);
+    process.env.PRIVATE_KEY_ETHEREUM = b.privateKey;
+    const s = createSigners([{ id: 369, envSlug: 'PULSECHAIN', provider: null as never }, { id: 1, envSlug: 'ETHEREUM', provider: null as never }]);
     expect(s.get(369)!.address).toBe(a.address);
-    expect(s.get(8453)!.address).toBe(b.address);
+    expect(s.get(1)!.address).toBe(b.address);
     expect(process.env.PRIVATE_KEY).toBeUndefined();
-    expect(process.env.PRIVATE_KEY_BASE).toBeUndefined();
+    expect(process.env.PRIVATE_KEY_ETHEREUM).toBeUndefined();
   });
 
-  function twoChains(baseSigner = false) {
+  function twoChains(ethSigner = false) {
     const pls = new MockChain(0.00001);
-    const base = baseWorld();
+    const eth = ethWorld();
     const noSend = { getAddress: async () => ME, sendTransaction: async () => { throw new Error('test: must not send'); } };
-    const rtP = new ChainRuntime(CHAINS[0], pls, null), rtB = new ChainRuntime(BASE, base, baseSigner ? noSend : null);
-    const hub = new Hub({ runtimes: [rtP, rtB], markets: [...legacyMarkets(NET), BASE_DEF], legacyNet: NET, custom: new MemoryStore<CustomFile>() });
+    const rtP = new ChainRuntime(CHAINS[0], pls, null), rtE = new ChainRuntime(ETH, eth, ethSigner ? noSend : null);
+    const hub = new Hub({ runtimes: [rtP, rtE], markets: [...legacyMarkets(NET), ETH_DEF], legacyNet: NET, custom: new MemoryStore<CustomFile>() });
     const bot = new MultiBot({ net: NET, reader: pls, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub });
-    return { pls, base, rtP, rtB, hub, bot };
+    return { pls, eth, rtP, rtE, hub, bot };
   }
 
   it('legacy markets stay chain 369 with unchanged labels; each chain has its own tx gate + nonce queue', () => {
-    const { hub, rtP, rtB } = twoChains();
+    const { hub, rtP, rtE } = twoChains();
     expect(hub.def('DAI').chainId).toBe(369);
     expect(hub.label('DAI')).toBe('PLS/DAI');
-    expect(hub.label(BASE_DEF.key)).toBe('ETH/USDC·BASE');
-    expect(rtP.gate).not.toBe(rtB.gate);
-    expect(rtP.nonce).not.toBe(rtB.nonce);
+    expect(hub.label(ETH_DEF.key)).toBe('ETH/USDC·ETH');
+    expect(rtP.gate).not.toBe(rtE.gate);
+    expect(rtP.nonce).not.toBe(rtE.nonce);
   });
 
-  it('a Base paper grid prices through Uniswap V3; STOP Base leaves PulseChain running', async () => {
-    const { bot, hub, base } = twoChains();
-    base.gasPrice = 10n ** 7n; // 0.01 gwei (Base-like)
-    const px = await hub.quoter(BASE_DEF.key).getPrice();
+  it('an Ethereum paper grid prices through Uniswap V3; STOP Ethereum leaves PulseChain running', async () => {
+    const { bot, hub, eth } = twoChains();
+    eth.gasPrice = 10n ** 7n; // 0.01 gwei keeps the mock grid clear of the gas gate
+    const px = await hub.quoter(ETH_DEF.key).getPrice();
     expect(px).toBeGreaterThan(2900);
     expect(px).toBeLessThan(3000);
     const pg = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.000009, upperPrice: 0.000011, gridCount: 10, totalCapitalUsd: 30 });
-    const bg = await bot.add({ mode: 'paper', stable: BASE_DEF.key, lowerPrice: px * 0.95, upperPrice: px * 1.05, gridCount: 8, totalCapitalUsd: 400 });
+    const bg = await bot.add({ mode: 'paper', stable: ETH_DEF.key, lowerPrice: px * 0.95, upperPrice: px * 1.05, gridCount: 8, totalCapitalUsd: 400 });
     const st = bot.status();
-    expect(st.grids.find((g) => g.id === bg)).toMatchObject({ chainId: 8453, dex: 'uniswap-v3', dexName: 'Uniswap V3', feeTier: 500 });
-    expect(bot.stopChain(8453)).toBe(1);
+    expect(st.grids.find((g) => g.id === bg)).toMatchObject({ chainId: 1, dex: 'uniswap-v3', dexName: 'Uniswap V3', feeTier: 500 });
+    expect(bot.stopChain(1)).toBe(1);
     const after = bot.status().grids;
     expect(after.find((g) => g.id === bg)!.status).toBe('stopped');
     expect(after.find((g) => g.id === pg)!.status).toBe('running');
   });
 
   it('live trading on a custom market without a passing simulation is refused (paper allowed)', async () => {
-    const { bot, base } = twoChains(true);
-    base.gasPrice = 10n ** 7n;
+    const { bot, eth } = twoChains(true);
+    eth.gasPrice = 10n ** 7n;
     const MEME: Tok = { address: '0x00000000000000000000000000000000000b0b02', symbol: 'MEME', decimals: 18 };
-    base.addToken(MEME);
-    base.v3Pool('uniswap-v3', MEME, 1e6, WETH, 100, 3000);
-    for (const t of [MEME, WETH]) base.wallet.set(`${ME.toLowerCase()}:${t.address.toLowerCase()}`, 10n ** 24n);
-    const d: MarketDef = await bot.addMarket({ chainId: 8453, address: MEME.address, quote: WETH.address });
+    eth.addToken(MEME);
+    eth.v3Pool('uniswap-v3', MEME, 1e6, WETH, 100, 3000);
+    for (const t of [MEME, WETH]) eth.wallet.set(`${ME.toLowerCase()}:${t.address.toLowerCase()}`, 10n ** 24n);
+    const d: MarketDef = await bot.addMarket({ chainId: 1, address: MEME.address, quote: WETH.address });
     expect(d.safety!.risk).toBe('unknown'); // mock reader has no eth_call state override
     expect(d.safety!.liveAllowed).toBe(false);
     const spot = await bot.hub.quoter(d.key).getPrice();

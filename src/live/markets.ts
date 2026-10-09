@@ -136,7 +136,7 @@ export function marketLabel(m: Pick<MarketDef, 'base' | 'quote'>) {
   return `${m.base.symbol}/${m.quote.symbol}`;
 }
 
-/** File-system safe candle series name ('base:ETH/USDC' → 'base_ETH-USDC'); legacy keys unchanged. */
+/** File-system safe candle series name ('ethereum:ETH/USDC' → 'ethereum_ETH-USDC'); legacy keys unchanged. */
 export function seriesFile(key: string) {
   return key.replace(/:/g, '_').replace(/\//g, '-').replace(/[^A-Za-z0-9._#-]/g, '_').replace(/#/g, '_');
 }
@@ -167,11 +167,6 @@ export function legacyMarkets(net: LiveNetwork): MarketDef[] {
 const DEFAULTS: { chain: string; quote: string; dex: string; tier: number; pool: string; probe: number }[] = [
   { chain: 'robinhood', quote: 'USDG', dex: 'uniswap-v3', tier: 100, pool: '0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca', probe: 0.01 },
   { chain: 'ethereum', quote: 'USDC', dex: 'uniswap-v3', tier: 500, pool: '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640', probe: 0.01 },
-  { chain: 'base', quote: 'USDC', dex: 'uniswap-v3', tier: 500, pool: '0xd0b53D9277642d899DF5C87A3966A349A798F224', probe: 0.01 },
-  { chain: 'arbitrum', quote: 'USDC', dex: 'uniswap-v3', tier: 500, pool: '0xC6962004f452bE9203591991D15f6b388e09E8D0', probe: 0.01 },
-  { chain: 'bsc', quote: 'USDT', dex: 'pancakeswap-v3', tier: 100, pool: '0x172fcD41E0913e95784454622d1c3724f546f849', probe: 0.05 },
-  { chain: 'polygon', quote: 'USDC', dex: 'uniswap-v3', tier: 500, pool: '0xB6e57ed85c4c9dbfEF2a68711e9d6f36c56e0FcB', probe: 100 },
-  { chain: 'optimism', quote: 'USDC', dex: 'uniswap-v3', tier: 3000, pool: '0xc1738D90E2E26C35784A0d3E3d8A9f795074bcA4', probe: 0.01 },
 ];
 
 export function defaultMarkets(chains: ChainConfig[] = CHAINS): MarketDef[] {

@@ -249,7 +249,12 @@ export class MultiBot {
     try { await eng.start({ ...p, limits: slot.limits }); } catch (e) { this.remove(slot.id); throw e; }
     return slot.id;
   }
-  async start(id: string, p: StartParams) { await this.engine(id).start(p); }
+  async start(id: string, p: StartParams) {
+    const eng = this.engine(id);
+    // A running grid is refused by eng.start; checking coverage first would report a misleading shortfall.
+    if (p.mode === 'live' && eng.state.status !== 'running') await this.assertCovers(p.stable ?? eng.state.stable, p.totalCapitalUsd, p.limits);
+    await eng.start(p);
+  }
   resume(id: string) { this.engine(id).resume(); }
   stop(id: string) { this.engine(id).stop(); }
   setLimits(id: string, l: Partial<SafetyLimits>) { this.engine(id).setLimits(l); }
@@ -311,7 +316,7 @@ export class MultiBot {
 
   // ── Wallet coverage ────────────────────────────────────────────────────
   /** Funds each LIVE bot relies on, per token, vs wallet balances. */
-  /** Token label: plain symbol on the legacy chain ('PLS', 'DAI'), 'BASE ETH' elsewhere. */
+  /** Token label: plain symbol on the legacy chain ('PLS', 'DAI'), 'HOOD ETH' elsewhere. */
   private tokLabel(chainId: number, sym: string) {
     return chainId === this.hub.legacyChainId ? sym : `${this.hub.chain(chainId).short} ${sym}`;
   }

@@ -97,6 +97,29 @@ describe('MultiBot', () => {
     });
     expect(bot.status().grids.find((g) => g.id === id)!.spacingWarn).toMatch(/round-trip/);
   });
+
+  it('restart keeps the grid on its own pair', async () => {
+    const { bot } = make(new MockChain(P0), undefined, null);
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', ...base });
+    bot.stop(id);
+    await expect(bot.start(id, { mode: 'paper', stable: 'USDC', ...base })).rejects.toThrow(/pair can't change/);
+    expect(bot.status().grids.find((g) => g.id === id)!.stable).toBe('DAI');
+    await bot.start(id, { mode: 'paper', stable: 'DAI', ...base, lowerPrice: P0 * 0.88 });
+    const g = bot.status().grids.find((x) => x.id === id)!;
+    expect(g.status).toBe('running');
+    expect(g.config!.lowerPrice).toBeCloseTo(P0 * 0.88);
+  });
+
+  it('restarting as live checks that the wallet covers the capital', async () => {
+    const { chain, bot } = make();
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', ...base });
+    bot.stop(id);
+    chain.setBal('DAI', 10);
+    await expect(bot.start(id, { mode: 'live', stable: 'DAI', ...base, totalCapitalUsd: 30 })).rejects.toThrow(/does not cover/);
+    chain.setBal('DAI', 1000);
+    await bot.start(id, { mode: 'live', stable: 'DAI', ...base, totalCapitalUsd: 30 });
+    expect(bot.status().grids.find((g) => g.id === id)!.mode).toBe('live');
+  });
 });
 
   it('can run a PLS/HEX paper grid alongside DAI', async () => {

@@ -39,8 +39,8 @@ describe('flip keys + orientation labels', () => {
     expect(flipKey('HEX')).toBe('HEX~');
     expect(flipKey('HEX~')).toBe('HEX');
     expect(isFlipKey('HEX~')).toBe(true);
-    expect(isFlipKey('base:ETH/USDC')).toBe(false);
-    expect(unflipKey('base:ETH/USDC~')).toBe('base:ETH/USDC');
+    expect(isFlipKey('ethereum:ETH/USDC')).toBe(false);
+    expect(unflipKey('ethereum:ETH/USDC~')).toBe('ethereum:ETH/USDC');
     expect(unflipKey('DAI')).toBe('DAI');
     expect(orientedKey('HEX', true)).toBe('HEX~');
     expect(orientedKey('HEX~', false)).toBe('HEX');

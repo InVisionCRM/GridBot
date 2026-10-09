@@ -1,6 +1,6 @@
 /**
  * Rebuild candles from pool events (no third party).
- *  - V2 (PulseX / Uniswap V2 / PancakeSwap V2 / QuickSwap): every Sync(reserve0, reserve1) is a price tick
+ *  - V2 (PulseX / 9mm V2 / Uniswap V2): every Sync(reserve0, reserve1) is a price tick
  *    (quote per base from reserves, × (1 − fee) for sell-side units), every Swap adds quote-side volume.
  *  - V3 (Uniswap / PancakeSwap V3): every Swap carries sqrtPriceX96 after the swap → price tick, |amountQuote| → volume.
  * Block timestamps are interpolated linearly inside each chunk (PulseChain ≈10 s blocks), ±1 block accuracy.

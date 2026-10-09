@@ -60,7 +60,7 @@ export function Alerts({ status: s, prefs, setPrefs }: { status: AnyObj; prefs: 
           {prefs.enabled && perm === 'granted'
             ? <button type="button" className="btn" onClick={() => setPrefs({ ...prefs, enabled: false })}>Turn off</button>
             : <button type="button" className="btn primary" onClick={enable}>Enable notifications</button>}
-          <button type="button" className="btn small-btn" disabled={perm !== 'granted'} onClick={() => notify('Test', 'PulseChain bot notification test')}>Test</button>
+          <button type="button" className="btn small-btn" disabled={perm !== 'granted'} onClick={() => notify('Test', 'GridBot notification test')}>Test</button>
         </div>
         <div className="checks">
           {([['fills', 'Fills (grid + trend)'], ['stops', 'Stops / trailing / take-profit hit'], ['errors', 'Bot stopped / errors / skipped sells'], ['range', 'Price leaves a grid range'], ['alerts', 'Alerts below'], ['pnl', 'Large PnL change']] as const).map(([k, l]) => (

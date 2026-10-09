@@ -1,6 +1,6 @@
 /**
  * Candle storage: one JSON file per market under data/candles/ (legacy PulseChain keys keep their file names,
- * e.g. DAI.json; multi-chain keys are sanitized: base:ETH/USDC → base_ETH-USDC.json), compact rows, debounced atomic writes.
+ * e.g. DAI.json; multi-chain keys are sanitized: ethereum:ETH/USDC → ethereum_ETH-USDC.json), compact rows, debounced atomic writes.
  * Flipped markets ('HEX~' = HEX/PLS) have no file of their own: they read the original series inverted (high ↔ 1/low),
  * so both orientations always show the same history.
  */

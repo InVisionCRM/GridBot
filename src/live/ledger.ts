@@ -3,7 +3,7 @@ import type { NetworkKey } from './networks';
 
 export interface LiveTrade {
   id: string;
-  /** 'mainnet'/'testnet' for legacy PulseChain trades; chain key (e.g. 'base') otherwise */
+  /** 'mainnet'/'testnet' for legacy PulseChain trades; chain key (e.g. 'ethereum') otherwise */
   network: NetworkKey | string;
   side: 'buy' | 'sell';
   intervalIndex: number;

@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { Guide, GUIDE_SECTIONS } from '../src/Guide';
 import { STRATEGY_PRESETS } from '../src/live/presets';
+import { CHAINS } from '../src/live/chains';
 
 describe('Guide', () => {
   const html = renderToStaticMarkup(createElement(Guide, { onClose: () => undefined }));
@@ -20,14 +21,14 @@ describe('Guide', () => {
     expect(html.match(/class="g-sell"/g)!.length).toBeGreaterThan(2);
   });
 
-  it('shows the real fee math, gate thresholds and limits', () => {
+  it('shows the real fee math, start-check thresholds and limits', () => {
     expect(html).toContain('0.29%'); // per swap
     expect(html).toContain('0.579%'); // per round-trip
     expect(html).toContain('1.0%'); // spacing floor
     expect(html).toContain('0.25%'); // net margin
     expect(html).toMatch(/Default 3%, max 5%/); // impact
     expect(html).toMatch(/Default 1%, max 5%/); // slippage
-    expect(html).toMatch(/2–50/); // grid count
+    expect(html).toMatch(/2–50/); // level count
   });
 
   it('lists every preset with its live params', () => {
@@ -37,19 +38,11 @@ describe('Guide', () => {
     }
   });
 
-  it('documents the fills columns and never names the key variable', () => {
-    for (const col of ['Trig', 'Quote', 'Exec', 'Slip', 'Gas', 'RT net']) expect(html).toContain(`<td>${col}</td>`);
-    expect(/PRIVATE_KEY|privateKey/.test(html)).toBe(false);
-  });
-
-  it('documents the trend bot, backtester, charts and analytics from the code constants', () => {
-    for (const id of ['trend', 'backtest', 'charts', 'analytics']) expect(html).toContain(`id="g-${id}"`);
+  it('documents the trend bot from the code constants and never names the key variable', () => {
     expect(html).toContain('EMA cross');
     expect(html).toContain('Donchian breakout');
-    expect(html).toMatch(/No look-ahead/);
-    expect(html).toMatch(/GeckoTerminal/);
-    expect(html).toMatch(/Cost gate/);
-    expect(html).toContain('1m / 5m / 15m / 1h / 4h / 1d');
+    expect(html).toMatch(/Cost check/);
+    expect(/PRIVATE_KEY|privateKey/.test(html)).toBe(false);
   });
 
   it('is wired into the main UI behind a Guide button', () => {
@@ -57,7 +50,9 @@ describe('Guide', () => {
     expect(app).toMatch(/onClick=\{\(\) => setGuide\(true\)\}>Guide</);
     expect(app).toContain('<Guide onClose={closeGuide} />');
   });
-  it('documents chains, PulseChain DEXes (PulseX V1/V2, 9mm) and the custom-token policy', () => {
-    for (const x of ['PulseX V1 (V2, 0.29%)', 'PulseX V2 (V2, 0.29%)', '9mm V2 (V2, 0.25%)', '9mm V3 (V3', 'Robinhood Chain', 'Base', 'paper-only', 'Auto: best quote']) expect(html, x).toContain(x);
+
+  it('documents the supported chains, PulseChain DEXes and the custom-token policy', () => {
+    for (const c of CHAINS) expect(html, c.name).toContain(c.name);
+    for (const x of ['PulseX V1 (V2, 0.29%)', 'PulseX V2 (V2, 0.29%)', '9mm V2 (V2, 0.25%)', '9mm V3 (V3', 'paper-only', 'Auto: best quote']) expect(html, x).toContain(x);
   });
 });

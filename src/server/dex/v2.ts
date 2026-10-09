@@ -1,4 +1,4 @@
-/** Uniswap-V2-style adapter (PulseX V2, Uniswap V2, PancakeSwap V2, QuickSwap V2) with a per-DEX fee. */
+/** Uniswap-V2-style adapter (PulseX V1/V2, 9mm V2, Uniswap V2) with a per-DEX fee. */
 import type { DexConfig } from '../../live/chains';
 import type { PoolRef } from '../../live/markets';
 import { NATIVE, priceImpact } from '../../live/swapMath';
