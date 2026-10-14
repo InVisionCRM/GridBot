@@ -182,6 +182,15 @@ input:disabled, select:disabled { opacity: 0.55; }
 .fill-flash { animation: fill-flash 1.2s ease-out; }
 @keyframes fill-flash { from { background: rgba(61, 255, 162, 0.14); } to { background: transparent; } }
 
+.wallet-row { display: grid; grid-template-columns: minmax(150px, auto) minmax(0, 1fr); gap: 6px 14px; align-items: center; padding-top: 8px; border-top: 1px solid var(--line); }
+.card-head + .wallet-row { border-top: 0; padding-top: 0; }
+@media (max-width: 560px) { .wallet-row { grid-template-columns: 1fr; } }
+.wallet-chain { font-size: 0.86rem; display: inline-flex; align-items: center; }
+.coins { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.coin { font-family: var(--mono); font-size: 0.8rem; border: 1px solid var(--line-2); border-radius: 7px; padding: 3px 9px; background: var(--bg); color: var(--muted); }
+.coin b { color: var(--text); font-weight: 500; }
+.coin small { color: var(--warn); }
+
 /* ── New bot ───────────────────────────────────────────── */
 .kind-pick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 640px) { .kind-pick { grid-template-columns: 1fr; } }

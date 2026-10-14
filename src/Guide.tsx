@@ -135,7 +135,7 @@ export function Guide({ onClose }: { onClose: () => void }) {
                 <ul className="tight">
                   <li><b>Falls below the range:</b> every level has bought, and the coins are worth less than they cost.</li>
                   <li><b>Rises above the range:</b> everything is sold early, so you miss the rally. Holding would have done better.</li>
-                  <li><b>Levels too close:</b> costs eat the gap. The start check blocks this.</li>
+                  <li><b>Levels too close or amounts too small:</b> costs eat the gap. New bot warns you before you start.</li>
                 </ul>
               </div>
             </div>
@@ -152,27 +152,25 @@ export function Guide({ onClose }: { onClose: () => void }) {
             <ul className="tight">
               <li><b>Price impact</b> grows with the size of each level compared to the pool. Small pools make it large.</li>
               <li><b>Gas</b> is a fixed cost per swap, so tiny levels lose most of their gap to it. On Ethereum, gas usually makes small grids unprofitable.</li>
-              <li><b>Start check:</b> using today's pool and gas price, the worst level needs a gap of at least {p(MIN_SPACING_PCT * 100, 1)} and must keep at least {p(MIN_NET_PCT * 100)} of the level size after every cost. Live bots can't start otherwise; paper bots need "Simulate anyway".</li>
-              <li>The New bot form shows the result as one sentence: what each completed trade nets in dollars.</li>
+              <li><b>Profit check:</b> using today's pool and gas price, New bot tells you in one sentence what each completed trade nets in the coin you spend. A level gap under {p(MIN_SPACING_PCT * 100, 1)}, or less than {p(MIN_NET_PCT * 100)} kept after costs, is flagged as likely to lose money. It never stops you from starting.</li>
             </ul>
           </section>
 
           <section id="g-presets">
             <h2>Presets</h2>
             <div className="table-wrap"><table className="gtable">
-              <thead><tr><th>Preset</th><th>Range × levels</th><th>Dollars</th><th>Use when</th></tr></thead>
+              <thead><tr><th>Preset</th><th>Range × levels</th><th>Use when</th></tr></thead>
               <tbody>
                 {STRATEGY_PRESETS.map((s) => (
                   <tr key={s.id}>
                     <td><b>{s.name}</b></td>
                     <td>±{(s.legs[0].bandPct * 100).toFixed(0)}% × {s.legs[0].gridCount}</td>
-                    <td>${s.legs[0].capitalUsd}{s.legs.length > 1 ? ' each' : ''}</td>
                     <td className="muted">{PRESET_USE[s.id]}</td>
                   </tr>
                 ))}
               </tbody>
             </table></div>
-            <p className="muted small">Each pair is re-checked against live pool prices before it starts. If any pair fails, nothing starts. "Stack" presets spend PLS and pick the best pool across PulseX and 9mm.</p>
+            <p className="muted small">A preset sets the range and number of levels. You choose how much of each pair's coin to use; the box shows your wallet balance and has a Max button. "Stack" presets spend PLS and pick the best pool across PulseX and 9mm.</p>
           </section>
 
           <section id="g-trend">
@@ -208,8 +206,8 @@ export function Guide({ onClose }: { onClose: () => void }) {
             <dl className="faq">
               <dt>No fills?</dt>
               <dd>The price hasn't dropped a full level yet, it's above the range, or the bot is stopped. The bot's log shows any skipped trades and why.</dd>
-              <dt>Start blocked?</dt>
-              <dd>The message gives the reason: levels too close, too little money per level for the pool and gas, or no levels below the price. Widen the range, use fewer levels, add money or pick a deeper pair.</dd>
+              <dt>Start refused?</dt>
+              <dd>The message says why: usually not enough of the coin in your wallet for a live bot (the amount, plus the gas set-aside when it spends PLS or ETH), or no levels below the price. Use a smaller amount or Max, or start it in paper mode.</dd>
               <dt>Price left the range?</dt>
               <dd>Nothing moves it automatically. Stop the grid, open Change range, centre it on today's price and restart. Coins the old levels still hold stay in that grid's totals.</dd>
               <dt>Why do I need HEX for PLS/HEX?</dt>

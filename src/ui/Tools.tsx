@@ -43,7 +43,7 @@ export function Tools({ s, view, ticks, nav, act, busy, prefs, setPrefs }: {
       </nav>
       {tab === 'chart' && <ChartTab s={s} ticks={ticks} />}
       {tab === 'backtest' && <Backtest status={s} prefill={view.btPrefill ?? null}
-        onUse={(p) => nav(p.created ? { v: 'trend', id: p.created } : { v: 'new', kind: 'trend', trendPrefill: { pair: p.pair, tf: p.tf, cfg: p.cfg, capitalUsd: p.capitalUsd, nonce: Date.now() } })} />}
+        onUse={(p) => nav(p.created ? { v: 'trend', id: p.created } : { v: 'new', kind: 'trend', trendPrefill: { pair: p.pair, tf: p.tf, cfg: p.cfg, capital: p.capital, nonce: Date.now() } })} />}
       {tab === 'analytics' && <Analytics status={s} />}
       {tab === 'markets' && <Markets status={s} act={act} busy={busy} />}
       {tab === 'alerts' && <Alerts status={s} prefs={prefs} setPrefs={setPrefs} />}

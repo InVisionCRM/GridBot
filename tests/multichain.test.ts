@@ -230,7 +230,7 @@ describe('Multi-chain operation', () => {
     expect(d.safety!.risk).toBe('unknown'); // mock reader has no eth_call state override
     expect(d.safety!.liveAllowed).toBe(false);
     const spot = await bot.hub.quoter(d.key).getPrice();
-    const p = { stable: d.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.01, allowTightSpacing: true };
+    const p = { stable: d.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.01 };
     await expect(bot.add({ mode: 'live', ...p })).rejects.toThrow(/safety|paper only|blocked|simulation/i);
     await expect(bot.add({ mode: 'paper', ...p })).resolves.toBeTruthy();
   });

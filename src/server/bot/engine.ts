@@ -14,7 +14,7 @@ import { analyzeSpacing, validateGridParams } from '../../live/spacing';
 import type { GridLevel } from '../../types/grid';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type ChainReader, type Executor, type Fill, type TxSender } from './chain';
 import { gridEconomics, type EconSummary } from './econ';
-import { FEE_BPS, MIN_SPACING_PCT } from '../../live/economics';
+import { FEE_BPS } from '../../live/economics';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import type { SharedNonce, TxGate } from './txGate';
@@ -95,11 +95,6 @@ export interface StartParams extends GridConfig {
   mode: Mode;
   stable?: string;
   limits?: Partial<SafetyLimits>;
-  /**
-   * PAPER ONLY: simulate a grid whose round-trip economics are not net-positive (recorded as warning).
-   * Ignored in live mode: live starts are hard-blocked unless every round-trip clears fee + impact + gas.
-   */
-  allowTightSpacing?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -140,11 +135,6 @@ export class GridEngine {
       : base;
     if (this.state.mode === 'live' && !this.signer) {
       this.tag('warn', 'LIVE mode but no PRIVATE_KEY — stopped.');
-      this.state.status = 'stopped';
-    }
-    const legacy = this.liveSpacingBlock();
-    if (legacy && this.state.status === 'running') {
-      this.tag('warn', `${legacy} — not resuming; STOP/remove and start a net-positive grid.`);
       this.state.status = 'stopped';
     }
     this.executor = this.makeExecutor(this.state.mode, this.state.stable);
@@ -232,16 +222,11 @@ export class GridEngine {
     if (errs.length) throw new Error(errs.join('; '));
     if (p.mode === 'live' && def.custom) await this.requireLiveSafety(stable);
 
-    // Economics gate: worst interval must clear the pool's round-trip fee + impact at level size + gas (+ L2 L1 fee).
+    // Economics (worst interval: the pool's round-trip fee + impact at level size + gas (+ L2 L1 fee)). Never blocks
+    // a start: a grid that doesn't clear its costs starts with a warning saying so.
     const quoter = this.hub.quoter(stable);
     const { summary: econ } = await gridEconomics(quoter, p, this.d.approval ?? 'exact');
-    let warn: string | null = null;
-    if (!econ.ok) {
-      const why = econ.reasons.join(' ');
-      if (p.mode === 'live') throw new Error(`LIVE start blocked — not net-positive per round-trip: ${why}`);
-      if (!p.allowTightSpacing) throw new Error(`${why} (paper only: pass allowTightSpacing to simulate anyway)`);
-      warn = `PAPER ONLY — would be blocked live: ${why}`;
-    }
+    const warn = econ.ok ? null : `Each completed trade is expected to lose money at this size: ${econ.reasons.join(' ')}`;
 
     const executor = this.makeExecutor(p.mode, stable);
     // Native-spending grid (flipped HEX/PLS …): capital + gas reserve must fit in the native balance; the reserve
@@ -249,7 +234,7 @@ export class GridEngine {
     if (p.mode === 'live' && def.quote.native) {
       const bal = await executor.balances();
       const chk = checkGasReserve({ capital: p.totalCapitalUsd, balance: bal.stable, cfg: reserveCfg(limits), symbol: def.quote.symbol });
-      if (!chk.ok) throw new Error(`LIVE start blocked — ${chk.reason}`);
+      if (!chk.ok) throw new Error(chk.reason!);
     }
     const price = await executor.getPrice();
     const levels = calculateGridLevels(p.lowerPrice, p.upperPrice, p.gridCount);
@@ -285,22 +270,9 @@ export class GridEngine {
     }
   }
 
-  /** Live grids saved before the economics gate (e.g. old ±2.5%×36 tight scalp) must not auto-resume. */
-  private liveSpacingBlock(): string | null {
-    const c = this.state.config;
-    if (this.state.mode !== 'live' || !c) return null;
-    if (this.state.econ && !this.state.econ.ok) return 'LIVE grid is not net-positive per round-trip';
-    const sp = analyzeSpacing(c.lowerPrice, c.upperPrice, c.gridCount);
-    return sp.worstSpacingFrac < MIN_SPACING_PCT
-      ? `LIVE grid spacing ${(sp.worstSpacingFrac * 100).toFixed(3)}% < ${(MIN_SPACING_PCT * 100).toFixed(1)}% floor (round-trip fee ${(sp.roundTripFee * 100).toFixed(3)}%)`
-      : null;
-  }
-
   resume() {
     if (this.state.status === 'running') return;
     if (!this.state.config) throw new Error('No grid to resume.');
-    const block = this.liveSpacingBlock();
-    if (block) throw new Error(`${block}. Start a new grid instead.`);
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
     if (this.state.mode === 'live' && !this.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
     if (this.state.mode === 'live' && this.def?.custom && this.def.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);

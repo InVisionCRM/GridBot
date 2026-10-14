@@ -9,6 +9,7 @@ import type { LiveNetwork } from '../../live/networks';
 import { Hub } from '../chains/hub';
 import { isFlipKey, unflipKey, type MarketDef } from '../../live/markets';
 import { checkGasReserve, reserveCfg } from '../../live/gasReserve';
+import { humanAmount } from '../../live/amount';
 import { totals, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
 import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type StartParams } from './engine';
@@ -412,11 +413,12 @@ export class MultiBot {
     if (d.quote.native) {
       // Spending the native coin (flipped HEX/PLS …): capital + gas reserve + other live bots' native must fit.
       const chk = checkGasReserve({ capital: amount, balance: have, allocated: cur, cfg: reserveCfg({ ...this.multi.defaults, ...(limits ?? {}) }), symbol: label });
-      if (!chk.ok) throw new Error(`Wallet does not cover allocations: ${chk.reason}`);
+      if (!chk.ok) throw new Error(chk.reason!);
       return;
     }
     if (have + 1e-9 < cur + amount) {
-      throw new Error(`Wallet does not cover allocations: ${label} ${have.toPrecision(6)} < already allocated ${cur.toPrecision(6)} + new ${amount.toPrecision(6)}`);
+      const f = humanAmount;
+      throw new Error(`Not enough ${label} in your wallet. This needs ${f(cur + amount)} ${label} (${f(amount)} for this bot${cur ? ` + ${f(cur)} already used by your other live bots` : ''}), and the wallet has ${f(have)} ${label}. Use a smaller amount, or start it in paper mode.`);
     }
   }
 
@@ -826,11 +828,10 @@ export class MultiBot {
     return { k, meta: this.candles.getMeta(pair, tf), gaps: k.filter((x) => x.f).length };
   }
 
-  private capitalQuote(pair: string, capital?: number, capitalUsd?: number) {
-    if (capital && capital > 0) return capital;
-    const k = this.usdPerQuote(pair);
-    if (capitalUsd && capitalUsd > 0 && k) return capitalUsd / k;
-    return k ? 1000 / k : 1000;
+  /** Backtest capital in the market's spend (quote) coin. */
+  private capitalQuote(pair: string, capital?: number) {
+    if (!(capital! > 0)) throw new Error(`Enter an amount of ${this.hub.def(pair).quote.symbol} to backtest with.`);
+    return capital!;
   }
 
   private thin(r: BtResult, max = 1500): BtResult {
@@ -839,27 +840,27 @@ export class MultiBot {
     return { ...r, equity: r.equity.filter((_, i) => i % step === 0 || i === r.equity.length - 1) };
   }
 
-  async backtest(p: { pair: string; tf: string; from?: number; to?: number; capital?: number; capitalUsd?: number; cfg?: Partial<TrendConfig>; costs?: { useImpact?: boolean; useGas?: boolean; slippageBps?: number } }) {
+  async backtest(p: { pair: string; tf: string; from?: number; to?: number; capital?: number; cfg?: Partial<TrendConfig>; costs?: { useImpact?: boolean; useGas?: boolean; slippageBps?: number } }) {
     if (!isTF(p.tf)) throw new Error('unknown timeframe');
     const cfg = { ...DEFAULT_TREND, ...(p.cfg ?? {}) };
     const { k, meta, gaps } = this.btCandles(p.pair, p.tf, p.from, p.to);
-    const capital = this.capitalQuote(p.pair, p.capital, p.capitalUsd);
+    const capital = this.capitalQuote(p.pair, p.capital);
     const { model, note } = await this.costModel(p.pair, p.costs);
     const htf = cfg.htfEnabled ? fillGaps(closedOnly(this.candles.get(p.pair, cfg.htfTf), cfg.htfTf, Math.floor(this.now() / 1000)), cfg.htfTf) : undefined;
     const r = runTrendBacktest(k, cfg, p.tf, { capital, costs: model, htf });
     return { ...this.thin(r), pair: p.pair, cfg, capital, usdPerQuote: this.usdPerQuote(p.pair), costs: model, candles: k.length, gaps, from: k[0]?.t, to: k[k.length - 1]?.t, source: meta?.source ?? null, notes: [...r.notes, note, gaps ? `${gaps} empty candles gap-filled flat (no trades in those periods).` : ''].filter(Boolean) };
   }
 
-  async backtestGrid(p: { pair: string; tf: string; from?: number; to?: number; lowerPrice: number; upperPrice: number; gridCount: number; capital?: number; capitalUsd?: number; costs?: { useImpact?: boolean; useGas?: boolean; slippageBps?: number } }) {
+  async backtestGrid(p: { pair: string; tf: string; from?: number; to?: number; lowerPrice: number; upperPrice: number; gridCount: number; capital?: number; costs?: { useImpact?: boolean; useGas?: boolean; slippageBps?: number } }) {
     if (!isTF(p.tf)) throw new Error('unknown timeframe');
     const { k, meta, gaps } = this.btCandles(p.pair, p.tf, p.from, p.to);
-    const capital = this.capitalQuote(p.pair, p.capital, p.capitalUsd);
+    const capital = this.capitalQuote(p.pair, p.capital);
     const { model, note } = await this.costModel(p.pair, p.costs);
     const r = runGridBacktest(k, { lowerPrice: p.lowerPrice, upperPrice: p.upperPrice, gridCount: p.gridCount, capital }, p.tf, model);
     return { ...this.thin(r), pair: p.pair, capital, usdPerQuote: this.usdPerQuote(p.pair), costs: model, candles: k.length, gaps, from: k[0]?.t, to: k[k.length - 1]?.t, source: meta?.source ?? null, notes: [...r.notes, note] };
   }
 
-  async sweep(p: { pair: string; tf: string; from?: number; to?: number; capital?: number; capitalUsd?: number; cfg?: Partial<TrendConfig>; xKey?: SweepKey; xs?: number[]; yKey?: SweepKey; ys?: number[]; costs?: { useImpact?: boolean; useGas?: boolean; slippageBps?: number } }) {
+  async sweep(p: { pair: string; tf: string; from?: number; to?: number; capital?: number; cfg?: Partial<TrendConfig>; xKey?: SweepKey; xs?: number[]; yKey?: SweepKey; ys?: number[]; costs?: { useImpact?: boolean; useGas?: boolean; slippageBps?: number } }) {
     if (!isTF(p.tf)) throw new Error('unknown timeframe');
     const cfg = { ...DEFAULT_TREND, ...(p.cfg ?? {}) };
     const [dx, dy] = SWEEP_AXES[cfg.strategy];
@@ -869,7 +870,7 @@ export class MultiBot {
       donchianEntry: [10, 20, 30, 55], donchianExit: [5, 10, 15, 20], stopAtr: [1, 1.5, 2, 3, 4], tpR: [0, 1, 2, 3, 5], trailAtr: [0, 1.5, 2, 3, 4],
     };
     const { k } = this.btCandles(p.pair, p.tf, p.from, p.to);
-    const capital = this.capitalQuote(p.pair, p.capital, p.capitalUsd);
+    const capital = this.capitalQuote(p.pair, p.capital);
     const { model } = await this.costModel(p.pair, p.costs);
     const htf = cfg.htfEnabled ? fillGaps(closedOnly(this.candles.get(p.pair, cfg.htfTf), cfg.htfTf, Math.floor(this.now() / 1000)), cfg.htfTf) : undefined;
     return { ...sweepTrend(k, cfg, p.tf, xKey, p.xs ?? defaults[xKey], yKey, p.ys ?? defaults[yKey], { capital, costs: model, htf }), candles: k.length, pair: p.pair, tf: p.tf };
@@ -888,7 +889,8 @@ export class MultiBot {
 
   private legacyKeys() { return this.hub.list().filter((d) => d.legacy).map((d) => d.key); }
 
-  async previewPreset(id: string, opts: { quote?: string; capitalUsd?: number } = {}) {
+  /** `amounts`: spend-coin amount per leg market key; legs without one get econ null. */
+  async previewPreset(id: string, opts: { quote?: string; amounts?: Record<string, number> } = {}) {
     const preset = getPreset(id);
     const selected = opts.quote ?? this.d.net.defaultQuote;
     // Presets are PulseChain-only (legacy markets, either orientation).
@@ -914,33 +916,31 @@ export class MultiBot {
         best[key] = { quoter, pool: { ...pool, dexName: b.dexName, switchTo: !same } };
       } catch { /* discovery failed: current pool */ }
     }
-    const resolved = resolvePreset(preset, spots, selected, opts);
-    const legs: (ResolvedLeg & { econ: EconSummary; label: string; pool?: PresetPool })[] = [];
+    const resolved = resolvePreset(preset, spots, selected, opts.amounts);
+    const legs: (ResolvedLeg & { econ: EconSummary | null; label: string; pool?: PresetPool })[] = [];
     for (const leg of resolved) {
       const b = best[leg.quote];
-      const { summary } = await gridEconomics(b?.quoter ?? this.hub.quoter(leg.quote), leg, this.d.approval ?? 'exact');
-      legs.push({ ...leg, econ: summary, label: this.hub.label(leg.quote), ...(b ? { pool: b.pool } : {}) });
+      const econ = leg.capital == null ? null
+        : (await gridEconomics(b?.quoter ?? this.hub.quoter(leg.quote), { ...leg, totalCapitalUsd: leg.capital }, this.d.approval ?? 'exact')).summary;
+      legs.push({ ...leg, econ, label: this.hub.label(leg.quote), ...(b ? { pool: b.pool } : {}) });
     }
-    return { preset: { id: preset.id, name: preset.name, blurb: preset.blurb }, spots, legs, ok: legs.every((l) => l.econ.ok) };
+    return { preset: { id: preset.id, name: preset.name, blurb: preset.blurb }, spots, legs };
   }
 
   async startPreset(
     id: string,
-    opts: { mode: Mode; quote?: string; capitalUsd?: number; allowTightSpacing?: boolean; limits?: Parameters<GridEngine['start']>[0]['limits'] } = { mode: 'paper' },
+    opts: { mode: Mode; quote?: string; amounts: Record<string, number>; limits?: Parameters<GridEngine['start']>[0]['limits'] },
   ): Promise<{ ids: string[]; legs: ResolvedLeg[] }> {
-    const { legs, ok } = await this.previewPreset(id, opts);
-    const paperOverride = opts.mode === 'paper' && !!opts.allowTightSpacing;
-    if (!ok && !paperOverride) {
-      const bad = legs.filter((l) => !l.econ.ok).map((l) => `${l.label}: ${l.econ.reasons.join(' ')}`).join('; ');
-      throw new Error(`${opts.mode === 'live' ? 'LIVE start blocked' : 'Blocked'} — not net-positive per round-trip: ${bad}`);
-    }
+    const { legs } = await this.previewPreset(id, opts);
+    const missing = legs.filter((l) => l.capital == null).map((l) => l.label);
+    if (missing.length) throw new Error(`Enter an amount for ${missing.join(', ')}.`);
     for (const leg of legs) if (leg.pool?.switchTo) await this.setMarketPool(leg.quote, { auto: true });
     const ids: string[] = [];
     try {
       for (const leg of legs) {
         ids.push(await this.add({
           mode: opts.mode, stable: leg.quote, lowerPrice: leg.lowerPrice, upperPrice: leg.upperPrice, gridCount: leg.gridCount,
-          totalCapitalUsd: leg.totalCapitalUsd, allowTightSpacing: paperOverride, limits: opts.limits,
+          totalCapitalUsd: leg.capital!, limits: opts.limits,
         }));
       }
     } catch (e) {
@@ -995,6 +995,19 @@ export class MultiBot {
   }
 
   // ── Status ─────────────────────────────────────────────────────────────
+  /** Signing wallet per chain: native coin first, then every tracked token the wallet holds (amount > 0). */
+  walletView() {
+    return this.hub.runtimes().filter((rt) => rt.signer).map((rt) => {
+      const w = this.wallets.get(rt.cfg.id);
+      const coins = w ? [
+        { symbol: rt.cfg.nativeSymbol, address: null as string | null, native: true, amount: w.native },
+        ...Object.entries(w.tokens).filter(([, t]) => t.amount > 0).map(([address, t]) => ({ symbol: t.symbol, address, native: false, amount: t.amount }))
+          .sort((a, b) => a.symbol.localeCompare(b.symbol)),
+      ] : [];
+      return { chainId: rt.cfg.id, name: rt.cfg.name, short: rt.cfg.short, address: w?.address ?? rt.gas.address, at: w?.at ?? null, error: w?.error ?? rt.gas.error ?? null, coins };
+    });
+  }
+
   /** Every configured chain: trading status, signer, gas wallet, RPC health, tx queue, bots. */
   chainsStatus() {
     return this.hub.runtimes().map((rt) => {
@@ -1017,6 +1030,7 @@ export class MultiBot {
     return this.hub.listBoth().map((d) => ({
       key: d.key, label: this.hub.label(d.key), chainId: d.chainId, base: d.base.symbol, quote: d.quote.symbol, quoteKind: d.quoteKind,
       flipped: !!d.flipped, pairKey: d.flipOf ?? d.key, spends: d.quote.symbol, stacks: d.base.symbol, quoteNative: !!d.quote.native,
+      quoteAddress: d.quote.address.toLowerCase(), baseAddress: d.base.address.toLowerCase(), baseNative: !!d.base.native,
       baseDecimals: d.base.decimals, quoteDecimals: d.quote.decimals,
       dex: d.pool.dex, dexName: this.hub.dexName(d.chainId, d.pool.dex), kind: d.pool.kind, feeBps: d.pool.feeBps, feeTier: d.pool.feeTier ?? null,
       // Built-in PulseChain markets resolve their PulseX V2 pair via getPair; candlePool is that same verified pair.
@@ -1055,7 +1069,7 @@ export class MultiBot {
     return {
       network: this.d.net.key, chainId: this.d.net.chainId, explorer: this.d.net.explorer,
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol),
-      hasSigner: this.hasSigner, address: this.address, walletBalances: this.walletBalances, defaults: this.multi.defaults,
+      hasSigner: this.hasSigner, address: this.address, walletBalances: this.walletBalances, wallets: this.walletView(), defaults: this.multi.defaults,
       txBusy: this.gate.busy, spots: this.spots, spotsAt: this.spotsAt,
       legacyChainId: this.hub.legacyChainId,
       chains: this.chainsStatus(),

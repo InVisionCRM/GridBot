@@ -8,7 +8,10 @@ import { cls, num, pct, px, qty, time, usd } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { T } from './theme';
-import { errMsg, gridName, gridPnlUsd, quoteSym, rangeState, type AnyObj, type Nav } from './model';
+import { errMsg, gridName, gridPnlUsd, quoteSym, rangeState, spendFunds, type AnyObj, type Nav } from './model';
+import { AmountField, fundsProblem } from './NewBot';
+import { reserveCfg } from '../live/gasReserve';
+import { humanAmount } from '../live/amount';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -22,39 +25,40 @@ export function BotLog({ events, botId }: { events: ActivityEvent[]; botId: stri
   );
 }
 
-/** Change the range of a stopped grid; always restarts on the grid's own pair and mode. */
-function ChangeRange({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean }) {
-  const k: number | null = g.usdPerQuote ?? null;
+/** Change the range of a stopped grid; always restarts on the grid's own pair and mode, amount in its spend coin. */
+function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['act']; busy: boolean }) {
+  const q = quoteSym(g);
   const [lower, setLower] = useState(String(g.config.lowerPrice));
   const [upper, setUpper] = useState(String(g.config.upperPrice));
   const [count, setCount] = useState(String(g.config.gridCount));
-  const [capUsd, setCapUsd] = useState(k ? String(+(g.config.totalCapitalUsd * k).toFixed(2)) : '');
+  const [amount, setAmount] = useState(String(g.config.totalCapitalUsd));
   const [econ, setEcon] = useState<AnyObj | null>(null);
   const [econErr, setEconErr] = useState<string | null>(null);
-  const capQuote = k ? +capUsd / k : null;
   useEffect(() => {
-    const lo = +lower, hi = +upper, n = +count;
-    if (!(lo > 0) || !(hi > lo) || !(n >= 2) || !(capQuote! > 0)) { setEcon(null); return; }
+    const lo = +lower, hi = +upper, n = +count, a = +amount;
+    if (!(lo > 0) || !(hi > lo) || !(n >= 2) || !(a > 0)) { setEcon(null); return; }
     const t = setTimeout(() => {
-      botApi(`econ?quote=${encodeURIComponent(g.stable)}&lower=${lo}&upper=${hi}&grids=${n}&capital=${capQuote}`)
+      botApi(`econ?quote=${encodeURIComponent(g.stable)}&lower=${lo}&upper=${hi}&grids=${n}&capital=${a}`)
         .then((e) => { setEcon(e); setEconErr(null); }).catch((e) => { setEcon(null); setEconErr(errMsg(e)); });
     }, 250);
     return () => clearTimeout(t);
-  }, [lower, upper, count, capQuote, g.stable]);
+  }, [lower, upper, count, amount, g.stable]);
   const recentre = (band: number) => { if (g.price) { setLower(String(+(g.price * (1 - band)).toPrecision(5))); setUpper(String(+(g.price * (1 + band)).toPrecision(5))); } };
   const running = g.status === 'running';
+  const funds = spendFunds(s, g.stable, +amount || 0, reserveCfg(g.limits));
+  const problem = fundsProblem(funds, +amount || 0, g.mode);
   const restart = () => act(async () => {
     if (g.mode === 'live' && !confirm(`Restart this LIVE grid with the new range? It signs real swaps.`)) return;
-    await botApi(`grids/${g.id}/start`, 'POST', { mode: g.mode, stable: g.stable, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: capQuote });
+    await botApi(`grids/${g.id}/start`, 'POST', { mode: g.mode, stable: g.stable, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: +amount });
   });
-  const money = (q: number) => (k ? usd(q * k, true) : qty(q, quoteSym(g), 4));
+  const coin = (x: number, sign = false) => `${sign && x > 0 ? '+' : ''}${humanAmount(x)} ${q}`;
   return (
     <div className="stack" style={{ gap: 10 }}>
       <div className="form-row">
         <label>Lowest price<input value={lower} onChange={(e) => setLower(e.target.value)} /></label>
         <label>Highest price<input value={upper} onChange={(e) => setUpper(e.target.value)} /></label>
         <label>Levels<input value={count} onChange={(e) => setCount(e.target.value)} /></label>
-        <label>Capital ($)<input value={capUsd} onChange={(e) => setCapUsd(e.target.value)} disabled={!k} /></label>
+        <AmountField label={`Amount (${q})`} value={amount} f={funds} onChange={setAmount} />
       </div>
       <div className="quick">
         <span className="muted small">Centre on today's price {g.price ? px(g.price) : '—'}:</span>
@@ -62,11 +66,11 @@ function ChangeRange({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boo
       </div>
       {econErr && <div className="banner error">{econErr}</div>}
       {econ && <div className={`verdict ${econ.ok ? 'ok' : 'bad'}`}>{econ.ok
-        ? <span>Each completed buy-then-sell nets about <b>{money(econ.netPerRoundTrip)}</b> ({pct(econ.netPct, 2)}). Levels are {pct(econ.spacingPct, 2)} apart.</span>
-        : <span><b className="neg">Not profitable at this size.</b> {econ.reasons.join(' ')}</span>}</div>}
+        ? <span>Each completed buy-then-sell nets about <b>{coin(econ.netPerRoundTrip, true)}</b> ({pct(econ.netPct, 2)}). Levels are {pct(econ.spacingPct, 2)} apart.</span>
+        : <span><b className="neg">Each completed buy-then-sell {econ.netPerRoundTrip < 0 ? `loses about ${coin(-econ.netPerRoundTrip)}` : `nets only ${coin(econ.netPerRoundTrip)}`} at this size.</b> You can still restart it. {econ.reasons.join(' ')}</span>}</div>}
       <div className="actions">
-        <button type="button" className={`btn ${g.mode === 'live' ? 'live' : 'primary'}`} disabled={busy || running || !econ?.ok} onClick={restart}>Restart with this range</button>
-        <span className="muted small">{running ? 'Stop the grid first.' : `Restarts as ${g.mode} on ${gridName(g)}. ${g.base} the old levels still hold stays in this grid's totals.`}</span>
+        <button type="button" className={`btn ${g.mode === 'live' ? 'live' : 'primary'}`} disabled={busy || running || !(+amount > 0) || !(+upper > +lower) || !!problem} onClick={restart}>Restart with this range</button>
+        <span className={`small ${problem ? 'neg' : 'muted'}`}>{running ? 'Stop the grid first.' : problem ?? `Restarts as ${g.mode} on ${gridName(g)}. ${g.base} the old levels still hold stays in this grid's totals.`}</span>
       </div>
     </div>
   );
@@ -201,7 +205,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="card">
           <details className="more" open={rs === 'above' || rs === 'below'}>
             <summary>Change range</summary>
-            <ChangeRange key={`${g.config.lowerPrice}-${g.config.upperPrice}-${g.config.gridCount}`} g={g} act={act} busy={busy} />
+            <ChangeRange key={`${g.config.lowerPrice}-${g.config.upperPrice}-${g.config.gridCount}`} s={s} g={g} act={act} busy={busy} />
           </details>
           <details className="more">
             <summary>Safety limits</summary>
