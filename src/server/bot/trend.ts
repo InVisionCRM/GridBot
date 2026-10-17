@@ -242,7 +242,7 @@ export class TrendEngine {
       // Flipped (long the token, flat in native PLS): capital + gas reserve must fit in the native balance.
       const bal = await executor.balances();
       const chk = checkGasReserve({ capital: p.capital, balance: bal.stable, cfg: reserveCfg(limits), symbol: def.quote.symbol });
-      if (!chk.ok) throw new Error(`LIVE start blocked — ${chk.reason}`);
+      if (!chk.ok) throw new Error(chk.reason!);
     }
     const price = await executor.getPrice();
     this.executor = executor;

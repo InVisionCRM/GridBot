@@ -220,45 +220,46 @@ describe('Engine pricing on PLS/HEX (8 decimals)', () => {
   });
 });
 
-describe('Start gate + paper/live parity', () => {
+describe('Economics warning (never blocks a start) + paper/live parity', () => {
   const tight = (spot: number) => ({ lowerPrice: spot * 0.98, upperPrice: spot * 1.02, gridCount: 40, totalCapitalUsd: 50 });
 
-  it('live is hard-blocked when not net-positive, even with allowTightSpacing', async () => {
+  it('a live grid that loses money per round-trip still starts, with a plain warning', async () => {
     const chain = new MockChain(P0);
     const { engine } = make(chain);
-    await expect(engine.start({ mode: 'live', ...tight(P0), allowTightSpacing: true })).rejects.toThrow(/LIVE start blocked.*round-trip/);
-    expect(engine.state.status).toBe('idle');
+    await engine.start({ mode: 'live', ...tight(P0) });
+    expect(engine.state.status).toBe('running');
+    expect(engine.state.econ?.ok).toBe(false);
+    expect(engine.state.econ!.netPerRoundTrip).toBeLessThan(0);
+    expect(engine.state.spacingWarn).toMatch(/^Each completed trade is expected to lose money at this size: .*round-trip/);
   });
 
-  it('a saved LIVE grid from before the gate (±2.5%×36) is stopped on load and cannot be resumed', async () => {
+  it('a saved running LIVE grid with tight spacing resumes on load', async () => {
     const chain = new MockChain(P0);
     const store = new MemoryStore<BotState>();
     const { engine } = make(chain);
     await engine.start({ mode: 'live', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 50 });
-    // simulate legacy saved state: old tight-scalp config, running, no econ
     store.save({ ...engine.state, config: { lowerPrice: P0 * 0.975, upperPrice: P0 * 1.025, gridCount: 36, totalCapitalUsd: 100 }, econ: undefined, status: 'running' });
-    const log = new Logger(true);
-    const reloaded = new GridEngine({ net: NET, reader: chain, signer: chain, store, log, maxRetries: 0, retryDelayMs: 0 });
-    expect(reloaded.state.status).toBe('stopped');
-    expect(log.entries.some((e) => /not resuming/.test(e.msg))).toBe(true);
-    expect(() => reloaded.resume()).toThrow(/spacing .* floor/);
+    const reloaded = new GridEngine({ net: NET, reader: chain, signer: chain, store, log: new Logger(true), maxRetries: 0, retryDelayMs: 0 });
+    expect(reloaded.state.status).toBe('running');
+    reloaded.stop();
+    reloaded.resume();
+    expect(reloaded.state.status).toBe('running');
   });
 
-  it('paper needs the explicit override and records a warning', async () => {
+  it('paper starts the same way and records the same warning', async () => {
     const chain = new MockChain(P0);
     const { engine } = make(chain, null);
-    await expect(engine.start({ mode: 'paper', ...tight(P0) })).rejects.toThrow(/paper only/);
-    await engine.start({ mode: 'paper', ...tight(P0), allowTightSpacing: true });
-    expect(engine.state.spacingWarn).toMatch(/PAPER ONLY/);
-    expect(engine.state.econ?.ok).toBe(false);
-    expect(engine.state.econ!.netPerRoundTrip).toBeLessThan(0);
+    await engine.start({ mode: 'paper', ...tight(P0) });
+    expect(engine.state.status).toBe('running');
+    expect(engine.state.spacingWarn).toMatch(/lose money/);
   });
 
-  it('gas-dominated level sizes are blocked (net ≤ 0 even with wide spacing)', async () => {
+  it('gas-dominated level sizes start with the warning (net ≤ 0 even with wide spacing)', async () => {
     const chain = new MockChain(P0);
     chain.gasPrice = 10n ** 15n; // 280–500 PLS per round-trip
     const { engine } = make(chain);
-    await expect(engine.start({ mode: 'live', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 0.01 })).rejects.toThrow(/Net per round-trip ≤ 0/);
+    await engine.start({ mode: 'live', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 0.01 });
+    expect(engine.state.spacingWarn).toMatch(/Net per round-trip ≤ 0/);
   });
 
   it('paper charges approve gas like live (exact: every buy; max: first buy only)', async () => {

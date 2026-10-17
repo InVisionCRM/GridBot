@@ -25,8 +25,8 @@ Dev: `npm run dev` (UI :5173, API :3847).
 
 ## Using the app
 
-- **Home**: total value, bot profit and what the same money would have made by just holding. Notices for anything that needs you (low gas, errors, a grid that left its range, a wallet that doesn't cover live bots). One row per bot with Stop / Resume.
-- **New bot**: choose a grid or a trend bot. Grids start from a preset or a custom range; capital is entered in dollars. One sentence tells you what each completed buy-then-sell nets after fees, impact and gas. Paper / Live sits next to the Start button; live always asks first. Limits live under *Advanced*.
+- **Home**: total value, bot profit and what the same money would have made by just holding, plus **Your wallet** (every coin the signing address holds on each chain, and how much your live bots use). Notices for anything that needs you (low gas, errors, a grid that left its range, a wallet that doesn't cover live bots). One row per bot with Stop / Resume.
+- **New bot**: choose a grid or a trend bot. Grids start from a preset or a custom range. Every amount is entered in the coin the bot spends (PLS, DAI, HEX …), with your wallet balance and a **Max** button beside the box; live starts are checked against the wallet before you press Start. One sentence tells you what each completed buy-then-sell nets after fees, impact and gas. Paper / Live sits next to the Start button; live always asks first. Limits live under *Advanced*.
 - **Bot detail**: profit vs holding, the chart (grid levels and fills, or the trend bot's entry / stop / take-profit lines), the bot's own log, levels, fills (compact, or *All columns*), and for grids **Change range**, which restarts a stopped grid on its own pair and mode.
 - **Tools**: Charts, Backtest, Analytics, Markets (custom tokens, pool picker, chain registry) and Alerts.
 - **Top bar**: chain filter (All / PLS / HOOD / ETH, with a dot when gas is low), signing address or *Paper only*, the Activity feed, the Guide, and **Stop all** (or *Stop all on* the filtered chain). Stopping never sells holdings.
@@ -48,7 +48,7 @@ One interface (`src/server/dex/types.ts`): `findPools`, `state`, `quote`, `build
 
 - **V2** (`v2.ts`): `factory.getPair`, `getReserves`, `router.getAmountsOut`, `swapExact{ETHForTokens,TokensForETH,TokensForTokens}`. The fee is set per DEX (PulseX V1/V2 0.29%, 9mm V2 0.25%, Uniswap V2 0.30%). `check:onchain` measures each fee from reserves against `getAmountsOut`.
 - **V3** (`v3.ts`): `factory.getPool` on every configured tier, then `slot0` + `liquidity`. Quotes come from **QuoterV2** `quoteExactInputSingle` at the real size. Swaps go through `multicall(deadline, …)` on SwapRouter02 / PancakeSwap-style SmartRouter (`exactInputSingle`, `exactInput` for paths, `unwrapWETH9` for native out). Tiers: Uniswap 100/500/3000/10000, PancakeSwap 100/500/2500/10000, 9mm 100/500/2500/10000/20000.
-- The cost gate, start gate, trend cost gate and backtests use the market's real LP fee, the chain's gas units and price, the L1 data fee and the native→USD price.
+- The profit check, trend cost check and backtests use the market's real LP fee, the chain's gas units and price, the L1 data fee and the native→USD price.
 
 ## PulseChain DEXes: PulseX V1, PulseX V2, 9mm V2, 9mm V3
 
@@ -138,7 +138,7 @@ Sources: [Robinhood Chain — connecting (chain ID, RPC, explorer)](https://docs
 
 ### Ethereum — chain 1 · L1 · gas ETH · `RPC_URL_ETHEREUM` / `PRIVATE_KEY_ETHEREUM`
 
-L1 gas makes small grids uneconomic — the start gate will usually block them.
+L1 gas makes small grids uneconomic: New bot will usually warn that each trade loses money.
 
 | Contract | Address | Fee |
 |---|---|---|
@@ -159,17 +159,15 @@ Sources: [Uniswap v3 Ethereum deployments](https://developers.uniswap.org/docs/p
 
 ## Strategies
 
-Every preset is net-positive per completed round-trip after the 2×0.29% LP fee (0.579%), price impact at the
-level size from current pool reserves, and gas. There is no tight-spacing override. Capital is in **USD** and is
-converted to quote units from live prices.
+A preset is a range and a level count per pair. It carries no amount: you enter how much of each pair's spend coin to use (New bot shows the wallet balance and a Max button per pair). The live check below used ≈$100 worth of each coin (100 DAI, 45k HEX, 120k eHEX, 14.5M PLSX, 10M PLS), the sample amounts in `npm run check:onchain`; at those sizes every preset clears the 2×0.29% LP fee (0.579%), price impact and gas.
 
 | Preset | Params | Live check (Oct 2026): step / net per RT (worst level) |
 |--------|--------|-----------------------------------|
-| **Tight scalp** | Selected pair · ±8% · 12 grids · $100 | 1.25% / ~0.58% on DAI |
-| **HEX / eHEX / PLSX** | Each · ±12% · 12 · $100 (≈45k HEX / ≈120k eHEX / ≈14.5M PLSX) | 1.82% / ~1.2% |
-| **HEX+eHEX+PLSX** | All three at once, $100 each | same |
-| **Stable ladder** | DAI+USDC · ±10% · 12 · $50 each | 1.54% / ~0.88% DAI, ~0.79% USDC |
-| **Stack HEX / PLSX / eHEX with PLS** ⇄ | Flipped (HEX/PLS …) · ±12% · 12 · $100 → ≈11.6M PLS · best pool | 1.82% / ~1.20% HEX (PulseX V1), ~1.30% PLSX (9mm V3 0.25%), ~1.19% eHEX (PulseX V2) |
+| **Tight scalp** | Selected pair · ±8% · 12 grids | 1.25% / ~0.58% on DAI |
+| **HEX / eHEX / PLSX** | Each · ±12% · 12 | 1.82% / ~1.2% |
+| **HEX+eHEX+PLSX** | All three at once | same |
+| **Stable ladder** | DAI+USDC · ±10% · 12 | 1.54% / ~0.88% DAI, ~0.79% USDC |
+| **Stack HEX / PLSX / eHEX with PLS** ⇄ | Flipped (HEX/PLS …) · ±12% · 12 · spends PLS · best pool | 1.82% / ~1.20% HEX (PulseX V1), ~1.30% PLSX (9mm V3 0.25%), ~1.19% eHEX (PulseX V2) |
 
 USDT is left out of the ladder because its WPLS pool is only about $1.5k per side. At $8–20 per level, impact (0.8–2.5% per round-trip) is bigger than the edge.
 `npm run check:onchain` re-checks every preset against live reserves (read-only).
@@ -183,8 +181,8 @@ Every market trades either way round. Labels show the base first, plus what the 
 | **PLS/HEX** (classic, key `HEX`) | HEX per PLS | HEX | spend HEX for PLS / sell that PLS for HEX | HEX |
 | **HEX/PLS** (flipped, key `HEX~`) | PLS per HEX | PLS | spend PLS for HEX / sell only that level's HEX lot for PLS | PLS (≈USD shown) |
 
-- **How to start:** New bot → Grid → Custom → Pair **PLS/HEX** → press **⇄** → **HEX/PLS** · Spends: PLS · Stacks: HEX. Capital is entered in dollars and converted to PLS.
-  Or use the **Stack HEX with PLS** preset (also PLSX, eHEX): ±12% × 12, $100 converted to PLS, checked on the best-quoting pool across PulseX V1/V2 and 9mm (the market switches to that pool, Auto mode, when started).
+- **How to start:** New bot → Grid → Custom → Pair **PLS/HEX** → press **⇄** → **HEX/PLS** · Spends: PLS · Stacks: HEX. The amount is entered in PLS.
+  Or use the **Stack HEX with PLS** preset (also PLSX, eHEX): ±12% × 12 with the PLS amount you enter, checked on the best-quoting pool across PulseX V1/V2 and 9mm (the market switches to that pool, Auto mode, when started).
 - **Gas reserve:** when the bot spends the gas token, a reserve is kept aside: max(2% of capital, fixed PLS). Set it in the form ("2%", "50000", or "3% 50000") or through the limits `gasReservePct` / `gasReserveNative`. A live start is blocked if capital + reserve (+ PLS other live bots already use) is more than the PLS balance.
 - **Swaps:** PLS goes in as `msg.value` (`swapExactETHForTokens`) and comes out unwrapped (`swapExactTokensForETH`). Taxed tokens use the `…SupportingFeeOnTransferTokens` variants. On V3 the router wraps PLS from `msg.value` and unwraps with `unwrapWETH9`. Buys need no approval; sells approve the token.
 - **Exact inversion:** amounts stay in each token's own units (HEX 8, PLS 18). Flipped prices come from on-chain quotes in the flipped direction, so they include the fee the other way and are not just 1/x. Candles are inverted (o=1/o, h=1/l, l=1/h, c=1/c; volume ÷ typical price). Charts, indicators, backtests, market panels, alerts, the cost gate, the start gate and the units guard all run on the flipped series.
@@ -192,9 +190,9 @@ Every market trades either way round. Labels show the base first, plus what the 
 - **Existing grids keep their orientation.** Stored keys never contain `~`, so every saved grid/bot/alert loads exactly as before.
 - **Custom markets** (e.g. `pulse:TOKEN/WPLS`) are already token-first: they spend WPLS and stack the token, and they trade WPLS as an ERC-20, as before. ⇄ turns them into WPLS/TOKEN. For these markets, keep **WPLS** (not native PLS) in the wallet. The gas reserve applies only to markets that spend native PLS or ETH.
 
-## Economics gate (pre-start)
+## Profit check (never blocks)
 
-New bot (custom range and every preset) shows, for the **worst** interval, as one plain sentence plus a detail line:
+New bot (custom range and every preset) and Change range show, for the **worst** interval, as one plain sentence plus a detail line:
 - per-level size
 - spacing %
 - round-trip fee
@@ -202,11 +200,9 @@ New bot (custom range and every preset) shows, for the **worst** interval, as on
 - gas in quote units: approve (exact mode) + 2 swaps at the current gas price
 - **net profit per completed round-trip**
 
-Required: spacing ≥ 1.0% **and** net ≥ 0.25% of level size.
+A grid with spacing under 1.0% or net under 0.25% of level size is flagged ("each completed buy-then-sell loses about …"), but it **starts anyway**, in paper and live alike, and carries that warning on its page. Saved grids resume on load whatever their spacing.
 
-- **Live:** hard block, no override (server-side, in `GridEngine.start`).
-- **Paper:** blocked unless you tick *Simulate anyway* under Advanced; the grid then carries a `PAPER ONLY` warning.
-- **Legacy live grids:** a live grid saved before this gate with spacing under 1.0% (e.g. the old ±2.5%×36 tight scalp) is stopped on load and cannot be resumed.
+What does stop a **live** start: not enough of the spend coin in the wallet for the amount, plus the gas set-aside when it spends PLS/ETH, plus what your running live bots already use. The message names all three in readable amounts (e.g. "needs 16.55M PLS (16.23M to trade + 324.5K kept for gas) and the wallet has 10.75M PLS").
 
 ## Fills and diagnostics
 
@@ -231,7 +227,7 @@ PnL is shown in ≈USD (each bot's quote converted at today's rate), with the qu
 
 ## Multi-pair
 
-- One grid per pair and range: PLS/DAI, PLS/USDC, PLS/USDT, **PLS/HEX**, **PLS/eHEX**, **PLS/PLSX**, the Ethereum and Robinhood markets, and custom tokens. Each has its own range, level count (2–50) and capital (entered in dollars, converted to the quote token at today's rate). The default custom range is ±8% × 12 (1.25% between levels).
+- One grid per pair and range: PLS/DAI, PLS/USDC, PLS/USDT, **PLS/HEX**, **PLS/eHEX**, **PLS/PLSX**, the Ethereum and Robinhood markets, and custom tokens. Each has its own range, level count (2–50) and amount (entered in the coin it spends). The default custom range is ±8% × 12 (1.25% between levels).
 - Per-grid **Stop** / **Resume**. **Stop all** halts every bot. One tx is in flight per chain.
 - **Change range** (bot detail) restarts a stopped grid on its own pair and mode; the server refuses a pair change, and a live restart re-checks that the wallet covers it.
 - State lives in `data/state.json` (all grids). A restart resumes them.
@@ -241,7 +237,7 @@ Limits: price-impact cap (≤5%), slippage, deadline. No dollar limits.
 
 ## Trend bot (long-only)
 
-Trend bots run next to the grids (New bot → Trend bot; default 4h candles, $100). They share the server, signing key, tx queue and nonce.
+Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the amount is entered in the coin it spends). They share the server, signing key, tx queue and nonce.
 
 - **Strategies.** EMA cross, EMA+RSI, MACD, Donchian breakout, plus an optional higher-timeframe EMA filter. Signals are evaluated once per newly closed candle, never on the forming one, so they don't repaint.
 - **Exits.** ATR stop and TP at an R multiple, both checked on every poll price; trailing ATR stop (ratchets on closed highs); max hold; signal exit; cooldown; manual Close.

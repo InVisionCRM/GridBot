@@ -8,7 +8,7 @@ import { Chart, EquityChart } from './Chart';
 import { TrendConfigEditor } from './TrendConfig';
 import { IND, T, alpha } from './theme';
 import type { AnyObj, BtPrefill } from './model';
-import { cls, dur, num, pct, px, qty, time, usd } from './fmt';
+import { cls, dur, num, pct, px, qty, time } from './fmt';
 
 const AXES: Record<string, [string, string]> = { ema: ['fast', 'slow'], ema_rsi: ['fast', 'slow'], macd: ['macdFast', 'macdSlow'], donchian: ['donchianEntry', 'donchianExit'] };
 const AXIS_DEFAULTS: Record<string, string> = {
@@ -20,12 +20,12 @@ function Metric({ k, v, sub, c }: { k: string; v: string; sub?: string; c?: stri
   return <div className="metric"><span>{k}</span><b className={c}>{v}</b>{sub && <small className="muted">{sub}</small>}</div>;
 }
 
-export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefill: BtPrefill | null; onUse: (p: { pair: string; tf: TF; cfg: TrendConfig; capitalUsd: number; created?: string }) => void }) {
+export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefill: BtPrefill | null; onUse: (p: { pair: string; tf: TF; cfg: TrendConfig; capital: number; created?: string }) => void }) {
   const [kind, setKind] = useState<'trend' | 'grid'>('trend');
   const [pair, setPair] = useState('DAI');
   const [tf, setTf] = useState<TF>('4h');
   const [days, setDays] = useState('0');
-  const [capUsd, setCapUsd] = useState('100');
+  const [amount, setAmount] = useState('');
   const [cfg, setCfg] = useState<TrendConfig>({ ...DEFAULT_TREND });
   const [grid, setGrid] = useState({ lower: '', upper: '', count: '12' });
   const [costs, setCosts] = useState({ useImpact: true, useGas: true, slippageBps: '10' });
@@ -53,7 +53,7 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
   const run = async (c = cfg) => {
     setBusy('Running backtest…'); setErr(null);
     try {
-      const body = { pair, tf, ...range(), capitalUsd: +capUsd, costs: costBody() };
+      const body = { pair, tf, ...range(), capital: +amount, costs: costBody() };
       setRes(kind === 'trend'
         ? await http('/api/backtest/trend', 'POST', { ...body, cfg: c })
         : await http('/api/backtest/grid', 'POST', { ...body, lowerPrice: +grid.lower, upperPrice: +grid.upper, gridCount: +grid.count }));
@@ -63,25 +63,23 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
     setBusy('Sweeping parameters…'); setErr(null);
     try {
       const list = (v: string) => v.split(',').map((x) => +x.trim()).filter((x) => Number.isFinite(x));
-      setSweep(await http('/api/backtest/sweep', 'POST', { pair, tf, ...range(), capitalUsd: +capUsd, cfg, costs: costBody(), xKey: axes.x, xs: list(axes.xs), yKey: axes.y, ys: list(axes.ys) }));
+      setSweep(await http('/api/backtest/sweep', 'POST', { pair, tf, ...range(), capital: +amount, cfg, costs: costBody(), xKey: axes.x, xs: list(axes.xs), yKey: axes.y, ys: list(axes.ys) }));
     } catch (e) { setErr((e as Error).message); } finally { setBusy(''); }
   };
   const pick = (x: number, y: number) => { const c = { ...cfg, [axes.x]: x, [axes.y]: y }; setCfg(c); void run(c); };
   const use = async (create: boolean) => {
-    if (!create) return onUse({ pair, tf, cfg, capitalUsd: +capUsd });
+    if (!create) return onUse({ pair, tf, cfg, capital: +amount });
     setBusy('Creating paper bot…');
     try {
       const pm0 = mk(s, pair);
-      const k = pm0.usdPerQuote ?? (pm0.flipped && pm0.legacy ? s.spots?.DAI ?? null : s.spots?.DAI && s.spots?.[pair] ? s.spots.DAI / s.spots[pair] : null);
-      const r = await botApi('trends', 'POST', { mode: 'paper', quote: pair, tf, cfg, capital: k ? +capUsd / k : undefined, capitalUsd: k ? undefined : +capUsd, name: `BT ${cfg.strategy.toUpperCase()} ${mk(s, pair).label} ${tf}` });
-      onUse({ pair, tf, cfg, capitalUsd: +capUsd, created: r.id });
+      const r = await botApi('trends', 'POST', { mode: 'paper', quote: pair, tf, cfg, capital: +amount, name: `BT ${cfg.strategy.toUpperCase()} ${pm0.label} ${tf}` });
+      onUse({ pair, tf, cfg, capital: +amount, created: r.id });
     } catch (e) { setErr((e as Error).message); } finally { setBusy(''); }
   };
 
   const m = res?.metrics;
   const pm = mk(s, res?.pair ?? pair);
   const sym = pm.quote;
-  const k = res?.usdPerQuote;
   const series = res ? [
     { name: kind === 'trend' ? 'strategy' : 'grid', data: res.equity.map((e: AnyObj) => [e.t * 1000, e.v]) as [number, number][], color: T.text },
     { name: `buy & hold ${pm.base}`, data: res.equity.map((e: AnyObj) => [e.t * 1000, e.bh]) as [number, number][], color: IND.slow, dashed: true },
@@ -104,7 +102,7 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
           <PairPicker s={s} value={pair} onChange={setPair} />
           <label>Timeframe<select value={tf} onChange={(e) => setTf(e.target.value as TF)}>{TFS.map((x) => <option key={x}>{x}</option>)}</select></label>
           <label>Period<select value={days} onChange={(e) => setDays(e.target.value)}><option value="0">all stored</option><option value="7">7 days</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option><option value="180">180 days</option></select></label>
-          <label>Capital ≈$<input value={capUsd} onChange={(e) => setCapUsd(e.target.value)} /></label>
+          <label>Amount ({mk(s, pair).quote})<input value={amount} placeholder="0" inputMode="decimal" onChange={(e) => setAmount(e.target.value.replace(/,/g, ''))} /></label>
           <label title="price impact from CURRENT pool reserves"><span>Impact</span><input type="checkbox" checked={costs.useImpact} onChange={(e) => setCosts((c) => ({ ...c, useImpact: e.target.checked }))} /></label>
           <label title="gas at the current gas price"><span>Gas</span><input type="checkbox" checked={costs.useGas} onChange={(e) => setCosts((c) => ({ ...c, useGas: e.target.checked }))} /></label>
           <label>Slip bps<input value={costs.slippageBps} onChange={(e) => setCosts((c) => ({ ...c, slippageBps: e.target.value }))} /></label>
@@ -119,8 +117,8 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
           </div>
         )}
         <div className="actions">
-          <button type="button" className="btn primary" disabled={!!busy} onClick={() => run()}>Run backtest</button>
-          {kind === 'trend' && <button type="button" className="btn" disabled={!!busy} onClick={runSweep}>Parameter sweep</button>}
+          <button type="button" className="btn primary" disabled={!!busy || !(+amount > 0)} title={+amount > 0 ? '' : 'Enter an amount first'} onClick={() => run()}>Run backtest</button>
+          {kind === 'trend' && <button type="button" className="btn" disabled={!!busy || !(+amount > 0)} onClick={runSweep}>Parameter sweep</button>}
           {busy && <span className="muted small spin">{busy}</span>}
         </div>
         {err && <div className="banner warn">{err}</div>}
@@ -129,7 +127,7 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
       {res && m && (
         <>
           <div className="card">
-            <h3>Result <span className="muted small"><ChainBadge c={chainOf(s, pm.chainId)} /> {pm.label} ({feeLabel(pm)} LP fee) {res.tf} · {res.candles} candles · {time(res.from * 1000)} → {time(res.to * 1000)} ({num(m.days, 1)} days) · capital {num(res.capital, 4)} {sym}{k ? ` ≈ ${usd(res.capital * k)}` : ''}</span></h3>
+            <h3>Result <span className="muted small"><ChainBadge c={chainOf(s, pm.chainId)} /> {pm.label} ({feeLabel(pm)} LP fee) {res.tf} · {res.candles} candles · {time(res.from * 1000)} → {time(res.to * 1000)} ({num(m.days, 1)} days) · amount {num(res.capital, 4)} {sym}</span></h3>
             <div className="metrics">
               <Metric k="Return" v={pct(m.totalReturn, 2, true)} c={cls(m.totalReturn)} sub={`B&H ${pm.base} ${pct(m.bhReturn, 2, true)}`} />
               <Metric k="vs B&H" v={pct(m.totalReturn - m.bhReturn, 2, true)} c={cls(m.totalReturn - m.bhReturn)} />

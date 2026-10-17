@@ -4,6 +4,7 @@ import { http, botApi } from './api';
 import { AnimatedNumber, StatusDot, useFlash } from './motion';
 import { cls, num, qty, usd } from './fmt';
 import { ChainBadge, DexTag, chainOf, chains, useChainFilter } from './chains';
+import { humanAmount } from '../live/amount';
 import { gridName, gridPnlUsd, quoteSym, rangeState, trendPnlUsd, type AnyObj, type Nav } from './model';
 
 interface Props { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -48,6 +49,31 @@ function BotRow({ s, b, hold, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: nu
   );
 }
 
+/** What the signing wallet holds on each chain, and how much of each coin running live bots already use. */
+function WalletPanel({ s, chain }: { s: AnyObj; chain: number | 'all' }) {
+  const wallets: AnyObj[] = (s.wallets ?? []).filter((w: AnyObj) => chain === 'all' || w.chainId === chain);
+  if (!s.hasSigner) return <div className="banner info"><span className="grow"><b>No signing key in .env</b>, so every bot runs in paper mode with simulated trades. Add your key to .env and restart to trade live.</span></div>;
+  if (!wallets.length) return null;
+  const inUse = (w: AnyObj, c: AnyObj) => (s.allocations?.rows ?? []).find((r: AnyObj) => r.chainId === w.chainId && (c.native ? r.native : String(r.address).toLowerCase() === c.address))?.allocated ?? 0;
+  const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+  return (
+    <section className="card" aria-label="Your wallet">
+      <div className="card-head"><h3>Your wallet</h3>{wallets[0]?.address && <span className="muted small mono" title={wallets[0].address}>{short(wallets[0].address)}</span>}</div>
+      {wallets.map((w) => (
+        <div key={w.chainId} className="wallet-row">
+          <span className="wallet-chain"><ChainBadge c={chainOf(s, w.chainId)} testnet={false} />{w.name}</span>
+          {w.error && !w.coins.length ? <span className="small neg">Couldn't read balances: {w.error}</span>
+            : !w.coins.length ? <span className="small muted">Loading…</span>
+            : <span className="coins">{w.coins.map((c: AnyObj) => {
+              const used = inUse(w, c);
+              return <span key={c.address ?? 'native'} className="coin" title={`${c.amount.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${c.symbol}`}><b>{humanAmount(c.amount)}</b> {c.symbol}{used > 0 ? <small> · {humanAmount(used)} in live bots</small> : null}</span>;
+            })}</span>}
+        </div>
+      ))}
+    </section>
+  );
+}
+
 export function Home({ s, nav, act, busy }: Props) {
   const { chain } = useChainFilter();
   const [ov, setOv] = useState<AnyObj | null>(null);
@@ -78,13 +104,15 @@ export function Home({ s, nav, act, busy }: Props) {
 
   const notices: { key: string; level: 'warn' | 'error'; text: React.ReactNode; open?: () => void }[] = [];
   for (const c of chains(s)) {
-    if (c.hasSigner && c.lowGas && (chain === 'all' || chain === c.id)) {
+    // Only where a live bot runs: paper bots and unused chains spend no real gas.
+    const liveHere = bots.some((b) => b.mode === 'live' && (b.chainId ?? s.legacyChainId) === c.id);
+    if (c.hasSigner && c.lowGas && liveHere && (chain === 'all' || chain === c.id)) {
       notices.push({ key: `gas-${c.id}`, level: 'warn', text: <><b>{c.name} gas is low.</b> {num(c.gasNative, 6)} {c.nativeSymbol} left, below the {c.lowGasNative} {c.nativeSymbol} warning level. Trades there are skipped when gas runs out.</> });
     }
   }
   if (s.allocations && s.allocations.ok === false) {
-    const short = s.allocations.rows.filter((r: AnyObj) => r.ok === false).map((r: AnyObj) => `${r.token} needs ${num(r.allocated, 4)}, wallet has ${num(r.wallet, 4)}`).join('; ');
-    notices.push({ key: 'alloc', level: 'error', text: <><b>Your wallet doesn't cover every live bot.</b> {short}.</> });
+    const short = s.allocations.rows.filter((r: AnyObj) => r.ok === false).map((r: AnyObj) => `your live bots use ${humanAmount(r.allocated)} ${r.token} but the wallet has ${humanAmount(r.wallet)} ${r.token}`).join('; ');
+    notices.push({ key: 'alloc', level: 'error', text: <><b>Not enough in your wallet for your running live bots:</b> {short}. Stop a bot or add funds.</> });
   }
   for (const b of bots) {
     const name = b.kind === 'grid' ? gridName(b) : b.name;
@@ -105,6 +133,8 @@ export function Home({ s, nav, act, busy }: Props) {
         <Kpi label="Bot profit" sub="since each bot started"><span className={cls(profit)}>{profit != null ? <AnimatedNumber value={profit} format={(x) => usd(x, true)} /> : '—'}</span></Kpi>
         <Kpi label="If you'd held" sub={profit != null && held != null ? (profit >= held ? `bots ahead by ${usd(profit - held)}` : `holding ahead by ${usd(held - profit)}`) : 'buying at each bot\'s start'}>{held != null ? usd(held, true) : '—'}</Kpi>
       </div>
+
+      <WalletPanel s={s} chain={chain} />
 
       {notices.length > 0 && (
         <div className="notices">

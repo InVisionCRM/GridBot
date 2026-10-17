@@ -14,6 +14,8 @@ export interface MarketInfo {
   dexName?: string; poolMode?: 'default' | 'auto' | 'manual';
   /** Orientation: flipped = base/quote swapped view of `pairKey` (HEX/PLS of PLS/HEX); spends = quote, stacks = base */
   flipped?: boolean; pairKey?: string; spends?: string; stacks?: string; quoteNative?: boolean;
+  /** Lowercase token addresses (the wrapped native token's address for native sides) */
+  quoteAddress?: string; baseAddress?: string; baseNative?: boolean;
 }
 export interface ChainInfo {
   id: number; key: string; name: string; short: string; color: string; status: 'live' | 'testnet'; tradable: boolean; reason: string | null;

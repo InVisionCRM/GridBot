@@ -250,7 +250,7 @@ describe('gas reserve', () => {
     const bad = checkGasReserve({ capital: 990, balance: 1000, symbol: 'PLS' });
     expect(bad.ok).toBe(false);
     expect(bad.need).toBeCloseTo(990 * 1.02, 9);
-    expect(bad.reason).toMatch(/PLS balance .* gas reserve/);
+    expect(bad.reason).toBe('Not enough PLS in your wallet. This needs 1009.8 PLS (990 to trade + 19.8 kept for gas), and the wallet has 1000 PLS. Use a smaller amount, or start it in paper mode.');
     const alloc = checkGasReserve({ capital: 500, balance: 1000, allocated: 600, symbol: 'PLS' });
     expect(alloc.ok).toBe(false);
     expect(alloc.reason).toMatch(/other live bots/);
@@ -325,15 +325,15 @@ describe('flipped live grid on the mock: native router methods + gas reserve gat
     const mid = flipMid();
     const bal = Number(chain.pls / 10n ** 18n);
     const cfg = { mode: 'live' as const, stable: 'HEX~', lowerPrice: mid * 0.9, upperPrice: mid * 1.1, gridCount: 10 };
-    await expect(bot.add({ ...cfg, totalCapitalUsd: bal * 0.99 })).rejects.toThrow(/gas reserve/);
+    await expect(bot.add({ ...cfg, totalCapitalUsd: bal * 0.99 })).rejects.toThrow(/kept for gas/);
     // A fixed reserve can also block: 60 % of the balance + a fixed reserve of 50 % of it
-    await expect(bot.add({ ...cfg, totalCapitalUsd: bal * 0.6, limits: { ...DEFAULT_LIMITS, gasReserveNative: bal * 0.5 } })).rejects.toThrow(/gas reserve/);
+    await expect(bot.add({ ...cfg, totalCapitalUsd: bal * 0.6, limits: { ...DEFAULT_LIMITS, gasReserveNative: bal * 0.5 } })).rejects.toThrow(/kept for gas/);
     const id = await bot.add({ ...cfg, totalCapitalUsd: 1_000_000 });
     const g = bot.status().grids.find((x) => x.id === id)!;
     expect(g.status).toBe('running');
     expect(g.gasReserve).toBeCloseTo(20_000, 6);
     // Second live bot: the first one's capital counts as allocated
-    await expect(bot.add({ ...cfg, totalCapitalUsd: bal - 1_000_000 })).rejects.toThrow(/gas reserve|cover/i);
+    await expect(bot.add({ ...cfg, totalCapitalUsd: bal - 1_000_000 })).rejects.toThrow(/Not enough PLS in your wallet/);
   });
 
   it('buy = swapExactETHForTokens with msg.value (no approve); sell = approve + swapExactTokensForETH', async () => {
@@ -460,7 +460,7 @@ describe('state migration: existing grids keep their orientation', () => {
   });
 });
 
-describe('flipped presets: "Stack … with PLS" pass the start gate', () => {
+describe('flipped presets: "Stack … with PLS" in PLS amounts', () => {
   it('lists the three stack presets as flipped with ±12 % × 12', () => {
     const ps = listPresets();
     for (const id of ['stack-hex', 'stack-plsx', 'stack-ehex']) {
@@ -471,25 +471,42 @@ describe('flipped presets: "Stack … with PLS" pass the start gate', () => {
     }
   });
   for (const id of ['stack-hex', 'stack-plsx', 'stack-ehex']) {
-    it(`${id}: preview ok (USD → PLS capital, range in PLS per token) and paper start runs flipped`, async () => {
+    it(`${id}: preview ok with a PLS amount (range in PLS per token) and paper start runs flipped`, async () => {
       const chain = new MockChain(P0, { quoteDepth: 10_000_000_000 }); // deep pools like the real HEX/PLSX/eHEX ones
       chain.setPrice(QH, 'HEX');
       chain.setPrice(0.0075, 'eHEX');
       chain.setPrice(1.5, 'PLSX');
       const { bot } = make({ chain });
-      const pv = await bot.previewPreset(id);
-      expect(pv.ok, JSON.stringify(pv.legs.map((l) => l.econ.reasons))).toBe(true);
+      const key = legKey(getPreset(id).legs[0], 'DAI');
+      const none = await bot.previewPreset(id);
+      expect(none.legs[0].capital).toBeNull();
+      expect(none.legs[0].econ).toBeNull();
+      await expect(bot.startPreset(id, { mode: 'paper', amounts: {} })).rejects.toThrow(/^Enter an amount for .*\/PLS/);
+      const amounts = { [key]: 10_000_000 };
+      const pv = await bot.previewPreset(id, { amounts });
       const leg = pv.legs[0];
+      expect(leg.econ!.ok, JSON.stringify(leg.econ!.reasons)).toBe(true);
       expect(isFlipKey(leg.quote)).toBe(true);
       expect(leg.label).toMatch(/\/PLS$/);
-      // $100 at the DAI/PLS quote (0.00001 × (1 − fee)) ≈ 10.03M PLS of capital
-      expect(leg.totalCapitalUsd / (100 / (P0 * (1 - FEE)))).toBeCloseTo(1, 4);
+      expect(leg.capital).toBe(10_000_000);
       const spot = pv.spots[leg.quote];
       expect(leg.lowerPrice).toBeCloseTo(spot * 0.88, 6);
       expect(leg.upperPrice).toBeCloseTo(spot * 1.12, 6);
-      const { ids } = await bot.startPreset(id, { mode: 'paper' });
+      const { ids } = await bot.startPreset(id, { mode: 'paper', amounts });
       const g = bot.status().grids.find((x) => x.id === ids[0])!;
       expect(g).toMatchObject({ flipped: true, spends: 'PLS', status: 'running' });
     });
   }
+});
+
+describe('humanAmount', () => {
+  it('formats wallet-sized numbers readably', async () => {
+    const { humanAmount } = await import('../src/live/amount');
+    expect(humanAmount(10_749_500)).toBe('10.75M');
+    expect(humanAmount(16_226_700)).toBe('16.23M');
+    expect(humanAmount(324_533)).toBe('324.5K');
+    expect(humanAmount(1000)).toBe('1000');
+    expect(humanAmount(0.0123456)).toBe('0.01235');
+    expect(humanAmount(2_500_000_000)).toBe('2.5B');
+  });
 });

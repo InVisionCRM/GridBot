@@ -4,6 +4,7 @@
  * tradable capital: reserve = max(pct × capital, fixed native amount). Live starts are blocked when
  * capital + reserve (+ what other live bots already allocated) exceeds the native balance.
  */
+import { humanAmount } from './amount';
 export interface GasReserveCfg {
   /** Fraction of the capital kept for gas (0.02 = 2 %) */
   pct: number;
@@ -37,10 +38,10 @@ export function checkGasReserve(i: { capital: number; balance: number; allocated
   const reserve = gasReserve(i.capital, i.cfg);
   const need = i.capital + reserve + (i.allocated ?? 0);
   const ok = i.balance + 1e-9 >= need;
-  const f = (x: number) => x.toPrecision(6);
+  const f = humanAmount, s = i.symbol;
   return {
     ok, reserve, need, have: i.balance,
-    reason: ok ? null : `${i.symbol} balance ${f(i.balance)} < capital ${f(i.capital)} + gas reserve ${f(reserve)}${i.allocated ? ` + allocated to other live bots ${f(i.allocated)}` : ''} = ${f(need)} (the reserve pays gas and is never traded)`,
+    reason: ok ? null : `Not enough ${s} in your wallet. This needs ${f(need)} ${s} (${f(i.capital)} to trade + ${f(reserve)} kept for gas${i.allocated ? ` + ${f(i.allocated)} already used by your other live bots` : ''}), and the wallet has ${f(i.balance)} ${s}. Use a smaller amount, or start it in paper mode.`,
   };
 }
 

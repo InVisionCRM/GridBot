@@ -163,7 +163,7 @@ describe('TrendEngine', () => {
     const s = setup({ signer: true });
     s.chain.setBal('DAI', 1000);
     await s.bot.addTrend({ mode: 'live', quote: 'DAI', tf: '1h', cfg: CFG, capital: 600 });
-    await expect(s.bot.addTrend({ mode: 'live', quote: 'DAI', tf: '1h', cfg: CFG, capital: 600 })).rejects.toThrow(/does not cover/);
+    await expect(s.bot.addTrend({ mode: 'live', quote: 'DAI', tf: '1h', cfg: CFG, capital: 600 })).rejects.toThrow(/Not enough DAI in your wallet/);
     const al = s.bot.allocations();
     expect(al.rows.find((r) => r.token === 'DAI')).toMatchObject({ allocated: 600, wallet: 1000, ok: true });
     s.chain.setBal('DAI', 500);

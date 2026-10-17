@@ -86,16 +86,14 @@ describe('MultiBot', () => {
     expect(bot.status().grids[0].status).toBe('stopped');
   });
 
-  it('rejects tight spacing unless allowTightSpacing', async () => {
+  it('starts a tight-spacing grid with a warning instead of refusing it', async () => {
     const { bot } = make(new MockChain(P0), undefined, null);
-    await expect(bot.add({
-      mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.98, upperPrice: P0 * 1.02, gridCount: 40, totalCapitalUsd: 50,
-    })).rejects.toThrow(/round-trip/);
     const id = await bot.add({
       mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.98, upperPrice: P0 * 1.02, gridCount: 40, totalCapitalUsd: 50,
-      allowTightSpacing: true,
     });
-    expect(bot.status().grids.find((g) => g.id === id)!.spacingWarn).toMatch(/round-trip/);
+    const g = bot.status().grids.find((x) => x.id === id)!;
+    expect(g.status).toBe('running');
+    expect(g.spacingWarn).toMatch(/round-trip/);
   });
 
   it('restart keeps the grid on its own pair', async () => {
@@ -115,7 +113,7 @@ describe('MultiBot', () => {
     const id = await bot.add({ mode: 'paper', stable: 'DAI', ...base });
     bot.stop(id);
     chain.setBal('DAI', 10);
-    await expect(bot.start(id, { mode: 'live', stable: 'DAI', ...base, totalCapitalUsd: 30 })).rejects.toThrow(/does not cover/);
+    await expect(bot.start(id, { mode: 'live', stable: 'DAI', ...base, totalCapitalUsd: 30 })).rejects.toThrow('Not enough DAI in your wallet. This needs 30 DAI (30 for this bot), and the wallet has 10 DAI. Use a smaller amount, or start it in paper mode.');
     chain.setBal('DAI', 1000);
     await bot.start(id, { mode: 'live', stable: 'DAI', ...base, totalCapitalUsd: 30 });
     expect(bot.status().grids.find((g) => g.id === id)!.mode).toBe('live');

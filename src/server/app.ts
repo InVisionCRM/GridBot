@@ -49,6 +49,12 @@ export function createApp(o: AppOpts) {
     }
   };
   const num = (v: unknown) => (v == null || v === '' ? undefined : Number(v));
+  /** Per-leg preset amounts in spend-coin units: { "HEX~": 10000000 } (object body, or JSON in a query string). */
+  const amountsParam = (v: unknown): Record<string, number> => {
+    const o = typeof v === 'string' ? JSON.parse(v) as unknown : v ?? {};
+    if (typeof o !== 'object' || o === null || Array.isArray(o)) throw new Error('amounts must be an object of market key → amount');
+    return Object.fromEntries(Object.entries(o).map(([k, x]) => [k, Number(x)]).filter(([, x]) => Number.isFinite(x as number) && (x as number) > 0));
+  };
   /** JSON-safe (bigint → string) */
   const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)));
   const marketReq = (b: Record<string, unknown>) => {
@@ -65,8 +71,6 @@ export function createApp(o: AppOpts) {
       mode, stable: b.stable as string | undefined,
       lowerPrice: Number(b.lowerPrice), upperPrice: Number(b.upperPrice), gridCount: Number(b.gridCount), totalCapitalUsd: Number(b.totalCapitalUsd),
       limits: b.limits as never,
-      // Paper-only override; live starts are hard-blocked by the engine's economics gate regardless.
-      allowTightSpacing: mode === 'paper' && !!b.allowTightSpacing,
     };
   }
   const limitsBody = (b: Record<string, unknown>) => ({
@@ -98,13 +102,13 @@ export function createApp(o: AppOpts) {
   app.get('/api/bot/prices', wrap(async () => ({ prices: await bot.prices() })));
   app.get('/api/bot/presets', (_req, res) => res.json({ presets: listPresets() }));
   app.get('/api/bot/presets/:id/preview', wrap(async (req) => bot.previewPreset(req.params.id, {
-    quote: req.query.quote as string | undefined, capitalUsd: num(req.query.capitalUsd),
+    quote: req.query.quote as string | undefined, amounts: amountsParam(req.query.amounts),
   })));
   app.post('/api/bot/presets/:id/start', wrap(async (req) => {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     if (mode === 'live' && !bot.hasSigner) throw new Error('Live mode needs PRIVATE_KEY in .env');
-    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, capitalUsd: num(b.capitalUsd), allowTightSpacing: mode === 'paper' && !!b.allowTightSpacing, limits: b.limits });
+    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits });
     void bot.tickAll();
     return { ok: true, ...out };
   }));
@@ -156,13 +160,7 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     const quote = String(b.quote ?? net.defaultQuote);
-    let capital = num(b.capital);
-    if (!(capital! > 0) && num(b.capitalUsd)) {
-      const k = bot.usdPerQuote(quote);
-      if (!k) throw new Error(`No USD rate for ${quote} yet — pass capital in ${quote}`);
-      capital = num(b.capitalUsd)! / k;
-    }
-    const id = await bot.addTrend({ mode, quote, tf: String(b.tf ?? '1h') as never, cfg: b.cfg ?? {}, capital: capital ?? 0, name: b.name, limits: b.limits });
+    const id = await bot.addTrend({ mode, quote, tf: String(b.tf ?? '1h') as never, cfg: b.cfg ?? {}, capital: num(b.capital) ?? 0, name: b.name, limits: b.limits });
     void bot.tickAll();
     return { ok: true, id };
   }));

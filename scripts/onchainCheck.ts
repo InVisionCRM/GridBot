@@ -24,6 +24,8 @@ const warn = (m: string) => { console.log(`  ! ${m}`); warnings++; };
 const ok = (c: boolean, m: string) => { console.log(`${c ? '  ✓' : '  ✗'} ${m}`); if (!c) failures++; };
 const DUMMY = '0x000000000000000000000000000000000000dEaD';
 const V3F = new Interface(['function feeAmountTickSpacing(uint24) view returns (int24)']);
+/** Sample spend-coin amounts for preset checks (≈$100 per pair in Oct 2026; presets carry no amount of their own). */
+const SAMPLE_AMOUNTS: Record<string, number> = { DAI: 100, USDC: 100, HEX: 45_000, eHEX: 120_000, PLSX: 14_500_000, 'HEX~': 10_000_000, 'PLSX~': 10_000_000, 'eHEX~': 10_000_000 };
 const NATIVE_USD: Record<string, [number, number]> = { PLS: [1e-6, 1e-3], ETH: [500, 20_000] };
 
 
@@ -64,9 +66,9 @@ for (const net of Object.values(NETWORKS)) {
     const spots = Object.fromEntries(Object.entries(markets).map(([k, m]) => [k, m.spot]));
     // Flipped "Stack … with PLS" presets are checked on the deepest pool in flipChecks().
     for (const preset of STRATEGY_PRESETS.filter((x) => !x.legs.some((l) => l.flip))) {
-      for (const leg of resolvePreset(preset, spots, net.defaultQuote)) {
-        const e = econFromMarket(markets[leg.quote], leg, 'exact');
-        ok(e.ok, `${preset.id} PLS/${leg.quote} ±${leg.bandPct * 100}%×${leg.gridCount} $${leg.capitalUsd}: size ${e.levelSize.toPrecision(5)} ${leg.quote}, step ${(e.spacingPct * 100).toFixed(3)}%, impact ${(e.impactPct * 100).toFixed(3)}%, gas ${(e.gasQuote * leg.usdPerQuote).toFixed(4)} USD, net ${(e.netPct * 100).toFixed(3)}% = $${(e.netPerRoundTrip * leg.usdPerQuote).toFixed(4)}/RT${e.ok ? '' : ' ' + e.reasons.join(' ')}`);
+      for (const leg of resolvePreset(preset, spots, net.defaultQuote, SAMPLE_AMOUNTS)) {
+        const e = econFromMarket(markets[leg.quote], { ...leg, totalCapitalUsd: leg.capital! }, 'exact');
+        ok(e.ok, `${preset.id} PLS/${leg.quote} ±${leg.bandPct * 100}%×${leg.gridCount} with ${leg.capital!.toLocaleString('en-US')} ${leg.quote}: size ${e.levelSize.toPrecision(5)} ${leg.quote}, step ${(e.spacingPct * 100).toFixed(3)}%, impact ${(e.impactPct * 100).toFixed(3)}%, gas ${e.gasQuote.toPrecision(3)} ${leg.quote}, net ${(e.netPct * 100).toFixed(3)}% = ${e.netPerRoundTrip.toPrecision(4)} ${leg.quote}/RT${e.ok ? '' : ' ' + e.reasons.join(' ')}`);
       }
     }
   }
@@ -283,11 +285,11 @@ async function flipChecks(hub: Hub) {
   const bot = new MultiBot({ net: NETWORKS.mainnet, reader: hub.rt(369).reader, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub });
   for (const id of ['stack-hex', 'stack-plsx', 'stack-ehex']) {
     try {
-      const pv = await bot.previewPreset(id);
+      const pv = await bot.previewPreset(id, { amounts: SAMPLE_AMOUNTS });
       for (const l of pv.legs) {
-        const e = l.econ;
+        const e = l.econ!;
         const k = hub.usdPerQuote(l.quote) ?? 0;
-        ok(e.ok, `${id} ${l.label} ±${l.bandPct * 100}%×${l.gridCount} $${l.capitalUsd} → ${Math.round(l.totalCapitalUsd).toLocaleString('en-US')} PLS on ${l.pool?.dexName ?? 'current pool'}${l.pool?.switchTo ? ' (would switch to this pool on start)' : ''}: range ${l.lowerPrice.toPrecision(5)}–${l.upperPrice.toPrecision(5)} PLS/${l.label.split('/')[0]}, size ${e.levelSize.toPrecision(5)} PLS, step ${(e.spacingPct * 100).toFixed(3)}%, impact ${(e.impactPct * 100).toFixed(3)}%, gas ≈ $${(e.gasQuote * k).toFixed(4)}, net ${(e.netPct * 100).toFixed(3)}% ≈ $${(e.netPerRoundTrip * k).toFixed(4)}/RT${e.ok ? '' : ' ' + e.reasons.join(' ')}`);
+        ok(e.ok, `${id} ${l.label} ±${l.bandPct * 100}%×${l.gridCount} with ${Math.round(l.capital!).toLocaleString('en-US')} PLS on ${l.pool?.dexName ?? 'current pool'}${l.pool?.switchTo ? ' (would switch to this pool on start)' : ''}: range ${l.lowerPrice.toPrecision(5)}–${l.upperPrice.toPrecision(5)} PLS/${l.label.split('/')[0]}, size ${e.levelSize.toPrecision(5)} PLS, step ${(e.spacingPct * 100).toFixed(3)}%, impact ${(e.impactPct * 100).toFixed(3)}%, gas ≈ $${(e.gasQuote * k).toFixed(4)}, net ${(e.netPct * 100).toFixed(3)}% ≈ $${(e.netPerRoundTrip * k).toFixed(4)}/RT${e.ok ? '' : ' ' + e.reasons.join(' ')}`);
       }
     } catch (e) { ok(false, `${id}: ${(e as Error).message.slice(0, 200)}`); }
   }
