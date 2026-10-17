@@ -158,8 +158,9 @@ export class DailyScanner {
         step('testing pairs', i, markets.length);
         const name = `${m.def.base.symbol}/${m.def.quote.symbol}`;
         try {
-          const p = await this.test(c, m.def, m.pool, m.isNew);
-          if (p) picks.push(p); else out.skipped.push({ name, why: 'no range made money over the last 7 days' });
+          const r = await this.test(c, m.def, m.pool, m.isNew);
+          if (r.pick) picks.push(r.pick);
+          else out.skipped.push({ name, why: `no range made money over the last 7 days (price ${r.movePct >= 0 ? '+' : ''}${(r.movePct * 100).toFixed(1)}% this week)` });
         } catch (e) { out.skipped.push({ name, why: msg(e) }); }
       }
       out.picks = picks.sort((a, b) => b.test.returnPct - a.test.returnPct).slice(0, PICKS_PER_CHAIN).map((p, i) => ({ ...p, rank: i + 1 }));
@@ -170,14 +171,17 @@ export class DailyScanner {
   }
 
   /** Best setup for one market over the last 7 days, centred on today's price. */
-  private async test(c: ScanChainInfo, d: MarketDef, pool: TopPool | null, isNew: boolean): Promise<ScanPick | null> {
+  /** movePct = the pair's price change over the test window (shown when nothing made money). */
+  private async test(c: ScanChainInfo, d: MarketDef, pool: TopPool | null, isNew: boolean): Promise<{ pick: ScanPick | null; movePct: number }> {
     const snap = await this.d.snapshot(d);
     const capital = TEST_USD / await this.d.usdPerSpend(d);
     const token = d.base.native ? c.wrapped : d.base.address;
     const k = await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
-    const s = bestSetup(k.slice(-SCAN_CANDLES), costModelOf(snap, d.pool.feeBps, this.d.approval), capital);
-    if (!s) return null;
-    return {
+    const week = k.slice(-SCAN_CANDLES);
+    const s = bestSetup(week, costModelOf(snap, d.pool.feeBps, this.d.approval), capital);
+    const movePct = week[week.length - 1].c / week[0].o - 1;
+    if (!s) return { pick: null, movePct };
+    return { movePct, pick: {
       chainId: c.id, rank: 0,
       // A new token's draft quote keeps the wrapped address (WPLS / WETH) even though it spends the native coin.
       key: isNew ? null : d.key,
@@ -187,7 +191,7 @@ export class DailyScanner {
       price: snap.spot, lowerPrice: sig(snap.spot * (1 - s.bandPct)), upperPrice: sig(snap.spot * (1 + s.bandPct)), gridCount: s.gridCount, bandPct: s.bandPct,
       test: { ...s, capital, usd: TEST_USD },
       activity: pool ? { volume24Usd: pool.volume24Usd, liquidityUsd: pool.liquidityUsd, tx24: pool.tx24, change24Pct: pool.change24Pct } : null,
-    };
+    } };
   }
 }
 

@@ -176,7 +176,7 @@ describe('DailyScanner', () => {
     const { deps } = fakeDeps({ rateLimitOnce: true });
     const c = (await new DailyScanner(deps).run()).chains[0];
     expect(c.picks).toEqual([]);
-    expect(c.skipped).toContainEqual({ name: 'ETH/USDC', why: 'no range made money over the last 7 days' });
+    expect(c.skipped.find((x) => x.name === 'ETH/USDC')!.why).toMatch(/^no range made money over the last 7 days \(price [+-]\d+\.\d% this week\)$/);
   });
 
   it('a GeckoTerminal 5xx is retried once (the real scan lost ETH/USDC to one HTTP 500)', async () => {
