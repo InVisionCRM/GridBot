@@ -18,16 +18,43 @@ export const GECKO_TF: Record<TF, [string, number]> = {
 
 export class RateLimited extends Error { constructor(public readonly retryAt: number) { super('GeckoTerminal rate limit (429)'); } }
 
+/** Slowest spacing the adaptive pace backs off to (≈5 requests a minute). */
+export const MAX_GAP_MS = 12_000;
+/** Successful requests in a row before the spacing tightens by 0.5 s again. */
+export const SPEEDUP_AFTER = 20;
+
+/**
+ * Adaptive pace: the documented 30 calls/min does not hold everywhere. Measured 2026-10-17 from a cloud IP: 6–7
+ * requests then a 429 at both 2.5 s and 7 s spacing, so a fixed 2.5 s pace hit a 65 s back-off every ~10 requests
+ * (79% of a 663 s scan). Each 429 doubles the spacing (up to MAX_GAP_MS); SPEEDUP_AFTER successes in a row shorten
+ * it by 0.5 s (down to minIntervalMs), so it settles at whatever this connection is allowed.
+ */
 export class GeckoSource {
   private nextAt = 0;
   private chain: Promise<unknown> = Promise.resolve();
+  private gap: number;
+  private okStreak = 0;
   calls = 0;
   constructor(
     private readonly fetchFn: FetchFn = (globalThis.fetch as unknown as FetchFn),
     private readonly opts: { minIntervalMs?: number; network?: string; feeBps?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
-  ) {}
+  ) { this.gap = opts.minIntervalMs ?? 2500; }
 
   private now() { return (this.opts.now ?? Date.now)(); }
+  /** Current spacing between requests (ms). */
+  get pace() { return this.gap; }
+  private limited() {
+    this.gap = Math.min(MAX_GAP_MS, this.gap * 2);
+    this.okStreak = 0;
+    this.nextAt = this.now() + 65_000;
+    return new RateLimited(this.nextAt);
+  }
+  private succeeded() {
+    if (++this.okStreak >= SPEEDUP_AFTER && this.gap > (this.opts.minIntervalMs ?? 2500)) {
+      this.gap = Math.max(this.opts.minIntervalMs ?? 2500, this.gap - 500);
+      this.okStreak = 0;
+    }
+  }
   private sleep(ms: number) { return (this.opts.sleep ?? ((m) => new Promise((r) => setTimeout(r, m))))(ms); }
   get blockedUntil() { return this.nextAt > this.now() ? this.nextAt : 0; }
 
@@ -36,7 +63,7 @@ export class GeckoSource {
     const run = async () => {
       const wait = this.nextAt - this.now();
       if (wait > 0) await this.sleep(wait);
-      this.nextAt = this.now() + (this.opts.minIntervalMs ?? 2500);
+      this.nextAt = this.now() + this.gap;
       this.calls++;
       return fn();
     };
@@ -45,13 +72,14 @@ export class GeckoSource {
     return p;
   }
 
-  /** Top pools of a network by 24 h volume (20 per page). */
-  async topPools(network: string, page = 1): Promise<TopPool[]> {
-    const url = `https://api.geckoterminal.com/api/v2/networks/${network}/pools?sort=h24_volume_usd_desc&page=${page}`;
+  /** Top pools of one DEX on a network by 24 h volume (20 per page). */
+  async topPools(network: string, dex: string, page = 1): Promise<TopPool[]> {
+    const url = `https://api.geckoterminal.com/api/v2/networks/${network}/dexes/${dex}/pools?sort=h24_volume_usd_desc&page=${page}`;
     return this.request(async () => {
       const r = await this.fetchFn(url, { headers: { accept: 'application/json' } });
-      if (r.status === 429) { this.nextAt = this.now() + 65_000; throw new RateLimited(this.nextAt); }
+      if (r.status === 429) throw this.limited();
       if (!r.ok) throw new Error(`GeckoTerminal HTTP ${r.status}`);
+      this.succeeded();
       return parseTopPools(await r.json());
     });
   }
@@ -65,8 +93,9 @@ export class GeckoSource {
     const url = `https://api.geckoterminal.com/api/v2/networks/${net}/pools/${pool}/ohlcv/${unit}?${q}`;
     return this.request(async () => {
       const r = await this.fetchFn(url, { headers: { accept: 'application/json' } });
-      if (r.status === 429) { this.nextAt = this.now() + 65_000; throw new RateLimited(this.nextAt); }
+      if (r.status === 429) throw this.limited();
       if (!r.ok) throw new Error(`GeckoTerminal HTTP ${r.status}`);
+      this.succeeded();
       const j = (await r.json()) as { data?: { attributes?: { ohlcv_list?: number[][] } } };
       const rows = j.data?.attributes?.ohlcv_list ?? [];
       const k = 1 - (o.feeBps ?? this.opts.feeBps ?? 29) / 10_000;

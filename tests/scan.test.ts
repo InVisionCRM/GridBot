@@ -56,7 +56,7 @@ describe('pickTokens: real activity, something the bot can spend', () => {
     expect(why['USDC / ETH (0xEeee)']).toBe('both sides are the native coin or stablecoins');
     expect(why['cirBTC / WBTC']).toBe('neither side is the native coin or a stablecoin');
     expect(why['PONS / USDG']).toBe('only 19 trades in 24h');
-    expect(why['WASH / USDC']).toBe('volume is 50× its liquidity (looks fake)');
+    expect(why['WASH / USDC']).toBe('volume is 50× its liquidity (likely wash trading)');
     expect(why['WBTC / WETH']).toBeUndefined(); // same token as a busier pool: tested once
   });
 
@@ -111,22 +111,26 @@ const mkt = (key: string, base: MarketDef['base'], quote: MarketDef['quote'], o:
   key, chainId: 1, base, quote, pool: { dex: 'uniswap-v3', kind: 'v3', address: `0xpool${key}`, feeBps: 30 }, probe: 1, quoteKind: 'stable', ...o,
 });
 
-function fakeDeps(o: { candles?: Record<string, Candle[]>; inspectFails?: Record<string, string>; rateLimitOnce?: boolean; http500Once?: boolean } = {}) {
+function fakeDeps(o: { candles?: Record<string, Candle[]>; stored?: Record<string, Candle[]>; inspectFails?: Record<string, string>; rateLimitOnce?: boolean; http500Once?: boolean } = {}) {
   const ethUsdc = mkt('ethereum:ETH/USDC', tok(WETH, 'ETH', { native: true }), tok(USDC, 'USDC'));
   const store = new MemoryStore<ScanFile>();
   const calls: string[] = [];
   let limited = !!o.rateLimitOnce, http500 = !!o.http500Once;
   const deps: ScanDeps = {
-    chains: () => [{ id: 1, name: 'Ethereum', slug: 'eth', wrapped: WETH, spendable: SPEND }],
+    chains: () => [{ id: 1, name: 'Ethereum', slug: 'eth', wrapped: WETH, spendable: SPEND, dexes: ['uniswap_v3', 'uniswap_v2'] }],
     existing: () => [ethUsdc],
     inspect: async (_c, token) => {
       if (o.inspectFails?.[token]) throw new Error(o.inspectFails[token]);
-      return mkt(`ethereum:${token}/USDT`, tok(token, token.slice(0, 6)), tok(USDT, 'USDT'), { custom: true, safety: { risk: 'low', liveAllowed: true } as MarketDef['safety'] });
+      return mkt(`ethereum:${token}/USDT`, tok(token, token.slice(0, 6)), tok(USDT, 'USDT'), { custom: true, safety: { risk: 'low', liveAllowed: true, reasons: ['Simulated buy, transfer and sell matched quotes exactly.'] } as MarketDef['safety'] });
     },
     snapshot: async () => ({ spot: 2, quoteReserve: 1e9, plsReserve: 5e8, gasPricePls: 0, feeBps: 30 }),
+    storedHourly: (d) => o.stored?.[d.key] ?? [],
     usdPerSpend: async () => 1,
     gecko: {
-      topPools: async (_n, page) => (page === 1 ? [pool({ name: 'WBTC / USDT', base: WBTC, quote: USDT }), pool({ name: 'DEAD / USDC', base: '0xdead', quote: USDC })] : []),
+      topPools: async (n, dex) => {
+        calls.push(`top:${n}/${dex}`);
+        return dex === 'uniswap_v3' ? [pool({ name: 'WBTC / USDT', base: WBTC, quote: USDT })] : [pool({ name: 'DEAD / USDC', base: '0xdead', quote: USDC })];
+      },
       ohlcv: async (p, token) => {
         calls.push(`${p}:${token}`);
         if (limited) { limited = false; throw new RateLimited(0); }
@@ -160,6 +164,8 @@ describe('DailyScanner', () => {
     expect(eth.upperPrice).toBeCloseTo(2 * (1 + eth.bandPct), 6);
     expect(eth.test).toMatchObject({ usd: TEST_USD, capital: TEST_USD });
     expect(wbtc.test.returnPct).toBeGreaterThan(eth.test.returnPct);
+    // Only the DEXes this app trades are read (not the chain-wide list, which on Robinhood is mostly Uniswap V4).
+    expect(calls.filter((x) => x.startsWith('top:'))).toEqual(['top:eth/uniswap_v3', 'top:eth/uniswap_v2']);
     // Native base asks GeckoTerminal for the wrapped token's price.
     expect(calls).toContain(`0xpoolethereum:ETH/USDC:${WETH}`);
     expect(c.skipped).toContainEqual({ name: 'DEAD / USDC', why: 'failed the safety check (blocked): honeypot' });
@@ -171,7 +177,7 @@ describe('DailyScanner', () => {
     const { deps } = fakeDeps({ rateLimitOnce: true });
     const c = (await new DailyScanner(deps).run()).chains[0];
     expect(c.picks).toEqual([]);
-    expect(c.skipped).toContainEqual({ name: 'ETH/USDC', why: 'no range made money over the last 7 days' });
+    expect(c.skipped.find((x) => x.name === 'ETH/USDC')!.why).toMatch(/^no range made money over the last 7 days \(price [+-]\d+\.\d% this week\)$/);
   });
 
   it('a GeckoTerminal 5xx is retried once (the real scan lost ETH/USDC to one HTTP 500)', async () => {
@@ -189,6 +195,19 @@ describe('DailyScanner', () => {
     expect(seen[0]).toEqual({ chain: 'Ethereum', chainNo: 1, chains: 1, phase: 'testing pairs', done: 0, total: 3 }); // ETH/USDC + 2 new tokens
     expect(seen[1]).toMatchObject({ phase: 'testing pairs', done: 1, total: 3 });
     expect(sc.status().progress).toBeNull();
+  });
+
+  it('a market in the app reuses its saved hourly candles when they cover the week (no GeckoTerminal request)', async () => {
+    const nowSec = 1_800_000_000; // fakeDeps clock
+    const week = wave(168, 2, 0.03).map((x, i) => ({ ...x, t: nowSec - 3600 - (167 - i) * 3600 }));
+    const { deps, calls } = fakeDeps({ stored: { 'ethereum:ETH/USDC': week } });
+    const c = (await new DailyScanner(deps).run()).chains[0];
+    expect(calls.some((x) => x.endsWith(WETH))).toBe(false);
+    expect(c.picks.map((p) => p.label)).toContain('ETH/USDC');
+    // Too old to cover the week up to the last 2 hours → fetched as before.
+    const stale = fakeDeps({ stored: { 'ethereum:ETH/USDC': week.map((x) => ({ ...x, t: x.t - 3 * 3600 })) } });
+    await new DailyScanner(stale.deps).run();
+    expect(stale.calls.some((x) => x.endsWith(WETH))).toBe(true);
   });
 
   it('runs one scan at a time', async () => {

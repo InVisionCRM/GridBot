@@ -8,7 +8,8 @@
  */
 import type { MarketDef, MarketToken, SafetyReport } from '../../live/markets';
 import { bestSetup, pickTokens, PICKS_PER_CHAIN, SCAN_CANDLES, SCAN_EVERY_MS, TEST_USD, type Setup, type Skipped, type TopPool } from '../../market/scan';
-import type { Candle, TF } from '../../market/candles';
+import { closedOnly, fillGaps, type Candle, type TF } from '../../market/candles';
+import type { CandleStore } from './candleStore';
 import type { MarketSnapshot } from '../bot/chain';
 import { costModelOf } from '../bot/econ';
 import type { Store } from '../bot/store';
@@ -31,6 +32,8 @@ export interface ScanPick {
   dex: string;
   feeBps: number;
   risk: SafetyReport['risk'] | null;
+  /** Why the safety check gave that risk (shown with the badge) */
+  riskWhy: string | null;
   /** Spot when scanned; the suggested range is centred on it */
   price: number;
   lowerPrice: number;
@@ -44,7 +47,8 @@ export interface ScanPick {
 export interface ScanChain { chainId: number; name: string; at: number; picks: ScanPick[]; tested: number; skipped: Skipped[]; error: string | null }
 export interface ScanFile { version: 1; at: number | null; chains: ScanChain[] }
 
-export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[] }
+/** `dexes` = GeckoTerminal ids of the DEXes this app trades on the chain (only their pools are read). */
+export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[]; dexes: string[] }
 
 export interface ScanDeps {
   chains(): ScanChainInfo[];
@@ -53,10 +57,12 @@ export interface ScanDeps {
   /** New token → draft market that passed the safety check; throws the reason otherwise */
   inspect(chainId: number, token: string, spend: string): Promise<MarketDef>;
   snapshot(def: MarketDef): Promise<MarketSnapshot>;
+  /** Saved closed hourly candles of a market in the app (gap-filled, oldest first); [] for a new token */
+  storedHourly(def: MarketDef): Candle[];
   /** USD per unit of the market's spend coin */
   usdPerSpend(def: MarketDef): Promise<number>;
   gecko: {
-    topPools(network: string, page?: number): Promise<TopPool[]>;
+    topPools(network: string, dex: string, page?: number): Promise<TopPool[]>;
     ohlcv(pool: string, token: string, tf: TF, beforeSec?: number, limit?: number, o?: { network?: string; feeBps?: number }): Promise<Candle[]>;
   };
   store: Store<ScanFile>;
@@ -132,7 +138,11 @@ export class DailyScanner {
     const out: ScanChain = { chainId: c.id, name: c.name, at: this.now(), picks: [], tested: 0, skipped: [], error: null };
     if (!c.slug) { out.error = 'No GeckoTerminal price history for this chain.'; return out; }
     try {
-      const pools = [...await retryOnce(() => this.d.gecko.topPools(c.slug!, 1)), ...await retryOnce(() => this.d.gecko.topPools(c.slug!, 2))];
+      // Busiest pools of each DEX this app trades. The chain-wide list is the wrong input: on 2026-10-17, 33 of
+      // Robinhood's 40 busiest pools were Uniswap V4 (not tradable here, and GeckoTerminal reports most of them with
+      // $0 liquidity), which crowded out the real Uniswap V3 stock pools (NVDA ~6.9k trades/day, SPCX ~12k).
+      const pools: TopPool[] = [];
+      for (const dex of c.dexes) pools.push(...await retryOnce(() => this.d.gecko.topPools(c.slug!, dex)));
       const { picked, skipped } = pickTokens(pools, c.spendable, c.wrapped);
       out.skipped.push(...skipped);
       const stackOf = (m: MarketDef) => lc(m.base.native ? c.wrapped : m.base.address);
@@ -151,8 +161,9 @@ export class DailyScanner {
         step('testing pairs', i, markets.length);
         const name = `${m.def.base.symbol}/${m.def.quote.symbol}`;
         try {
-          const p = await this.test(c, m.def, m.pool, m.isNew);
-          if (p) picks.push(p); else out.skipped.push({ name, why: 'no range made money over the last 7 days' });
+          const r = await this.test(c, m.def, m.pool, m.isNew);
+          if (r.pick) picks.push(r.pick);
+          else out.skipped.push({ name, why: `no range made money over the last 7 days (price ${r.movePct >= 0 ? '+' : ''}${(r.movePct * 100).toFixed(1)}% this week)` });
         } catch (e) { out.skipped.push({ name, why: msg(e) }); }
       }
       out.picks = picks.sort((a, b) => b.test.returnPct - a.test.returnPct).slice(0, PICKS_PER_CHAIN).map((p, i) => ({ ...p, rank: i + 1 }));
@@ -163,35 +174,43 @@ export class DailyScanner {
   }
 
   /** Best setup for one market over the last 7 days, centred on today's price. */
-  private async test(c: ScanChainInfo, d: MarketDef, pool: TopPool | null, isNew: boolean): Promise<ScanPick | null> {
+  /** movePct = the pair's price change over the test window (shown when nothing made money). */
+  private async test(c: ScanChainInfo, d: MarketDef, pool: TopPool | null, isNew: boolean): Promise<{ pick: ScanPick | null; movePct: number }> {
     const snap = await this.d.snapshot(d);
     const capital = TEST_USD / await this.d.usdPerSpend(d);
+    // The candle sync keeps every market's hourly series: reuse it when it covers the week up to the last 2 hours
+    // (one GeckoTerminal request saved per market in the app; the shared budget can be ~6 requests a minute).
+    const saved = this.d.storedHourly(d);
+    const fresh = saved.length >= SCAN_CANDLES && saved[saved.length - 1].t >= this.now() / 1000 - 2 * 3600;
     const token = d.base.native ? c.wrapped : d.base.address;
-    const k = await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
-    const s = bestSetup(k.slice(-SCAN_CANDLES), costModelOf(snap, d.pool.feeBps, this.d.approval), capital);
-    if (!s) return null;
-    return {
+    const k = fresh ? saved : await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
+    const week = k.slice(-SCAN_CANDLES);
+    const s = bestSetup(week, costModelOf(snap, d.pool.feeBps, this.d.approval), capital);
+    const movePct = week[week.length - 1].c / week[0].o - 1;
+    if (!s) return { pick: null, movePct };
+    return { movePct, pick: {
       chainId: c.id, rank: 0,
       // A new token's draft quote keeps the wrapped address (WPLS / WETH) even though it spends the native coin.
       key: isNew ? null : d.key,
       add: isNew ? { address: d.base.address, quote: d.quote.address, pool: d.pool.address } : null,
       label: `${d.base.symbol}/${d.quote.symbol}`, spend: d.quote.symbol, stack: d.base.symbol,
-      dex: d.pool.dex, feeBps: d.pool.feeBps, risk: d.safety?.risk ?? null,
+      dex: d.pool.dex, feeBps: d.pool.feeBps, risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null,
       price: snap.spot, lowerPrice: sig(snap.spot * (1 - s.bandPct)), upperPrice: sig(snap.spot * (1 + s.bandPct)), gridCount: s.gridCount, bandPct: s.bandPct,
       test: { ...s, capital, usd: TEST_USD },
       activity: pool ? { volume24Usd: pool.volume24Usd, liquidityUsd: pool.liquidityUsd, tx24: pool.tx24, change24Pct: pool.change24Pct } : null,
-    };
+    } };
   }
 }
 
 /** Scan dependencies backed by the live hub (markets, safety check, quoters, native USD price) and GeckoTerminal. */
-export function scanDepsFromHub(hub: Hub, rest: Pick<ScanDeps, 'gecko' | 'store' | 'approval' | 'now' | 'emit'>): ScanDeps {
+export function scanDepsFromHub(hub: Hub, candles: CandleStore, rest: Pick<ScanDeps, 'gecko' | 'store' | 'approval' | 'now' | 'emit'>): ScanDeps {
   const spends = (chainId: number, t: MarketToken) => t.native || sameAddr(t.address, hub.chain(chainId).wrappedNative.address) || hub.isStable(chainId, t.address);
   return {
     ...rest,
     chains: () => hub.runtimes().filter((rt) => rt.tradable && rt.cfg.status === 'live').map((rt) => ({
       id: rt.cfg.id, name: rt.cfg.name, slug: rt.cfg.geckoSlug, wrapped: rt.cfg.wrappedNative.address,
       spendable: [rt.cfg.wrappedNative.address, ...rt.cfg.stables.map((s) => s.address)],
+      dexes: rt.cfg.dexes.flatMap((d) => (d.gecko ? [d.gecko] : [])),
     })),
     // PLS/DAI and ETH/USDC spend the stablecoin; PLS/HEX is turned around to HEX/PLS so it spends PLS.
     existing: (chainId) => hub.byChain(chainId).flatMap((d) => (spends(chainId, d.quote) ? [d] : spends(chainId, d.base) ? [hub.def(`${d.key}~`)] : [])),
@@ -202,6 +221,11 @@ export function scanDepsFromHub(hub: Hub, rest: Pick<ScanDeps, 'gecko' | 'store'
       return r.draft;
     },
     snapshot: (d) => (hub.has(d.key) ? hub.quoter(d.key) : hub.draftQuoter(d)).market(),
+    storedHourly: (d) => {
+      if (!hub.has(d.key)) return [];
+      const nowSec = Math.floor((rest.now ?? Date.now)() / 1000);
+      return fillGaps(closedOnly(candles.get(d.key, '1h'), '1h', nowSec), '1h');
+    },
     usdPerSpend: async (d) => {
       if (hub.isStable(d.chainId, d.quote.address)) return 1;
       if (!spends(d.chainId, d.quote)) throw new Error(`${d.quote.symbol} is not the native coin or a stablecoin`);

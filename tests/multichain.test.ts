@@ -288,3 +288,14 @@ describe('Multi-chain operation', () => {
     expect(bot.status().grids.find((g) => g.id === gid)!.gasReserve).toBeGreaterThan(0);
   });
 });
+
+describe('GeckoTerminal DEX ids (daily scan reads only these pools)', () => {
+  it('every DEX this app trades on PulseChain, Robinhood and Ethereum names its GeckoTerminal id', () => {
+    const ids = Object.fromEntries(CHAINS.map((c) => [c.key, c.dexes.map((d) => `${d.id}=${d.gecko}`)]));
+    expect(ids).toEqual({
+      pulsechain: ['pulsex-v2=pulsex-v2', 'pulsex-v1=pulsex', '9mm-v2=9mm-v2', '9mm-v3=9mm-v3'],
+      robinhood: ['uniswap-v3=uniswap-v3-robinhood', 'uniswap-v2=uniswap-v2-robinhood', 'pancakeswap-v3=pancakeswap-v3-robinhood'],
+      ethereum: ['uniswap-v3=uniswap_v3', 'uniswap-v2=uniswap_v2'],
+    });
+  });
+});

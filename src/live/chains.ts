@@ -27,6 +27,8 @@ export interface DexConfig {
   feeTiers?: number[];
   source: string;
   note?: string;
+  /** GeckoTerminal DEX id on this chain (verified 2026-10-17 against /networks/{slug}/dexes and a known pool) */
+  gecko?: string;
 }
 
 export interface ChainToken {
@@ -83,8 +85,8 @@ const UNI_V3_CANON = {
   router: '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45',
   quoter: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
 };
-const uniV3 = (chainSrc: string, a = UNI_V3_CANON): DexConfig => ({
-  id: 'uniswap-v3', name: 'Uniswap V3', kind: 'v3', ...a, feeTiers: TIERS_UNI, source: chainSrc,
+const uniV3 = (chainSrc: string, gecko: string, a = UNI_V3_CANON): DexConfig => ({
+  id: 'uniswap-v3', name: 'Uniswap V3', kind: 'v3', ...a, feeTiers: TIERS_UNI, source: chainSrc, gecko,
 });
 
 /**
@@ -97,17 +99,17 @@ const uniV3 = (chainSrc: string, a = UNI_V3_CANON): DexConfig => ({
  */
 export const PULSECHAIN_EXTRA_DEXES: DexConfig[] = [
   {
-    id: 'pulsex-v1', name: 'PulseX V1', kind: 'v2', factory: '0x1715a3E4A142d8b698131108995174F37aEBA10D',
+    id: 'pulsex-v1', name: 'PulseX V1', kind: 'v2', gecko: 'pulsex', factory: '0x1715a3E4A142d8b698131108995174F37aEBA10D',
     router: '0x98bf93ebf5c380C0e6Ae8e192A7e2AE08edAcc02', feeBps: 29,
     source: 'https://scan.pulsechain.com/address/0x98bf93ebf5c380C0e6Ae8e192A7e2AE08edAcc02',
   },
   {
-    id: '9mm-v2', name: '9mm V2', kind: 'v2', factory: '0x3a0Fa7884dD93f3cd234bBE2A0958Ef04b05E13b',
+    id: '9mm-v2', name: '9mm V2', kind: 'v2', gecko: '9mm-v2', factory: '0x3a0Fa7884dD93f3cd234bBE2A0958Ef04b05E13b',
     router: '0xcC73b59F8D7b7c532703bDfea2808a28a488cF47', feeBps: 25,
     source: 'https://github.com/9mm-exchange/deployments/blob/main/pulsechain/v2.json',
   },
   {
-    id: '9mm-v3', name: '9mm V3', kind: 'v3', factory: '0xe50DbDC88E87a2C92984d794bcF3D1d76f619C68',
+    id: '9mm-v3', name: '9mm V3', kind: 'v3', gecko: '9mm-v3', factory: '0xe50DbDC88E87a2C92984d794bcF3D1d76f619C68',
     router: '0xa9444246d80d6E3496C9242395213B4f22226a59', quoter: '0x500260dD7C27eCE20b89ea0808d05a13CF867279',
     feeTiers: [100, 500, 2500, 10000, 20000],
     source: 'https://github.com/9mm-exchange/deployments/blob/main/pulsechain/v3.json',
@@ -127,7 +129,7 @@ export function chainFromNetwork(net: LiveNetwork): ChainConfig {
     trading: { enabled: true },
     // PulseX V2 stays first (legacy markets + the legacy Quoter constructor use it); mainnet adds PulseX V1 and 9mm.
     dexes: [
-      { id: 'pulsex-v2', name: 'PulseX V2', kind: 'v2', factory: net.pulsex.factoryV2, router: net.pulsex.routerV2, feeBps: net.pulsex.feeBps, source: 'https://scan.pulsechain.com/address/0x165C3410fC91EF562C50559f7d2289fEbed552d9' },
+      { id: 'pulsex-v2', name: 'PulseX V2', kind: 'v2', gecko: net.isTestnet ? undefined : 'pulsex-v2', factory: net.pulsex.factoryV2, router: net.pulsex.routerV2, feeBps: net.pulsex.feeBps, source: 'https://scan.pulsechain.com/address/0x165C3410fC91EF562C50559f7d2289fEbed552d9' },
       ...(net.isTestnet ? [] : PULSECHAIN_EXTRA_DEXES),
     ],
     stack: 'l1', gasUnits: { approve: 60_000, swap: 220_000 }, lowGasNative: 50_000, blockTimeSec: 10, logChunk: 5000,
@@ -154,11 +156,11 @@ export const CHAINS: ChainConfig[] = [
     rpcs: ['https://rpc.mainnet.chain.robinhood.com'],
     explorer: 'https://robinhoodchain.blockscout.com', geckoSlug: 'robinhood', status: 'live', trading: { enabled: true },
     dexes: [
-      uniV3('https://developers.uniswap.org/docs/protocols/v3/deployments/v3-robinhood-deployments', {
+      uniV3('https://developers.uniswap.org/docs/protocols/v3/deployments/v3-robinhood-deployments', 'uniswap-v3-robinhood', {
         factory: '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA', router: '0xCaf681a66D020601342297493863E78C959E5cb2', quoter: '0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7',
       }),
-      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', factory: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f', router: '0x89e5DB8B5aA49aA85AC63f691524311AEB649eba', feeBps: 30, source: 'https://github.com/Uniswap/contracts/blob/main/deployments/4663.md' },
-      { id: 'pancakeswap-v3', name: 'PancakeSwap V3', kind: 'v3', factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865', router: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4', quoter: '0x8553AA1615549A86882151784b329B017aA7c832', feeTiers: TIERS_CAKE, source: 'https://developer.pancakeswap.finance/contracts/v3/addresses', note: 'Thin liquidity on WETH/USDG (Oct 2026); auto-pick prefers Uniswap.' },
+      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap-v2-robinhood', factory: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f', router: '0x89e5DB8B5aA49aA85AC63f691524311AEB649eba', feeBps: 30, source: 'https://github.com/Uniswap/contracts/blob/main/deployments/4663.md' },
+      { id: 'pancakeswap-v3', name: 'PancakeSwap V3', kind: 'v3', gecko: 'pancakeswap-v3-robinhood', factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865', router: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4', quoter: '0x8553AA1615549A86882151784b329B017aA7c832', feeTiers: TIERS_CAKE, source: 'https://developer.pancakeswap.finance/contracts/v3/addresses', note: 'Thin liquidity on WETH/USDG (Oct 2026); auto-pick prefers Uniswap.' },
     ],
     stack: 'arbitrum', gasUnits: { approve: 60_000, swap: 220_000 }, lowGasNative: 0.0005, blockTimeSec: 0.25, logChunk: 20_000,
     sources: [
@@ -181,8 +183,8 @@ export const CHAINS: ChainConfig[] = [
     rpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org', 'https://cloudflare-eth.com'],
     explorer: 'https://etherscan.io', geckoSlug: 'eth', status: 'live', trading: { enabled: true },
     dexes: [
-      uniV3('https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments'),
-      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', factory: '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f', router: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', feeBps: 30, source: UNI_V2_SRC },
+      uniV3('https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments', 'uniswap_v3'),
+      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap_v2', factory: '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f', router: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', feeBps: 30, source: UNI_V2_SRC },
     ],
     stack: 'l1', gasUnits: { approve: 60_000, swap: 180_000 }, lowGasNative: 0.01, blockTimeSec: 12, logChunk: 2000,
     sources: [

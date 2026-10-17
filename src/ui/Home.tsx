@@ -82,7 +82,8 @@ function PickRow({ k, use, busy }: { k: AnyObj; use: (k: AnyObj) => void; busy: 
     <div className="pick">
       <span className="pick-rank">{k.rank}</span>
       <div className="pick-main">
-        <div className="pick-name"><b>{k.label}</b>{k.key ? null : <span className="tag" title={k.add.address}>new token {k.add.address.slice(0, 6)}…{k.add.address.slice(-4)}</span>}{k.risk && k.risk !== 'low' ? <span className="tag live">risk {k.risk}</span> : null}</div>
+        <div className="pick-name"><b>{k.label}</b>{k.key ? null : <span className="tag" title={k.add.address}>new token {k.add.address.slice(0, 6)}…{k.add.address.slice(-4)}</span>}{k.risk && k.risk !== 'low' ? <span className="tag live" title={k.riskWhy ?? ''}>risk {k.risk}</span> : null}</div>
+        {k.risk && k.risk !== 'low' && k.riskWhy ? <div className="small muted">{k.riskWhy}</div> : null}
         <div className="small muted">±{Math.round(k.bandPct * 100)}% around {px(k.price)} · {k.gridCount} levels · spends {k.spend}{k.activity ? ` · ${money(k.activity.volume24Usd)} traded today · ${money(k.activity.liquidityUsd)} in the pool` : ''}</div>
       </div>
       <div className="pick-test">

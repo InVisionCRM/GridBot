@@ -116,7 +116,11 @@ export class CandleSync {
 
   constructor(
     private readonly gecko: GeckoSource, private readonly sources: () => CandleSource[], private readonly store: CandleStore,
-    private readonly opts: { onEvent?: (msg: string, level: 'info' | 'warn') => void; now?: () => number; active?: () => ReadonlySet<string> } = {},
+    private readonly opts: {
+      onEvent?: (msg: string, level: 'info' | 'warn') => void; now?: () => number; active?: () => ReadonlySet<string>;
+      /** True while the daily scan runs: it shares the GeckoTerminal budget, and the user is waiting on it. */
+      paused?: () => boolean;
+    } = {},
   ) {}
 
   private now() { return (this.opts.now ?? Date.now)(); }
@@ -189,7 +193,7 @@ export class CandleSync {
   start(intervalMs = 2600) {
     if (this.timer) return;
     const loop = async () => {
-      if (!this.busy && this.pairs.length) { this.busy = true; try { await this.step(); } finally { this.busy = false; } }
+      if (!this.busy && this.pairs.length && !this.opts.paused?.()) { this.busy = true; try { await this.step(); } finally { this.busy = false; } }
       this.timer = setTimeout(loop, Math.max(intervalMs, this.gecko.blockedUntil - this.now()));
     };
     this.timer = setTimeout(loop, 1000);

@@ -93,7 +93,7 @@ export function pickTokens(pools: TopPool[], spendable: string[], wrapped: strin
       : !b && !q ? 'neither side is the native coin or a stablecoin'
         : p.liquidityUsd < rules.minLiquidityUsd ? `liquidity $${Math.round(p.liquidityUsd).toLocaleString('en-US')} is below $${rules.minLiquidityUsd.toLocaleString('en-US')}`
           : p.tx24 < rules.minTx24 ? `only ${p.tx24} trades in 24h`
-            : p.volume24Usd / p.liquidityUsd > rules.maxVolumeToLiquidity ? `volume is ${Math.round(p.volume24Usd / p.liquidityUsd)}× its liquidity (looks fake)`
+            : p.volume24Usd / p.liquidityUsd > rules.maxVolumeToLiquidity ? `volume is ${Math.round(p.volume24Usd / p.liquidityUsd)}× its liquidity (likely wash trading)`
               : null;
     if (why) { skipped.push({ name: p.name, why }); continue; }
     const token = b ? p.quote : p.base, spend = b ? p.base : p.quote;

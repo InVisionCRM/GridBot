@@ -5,7 +5,7 @@ import { AbiCoder, zeroPadValue } from 'ethers';
 import { describe, expect, it } from 'vitest';
 import { aggregate, applyTick, bucketStart, closedOnly, fillGaps, mergeCandles, type Candle } from '../src/market/candles';
 import { CandleStore } from '../src/server/market/candleStore';
-import { GeckoSource, RateLimited } from '../src/server/market/gecko';
+import { GeckoSource, MAX_GAP_MS, RateLimited, SPEEDUP_AFTER } from '../src/server/market/gecko';
 import { SWAP_TOPIC, SYNC_TOPIC, rebuildFromChain } from '../src/server/market/onchain';
 import { NET } from './helpers/mockChain';
 
@@ -101,6 +101,26 @@ describe('GeckoTerminal source', () => {
     expect(g.blockedUntil).toBe(2500 + 65_000);
     await g.ohlcv('p', 'w', '1h');
     expect(sleeps).toEqual([2500, 65_000]);
+  });
+
+  it(`adaptive pace: each 429 doubles the spacing (max ${MAX_GAP_MS / 1000} s); ${SPEEDUP_AFTER} successes in a row shorten it by 0.5 s`, async () => {
+    let now = 0, status = 200;
+    const g = new GeckoSource(async () => ({ ok: status === 200, status, json: async () => ({ data: { attributes: { ohlcv_list: [] } } }) }), {
+      minIntervalMs: 2500, now: () => now, sleep: async (ms) => { now += ms; },
+    });
+    expect(g.pace).toBe(2500);
+    status = 429;
+    for (const want of [5000, 10_000, MAX_GAP_MS, MAX_GAP_MS]) {
+      await expect(g.ohlcv('p', 'w', '1h')).rejects.toBeInstanceOf(RateLimited);
+      expect(g.pace).toBe(want);
+    }
+    status = 200;
+    for (let i = 0; i < SPEEDUP_AFTER - 1; i++) await g.ohlcv('p', 'w', '1h');
+    expect(g.pace).toBe(MAX_GAP_MS);
+    await g.ohlcv('p', 'w', '1h');
+    expect(g.pace).toBe(MAX_GAP_MS - 500);
+    for (let i = 0; i < SPEEDUP_AFTER * 40; i++) await g.ohlcv('p', 'w', '1h');
+    expect(g.pace).toBe(2500); // never below the configured minimum
   });
 });
 

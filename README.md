@@ -78,11 +78,11 @@ Sources:
 
 **Today's picks** (Home) are found by `src/server/market/scanner.ts` once a day (checked every 30 min; results in `data/picks.json`), or by **Scan now**. For each chain (PulseChain, Ethereum, Robinhood):
 
-1. **Busiest pools.** GeckoTerminal `/networks/{slug}/pools?sort=h24_volume_usd_desc`, 2 pages (40 pools). A 429 or 5xx is retried once.
+1. **Busiest pools of the DEXes this app trades.** GeckoTerminal `/networks/{slug}/dexes/{dex}/pools?sort=h24_volume_usd_desc` for each tradable DEX (ids in `src/live/chains.ts`, field `gecko`; PulseChain: pulsex-v2, pulsex (V1), 9mm-v2, 9mm-v3; Robinhood: uniswap-v3/v2-robinhood, pancakeswap-v3-robinhood; Ethereum: uniswap_v3, uniswap_v2). The chain-wide list was the wrong input: on 2026-10-17, 33 of Robinhood's 40 busiest pools were Uniswap V4 (not tradable here, most reported with $0 liquidity), which crowded out the real Uniswap V3 stock pools (NVDA ~6.7k trades/day, SPCX ~11k). A 429 or 5xx is retried once. The background candle download pauses while a scan runs.
 2. **Filter** (`pickTokens` in `src/market/scan.ts`). Volume alone is misleading: on 2026-10-17 the top Ethereum list had $53M of "volume" on a $45 pool and stablecoin/stablecoin pairs that never move, and Robinhood had $30–60M "volume" pools with ~19 trades. A pool is kept only if:
    - one side is something the bot can spend (wrapped native or a stablecoin; the zero address and `0xEeee…` count as the native coin);
    - it has at least $50,000 of liquidity and 100 trades in 24 h;
-   - its volume is at most 20× its liquidity.
+   - its volume is at most 20× its liquidity (more is likely wash trading).
 
    One pool per token, up to 8 tokens per chain. Every market already in the app is tested too: PLS/HEX is turned around to HEX/PLS so it spends PLS.
 3. **Safety.** New tokens go through the same `hub.inspect` as Markets → Add (deepest pool on a DEX the app trades, honeypot / tax simulation). Anything not allowed live is left out, with the reason.
@@ -90,6 +90,7 @@ Sources:
    - with the pool's real fee, depth (V3 active range) and gas (`Quoter.market()` → `costModelOf`);
    - using about $1,000 of the spend coin, so gas weighs the same on every chain;
    - over ranges ±5/8/12/18/25% × 6/10/14/20/30/40 levels.
+   - Markets already in the app reuse their saved hourly candles (kept by the candle sync) when they cover the week up to the last 2 hours, so they cost no GeckoTerminal request.
 
    The best setup per pair is kept if it made money **and** sold in at least 3 different hours. One spike is not a pattern: the first real scan ranked USDG/USDC first at +1.99% from a single stablecoin wick, and one wick through several levels completes several round trips inside the same candle.
 5. **Picks.** The 3 best pairs per chain, with the week's result, trades, buy-and-hold for comparison and the worst dip. **Why other pools were left out** lists every skip with its reason.
@@ -285,7 +286,7 @@ Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the
 
 | Source | How | Limits |
 |---|---|---|
-| GeckoTerminal (primary, background `CandleSync`) | `/networks/pulsechain/pools/{pool}/ohlcv`, per timeframe | Public API: 30 calls/min, ≤1000 candles/call, ~6 months history. 429 → 65 s backoff. Disable with `CANDLES_GECKO=off`. |
+| GeckoTerminal (primary, background `CandleSync`) | `/networks/pulsechain/pools/{pool}/ohlcv`, per timeframe | Public API: documented 30 calls/min, but measured 2026-10-17 from a cloud IP at 6–7 requests then a 429, at both 2.5 s and 7 s spacing. Adaptive pace: 2.5 s to start, each 429 doubles the spacing (max 12 s) and waits 65 s, 20 successes in a row shorten it by 0.5 s. ≤1000 candles/call, ~6 months history. Disable with `CANDLES_GECKO=off`. |
 | On-chain rebuild (fallback, trustless) | PulseX pair `Sync` (price) + `Swap` (volume) logs → 1m candles → all timeframes | Slow: 5k-block `eth_getLogs` chunks, about 10 min per 90 days on the public RPC. Block times are interpolated. |
 | Live poll | each poll price updates the open candle of every timeframe | No volume |
 

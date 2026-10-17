@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CandleSync, IDLE_TFS, REFRESH_LIMIT, VIEW_MS, type CandleSource } from '../src/server/market/backfill';
 import { CandleStore } from '../src/server/market/candleStore';
 import { TFS, TF_SEC, type TF } from '../src/market/candles';
@@ -59,5 +59,23 @@ describe('CandleSync: no full re-download after a restart', () => {
     const { sync } = world({ store });
     const first = sync.nextTask();
     expect(first).toEqual({ pair: 'B', tf: '1h', kind: 'backfill' }); // A|1h is skipped, B|1h is too old
+  });
+});
+
+describe('CandleSync: pauses while the daily scan runs', () => {
+  it('no GeckoTerminal requests while paused; resumes after', async () => {
+    vi.useFakeTimers();
+    try {
+      let scanning = true, calls = 0;
+      const gecko = { calls: 0, blockedUntil: 0, ohlcv: async () => { calls++; return []; } };
+      const sync = new CandleSync(gecko as never, () => [src('A')], new CandleStore(null), { paused: () => scanning });
+      sync.start(1000);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(calls).toBe(0);
+      scanning = false;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(calls).toBeGreaterThan(0);
+      sync.stop();
+    } finally { vi.useRealTimers(); }
   });
 });

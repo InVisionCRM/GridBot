@@ -436,3 +436,4 @@ label.wide input { min-width: 180px; }
 .check.follow input { margin-top: 3px; }
 .follow-row { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; }
 .follow-row > .small { padding-left: 26px; }
+.risk-why { max-width: 280px; white-space: normal; margin-top: 2px; }
