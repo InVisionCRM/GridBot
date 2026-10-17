@@ -434,5 +434,5 @@ label.wide input { min-width: 180px; }
 /* Follow the price up (auto-recenter) */
 .check.follow { display: flex; align-items: flex-start; gap: 10px; font-size: 0.86rem; }
 .check.follow input { margin-top: 3px; }
-.follow-row { display: flex; flex-direction: column; gap: 4px; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
+.follow-row { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; }
 .follow-row > .small { padding-left: 26px; }

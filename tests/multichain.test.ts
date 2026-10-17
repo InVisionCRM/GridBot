@@ -219,6 +219,19 @@ describe('Multi-chain operation', () => {
     expect(after.find((g) => g.id === pg)!.status).toBe('running');
   });
 
+  it('a daily pick adds its market once, priced right away, and reuses it next time', async () => {
+    const { bot, eth } = twoChains();
+    const MEME: Tok = { address: '0x00000000000000000000000000000000000b0b03', symbol: 'MEME', decimals: 18 };
+    eth.addToken(MEME);
+    const pool = eth.v3Pool('uniswap-v3', MEME, 1e6, WETH, 100, 3000);
+    const req = { chainId: 1, address: MEME.address, quote: WETH.address, pool };
+    const key = await bot.addPickMarket(req);
+    expect(bot.spots[key]).toBeGreaterThan(0);
+    expect(bot.hub.def(key).quote).toMatchObject({ native: true, symbol: 'ETH' });
+    expect(await bot.addPickMarket(req)).toBe(key);
+    expect(bot.hub.byChain(1).filter((m) => m.custom)).toHaveLength(1);
+  });
+
   it('live trading on a custom market without a passing simulation is refused (paper allowed)', async () => {
     const { bot, eth } = twoChains(true);
     eth.gasPrice = 10n ** 7n;

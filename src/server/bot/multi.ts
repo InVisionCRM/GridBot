@@ -955,7 +955,10 @@ export class MultiBot {
   /** Daily pick → market key: the market already added for this token, quote and pool, or a new one (safety re-checked). */
   async addPickMarket(req: { chainId: number; address: string; quote: string; pool: string }): Promise<string> {
     const have = this.hub.byChain(req.chainId).find((m) => sameAddr(m.base.address, req.address) && sameAddr(m.quote.address, req.quote) && sameAddr(m.pool.address, req.pool));
-    return have ? have.key : (await this.addMarket(req)).key;
+    const key = have ? have.key : (await this.addMarket(req)).key;
+    // Priced now, not on the next all-markets poll (~30 s): New bot centres the range on this price right away.
+    await this.hub.ensureSpot(key);
+    return key;
   }
   removeMarket(key: string) {
     key = unflipKey(key);
