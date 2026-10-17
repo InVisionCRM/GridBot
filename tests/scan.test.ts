@@ -181,6 +181,16 @@ describe('DailyScanner', () => {
     expect(calls.filter((x) => x.endsWith(WETH))).toHaveLength(2);
   });
 
+  it('reports what it is doing while it runs (shown on Home), and clears it when done', async () => {
+    const { deps } = fakeDeps();
+    const seen: unknown[] = [];
+    const sc = new DailyScanner({ ...deps, snapshot: async (d) => { seen.push(sc.status().progress); return deps.snapshot(d); } });
+    await sc.run();
+    expect(seen[0]).toEqual({ chain: 'Ethereum', chainNo: 1, chains: 1, phase: 'testing pairs', done: 0, total: 3 }); // ETH/USDC + 2 new tokens
+    expect(seen[1]).toMatchObject({ phase: 'testing pairs', done: 1, total: 3 });
+    expect(sc.status().progress).toBeNull();
+  });
+
   it('runs one scan at a time', async () => {
     const { deps } = fakeDeps();
     const sc = new DailyScanner(deps);

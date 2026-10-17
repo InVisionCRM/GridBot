@@ -469,6 +469,15 @@ export class MultiBot {
     }
   }
 
+  /** Markets a bot or alert uses, in their original orientation (flipped series derive from it): the candle sync keeps every timeframe of these. */
+  activeCandleKeys(): Set<string> {
+    const s = new Set<string>();
+    for (const g of this.multi.grids) s.add(unflipKey(g.stable));
+    for (const t of this.multi.trends) s.add(unflipKey(t.quote));
+    for (const a of this.multi.alerts) s.add(unflipKey(a.pair));
+    return s;
+  }
+
   /** Market keys that are priced every poll (legacy + anything a bot or alert uses); `all` adds every tradable market. */
   watchedKeys(all = true): string[] {
     const used = new Set<string>();

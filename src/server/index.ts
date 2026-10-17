@@ -36,6 +36,7 @@ const bot = new MultiBot({
 const gecko = new GeckoSource();
 const sync = new CandleSync(gecko, () => hub.candleSources(), candles, {
   onEvent: (msg, level) => activity.emitEvent({ type: 'candles', kind: 'system', level, msg }),
+  active: () => bot.activeCandleKeys(),
 });
 sync.enabled = process.env.CANDLES_GECKO !== 'off';
 bot.candleSyncStatus = () => sync.status();
@@ -70,7 +71,7 @@ const scanner = sync.enabled ? new DailyScanner(scanDepsFromHub(hub, {
   gecko, store: new JsonStore<ScanFile>(path.join(dataDir, 'picks.json')), approval: cfg.approval, emit: activity.emitEvent,
 })) : undefined;
 
-const app = createApp({ bot, net: cfg.net, backfill, scanner });
+const app = createApp({ bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair) });
 if (isProd) {
   const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../client');
   app.use(express.static(clientDir));

@@ -20,6 +20,8 @@ export interface AppOpts {
   backfill?: (pair: string, source: 'gecko' | 'onchain', days: number) => Promise<unknown>;
   /** Daily pair scan (server only) */
   scanner?: { status(): unknown; run(): Promise<unknown> };
+  /** A chart was opened: the candle sync keeps every timeframe of that market for a while (server only) */
+  viewCandles?: (pair: string) => void;
   heartbeatMs?: number;
   statusThrottleMs?: number;
 }
@@ -190,6 +192,7 @@ export function createApp(o: AppOpts) {
     const pair = String(req.query.pair ?? net.defaultQuote), tf = String(req.query.tf ?? '1h');
     if (!isTF(tf)) throw new Error('unknown timeframe');
     const candles = bot.candleSeries(pair, tf, num(req.query.from), num(req.query.to), Math.min(5000, num(req.query.limit) ?? 1500));
+    o.viewCandles?.(pair);
     return { pair, tf, candles, meta: bot.candles.getMeta(pair, tf) };
   }));
   app.get('/api/market/summary', wrap(() => ({ series: bot.candles.summary(bot.watchedKeys(true)), sync: bot.status().candleSync })));

@@ -80,9 +80,13 @@ async function retryOnce<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** What a running scan is doing now (shown on Home). */
+export interface ScanProgress { chain: string; chainNo: number; chains: number; phase: 'finding pools' | 'checking new tokens' | 'testing pairs'; done: number; total: number }
+
 export class DailyScanner {
   private file: ScanFile;
   private running = false;
+  private progress: ScanProgress | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly d: ScanDeps) {
@@ -92,7 +96,7 @@ export class DailyScanner {
   private now() { return (this.d.now ?? Date.now)(); }
 
   status() {
-    return { ...this.file, running: this.running, nextAt: this.file.at == null ? null : this.file.at + SCAN_EVERY_MS, testUsd: TEST_USD };
+    return { ...this.file, running: this.running, progress: this.progress, nextAt: this.file.at == null ? null : this.file.at + SCAN_EVERY_MS, testUsd: TEST_USD };
   }
 
   /** Check every 30 min; scan when the last one is a day old (or there is none). */
@@ -110,17 +114,21 @@ export class DailyScanner {
     this.d.emit?.({ type: 'info', kind: 'system', msg: 'Daily pair scan started' });
     try {
       const chains: ScanChain[] = [];
-      for (const c of this.d.chains()) chains.push(await this.scanChain(c));
+      const list = this.d.chains();
+      for (const [i, c] of list.entries()) chains.push(await this.scanChain(c, i + 1, list.length));
       this.file = { version: 1, at: this.now(), chains };
       this.d.store.save(this.file);
       this.d.emit?.({ type: 'info', kind: 'system', level: 'success', msg: `Daily pair scan done: ${chains.map((c) => `${c.name} ${c.picks.length} pick${c.picks.length === 1 ? '' : 's'}`).join(', ')}` });
       return this.file;
     } finally {
       this.running = false;
+      this.progress = null;
     }
   }
 
-  private async scanChain(c: ScanChainInfo): Promise<ScanChain> {
+  private async scanChain(c: ScanChainInfo, chainNo: number, chains: number): Promise<ScanChain> {
+    const step = (phase: ScanProgress['phase'], done: number, total: number) => { this.progress = { chain: c.name, chainNo, chains, phase, done, total }; };
+    step('finding pools', 0, 1);
     const out: ScanChain = { chainId: c.id, name: c.name, at: this.now(), picks: [], tested: 0, skipped: [], error: null };
     if (!c.slug) { out.error = 'No GeckoTerminal price history for this chain.'; return out; }
     try {
@@ -132,13 +140,15 @@ export class DailyScanner {
       const markets: { def: MarketDef; pool: TopPool | null; isNew: boolean }[] = this.d.existing(c.id).map((def) => ({
         def, isNew: false, pool: pools.find((p) => (p.base === stackOf(def) && p.quote === spendOf(def)) || (p.quote === stackOf(def) && p.base === spendOf(def))) ?? null,
       }));
-      for (const t of picked) {
+      for (const [i, t] of picked.entries()) {
+        step('checking new tokens', i, picked.length);
         if (markets.some((m) => stackOf(m.def) === t.token && spendOf(m.def) === t.spend)) continue;
         try { markets.push({ def: await this.d.inspect(c.id, t.token, t.spend), pool: t.pool, isNew: true }); } catch (e) { out.skipped.push({ name: t.pool.name, why: msg(e) }); }
       }
       out.tested = markets.length;
       const picks: ScanPick[] = [];
-      for (const m of markets) {
+      for (const [i, m] of markets.entries()) {
+        step('testing pairs', i, markets.length);
         const name = `${m.def.base.symbol}/${m.def.quote.symbol}`;
         try {
           const p = await this.test(c, m.def, m.pool, m.isNew);
