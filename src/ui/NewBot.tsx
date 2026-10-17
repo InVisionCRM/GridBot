@@ -1,5 +1,5 @@
 /** New bot: pick grid or trend, enter how much of the coin it spends (wallet balance + Max beside it), start. */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_TREND, STRATEGIES, type TrendConfig } from '../market/strategy';
 import { TFS, type TF } from '../market/candles';
 import { STRATEGY_PRESETS } from '../live/presets';
@@ -9,7 +9,7 @@ import { botApi } from './api';
 import { pct, px } from './fmt';
 import { ChainBadge, Orientation, PairPicker, chainOf, feeLabel, marketsOf, mk, unflipKey, useChainFilter } from './chains';
 import { TrendConfigEditor, strategyRule } from './TrendConfig';
-import { errMsg, floorSig, spendFunds, type AnyObj, type Funds, type Nav, type TrendPrefill } from './model';
+import { errMsg, floorSig, spendFunds, type AnyObj, type Funds, type GridPrefill, type Nav, type TrendPrefill } from './model';
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 type Mode = 'paper' | 'live';
@@ -103,13 +103,24 @@ function Verdict({ e, quote, fee }: { e: Econ; quote: string; fee: string }) {
   );
 }
 
-function GridForm({ s, nav, act, busy }: Common) {
+/** "Follow the price up" checkbox (auto-recenter), on for every new grid. */
+function FollowUp({ on, set }: { on: boolean; set: (v: boolean) => void }) {
+  return (
+    <label className="check follow">
+      <input type="checkbox" checked={on} onChange={(e) => set(e.target.checked)} />
+      <span><b>Follow the price up</b> <span className="muted">When the price stays above the range for 2 hours with everything sold, move the range up around it (same width, levels and amount). Never moves down.</span></span>
+    </label>
+  );
+}
+
+function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefill }) {
   const { chain } = useChainFilter();
-  const [tab, setTab] = useState<'preset' | 'custom'>('preset');
-  const [pair, setPair] = useState(() => defaultPair(s, chain));
+  const [tab, setTab] = useState<'preset' | 'custom'>(prefill ? 'custom' : 'preset');
+  const [pair, setPair] = useState(() => prefill?.pair ?? defaultPair(s, chain));
   const [lower, setLower] = useState('');
   const [upper, setUpper] = useState('');
-  const [count, setCount] = useState('12');
+  const [count, setCount] = useState(prefill ? String(prefill.gridCount) : '12');
+  const [follow, setFollow] = useState(true);
   const [amount, setAmount] = useState('');
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [mode, setMode] = useState<Mode>('paper');
@@ -126,14 +137,17 @@ function GridForm({ s, nav, act, busy }: Common) {
   const presetUsesPair = preset.legs.some((l) => l.quote === null);
   const gas: GasReserveCfg = parseGasRes(limits.gasRes) ?? DEFAULT_GAS_RESERVE;
 
-  // Chain filter change: move to a market on that chain.
+  // Chain filter change (not the first render: a daily pick may be on another chain): move to a market on that chain.
+  const shownChain = useRef(chain);
   useEffect(() => {
+    if (shownChain.current === chain) return;
+    shownChain.current = chain;
     const ms = marketsOf(s).filter((x) => x.tradable && (chain === 'all' || x.chainId === chain));
     if (ms.length && !ms.some((x) => x.key === unflipKey(pair))) setPair(ms[0].key);
   }, [chain]); // eslint-disable-line react-hooks/exhaustive-deps
-  // Pair change: centre an ±8% × 12 range on the spot of this orientation.
+  // Pair change: centre a range on the spot of this orientation (±8%, or the daily pick's width).
   const centre = (band: number) => { if (spot) { setLower(String(+(spot * (1 - band)).toPrecision(5))); setUpper(String(+(spot * (1 + band)).toPrecision(5))); } };
-  useEffect(() => { centre(0.08); }, [pair, spot != null]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { centre(prefill && pair === prefill.pair ? prefill.bandPct : 0.08); }, [pair, spot != null]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (tab !== 'custom') return;
@@ -165,7 +179,7 @@ function GridForm({ s, nav, act, busy }: Common) {
     if (!confirmLive(`grid on ${m.label}`)) return;
     const r = await botApi('grids', 'POST', {
       mode, stable: pair, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: +amount,
-      limits: limitsBody(limits, !!m.quoteNative),
+      limits: limitsBody(limits, !!m.quoteNative), recenter: follow,
     });
     nav({ v: 'grid', id: r.id });
   });
@@ -173,7 +187,7 @@ function GridForm({ s, nav, act, busy }: Common) {
   const startPreset = () => act(async () => {
     if (!confirmLive(`${preset.name} preset`)) return;
     const r = await botApi(`presets/${presetId}/start`, 'POST', {
-      mode, quote: pair, amounts: JSON.parse(amountsKey), limits: limitsBody(limits, legQuoteNative),
+      mode, quote: pair, amounts: JSON.parse(amountsKey), limits: limitsBody(limits, legQuoteNative), recenter: follow,
     });
     nav(r.ids?.length === 1 ? { v: 'grid', id: r.ids[0] } : { v: 'home' });
   });
@@ -249,6 +263,8 @@ function GridForm({ s, nav, act, busy }: Common) {
         {econ ? <Verdict e={econ} quote={m.quote} fee={feeLabel(m)} /> : !(+amount > 0) && <p className="muted small">Enter an amount of {m.quote} to see what each trade nets.</p>}
       </>}
 
+      <FollowUp on={follow} set={setFollow} />
+
       <details className="more">
         <summary>Advanced</summary>
         <LimitsFields l={limits} set={setLimits} quoteNative={tab === 'preset' ? legQuoteNative : !!m.quoteNative} quote={mk(s, startKey).quote} />
@@ -312,7 +328,7 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
   );
 }
 
-export function NewBot({ s, kind, trendPrefill, nav, act, busy }: Common & { kind: 'grid' | 'trend'; trendPrefill?: TrendPrefill }) {
+export function NewBot({ s, kind, trendPrefill, gridPrefill, nav, act, busy }: Common & { kind: 'grid' | 'trend'; trendPrefill?: TrendPrefill; gridPrefill?: GridPrefill }) {
   const pick = useMemo(() => [
     ['grid', 'Grid bot', 'Buys a little on each dip and sells it one level higher. Earns when the price swings sideways inside a range.'],
     ['trend', 'Trend bot', 'Buys when a trend starts and sells on a stop, take-profit or exit signal. Earns when the price moves in one direction.'],
@@ -328,7 +344,7 @@ export function NewBot({ s, kind, trendPrefill, nav, act, busy }: Common & { kin
         ))}
       </div>
       {kind === 'grid'
-        ? <GridForm s={s} nav={nav} act={act} busy={busy} />
+        ? <GridForm key={gridPrefill?.nonce ?? 0} s={s} nav={nav} act={act} busy={busy} prefill={gridPrefill} />
         : <TrendForm key={trendPrefill?.nonce ?? 0} s={s} nav={nav} act={act} busy={busy} prefill={trendPrefill} />}
     </main>
   );

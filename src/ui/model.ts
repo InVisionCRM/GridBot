@@ -8,13 +8,15 @@ export type AnyObj = Record<string, any>; // eslint-disable-line @typescript-esl
 
 export interface TrendPrefill { pair: string; tf: TF; cfg: TrendConfig; capital?: number; nonce: number }
 export interface BtPrefill { pair: string; tf: TF; cfg: TrendConfig; nonce: number }
+/** A daily pick opened in New bot: the range is re-centred on the live price with the pick's width. */
+export interface GridPrefill { pair: string; bandPct: number; gridCount: number; nonce: number }
 
 export const TOOL_TABS = [['chart', 'Charts'], ['backtest', 'Backtest'], ['analytics', 'Analytics'], ['markets', 'Markets'], ['alerts', 'Alerts']] as const;
 export type ToolTab = (typeof TOOL_TABS)[number][0];
 
 export type View =
   | { v: 'home' }
-  | { v: 'new'; kind: 'grid' | 'trend'; trendPrefill?: TrendPrefill }
+  | { v: 'new'; kind: 'grid' | 'trend'; trendPrefill?: TrendPrefill; gridPrefill?: GridPrefill }
   | { v: 'grid'; id: string }
   | { v: 'trend'; id: string }
   | { v: 'tools'; tab: ToolTab; btPrefill?: BtPrefill };

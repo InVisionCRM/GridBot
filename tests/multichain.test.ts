@@ -229,9 +229,12 @@ describe('Multi-chain operation', () => {
     const d: MarketDef = await bot.addMarket({ chainId: 1, address: MEME.address, quote: WETH.address });
     expect(d.safety!.risk).toBe('unknown'); // mock reader has no eth_call state override
     expect(d.safety!.liveAllowed).toBe(false);
+    expect(d.quote).toMatchObject({ address: WETH.address, symbol: 'ETH', native: true }); // spends native ETH
     const spot = await bot.hub.quoter(d.key).getPrice();
     const p = { stable: d.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.01 };
     await expect(bot.add({ mode: 'live', ...p })).rejects.toThrow(/safety|paper only|blocked|simulation/i);
-    await expect(bot.add({ mode: 'paper', ...p })).resolves.toBeTruthy();
+    const gid = await bot.add({ mode: 'paper', ...p });
+    // Native spend coin → the gas set-aside applies, like HEX/PLS.
+    expect(bot.status().grids.find((g) => g.id === gid)!.gasReserve).toBeGreaterThan(0);
   });
 });

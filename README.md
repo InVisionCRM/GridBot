@@ -25,9 +25,9 @@ Dev: `npm run dev` (UI :5173, API :3847).
 
 ## Using the app
 
-- **Home**: total value, bot profit and what the same money would have made by just holding, plus **Your wallet** (every coin the signing address holds on each chain, and how much your live bots use). Notices for anything that needs you (low gas, errors, a grid that left its range, a wallet that doesn't cover live bots). One row per bot with Stop / Resume.
+- **Home**: total value, bot profit and what the same money would have made by just holding, plus **Your wallet** (every coin the signing address holds on each chain, and how much your live bots use). Notices for anything that needs you (low gas, errors, a grid that left its range, a wallet that doesn't cover live bots). One row per bot with Stop / Resume, then **Today's picks** (below).
 - **New bot**: choose a grid or a trend bot. Grids start from a preset or a custom range. Every amount is entered in the coin the bot spends (PLS, DAI, HEX …), with your wallet balance and a **Max** button beside the box; live starts are checked against the wallet before you press Start. One sentence tells you what each completed buy-then-sell nets after fees, impact and gas. Paper / Live sits next to the Start button; live always asks first. Limits live under *Advanced*.
-- **Bot detail**: profit vs holding, the chart (grid levels and fills, or the trend bot's entry / stop / take-profit lines), the bot's own log, levels, fills (compact, or *All columns*), and for grids **Change range**, which restarts a stopped grid on its own pair and mode.
+- **Bot detail**: profit vs holding, the chart (grid levels and fills, or the trend bot's entry / stop / take-profit lines), the bot's own log, levels, fills (compact, or *All columns*), and for grids **Follow the price up** and **Change range**, which restarts a stopped grid on its own pair and mode.
 - **Tools**: Charts, Backtest, Analytics, Markets (custom tokens, pool picker, chain registry) and Alerts.
 - **Top bar**: chain filter (All / PLS / HOOD / ETH, with a dot when gas is low), signing address or *Paper only*, the Activity feed, the Guide, and **Stop all** (or *Stop all on* the filtered chain). Stopping never sells holdings.
 - **Guide**: a short in-app explainer. Its numbers are imported from the code (fees, start-check thresholds, limits, preset params).
@@ -73,6 +73,30 @@ Sources:
 - A switch is refused while a tx on that market is in flight. Candles stay on the original pool so a series never mixes pools.
 - Custom-token discovery searches the same DEXes and defaults to the deepest pool. The radio buttons override it.
 - Example live read (Oct 8 2026, 1M PLS → DAI): PulseX V1 8.853 DAI (its WPLS/DAI pair holds ~46B WPLS vs ~4.4B on V2), PulseX V2 8.855, 9mm V3 0.25% 8.859, 9mm V2 0.71 (thin).
+
+## Daily picks and follow-up
+
+**Today's picks** (Home) are found by `src/server/market/scanner.ts` once a day (checked every 30 min; results in `data/picks.json`), or by **Scan now**. For each chain (PulseChain, Ethereum, Robinhood):
+
+1. **Busiest pools.** GeckoTerminal `/networks/{slug}/pools?sort=h24_volume_usd_desc`, 2 pages (40 pools).
+2. **Filter** (`pickTokens` in `src/market/scan.ts`). Volume alone is misleading: on 2026-10-17 the top Ethereum list had $53M of "volume" on a $45 pool and stablecoin/stablecoin pairs that never move, and Robinhood had $30–60M "volume" pools with ~19 trades. A pool is kept only if:
+   - one side is something the bot can spend (wrapped native or a stablecoin; Uniswap V4's zero address counts as the native coin);
+   - it has at least $50,000 of liquidity and 100 trades in 24 h;
+   - its volume is at most 20× its liquidity.
+
+   One pool per token, up to 8 tokens per chain. Every market already in the app is tested too: PLS/HEX is turned around to HEX/PLS so it spends PLS.
+3. **Safety.** New tokens go through the same `hub.inspect` as Markets → Add (deepest pool on a DEX the app trades, honeypot / tax simulation). Anything not allowed live is left out, with the reason.
+4. **Test.** The last 7 days of hourly candles from that pool replay through the grid backtester:
+   - with the pool's real fee, depth (V3 active range) and gas (`Quoter.market()` → `costModelOf`);
+   - using about $1,000 of the spend coin, so gas weighs the same on every chain;
+   - over ranges ±5/8/12/18/25% × 6/10/14/20/30/40 levels.
+
+   The best setup per pair is kept if it made money with at least one completed round trip.
+5. **Picks.** The 3 best pairs per chain, with the week's result, trades, buy-and-hold for comparison and the worst dip. **Why other pools were left out** lists every skip with its reason.
+
+**Use this** adds the market if it is new (safety re-checked) and opens New bot on the custom tab with that pair, width and levels, centred on today's price. Nothing is started for you: you enter the amount and choose paper or live. Tokens paired with WPLS/WETH are added so they **spend native PLS/ETH** (wrapped inside the swap, like HEX/PLS), with the gas set-aside. The scan is off with `CANDLES_GECKO=off`.
+
+**Follow the price up** (auto-recenter, `GridEngine.followUp`) is on for grids started from New bot and can be switched on any grid's page. When the price has stayed above the range for 2 h with every level sold (nothing held, queued or in flight), the range moves up around the price. The width, level count and amount stay the same, and trades and profit carry over. It moves at most once every 6 h. It **never moves down**: below the range the grid keeps what it bought and waits. Each move is logged and notified.
 
 ## Custom tokens + safety
 

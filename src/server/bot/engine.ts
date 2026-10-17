@@ -21,6 +21,7 @@ import type { SharedNonce, TxGate } from './txGate';
 import type { Emit } from './activity';
 import { pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
+import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, type RecenterState } from '../../live/recenter';
 
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
@@ -64,7 +65,11 @@ export interface BotState {
   startPrice?: number | null;
   /** [ms, equity in quote] sampled every ≥60 s */
   equity?: [number, number][];
+  /** Follow the price up: when it stays above the range, move the range up around it */
+  recenter?: RecenterState;
 }
+
+
 
 export interface EngineDeps {
   net: LiveNetwork;
@@ -95,6 +100,8 @@ export interface StartParams extends GridConfig {
   mode: Mode;
   stable?: string;
   limits?: Partial<SafetyLimits>;
+  /** Auto-recenter (follow the price up); omitted = keep this grid's current setting */
+  recenter?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -253,6 +260,7 @@ export class GridEngine {
       lastPrice: price, lastPriceAt: this.now(),
       spacingWarn: warn, econ,
       startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalUsd]],
+      recenter: { enabled: p.recenter ?? this.state.recenter?.enabled ?? false, aboveSince: null, lastAt: this.state.recenter?.lastAt ?? null, count: this.state.recenter?.count ?? 0 },
     };
     this.lastError = null;
     this.save();
@@ -300,6 +308,43 @@ export class GridEngine {
     this.save();
   }
 
+  setRecenter(enabled: boolean) {
+    if (!this.state.config) throw new Error('Start the grid first.');
+    this.state.recenter = { aboveSince: null, lastAt: null, count: 0, ...this.state.recenter, enabled };
+    this.save();
+  }
+
+  /**
+   * Auto-recenter (up only). Once the price has stayed above the range for RECENTER_AFTER_MS with every level sold
+   * (nothing held, queued or in flight), the range moves up around the price: same ±width, same levels, same amount;
+   * trades and profit carry over. At most once per RECENTER_COOLDOWN_MS. A fall below the range never moves it:
+   * the grid keeps what it bought and waits for the price to come back.
+   */
+  private async followUp(price: number) {
+    const r = this.state.recenter, c = this.state.config;
+    if (!r?.enabled || !c) return;
+    if (price <= c.upperPrice) { r.aboveSince = null; return; }
+    const now = this.now();
+    r.aboveSince ??= now;
+    if (now - r.aboveSince < RECENTER_AFTER_MS) return;
+    if (r.lastAt != null && now - r.lastAt < RECENTER_COOLDOWN_MS) return;
+    if (this.state.inFlight || this.state.queue.length || this.state.intervals.some((i) => i.status !== 'inactive' && i.status !== 'waitingBuy')) return;
+    const band = (c.upperPrice - c.lowerPrice) / (c.upperPrice + c.lowerPrice);
+    const next: GridConfig = { ...c, lowerPrice: +(price * (1 - band)).toPrecision(6), upperPrice: +(price * (1 + band)).toPrecision(6) };
+    const { summary: econ } = await gridEconomics(this.hub.quoter(this.state.stable), next, this.d.approval ?? 'exact');
+    const levels = calculateGridLevels(next.lowerPrice, next.upperPrice, next.gridCount);
+    const intervals = buildIntervals(levels, price);
+    this.state = {
+      ...this.state, config: next, levels, intervals, usdPerBuy: usdPerBuyLevel(intervals, next.totalCapitalUsd), queue: [],
+      econ, spacingWarn: econ.ok ? null : `Each completed trade is expected to lose money at this size: ${econ.reasons.join(' ')}`,
+      recenter: { enabled: true, aboveSince: null, lastAt: now, count: r.count + 1 },
+    };
+    this.save();
+    const msg = `Grid ${this.label}: price stayed above the range for ${RECENTER_AFTER_MS / 3600_000}h, so the range moved up to ${next.lowerPrice.toPrecision(5)}–${next.upperPrice.toPrecision(5)} (±${(band * 100).toFixed(0)}%, ${next.gridCount} levels)`;
+    this.tag('info', msg);
+    this.ev('range', msg, { level: 'success', notify: true, data: { recenter: true, lowerPrice: next.lowerPrice, upperPrice: next.upperPrice } });
+  }
+
   startLoop(pollMs: number) {
     if (this.timer) return;
     void this.tick();
@@ -340,6 +385,7 @@ export class GridEngine {
           this.tag('info', `Price ${price}: triggered ${queued.map((q) => `${q.side}@${q.levelPrice}`).join(', ')}`);
           this.ev('queued', `Grid ${this.label}: queued ${queued.map((q) => `${q.side} @ ${q.levelPrice.toPrecision(5)}`).join(', ')}`);
         }
+        await this.followUp(price);
       }
       if (this.state.config && this.state.status === 'running') {
         const eq = this.state.equity ??= [];
@@ -600,6 +646,7 @@ export class GridEngine {
       equityHist: (this.state.equity ?? []).slice(-600),
       startedAt: this.state.startedAt ?? trades[0]?.timestamp ?? null,
       startPrice: this.state.startPrice ?? trades[0]?.price ?? null,
+      recenter: this.state.recenter ?? null,
     };
   }
 }

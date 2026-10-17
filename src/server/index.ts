@@ -10,6 +10,7 @@ import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
 import { CandleSync, geckoBackfill, onchainBackfill } from './market/backfill';
+import { DailyScanner, scanDepsFromHub, type ScanFile } from './market/scanner';
 import { TFS } from '../market/candles';
 import { buildHub } from './chains/build';
 import type { CustomFile } from './chains/hub';
@@ -64,7 +65,12 @@ const backfill = async (pair: string, source: 'gecko' | 'onchain', days: number)
   }
 };
 
-const app = createApp({ bot, net: cfg.net, backfill });
+// Daily pair scan shares the GeckoTerminal client (one rate limit) and is off with it (CANDLES_GECKO=off).
+const scanner = sync.enabled ? new DailyScanner(scanDepsFromHub(hub, {
+  gecko, store: new JsonStore<ScanFile>(path.join(dataDir, 'picks.json')), approval: cfg.approval, emit: activity.emitEvent,
+})) : undefined;
+
+const app = createApp({ bot, net: cfg.net, backfill, scanner });
 if (isProd) {
   const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../client');
   app.use(express.static(clientDir));
@@ -81,11 +87,12 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   log.info(`State file ${cfg.stateFile} · poll ${cfg.pollMs}ms · approvals ${cfg.approval} · ${hub.list().length} markets (${hub.customMarkets().length} custom)`);
   bot.startLoop(cfg.pollMs);
   sync.start();
+  scanner?.start();
 });
 server.on('error', (err: NodeJS.ErrnoException) => {
   log.error(err.code === 'EADDRINUSE' ? `Port ${cfg.port} in use. Set PORT=…` : err.message);
   process.exit(1);
 });
-const shutdown = () => { bot.stopLoop(); sync.stop(); candles.flush(); server.close(); process.exit(0); };
+const shutdown = () => { bot.stopLoop(); sync.stop(); scanner?.stop(); candles.flush(); server.close(); process.exit(0); };
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
