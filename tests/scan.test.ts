@@ -111,7 +111,7 @@ const mkt = (key: string, base: MarketDef['base'], quote: MarketDef['quote'], o:
   key, chainId: 1, base, quote, pool: { dex: 'uniswap-v3', kind: 'v3', address: `0xpool${key}`, feeBps: 30 }, probe: 1, quoteKind: 'stable', ...o,
 });
 
-function fakeDeps(o: { candles?: Record<string, Candle[]>; inspectFails?: Record<string, string>; rateLimitOnce?: boolean; http500Once?: boolean } = {}) {
+function fakeDeps(o: { candles?: Record<string, Candle[]>; stored?: Record<string, Candle[]>; inspectFails?: Record<string, string>; rateLimitOnce?: boolean; http500Once?: boolean } = {}) {
   const ethUsdc = mkt('ethereum:ETH/USDC', tok(WETH, 'ETH', { native: true }), tok(USDC, 'USDC'));
   const store = new MemoryStore<ScanFile>();
   const calls: string[] = [];
@@ -124,6 +124,7 @@ function fakeDeps(o: { candles?: Record<string, Candle[]>; inspectFails?: Record
       return mkt(`ethereum:${token}/USDT`, tok(token, token.slice(0, 6)), tok(USDT, 'USDT'), { custom: true, safety: { risk: 'low', liveAllowed: true, reasons: ['Simulated buy, transfer and sell matched quotes exactly.'] } as MarketDef['safety'] });
     },
     snapshot: async () => ({ spot: 2, quoteReserve: 1e9, plsReserve: 5e8, gasPricePls: 0, feeBps: 30 }),
+    storedHourly: (d) => o.stored?.[d.key] ?? [],
     usdPerSpend: async () => 1,
     gecko: {
       topPools: async (n, dex) => {
@@ -194,6 +195,19 @@ describe('DailyScanner', () => {
     expect(seen[0]).toEqual({ chain: 'Ethereum', chainNo: 1, chains: 1, phase: 'testing pairs', done: 0, total: 3 }); // ETH/USDC + 2 new tokens
     expect(seen[1]).toMatchObject({ phase: 'testing pairs', done: 1, total: 3 });
     expect(sc.status().progress).toBeNull();
+  });
+
+  it('a market in the app reuses its saved hourly candles when they cover the week (no GeckoTerminal request)', async () => {
+    const nowSec = 1_800_000_000; // fakeDeps clock
+    const week = wave(168, 2, 0.03).map((x, i) => ({ ...x, t: nowSec - 3600 - (167 - i) * 3600 }));
+    const { deps, calls } = fakeDeps({ stored: { 'ethereum:ETH/USDC': week } });
+    const c = (await new DailyScanner(deps).run()).chains[0];
+    expect(calls.some((x) => x.endsWith(WETH))).toBe(false);
+    expect(c.picks.map((p) => p.label)).toContain('ETH/USDC');
+    // Too old to cover the week up to the last 2 hours → fetched as before.
+    const stale = fakeDeps({ stored: { 'ethereum:ETH/USDC': week.map((x) => ({ ...x, t: x.t - 3 * 3600 })) } });
+    await new DailyScanner(stale.deps).run();
+    expect(stale.calls.some((x) => x.endsWith(WETH))).toBe(true);
   });
 
   it('runs one scan at a time', async () => {

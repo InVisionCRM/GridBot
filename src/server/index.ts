@@ -68,7 +68,7 @@ const backfill = async (pair: string, source: 'gecko' | 'onchain', days: number)
 };
 
 // Daily pair scan shares the GeckoTerminal client (one rate limit) and is off with it (CANDLES_GECKO=off).
-const scanner: DailyScanner | undefined = sync.enabled ? new DailyScanner(scanDepsFromHub(hub, {
+const scanner: DailyScanner | undefined = sync.enabled ? new DailyScanner(scanDepsFromHub(hub, candles, {
   gecko, store: new JsonStore<ScanFile>(path.join(dataDir, 'picks.json')), approval: cfg.approval, emit: activity.emitEvent,
 })) : undefined;
 

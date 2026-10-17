@@ -90,6 +90,7 @@ Sources:
    - with the pool's real fee, depth (V3 active range) and gas (`Quoter.market()` → `costModelOf`);
    - using about $1,000 of the spend coin, so gas weighs the same on every chain;
    - over ranges ±5/8/12/18/25% × 6/10/14/20/30/40 levels.
+   - Markets already in the app reuse their saved hourly candles (kept by the candle sync) when they cover the week up to the last 2 hours, so they cost no GeckoTerminal request.
 
    The best setup per pair is kept if it made money **and** sold in at least 3 different hours. One spike is not a pattern: the first real scan ranked USDG/USDC first at +1.99% from a single stablecoin wick, and one wick through several levels completes several round trips inside the same candle.
 5. **Picks.** The 3 best pairs per chain, with the week's result, trades, buy-and-hold for comparison and the worst dip. **Why other pools were left out** lists every skip with its reason.
@@ -285,7 +286,7 @@ Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the
 
 | Source | How | Limits |
 |---|---|---|
-| GeckoTerminal (primary, background `CandleSync`) | `/networks/pulsechain/pools/{pool}/ohlcv`, per timeframe | Public API: 30 calls/min, ≤1000 candles/call, ~6 months history. 429 → 65 s backoff. Disable with `CANDLES_GECKO=off`. |
+| GeckoTerminal (primary, background `CandleSync`) | `/networks/pulsechain/pools/{pool}/ohlcv`, per timeframe | Public API: documented 30 calls/min, but measured 2026-10-17 from a cloud IP at 6–7 requests then a 429, at both 2.5 s and 7 s spacing. Adaptive pace: 2.5 s to start, each 429 doubles the spacing (max 12 s) and waits 65 s, 20 successes in a row shorten it by 0.5 s. ≤1000 candles/call, ~6 months history. Disable with `CANDLES_GECKO=off`. |
 | On-chain rebuild (fallback, trustless) | PulseX pair `Sync` (price) + `Swap` (volume) logs → 1m candles → all timeframes | Slow: 5k-block `eth_getLogs` chunks, about 10 min per 90 days on the public RPC. Block times are interpolated. |
 | Live poll | each poll price updates the open candle of every timeframe | No volume |
 

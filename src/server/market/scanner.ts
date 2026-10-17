@@ -8,7 +8,8 @@
  */
 import type { MarketDef, MarketToken, SafetyReport } from '../../live/markets';
 import { bestSetup, pickTokens, PICKS_PER_CHAIN, SCAN_CANDLES, SCAN_EVERY_MS, TEST_USD, type Setup, type Skipped, type TopPool } from '../../market/scan';
-import type { Candle, TF } from '../../market/candles';
+import { closedOnly, fillGaps, type Candle, type TF } from '../../market/candles';
+import type { CandleStore } from './candleStore';
 import type { MarketSnapshot } from '../bot/chain';
 import { costModelOf } from '../bot/econ';
 import type { Store } from '../bot/store';
@@ -56,6 +57,8 @@ export interface ScanDeps {
   /** New token → draft market that passed the safety check; throws the reason otherwise */
   inspect(chainId: number, token: string, spend: string): Promise<MarketDef>;
   snapshot(def: MarketDef): Promise<MarketSnapshot>;
+  /** Saved closed hourly candles of a market in the app (gap-filled, oldest first); [] for a new token */
+  storedHourly(def: MarketDef): Candle[];
   /** USD per unit of the market's spend coin */
   usdPerSpend(def: MarketDef): Promise<number>;
   gecko: {
@@ -175,8 +178,12 @@ export class DailyScanner {
   private async test(c: ScanChainInfo, d: MarketDef, pool: TopPool | null, isNew: boolean): Promise<{ pick: ScanPick | null; movePct: number }> {
     const snap = await this.d.snapshot(d);
     const capital = TEST_USD / await this.d.usdPerSpend(d);
+    // The candle sync keeps every market's hourly series: reuse it when it covers the week up to the last 2 hours
+    // (one GeckoTerminal request saved per market in the app; the shared budget can be ~6 requests a minute).
+    const saved = this.d.storedHourly(d);
+    const fresh = saved.length >= SCAN_CANDLES && saved[saved.length - 1].t >= this.now() / 1000 - 2 * 3600;
     const token = d.base.native ? c.wrapped : d.base.address;
-    const k = await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
+    const k = fresh ? saved : await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
     const week = k.slice(-SCAN_CANDLES);
     const s = bestSetup(week, costModelOf(snap, d.pool.feeBps, this.d.approval), capital);
     const movePct = week[week.length - 1].c / week[0].o - 1;
@@ -196,7 +203,7 @@ export class DailyScanner {
 }
 
 /** Scan dependencies backed by the live hub (markets, safety check, quoters, native USD price) and GeckoTerminal. */
-export function scanDepsFromHub(hub: Hub, rest: Pick<ScanDeps, 'gecko' | 'store' | 'approval' | 'now' | 'emit'>): ScanDeps {
+export function scanDepsFromHub(hub: Hub, candles: CandleStore, rest: Pick<ScanDeps, 'gecko' | 'store' | 'approval' | 'now' | 'emit'>): ScanDeps {
   const spends = (chainId: number, t: MarketToken) => t.native || sameAddr(t.address, hub.chain(chainId).wrappedNative.address) || hub.isStable(chainId, t.address);
   return {
     ...rest,
@@ -214,6 +221,11 @@ export function scanDepsFromHub(hub: Hub, rest: Pick<ScanDeps, 'gecko' | 'store'
       return r.draft;
     },
     snapshot: (d) => (hub.has(d.key) ? hub.quoter(d.key) : hub.draftQuoter(d)).market(),
+    storedHourly: (d) => {
+      if (!hub.has(d.key)) return [];
+      const nowSec = Math.floor((rest.now ?? Date.now)() / 1000);
+      return fillGaps(closedOnly(candles.get(d.key, '1h'), '1h', nowSec), '1h');
+    },
     usdPerSpend: async (d) => {
       if (hub.isStable(d.chainId, d.quote.address)) return 1;
       if (!spends(d.chainId, d.quote)) throw new Error(`${d.quote.symbol} is not the native coin or a stablecoin`);
