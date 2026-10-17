@@ -69,9 +69,15 @@ const lc = (a: string) => a.toLowerCase();
 const sig = (x: number) => +x.toPrecision(6);
 const msg = (e: unknown) => (e as Error).message.slice(0, 200);
 
-/** One retry after a 429 (GeckoSource waits out the back-off before the next request). */
-async function once429<T>(fn: () => Promise<T>): Promise<T> {
-  try { return await fn(); } catch (e) { if (e instanceof RateLimited) return fn(); throw e; }
+/**
+ * One retry after a 429 (GeckoSource waits out the back-off before the next request) or a GeckoTerminal 5xx
+ * (the real scan on 2026-10-17 lost ETH/USDC to a single HTTP 500).
+ */
+async function retryOnce<T>(fn: () => Promise<T>): Promise<T> {
+  try { return await fn(); } catch (e) {
+    if (e instanceof RateLimited || /GeckoTerminal HTTP 5\d\d/.test((e as Error).message)) return fn();
+    throw e;
+  }
 }
 
 export class DailyScanner {
@@ -118,7 +124,7 @@ export class DailyScanner {
     const out: ScanChain = { chainId: c.id, name: c.name, at: this.now(), picks: [], tested: 0, skipped: [], error: null };
     if (!c.slug) { out.error = 'No GeckoTerminal price history for this chain.'; return out; }
     try {
-      const pools = [...await once429(() => this.d.gecko.topPools(c.slug!, 1)), ...await once429(() => this.d.gecko.topPools(c.slug!, 2))];
+      const pools = [...await retryOnce(() => this.d.gecko.topPools(c.slug!, 1)), ...await retryOnce(() => this.d.gecko.topPools(c.slug!, 2))];
       const { picked, skipped } = pickTokens(pools, c.spendable, c.wrapped);
       out.skipped.push(...skipped);
       const stackOf = (m: MarketDef) => lc(m.base.native ? c.wrapped : m.base.address);
@@ -151,7 +157,7 @@ export class DailyScanner {
     const snap = await this.d.snapshot(d);
     const capital = TEST_USD / await this.d.usdPerSpend(d);
     const token = d.base.native ? c.wrapped : d.base.address;
-    const k = await once429(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
+    const k = await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
     const s = bestSetup(k.slice(-SCAN_CANDLES), costModelOf(snap, d.pool.feeBps, this.d.approval), capital);
     if (!s) return null;
     return {

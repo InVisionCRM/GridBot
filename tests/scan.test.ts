@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bestSetup, MIN_SCAN_CANDLES, NATIVE_ZERO, parseTopPools, pickTokens, SCAN_EVERY_MS, SCAN_RULES, TEST_USD, type TopPool } from '../src/market/scan';
+import { bestSetup, MIN_SCAN_CANDLES, MIN_SELL_HOURS, NATIVE_EEEE, NATIVE_ZERO, parseTopPools, pickTokens, SCAN_EVERY_MS, SCAN_RULES, TEST_USD, type TopPool } from '../src/market/scan';
 import { DEFAULT_COSTS } from '../src/market/costs';
 import type { Candle } from '../src/market/candles';
 import { DailyScanner, type ScanDeps, type ScanFile } from '../src/server/market/scanner';
@@ -40,6 +40,7 @@ describe('pickTokens: real activity, something the bot can spend', () => {
       pool({ name: 'BIS / WETH', base: '0xb1', quote: WETH, liquidityUsd: 45, volume24Usd: 53e6, tx24: 8 }),
       pool({ name: 'USDC / USDT', base: USDC, quote: USDT, volume24Usd: 1e8 }),
       pool({ name: 'ETH / USDT (V4 native)', base: NATIVE_ZERO, quote: USDT, volume24Usd: 9e7 }),
+      pool({ name: 'USDC / ETH (0xEeee)', base: USDC, quote: NATIVE_EEEE, volume24Usd: 8.5e7 }),
       pool({ name: 'cirBTC / WBTC', base: '0xc1', quote: WBTC }),
       pool({ name: 'PONS / USDG', base: '0xd1', quote: USDC, tx24: 19, volume24Usd: 6e7 }),
       pool({ name: 'WASH / USDC', base: '0xe1', quote: USDC, liquidityUsd: 100_000, volume24Usd: 5e6 }),
@@ -52,6 +53,7 @@ describe('pickTokens: real activity, something the bot can spend', () => {
     expect(why['BIS / WETH']).toMatch(/liquidity \$45 is below \$50,000/);
     expect(why['USDC / USDT']).toBe('both sides are the native coin or stablecoins');
     expect(why['ETH / USDT (V4 native)']).toBe('both sides are the native coin or stablecoins');
+    expect(why['USDC / ETH (0xEeee)']).toBe('both sides are the native coin or stablecoins');
     expect(why['cirBTC / WBTC']).toBe('neither side is the native coin or a stablecoin');
     expect(why['PONS / USDG']).toBe('only 19 trades in 24h');
     expect(why['WASH / USDC']).toBe('volume is 50× its liquidity (looks fake)');
@@ -88,6 +90,13 @@ describe('bestSetup: replay the week through the grid backtester', () => {
     expect(s.days).toBeCloseTo(167 / 24, 5);
   });
 
+  it(`one price spike is not a pattern: a single wick through several levels has no pick (needs sells in ${MIN_SELL_HOURS} different hours)`, () => {
+    const flat = (wicks: number[]): Candle[] => Array.from({ length: 168 }, (_, i) => ({ t: 1_700_000_000 + i * 3600, o: 1, h: 1.0005, l: wicks.includes(i) ? 0.9 : 0.9995, c: 1, v: 1 }));
+    expect(bestSetup(flat([40]), COSTS, 1000)).toBeNull();
+    // The same wick on three different days is a pattern.
+    expect(bestSetup(flat([40, 90, 140]), COSTS, 1000)).not.toBeNull();
+  });
+
   it('a pair that only falls has no setup that made money', () => {
     expect(bestSetup(wave(168, 1, 0.002, -0.004), COSTS, 1000)).toBeNull();
   });
@@ -102,11 +111,11 @@ const mkt = (key: string, base: MarketDef['base'], quote: MarketDef['quote'], o:
   key, chainId: 1, base, quote, pool: { dex: 'uniswap-v3', kind: 'v3', address: `0xpool${key}`, feeBps: 30 }, probe: 1, quoteKind: 'stable', ...o,
 });
 
-function fakeDeps(o: { candles?: Record<string, Candle[]>; inspectFails?: Record<string, string>; rateLimitOnce?: boolean } = {}) {
+function fakeDeps(o: { candles?: Record<string, Candle[]>; inspectFails?: Record<string, string>; rateLimitOnce?: boolean; http500Once?: boolean } = {}) {
   const ethUsdc = mkt('ethereum:ETH/USDC', tok(WETH, 'ETH', { native: true }), tok(USDC, 'USDC'));
   const store = new MemoryStore<ScanFile>();
   const calls: string[] = [];
-  let limited = !!o.rateLimitOnce;
+  let limited = !!o.rateLimitOnce, http500 = !!o.http500Once;
   const deps: ScanDeps = {
     chains: () => [{ id: 1, name: 'Ethereum', slug: 'eth', wrapped: WETH, spendable: SPEND }],
     existing: () => [ethUsdc],
@@ -121,6 +130,7 @@ function fakeDeps(o: { candles?: Record<string, Candle[]>; inspectFails?: Record
       ohlcv: async (p, token) => {
         calls.push(`${p}:${token}`);
         if (limited) { limited = false; throw new RateLimited(0); }
+        if (http500) { http500 = false; throw new Error('GeckoTerminal HTTP 500'); }
         return o.candles?.[token] ?? wave(168, 2, 0.001);
       },
     },
@@ -162,6 +172,13 @@ describe('DailyScanner', () => {
     const c = (await new DailyScanner(deps).run()).chains[0];
     expect(c.picks).toEqual([]);
     expect(c.skipped).toContainEqual({ name: 'ETH/USDC', why: 'no range made money over the last 7 days' });
+  });
+
+  it('a GeckoTerminal 5xx is retried once (the real scan lost ETH/USDC to one HTTP 500)', async () => {
+    const { deps, calls } = fakeDeps({ http500Once: true, candles: { [WETH]: wave(168, 2, 0.03) } });
+    const c = (await new DailyScanner(deps).run()).chains[0];
+    expect(c.picks.map((p) => p.label)).toContain('ETH/USDC');
+    expect(calls.filter((x) => x.endsWith(WETH))).toHaveLength(2);
   });
 
   it('runs one scan at a time', async () => {

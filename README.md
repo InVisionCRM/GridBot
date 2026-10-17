@@ -78,9 +78,9 @@ Sources:
 
 **Today's picks** (Home) are found by `src/server/market/scanner.ts` once a day (checked every 30 min; results in `data/picks.json`), or by **Scan now**. For each chain (PulseChain, Ethereum, Robinhood):
 
-1. **Busiest pools.** GeckoTerminal `/networks/{slug}/pools?sort=h24_volume_usd_desc`, 2 pages (40 pools).
+1. **Busiest pools.** GeckoTerminal `/networks/{slug}/pools?sort=h24_volume_usd_desc`, 2 pages (40 pools). A 429 or 5xx is retried once.
 2. **Filter** (`pickTokens` in `src/market/scan.ts`). Volume alone is misleading: on 2026-10-17 the top Ethereum list had $53M of "volume" on a $45 pool and stablecoin/stablecoin pairs that never move, and Robinhood had $30–60M "volume" pools with ~19 trades. A pool is kept only if:
-   - one side is something the bot can spend (wrapped native or a stablecoin; Uniswap V4's zero address counts as the native coin);
+   - one side is something the bot can spend (wrapped native or a stablecoin; the zero address and `0xEeee…` count as the native coin);
    - it has at least $50,000 of liquidity and 100 trades in 24 h;
    - its volume is at most 20× its liquidity.
 
@@ -91,7 +91,7 @@ Sources:
    - using about $1,000 of the spend coin, so gas weighs the same on every chain;
    - over ranges ±5/8/12/18/25% × 6/10/14/20/30/40 levels.
 
-   The best setup per pair is kept if it made money with at least one completed round trip.
+   The best setup per pair is kept if it made money **and** sold in at least 3 different hours. One spike is not a pattern: the first real scan ranked USDG/USDC first at +1.99% from a single stablecoin wick, and one wick through several levels completes several round trips inside the same candle.
 5. **Picks.** The 3 best pairs per chain, with the week's result, trades, buy-and-hold for comparison and the worst dip. **Why other pools were left out** lists every skip with its reason.
 
 **Use this** adds the market if it is new (safety re-checked) and opens New bot on the custom tab with that pair, width and levels, centred on today's price. Nothing is started for you: you enter the amount and choose paper or live. Tokens paired with WPLS/WETH are added so they **spend native PLS/ETH** (wrapped inside the swap, like HEX/PLS), with the gas set-aside. The scan is off with `CANDLES_GECKO=off`.

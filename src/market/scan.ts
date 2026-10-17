@@ -74,14 +74,16 @@ export interface Skipped { name: string; why: string }
 
 /** Uniswap V4 pools name the native coin by the zero address (verified on Ethereum and Robinhood, 2026-10-17). */
 export const NATIVE_ZERO = '0x0000000000000000000000000000000000000000';
+/** Some Ethereum pools use the 0xEeee… placeholder for native ETH instead (verified 2026-10-17). */
+export const NATIVE_EEEE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 
 /**
  * Tokens to test, best volume first, one pool per token. `spendable` = native wrapper + stablecoins; `wrapped` = the
- * native wrapper, which also stands for the native coin (zero address) since the app trades through the wrapper.
+ * native wrapper, which also stands for the native coin (zero / 0xEeee… address) since the app trades through it.
  */
 export function pickTokens(pools: TopPool[], spendable: string[], wrapped: string, rules = SCAN_RULES): { picked: TokenCandidate[]; skipped: Skipped[] } {
   const sp = new Set(spendable.map((a) => a.toLowerCase()));
-  const native = (a: string) => (a === NATIVE_ZERO ? wrapped.toLowerCase() : a);
+  const native = (a: string) => (a === NATIVE_ZERO || a === NATIVE_EEEE ? wrapped.toLowerCase() : a);
   const picked: TokenCandidate[] = [], skipped: Skipped[] = [];
   const seen = new Set<string>();
   for (const p0 of [...pools].sort((a, b) => b.volume24Usd - a.volume24Usd)) {
@@ -107,6 +109,12 @@ export const SETUP_BANDS = [0.05, 0.08, 0.12, 0.18, 0.25];
 export const SETUP_LEVELS = [6, 10, 14, 20, 30, 40];
 /** Hourly candles needed before a pair is ranked (3 days) */
 export const MIN_SCAN_CANDLES = 72;
+/**
+ * Different hours in which a setup must complete a buy-then-sell. One spike is not a pattern: on 2026-10-17 the real
+ * scan ranked USDG/USDC first at +1.99% from a single stablecoin wick, and one wick through several levels completes
+ * several round trips inside the same candle, so round trips alone don't count.
+ */
+export const MIN_SELL_HOURS = 3;
 
 export interface Setup {
   bandPct: number;
@@ -122,7 +130,7 @@ export interface Setup {
 
 /**
  * Best range × level count over `k` (hourly candles, oldest first), each started at the first candle's open.
- * Null when nothing completed a round trip with a positive net result.
+ * Null when no setup made a positive net result with sells in at least MIN_SELL_HOURS different hours.
  */
 export function bestSetup(k: Candle[], costs: CostModel, capital: number): Setup | null {
   if (k.length < MIN_SCAN_CANDLES) throw new Error(`only ${k.length} hourly candles (need ${MIN_SCAN_CANDLES})`);
@@ -130,8 +138,9 @@ export function bestSetup(k: Candle[], costs: CostModel, capital: number): Setup
   let best: Setup | null = null;
   for (const bandPct of SETUP_BANDS) {
     for (const gridCount of SETUP_LEVELS) {
-      const m = runGridBacktest(k, { lowerPrice: p0 * (1 - bandPct), upperPrice: p0 * (1 + bandPct), gridCount, capital }, '1h', costs).metrics;
-      if (m.trades < 1 || !(m.totalReturn > 0)) continue;
+      const r = runGridBacktest(k, { lowerPrice: p0 * (1 - bandPct), upperPrice: p0 * (1 + bandPct), gridCount, capital }, '1h', costs);
+      const m = r.metrics;
+      if (new Set(r.trades.map((t) => t.exitT)).size < MIN_SELL_HOURS || !(m.totalReturn > 0)) continue;
       const s: Setup = { bandPct, gridCount, returnPct: m.totalReturn, roundTrips: m.trades, maxDrawdownPct: m.maxDrawdown, holdPct: m.bhReturn, days: m.days };
       if (!best || s.returnPct > best.returnPct || (s.returnPct === best.returnPct && s.roundTrips > best.roundTrips)) best = s;
     }
