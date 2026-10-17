@@ -82,7 +82,7 @@ function metrics(eq: { t: number; v: number; bh: number }[], trades: BtTrade[], 
 }
 
 /** Buy & hold PLS from the first tradable open, same cost model. */
-function buyHold(k: Candle[], start: number, capital: number, m: CostModel) {
+export function buyHold(k: Candle[], start: number, capital: number, m: CostModel) {
   const b = simBuy(capital, k[start].o, m);
   return { pls: b.pls, cashLeft: -b.gasQuote };
 }

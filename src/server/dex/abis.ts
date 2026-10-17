@@ -44,6 +44,13 @@ export const V3_POOL = new Interface([
   'function fee() view returns (uint24)',
   'event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)',
 ]);
+/**
+ * Full slot0 for the protocol-fee setting. Uniswap returns feeProtocol as uint8, PancakeSwap forks (9mm V3) as uint32;
+ * both sit in the 6th 32-byte word, so one uint32 decode reads either (verified on Ethereum, Robinhood and 9mm pools).
+ */
+export const V3_POOL_FEES = new Interface([
+  'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint32 feeProtocol, bool unlocked)',
+]);
 export const V3_QUOTER = new Interface([
   'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
   'function quoteExactInput(bytes path, uint256 amountIn) returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)',

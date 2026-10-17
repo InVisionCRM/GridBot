@@ -11,8 +11,22 @@ import { runGridBacktest } from './backtest';
 import type { Candle } from './candles';
 import type { CostModel } from './costs';
 
-/** Every setup is tested with this much of the spend coin (in USD) so gas weighs the same on every chain. */
+/**
+ * Default test size: every setup is tested with this much of the spend coin (in USD) so gas weighs the same on every
+ * chain. You can set your own (Scan now) so price impact and your share of a pool match the money you'll put in.
+ */
 export const TEST_USD = 1000;
+export const MIN_TEST_USD = 10;
+export const MAX_TEST_USD = 10_000_000;
+
+/** A test size in USD, or an error saying what's allowed. */
+export function checkTestUsd(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < MIN_TEST_USD || n > MAX_TEST_USD) {
+    throw new Error(`Test size must be a dollar amount from $${MIN_TEST_USD} to $${MAX_TEST_USD.toLocaleString('en-US')}.`);
+  }
+  return n;
+}
 export const SCAN_EVERY_MS = 24 * 3600_000;
 export const PICKS_PER_CHAIN = 3;
 /** 7 days of hourly candles */
