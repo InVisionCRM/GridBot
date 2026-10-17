@@ -103,9 +103,42 @@ function scanStep(g: AnyObj | null): string {
 }
 
 /** Today's picks: the daily scan's best grid setups per chain, tested on the last 7 days of hourly prices. */
+/** Grid vs liquidity position vs hold for every pair the scan tested on one chain (same week, same test size). */
+function CompareList({ s, c, testUsd }: { s: AnyObj; c: AnyObj; testUsd: number }) {
+  if (!c.compare?.length) return null;
+  const dexName = (id: string) => chainOf(s, c.chainId)?.dexes?.find((d: AnyObj) => d.id === id)?.name ?? id;
+  return (
+    <details className="more">
+      <summary>Grid vs liquidity position vs holding ({c.compare.length} pairs)</summary>
+      <p className="small muted picks-note">Same 7 days, about ${testUsd.toLocaleString('en-US')} each. A liquidity position (LP) earns its share of the pool's trading fees, after the DEX's own cut, while the price stays inside its range, and like a grid it ends up holding more of whichever coin fell. Holding means putting all of it in the coin.</p>
+      <div className="cmp">
+        <div className="cmp-row cmp-head"><span>Pair</span><span className="n">Hold</span><span className="n">Grid</span><span className="n">LP</span></div>
+        {c.compare.map((r: AnyObj, i: number) => {
+          const best = Math.max(r.holdPct, r.grid?.returnPct ?? -Infinity, r.lp?.returnPct ?? -Infinity);
+          const cell = (x: number | null | undefined) => (x == null ? <span className="n muted">—</span> : <span className={`n ${cls(x)}${x === best ? ' win' : ''}`}>{pct(x, 1, true)}</span>);
+          return (
+            <div key={i} className="cmp-row">
+              <span className="cmp-name"><b>{r.label}</b> <DexTag name={dexName(r.dex)} feeBps={r.feeBps} /></span>
+              {cell(r.holdPct)}{cell(r.grid?.returnPct)}{cell(r.lp?.returnPct)}
+              <span className="cmp-why small muted">
+                {r.entryImpactPct >= 0.005 ? <span className="neg">Putting all ${testUsd.toLocaleString('en-US')} in at once moves this pool's price {pct(r.entryImpactPct, 1)}, which is in the hold and LP numbers. </span> : null}
+                {r.grid ? `Grid ±${Math.round(r.grid.bandPct * 100)}%, ${r.grid.gridCount} levels. ` : 'No grid made money. '}
+                {r.lp
+                  ? `LP ${r.lp.bandPct == null ? 'full range' : `±${Math.round(r.lp.bandPct * 100)}%`}: fees ${pct(r.lp.feesPct, 2, true)}, in range ${pct(r.lp.inRangePct, 0)} of the time, ${pct(r.lp.poolSharePct, 2)} of the pool. LPs keep ${pct(r.lpShare, 0)} of the fee here.`
+                  : `LP not tested: ${r.lpWhy}`}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
 function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | 'all'; nav: Nav; act: Props['act']; busy: boolean }) {
   const [p, setP] = useState<AnyObj | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [usd, setUsd] = useState<string | null>(null);
   const load = useCallback(() => http('/api/picks').then((x) => { setP(x); setErr(null); }).catch((e) => setErr(errMsg(e))), []);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -115,7 +148,8 @@ function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | '
   }, [p?.running, load]);
   if (err) return <div className="banner info"><span className="grow">Today's picks: {err}</span></div>;
   if (!p) return null;
-  const scan = () => act(async () => { await http('/api/picks/scan', 'POST'); setP({ ...p, running: true }); });
+  const testUsd = usd ?? String(p.testUsd);
+  const scan = () => act(async () => { await http('/api/picks/scan', 'POST', { testUsd: Number(testUsd) }); setP({ ...p, running: true }); });
   const use = (k: AnyObj) => act(async () => {
     const key = k.key ?? (await http('/api/picks/use', 'POST', { chainId: k.chainId, ...k.add })).key;
     nav({ v: 'new', kind: 'grid', gridPrefill: { pair: key, bandPct: k.bandPct, gridCount: k.gridCount, nonce: Date.now() } });
@@ -127,6 +161,7 @@ function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | '
         <h3>Today's picks</h3>
         <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `scanned ${ago(p.at)} · next scan ${time(p.nextAt)}` : 'not scanned yet'}</span>
         <span className="grow" />
+        <label className="small muted test-usd" title="The amount every setup is tested with. Use what you plan to put in: price impact and your share of a pool depend on it.">Test with $<input value={testUsd} inputMode="decimal" onChange={(e) => setUsd(e.target.value.replace(/[$,\s]/g, ''))} /></label>
         <button type="button" className="btn small-btn" disabled={busy || p.running} onClick={scan}>{p.running ? 'Scanning…' : 'Scan now'}</button>
       </div>
       <p className="small muted picks-note">Each chain's busiest pools are checked for real trading and safety, then the grid is replayed on the last 7 days of hourly prices with the pool's fee, price impact and gas, using about ${p.testUsd.toLocaleString('en-US')} of the coin it spends. These are the setups that made the most. A good week doesn't promise the next one, so start in paper first.</p>
@@ -136,6 +171,7 @@ function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | '
           {c.error ? <p className="small neg">{c.error}</p>
             : !c.picks.length ? <p className="small muted">Nothing made money here over the last 7 days. A grid would have lost to fees or to a one-way move.</p>
             : c.picks.map((k: AnyObj) => <PickRow key={`${k.rank}-${k.label}`} k={k} use={use} busy={busy} />)}
+          <CompareList s={s} c={c} testUsd={p.testUsd} />
           {c.skipped.length > 0 && (
             <details className="more">
               <summary>Why other pools were left out ({c.skipped.length})</summary>

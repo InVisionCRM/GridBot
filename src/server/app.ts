@@ -9,6 +9,7 @@ import { analyzeSpacing, DENSE_PRESETS, MAX_GRID_COUNT } from '../live/spacing';
 import { listPresets } from '../live/presets';
 import { DEFAULT_TREND, STRATEGIES } from '../market/strategy';
 import { SWEEP_AXES } from '../market/backtest';
+import { checkTestUsd } from '../market/scan';
 import { TFS, isTF } from '../market/candles';
 import type { LiveNetwork } from '../live/networks';
 import { fmtFeeTier } from '../live/chains';
@@ -19,7 +20,7 @@ export interface AppOpts {
   /** Background candle backfill (server only) */
   backfill?: (pair: string, source: 'gecko' | 'onchain', days: number) => Promise<unknown>;
   /** Daily pair scan (server only) */
-  scanner?: { status(): unknown; run(): Promise<unknown> };
+  scanner?: { status(): unknown; run(testUsd?: number): Promise<unknown> };
   /** A chart was opened: the candle sync keeps every timeframe of that market for a while (server only) */
   viewCandles?: (pair: string) => void;
   heartbeatMs?: number;
@@ -143,7 +144,13 @@ export function createApp(o: AppOpts) {
   // ── Daily picks ──────────────────────────────────────────────────────
   const scanner = () => { if (!o.scanner) throw new Error('The daily scan is off (CANDLES_GECKO=off).'); return o.scanner; };
   app.get('/api/picks', wrap(() => scanner().status()));
-  app.post('/api/picks/scan', wrap(() => { const sc = scanner(); void sc.run().catch(() => undefined); return { ok: true }; }));
+  // { testUsd } = test size in USD (checked here so a bad value is an error, not a silently failed background scan).
+  app.post('/api/picks/scan', wrap((req) => {
+    const sc = scanner();
+    const usd = req.body?.testUsd == null ? undefined : checkTestUsd(req.body.testUsd);
+    void sc.run(usd).catch(() => undefined);
+    return { ok: true };
+  }));
   app.post('/api/picks/use', wrap(async (req) => {
     const b = req.body ?? {};
     const key = await bot.addPickMarket({ chainId: Number(b.chainId), address: String(b.address ?? ''), quote: String(b.quote ?? ''), pool: String(b.pool ?? '') });

@@ -4,10 +4,15 @@
  *   + the markets already in the app → safety check for new tokens (hub.inspect: honeypot / tax simulation)
  *   → last 7 days of hourly candles through the grid backtester with the pool's real fee, depth and gas
  *   → the 3 best setups per chain. Nothing is added or started: "Use this" adds the market and opens New bot.
- * Runs once a day (and on demand); results persist in data/picks.json.
+ * Every tested pair also gets a grid vs liquidity position vs hold comparison over the same week (market/lp.ts),
+ * with the LP fee share each DEX really pays (V2: measured constant; V3: read from the pool's slot0).
+ * Runs once a day (and on demand) at the test size you last chose; results persist in data/picks.json.
  */
 import type { MarketDef, MarketToken, SafetyReport } from '../../live/markets';
-import { bestSetup, pickTokens, PICKS_PER_CHAIN, SCAN_CANDLES, SCAN_EVERY_MS, TEST_USD, type Setup, type Skipped, type TopPool } from '../../market/scan';
+import { bestSetup, checkTestUsd, pickTokens, PICKS_PER_CHAIN, SCAN_CANDLES, SCAN_EVERY_MS, TEST_USD, type Setup, type Skipped, type TopPool } from '../../market/scan';
+import { bestLp, lpShareFromFeeProtocol, type LpSetup } from '../../market/lp';
+import { buyHold } from '../../market/backtest';
+import { simBuy } from '../../market/costs';
 import { closedOnly, fillGaps, type Candle, type TF } from '../../market/candles';
 import type { CandleStore } from './candleStore';
 import type { MarketSnapshot } from '../bot/chain';
@@ -15,7 +20,8 @@ import { costModelOf } from '../bot/econ';
 import type { Store } from '../bot/store';
 import type { Emit } from '../bot/activity';
 import type { Hub } from '../chains/hub';
-import { sameAddr } from '../dex/types';
+import { readCall, sameAddr } from '../dex/types';
+import { V3_POOL_FEES } from '../dex/abis';
 import { RateLimited } from './gecko';
 
 
@@ -44,8 +50,28 @@ export interface ScanPick {
   activity: { volume24Usd: number; liquidityUsd: number; tx24: number; change24Pct: number | null } | null;
 }
 
-export interface ScanChain { chainId: number; name: string; at: number; picks: ScanPick[]; tested: number; skipped: Skipped[]; error: string | null }
-export interface ScanFile { version: 1; at: number | null; chains: ScanChain[] }
+/** Grid vs liquidity position vs hold for one tested pair, same week, same test size. */
+export interface CompareRow {
+  label: string;
+  dex: string;
+  feeBps: number;
+  holdPct: number;
+  /**
+   * Price impact of putting the whole test amount in at once (what "hold" pays at the start). Shown so a thin pool
+   * explains itself: the 2026-10-17 scan at $25k had PLS/USDT "hold −96%" in a ≈$28k pool while PLS fell ≈38%.
+   */
+  entryImpactPct: number;
+  /** Best grid that made money (null = none did) */
+  grid: { returnPct: number; bandPct: number; gridCount: number } | null;
+  /** Best liquidity position (null = not tested, see lpWhy) */
+  lp: LpSetup | null;
+  /** Share of the pool fee liquidity providers keep on this DEX / pool */
+  lpShare: number | null;
+  lpWhy: string | null;
+}
+
+export interface ScanChain { chainId: number; name: string; at: number; picks: ScanPick[]; compare: CompareRow[]; tested: number; skipped: Skipped[]; error: string | null }
+export interface ScanFile { version: 2; at: number | null; testUsd: number; chains: ScanChain[] }
 
 /** `dexes` = GeckoTerminal ids of the DEXes this app trades on the chain (only their pools are read). */
 export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[]; dexes: string[] }
@@ -59,6 +85,8 @@ export interface ScanDeps {
   snapshot(def: MarketDef): Promise<MarketSnapshot>;
   /** Saved closed hourly candles of a market in the app (gap-filled, oldest first); [] for a new token */
   storedHourly(def: MarketDef): Candle[];
+  /** Share of the swap fee liquidity providers keep in this market's pool; throws when it isn't verified */
+  lpShare(def: MarketDef): Promise<number>;
   /** USD per unit of the market's spend coin */
   usdPerSpend(def: MarketDef): Promise<number>;
   gecko: {
@@ -96,13 +124,14 @@ export class DailyScanner {
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly d: ScanDeps) {
-    this.file = d.store.load() ?? { version: 1, at: null, chains: [] };
+    const f = d.store.load();
+    this.file = f?.version === 2 ? f : { version: 2, at: null, testUsd: TEST_USD, chains: [] };
   }
 
   private now() { return (this.d.now ?? Date.now)(); }
 
   status() {
-    return { ...this.file, running: this.running, progress: this.progress, nextAt: this.file.at == null ? null : this.file.at + SCAN_EVERY_MS, testUsd: TEST_USD };
+    return { ...this.file, running: this.running, progress: this.progress, nextAt: this.file.at == null ? null : this.file.at + SCAN_EVERY_MS };
   }
 
   /** Check every 30 min; scan when the last one is a day old (or there is none). */
@@ -114,15 +143,17 @@ export class DailyScanner {
   }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  async run(): Promise<ScanFile> {
+  /** `testUsd` = test size in USD (kept for the daily scans after it); defaults to the last one used. */
+  async run(testUsd: number = this.file.testUsd): Promise<ScanFile> {
+    const usd = checkTestUsd(testUsd);
     if (this.running) throw new Error('A scan is already running.');
     this.running = true;
-    this.d.emit?.({ type: 'info', kind: 'system', msg: 'Daily pair scan started' });
+    this.d.emit?.({ type: 'info', kind: 'system', msg: `Daily pair scan started ($${usd.toLocaleString('en-US')} test size)` });
     try {
       const chains: ScanChain[] = [];
       const list = this.d.chains();
-      for (const [i, c] of list.entries()) chains.push(await this.scanChain(c, i + 1, list.length));
-      this.file = { version: 1, at: this.now(), chains };
+      for (const [i, c] of list.entries()) chains.push(await this.scanChain(c, i + 1, list.length, usd));
+      this.file = { version: 2, at: this.now(), testUsd: usd, chains };
       this.d.store.save(this.file);
       this.d.emit?.({ type: 'info', kind: 'system', level: 'success', msg: `Daily pair scan done: ${chains.map((c) => `${c.name} ${c.picks.length} pick${c.picks.length === 1 ? '' : 's'}`).join(', ')}` });
       return this.file;
@@ -132,10 +163,10 @@ export class DailyScanner {
     }
   }
 
-  private async scanChain(c: ScanChainInfo, chainNo: number, chains: number): Promise<ScanChain> {
+  private async scanChain(c: ScanChainInfo, chainNo: number, chains: number, usd: number): Promise<ScanChain> {
     const step = (phase: ScanProgress['phase'], done: number, total: number) => { this.progress = { chain: c.name, chainNo, chains, phase, done, total }; };
     step('finding pools', 0, 1);
-    const out: ScanChain = { chainId: c.id, name: c.name, at: this.now(), picks: [], tested: 0, skipped: [], error: null };
+    const out: ScanChain = { chainId: c.id, name: c.name, at: this.now(), picks: [], compare: [], tested: 0, skipped: [], error: null };
     if (!c.slug) { out.error = 'No GeckoTerminal price history for this chain.'; return out; }
     try {
       // Busiest pools of each DEX this app trades. The chain-wide list is the wrong input: on 2026-10-17, 33 of
@@ -161,7 +192,8 @@ export class DailyScanner {
         step('testing pairs', i, markets.length);
         const name = `${m.def.base.symbol}/${m.def.quote.symbol}`;
         try {
-          const r = await this.test(c, m.def, m.pool, m.isNew);
+          const r = await this.test(c, m.def, m.pool, m.isNew, usd);
+          out.compare.push(r.row);
           if (r.pick) picks.push(r.pick);
           else out.skipped.push({ name, why: `no range made money over the last 7 days (price ${r.movePct >= 0 ? '+' : ''}${(r.movePct * 100).toFixed(1)}% this week)` });
         } catch (e) { out.skipped.push({ name, why: msg(e) }); }
@@ -173,11 +205,13 @@ export class DailyScanner {
     return out;
   }
 
-  /** Best setup for one market over the last 7 days, centred on today's price. */
-  /** movePct = the pair's price change over the test window (shown when nothing made money). */
-  private async test(c: ScanChainInfo, d: MarketDef, pool: TopPool | null, isNew: boolean): Promise<{ pick: ScanPick | null; movePct: number }> {
+  /**
+   * Best grid setup for one market over the last 7 days, centred on today's price, plus the grid vs LP vs hold row.
+   * movePct = the pair's price change over the test window (shown when nothing made money).
+   */
+  private async test(c: ScanChainInfo, d: MarketDef, pool: TopPool | null, isNew: boolean, usd: number): Promise<{ pick: ScanPick | null; movePct: number; row: CompareRow }> {
     const snap = await this.d.snapshot(d);
-    const capital = TEST_USD / await this.d.usdPerSpend(d);
+    const capital = usd / await this.d.usdPerSpend(d);
     // The candle sync keeps every market's hourly series: reuse it when it covers the week up to the last 2 hours
     // (one GeckoTerminal request saved per market in the app; the shared budget can be ~6 requests a minute).
     const saved = this.d.storedHourly(d);
@@ -185,10 +219,23 @@ export class DailyScanner {
     const token = d.base.native ? c.wrapped : d.base.address;
     const k = fresh ? saved : await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
     const week = k.slice(-SCAN_CANDLES);
-    const s = bestSetup(week, costModelOf(snap, d.pool.feeBps, this.d.approval), capital);
+    const costs = costModelOf(snap, d.pool.feeBps, this.d.approval);
+    const s = bestSetup(week, costs, capital);
     const movePct = week[week.length - 1].c / week[0].o - 1;
-    if (!s) return { pick: null, movePct };
-    return { movePct, pick: {
+    const bh = buyHold(week, 0, capital, costs);
+    const row: CompareRow = {
+      label: `${d.base.symbol}/${d.quote.symbol}`, dex: d.pool.dex, feeBps: d.pool.feeBps,
+      holdPct: (bh.pls * week[week.length - 1].c + bh.cashLeft) / capital - 1,
+      entryImpactPct: simBuy(capital, week[0].o, costs).impactPct,
+      grid: s ? { returnPct: s.returnPct, bandPct: s.bandPct, gridCount: s.gridCount } : null,
+      lp: null, lpShare: null, lpWhy: null,
+    };
+    try {
+      row.lpShare = await this.d.lpShare(d);
+      row.lp = bestLp(week, costs, capital, d.pool.kind, row.lpShare);
+    } catch (e) { row.lpWhy = msg(e); }
+    if (!s) return { pick: null, movePct, row };
+    return { movePct, row, pick: {
       chainId: c.id, rank: 0,
       // A new token's draft quote keeps the wrapped address (WPLS / WETH) even though it spends the native coin.
       key: isNew ? null : d.key,
@@ -196,7 +243,7 @@ export class DailyScanner {
       label: `${d.base.symbol}/${d.quote.symbol}`, spend: d.quote.symbol, stack: d.base.symbol,
       dex: d.pool.dex, feeBps: d.pool.feeBps, risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null,
       price: snap.spot, lowerPrice: sig(snap.spot * (1 - s.bandPct)), upperPrice: sig(snap.spot * (1 + s.bandPct)), gridCount: s.gridCount, bandPct: s.bandPct,
-      test: { ...s, capital, usd: TEST_USD },
+      test: { ...s, capital, usd },
       activity: pool ? { volume24Usd: pool.volume24Usd, liquidityUsd: pool.liquidityUsd, tx24: pool.tx24, change24Pct: pool.change24Pct } : null,
     } };
   }
@@ -225,6 +272,17 @@ export function scanDepsFromHub(hub: Hub, candles: CandleStore, rest: Pick<ScanD
       if (!hub.has(d.key)) return [];
       const nowSec = Math.floor((rest.now ?? Date.now)() / 1000);
       return fillGaps(closedOnly(candles.get(d.key, '1h'), '1h', nowSec), '1h');
+    },
+    lpShare: async (d) => {
+      const dex = hub.chain(d.chainId).dexes.find((x) => x.id === d.pool.dex);
+      if (!dex) throw new Error(`unknown DEX ${d.pool.dex}`);
+      if (dex.kind === 'v2') {
+        if (dex.lpShare == null) throw new Error(`${dex.name}: the share of fees paid to liquidity providers isn't verified`);
+        return dex.lpShare;
+      }
+      if (!dex.protocolFee) throw new Error(`${dex.name}: protocol fee encoding isn't verified`);
+      const r = await readCall<unknown[]>(hub.rt(d.chainId).reader, d.pool.address, V3_POOL_FEES, 'slot0');
+      return lpShareFromFeeProtocol(Number(r[5]), dex.protocolFee);
     },
     usdPerSpend: async (d) => {
       if (hub.isStable(d.chainId, d.quote.address)) return 1;

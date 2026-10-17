@@ -111,7 +111,7 @@ const mkt = (key: string, base: MarketDef['base'], quote: MarketDef['quote'], o:
   key, chainId: 1, base, quote, pool: { dex: 'uniswap-v3', kind: 'v3', address: `0xpool${key}`, feeBps: 30 }, probe: 1, quoteKind: 'stable', ...o,
 });
 
-function fakeDeps(o: { candles?: Record<string, Candle[]>; stored?: Record<string, Candle[]>; inspectFails?: Record<string, string>; rateLimitOnce?: boolean; http500Once?: boolean } = {}) {
+function fakeDeps(o: { candles?: Record<string, Candle[]>; stored?: Record<string, Candle[]>; inspectFails?: Record<string, string>; rateLimitOnce?: boolean; http500Once?: boolean; lpUnverified?: string[] } = {}) {
   const ethUsdc = mkt('ethereum:ETH/USDC', tok(WETH, 'ETH', { native: true }), tok(USDC, 'USDC'));
   const store = new MemoryStore<ScanFile>();
   const calls: string[] = [];
@@ -125,6 +125,7 @@ function fakeDeps(o: { candles?: Record<string, Candle[]>; stored?: Record<strin
     },
     snapshot: async () => ({ spot: 2, quoteReserve: 1e9, plsReserve: 5e8, gasPricePls: 0, feeBps: 30 }),
     storedHourly: (d) => o.stored?.[d.key] ?? [],
+    lpShare: async (d) => { if (o.lpUnverified?.includes(d.key)) throw new Error('Uniswap V3: not verified'); return 0.75; },
     usdPerSpend: async () => 1,
     gecko: {
       topPools: async (n, dex) => {
@@ -216,6 +217,57 @@ describe('DailyScanner', () => {
     const first = sc.run();
     await expect(sc.run()).rejects.toThrow('A scan is already running.');
     await first;
+  });
+});
+
+describe('DailyScanner: grid vs liquidity position vs hold, at your test size', () => {
+  it('every tested pair gets a row: hold, the best grid (or none), the best LP with the pool\'s fee share', async () => {
+    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03), [WBTC]: wave(168, 2, 0.08) } });
+    const c = (await new DailyScanner(deps).run()).chains[0];
+    expect(c.compare.map((r) => r.label).sort()).toEqual(['ETH/USDC', `${WBTC.slice(0, 6)}/USDT`, '0xdead/USDT'].sort());
+    const eth = c.compare.find((r) => r.label === 'ETH/USDC')!;
+    expect(eth).toMatchObject({ dex: 'uniswap-v3', feeBps: 30, lpShare: 0.75, lpWhy: null });
+    expect(eth.grid!.returnPct).toBeCloseTo(c.picks.find((p) => p.label === 'ETH/USDC')!.test.returnPct, 12);
+    expect(eth.lp!.feesPct).toBeGreaterThan(0);
+    expect(eth.lp!.holdPct).toBeCloseTo(eth.holdPct, 12);
+    expect(eth.entryImpactPct).toBeGreaterThan(0);
+  });
+
+  it('a big test size in a thin pool shows its own price impact (what makes "hold" look so bad)', async () => {
+    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) } });
+    const thin = { ...deps, snapshot: async () => ({ spot: 2, quoteReserve: 20_000, plsReserve: 10_000, gasPricePls: 0, feeBps: 30 }) };
+    const small = (await new DailyScanner(thin).run(100)).chains[0].compare.find((r) => r.label === 'ETH/USDC')!;
+    const big = (await new DailyScanner(thin).run(25_000)).chains[0].compare.find((r) => r.label === 'ETH/USDC')!;
+    expect(small.entryImpactPct).toBeLessThan(0.01);
+    expect(big.entryImpactPct).toBeGreaterThan(0.5);
+    expect(big.holdPct).toBeLessThan(small.holdPct - 0.4);
+  });
+
+  it('an unverified fee share leaves the LP column empty and says why; the grid still runs', async () => {
+    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) }, lpUnverified: ['ethereum:ETH/USDC'] });
+    const eth = (await new DailyScanner(deps).run()).chains[0].compare.find((r) => r.label === 'ETH/USDC')!;
+    expect(eth).toMatchObject({ lp: null, lpShare: null, lpWhy: 'Uniswap V3: not verified' });
+    expect(eth.grid).not.toBeNull();
+  });
+
+  it('tests with the size you choose, keeps it for the daily scans after, and refuses nonsense', async () => {
+    const { deps, store } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) } });
+    const sc = new DailyScanner(deps);
+    expect(sc.status().testUsd).toBe(TEST_USD);
+    const f = await sc.run(25_000);
+    expect(f.testUsd).toBe(25_000);
+    expect(f.chains[0].picks.find((p) => p.label === 'ETH/USDC')!.test).toMatchObject({ usd: 25_000, capital: 25_000 });
+    expect((await sc.run()).testUsd).toBe(25_000);
+    expect(new DailyScanner(deps).status().testUsd).toBe(25_000); // saved
+    expect(store.load()!.version).toBe(2);
+    await expect(sc.run(5)).rejects.toThrow(/from \$10 to \$10,000,000/);
+    await expect(sc.run(Number.NaN)).rejects.toThrow(/dollar amount/);
+  });
+
+  it('a saved scan from before the comparison existed is dropped (no rows to show), not half-shown', () => {
+    const { deps, store } = fakeDeps();
+    store.save({ version: 1, at: 123, chains: [] } as unknown as ScanFile);
+    expect(new DailyScanner(deps).status()).toMatchObject({ at: null, chains: [], testUsd: TEST_USD });
   });
 });
 

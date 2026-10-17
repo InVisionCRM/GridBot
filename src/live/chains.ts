@@ -29,6 +29,16 @@ export interface DexConfig {
   note?: string;
   /** GeckoTerminal DEX id on this chain (verified 2026-10-17 against /networks/{slug}/dexes and a known pool) */
   gecko?: string;
+  /**
+   * V2 only: share of the swap fee that stays with liquidity providers (the rest is minted to the factory's feeTo).
+   * Measured 2026-10-17 from on-chain fee mints; absent = not verified, so the LP backtest refuses the DEX.
+   */
+  lpShare?: number;
+  /**
+   * V3 only: how slot0().feeProtocol is encoded, so the LP share can be read live per pool.
+   * uniswap: low/high 4 bits = N, protocol takes 1/N (0 = off). pancake: low/high 16 bits = protocol share × 10 000.
+   */
+  protocolFee?: 'uniswap' | 'pancake';
 }
 
 export interface ChainToken {
@@ -77,6 +87,11 @@ export interface ChainConfig {
 }
 
 const UNI_V2_SRC = 'https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments';
+/**
+ * Uniswap V2 pairs on Ethereum and Robinhood run byte-identical code (keccak of the runtime code matched, 2026-10-17)
+ * and both factories have feeTo set, so the canonical _mintFee applies: feeTo gets 1/6 of the fee growth.
+ */
+const UNI_V2_LP_SHARE = 5 / 6;
 const TIERS_UNI = [100, 500, 3000, 10000];
 const TIERS_CAKE = [100, 500, 2500, 10000];
 /** Canonical Uniswap V3 addresses (Ethereum mainnet). */
@@ -86,7 +101,7 @@ const UNI_V3_CANON = {
   quoter: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
 };
 const uniV3 = (chainSrc: string, gecko: string, a = UNI_V3_CANON): DexConfig => ({
-  id: 'uniswap-v3', name: 'Uniswap V3', kind: 'v3', ...a, feeTiers: TIERS_UNI, source: chainSrc, gecko,
+  id: 'uniswap-v3', name: 'Uniswap V3', kind: 'v3', ...a, feeTiers: TIERS_UNI, source: chainSrc, gecko, protocolFee: 'uniswap',
 });
 
 /**
@@ -96,11 +111,18 @@ const uniV3 = (chainSrc: string, gecko: string, a = UNI_V3_CANON): DexConfig => 
  *  - 9mm V2 / V3: github.com/9mm-exchange/deployments pulsechain/v2.json + v3.json. V2 router.factory() == factory,
  *    fee measured 25 bps. V3 is a PancakeSwap-V3 fork: SmartRouter + QuoterV2 report factory/deployer/WPLS on-chain;
  *    enabled tiers via factory.feeAmountTickSpacing: 100, 500, 2500, 10000, 20000 (3000 disabled).
+ *  LP fee shares (measured 2026-10-17):
+ *  - PulseX V1: fee mints to feeTo equal the whole √k growth since kLast (6 mints, ratio 1.000), and one DAI/WPLS LP
+ *    token's √k/supply was flat over 30 days (−0.15 % … +0.23 %) while the pool traded ≈1× its size a day → LPs keep ~0.
+ *  - PulseX V2: feeTo receives 0.2414 of the √k growth on every mint (6 mints) = 7/29 → LPs keep 22 of the 29 bps.
+ *  - 9mm V2: feeTo is set but no fee mint happened in ~35 days (pools hold ≈$1k), so its split is not verified.
+ *  - 9mm V3: slot0.feeProtocol 3200/3200 (pancake encoding); Swap events' protocol-fee totals grow by exactly 0.3200 of
+ *    the fee on single-hop swaps.
  */
 export const PULSECHAIN_EXTRA_DEXES: DexConfig[] = [
   {
     id: 'pulsex-v1', name: 'PulseX V1', kind: 'v2', gecko: 'pulsex', factory: '0x1715a3E4A142d8b698131108995174F37aEBA10D',
-    router: '0x98bf93ebf5c380C0e6Ae8e192A7e2AE08edAcc02', feeBps: 29,
+    router: '0x98bf93ebf5c380C0e6Ae8e192A7e2AE08edAcc02', feeBps: 29, lpShare: 0,
     source: 'https://scan.pulsechain.com/address/0x98bf93ebf5c380C0e6Ae8e192A7e2AE08edAcc02',
   },
   {
@@ -111,7 +133,7 @@ export const PULSECHAIN_EXTRA_DEXES: DexConfig[] = [
   {
     id: '9mm-v3', name: '9mm V3', kind: 'v3', gecko: '9mm-v3', factory: '0xe50DbDC88E87a2C92984d794bcF3D1d76f619C68',
     router: '0xa9444246d80d6E3496C9242395213B4f22226a59', quoter: '0x500260dD7C27eCE20b89ea0808d05a13CF867279',
-    feeTiers: [100, 500, 2500, 10000, 20000],
+    feeTiers: [100, 500, 2500, 10000, 20000], protocolFee: 'pancake',
     source: 'https://github.com/9mm-exchange/deployments/blob/main/pulsechain/v3.json',
     note: 'PancakeSwap-V3 fork (SmartRouter interface); 0.3% tier not enabled',
   },
@@ -129,7 +151,7 @@ export function chainFromNetwork(net: LiveNetwork): ChainConfig {
     trading: { enabled: true },
     // PulseX V2 stays first (legacy markets + the legacy Quoter constructor use it); mainnet adds PulseX V1 and 9mm.
     dexes: [
-      { id: 'pulsex-v2', name: 'PulseX V2', kind: 'v2', gecko: net.isTestnet ? undefined : 'pulsex-v2', factory: net.pulsex.factoryV2, router: net.pulsex.routerV2, feeBps: net.pulsex.feeBps, source: 'https://scan.pulsechain.com/address/0x165C3410fC91EF562C50559f7d2289fEbed552d9' },
+      { id: 'pulsex-v2', name: 'PulseX V2', kind: 'v2', gecko: net.isTestnet ? undefined : 'pulsex-v2', factory: net.pulsex.factoryV2, router: net.pulsex.routerV2, feeBps: net.pulsex.feeBps, lpShare: net.isTestnet ? undefined : 22 / 29, source: 'https://scan.pulsechain.com/address/0x165C3410fC91EF562C50559f7d2289fEbed552d9' },
       ...(net.isTestnet ? [] : PULSECHAIN_EXTRA_DEXES),
     ],
     stack: 'l1', gasUnits: { approve: 60_000, swap: 220_000 }, lowGasNative: 50_000, blockTimeSec: 10, logChunk: 5000,
@@ -159,8 +181,8 @@ export const CHAINS: ChainConfig[] = [
       uniV3('https://developers.uniswap.org/docs/protocols/v3/deployments/v3-robinhood-deployments', 'uniswap-v3-robinhood', {
         factory: '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA', router: '0xCaf681a66D020601342297493863E78C959E5cb2', quoter: '0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7',
       }),
-      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap-v2-robinhood', factory: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f', router: '0x89e5DB8B5aA49aA85AC63f691524311AEB649eba', feeBps: 30, source: 'https://github.com/Uniswap/contracts/blob/main/deployments/4663.md' },
-      { id: 'pancakeswap-v3', name: 'PancakeSwap V3', kind: 'v3', gecko: 'pancakeswap-v3-robinhood', factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865', router: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4', quoter: '0x8553AA1615549A86882151784b329B017aA7c832', feeTiers: TIERS_CAKE, source: 'https://developer.pancakeswap.finance/contracts/v3/addresses', note: 'Thin liquidity on WETH/USDG (Oct 2026); auto-pick prefers Uniswap.' },
+      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap-v2-robinhood', factory: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f', router: '0x89e5DB8B5aA49aA85AC63f691524311AEB649eba', feeBps: 30, lpShare: UNI_V2_LP_SHARE, source: 'https://github.com/Uniswap/contracts/blob/main/deployments/4663.md' },
+      { id: 'pancakeswap-v3', name: 'PancakeSwap V3', kind: 'v3', gecko: 'pancakeswap-v3-robinhood', factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865', router: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4', quoter: '0x8553AA1615549A86882151784b329B017aA7c832', feeTiers: TIERS_CAKE, protocolFee: 'pancake', source: 'https://developer.pancakeswap.finance/contracts/v3/addresses', note: 'Thin liquidity on WETH/USDG (Oct 2026); auto-pick prefers Uniswap.' },
     ],
     stack: 'arbitrum', gasUnits: { approve: 60_000, swap: 220_000 }, lowGasNative: 0.0005, blockTimeSec: 0.25, logChunk: 20_000,
     sources: [
@@ -184,7 +206,7 @@ export const CHAINS: ChainConfig[] = [
     explorer: 'https://etherscan.io', geckoSlug: 'eth', status: 'live', trading: { enabled: true },
     dexes: [
       uniV3('https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments', 'uniswap_v3'),
-      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap_v2', factory: '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f', router: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', feeBps: 30, source: UNI_V2_SRC },
+      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap_v2', factory: '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f', router: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', feeBps: 30, lpShare: UNI_V2_LP_SHARE, source: UNI_V2_SRC },
     ],
     stack: 'l1', gasUnits: { approve: 60_000, swap: 180_000 }, lowGasNative: 0.01, blockTimeSec: 12, logChunk: 2000,
     sources: [

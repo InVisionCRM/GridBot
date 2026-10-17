@@ -88,12 +88,26 @@ Sources:
 3. **Safety.** New tokens go through the same `hub.inspect` as Markets → Add (deepest pool on a DEX the app trades, honeypot / tax simulation). Anything not allowed live is left out, with the reason.
 4. **Test.** The last 7 days of hourly candles from that pool replay through the grid backtester:
    - with the pool's real fee, depth (V3 active range) and gas (`Quoter.market()` → `costModelOf`);
-   - using about $1,000 of the spend coin, so gas weighs the same on every chain;
+   - using the **test size** next to Scan now (default $1,000 of the spend coin; set it to what you plan to put in, since price impact and your share of a pool depend on it). It is kept for the daily scans after;
    - over ranges ±5/8/12/18/25% × 6/10/14/20/30/40 levels.
    - Markets already in the app reuse their saved hourly candles (kept by the candle sync) when they cover the week up to the last 2 hours, so they cost no GeckoTerminal request.
 
    The best setup per pair is kept if it made money **and** sold in at least 3 different hours. One spike is not a pattern: the first real scan ranked USDG/USDC first at +1.99% from a single stablecoin wick, and one wick through several levels completes several round trips inside the same candle.
 5. **Picks.** The 3 best pairs per chain, with the week's result, trades, buy-and-hold for comparison and the worst dip. **Why other pools were left out** lists every skip with its reason.
+6. **Grid vs liquidity position vs holding** (`src/market/lp.ts`), for every tested pair, same week and test size. A liquidity position (LP) is opened at the first hour (swap part of the money into the coin, approve both, add liquidity) and held; it earns `volume × pool fee × LP share × your share of the pool's active liquidity` for the part of each hour the price is inside its range, and closing gas is charged at the end. V3 tries ±5/8/12/18/25% and full range; V2 is always full range. The pool's liquidity is today's, held constant over the week (the same approximation the grid's depth uses). Each row also shows the price impact of putting the whole test amount in at once: at $25,000 the PulseChain PLS/USDT pool (≈$28k) showed "hold −96%" in a week PLS fell ≈38%.
+
+   What liquidity providers really keep of the fee, measured 2026-10-17 (DEX field `lpShare` / `protocolFee` in `src/live/chains.ts`):
+
+   | DEX | LPs keep | Evidence |
+   |---|---|---|
+   | PulseX V1 | ~0% | every fee mint to feeTo = the whole √k growth (6 mints); a DAI/WPLS LP token was flat over 30 days in a pool trading ≈1× its size daily |
+   | PulseX V2 | 22/29 (0.22% of 0.29%) | feeTo gets 0.2414 = 7/29 of the √k growth on every mint (6 mints) |
+   | 9mm V2 | not verified | feeTo set, no fee mint in ~35 days (pools ≈$1k); the LP column says so |
+   | 9mm V3, PancakeSwap V3 | 68% / 67% | read live from `slot0().feeProtocol` (3200 / 3300 of 10 000); Swap events' protocol-fee totals grow by exactly that share |
+   | Uniswap V3 (Ethereum, Robinhood) | 75% (0.01/0.05% pools), 83.3% (0.3%) | read live from `slot0().feeProtocol` (68 → 1/4, 102 → 1/6); `protocolFees()` grew by 0.2500 of the fee on single swaps |
+   | Uniswap V2 (Ethereum, Robinhood) | 5/6 | pair code byte-identical on both chains, feeTo set → canonical 1/6 to the protocol |
+
+   Gas per LP action (medians of real transactions): V3 open 480k, close 250k; V2 add 170k, remove 215k. Candle volume is in the spend coin (checked: a HEX/WPLS pool's hourly volumes summed to 55.4B WPLS = $313.5k vs its $314.4k 24 h volume). This only compares; the app does not open liquidity positions.
 
 While it runs, Home shows the chain and step ("Scanning Robinhood Chain (2 of 3): testing pairs 5 of 11…"). A scan takes a few minutes: each new token's safety simulation takes ~5 s and each pair needs one GeckoTerminal request.
 
