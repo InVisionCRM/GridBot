@@ -6,6 +6,7 @@
  */
 import { Interface } from 'ethers';
 import { TFS, TF_CAP, TF_SEC, type Candle, type TF } from '../../market/candles';
+import { unflipKey } from '../../live/markets';
 import type { LiveNetwork } from '../../live/networks';
 import type { CandleStore } from './candleStore';
 import { RateLimited, type GeckoSource } from './gecko';
@@ -89,14 +90,24 @@ export async function geckoBackfill(gecko: GeckoSource, src: CandleSource, store
   return got;
 }
 
+/** Timeframes kept from GeckoTerminal for a market nothing uses; its 1m–15m candles build up from the bot's own polls. */
+export const IDLE_TFS: TF[] = ['1h', '4h', '1d'];
+/** A chart opened this recently counts as in use (all timeframes). */
+export const VIEW_MS = 30 * 60_000;
+/** Newest candles fetched per refresh; a saved series newer than this many bars needs no backfill after a restart. */
+export const REFRESH_LIMIT = 100;
+
 /**
- * Background GeckoTerminal scheduler across every market with a Gecko slug: initial backfill per
- * market×timeframe, then round-robin refresh of the newest candles (each series refreshed every max(2 min, tf/2)).
- * Throttling + 429 backoff live in GeckoSource. Markets are re-read on every step (custom markets appear live).
+ * Background GeckoTerminal scheduler. Markets in use (a bot, an alert, or a chart opened in the last VIEW_MS) get every
+ * timeframe; every other market gets IDLE_TFS. Each series is backfilled once (skipped when the saved series is
+ * recent), then refreshed every max(2 min, tf/2). Throttling + 429 backoff live in GeckoSource, which the daily scan
+ * shares: syncing every timeframe of all 19 built-in markets took ~20 of the ~24 requests a minute and starved it.
+ * Markets are re-read on every step (custom markets appear live).
  */
 export class CandleSync {
   private due = new Map<string, number>();
   private backfilled = new Set<string>();
+  private viewed = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private busy = false;
   lastError: string | null = null;
@@ -105,7 +116,7 @@ export class CandleSync {
 
   constructor(
     private readonly gecko: GeckoSource, private readonly sources: () => CandleSource[], private readonly store: CandleStore,
-    private readonly opts: { onEvent?: (msg: string, level: 'info' | 'warn') => void; now?: () => number } = {},
+    private readonly opts: { onEvent?: (msg: string, level: 'info' | 'warn') => void; now?: () => number; active?: () => ReadonlySet<string> } = {},
   ) {}
 
   private now() { return (this.opts.now ?? Date.now)(); }
@@ -113,15 +124,33 @@ export class CandleSync {
   get pairs() { return this.list().map((s) => s.key); }
   private src(key: string) { return this.list().find((s) => s.key === key) ?? null; }
 
+  /** A chart of this market was opened: sync every timeframe for the next VIEW_MS. */
+  view(pair: string) { this.viewed.set(unflipKey(pair), this.now() + VIEW_MS); }
+  private inUse(pair: string) { return !!this.opts.active?.().has(pair) || (this.viewed.get(pair) ?? 0) > this.now(); }
+  tfsFor(pair: string): readonly TF[] { return this.inUse(pair) ? TFS : IDLE_TFS; }
+
+  /** False when backfilled this run, or when the saved series is recent enough for a refresh to close the gap. */
+  private needsBackfill(pair: string, tf: TF): boolean {
+    const key = `${pair}|${tf}`;
+    if (this.backfilled.has(key)) return false;
+    const s = this.store.get(pair, tf), last = s[s.length - 1];
+    if (this.store.getMeta(pair, tf)?.backfilledTo != null && last && last.t >= this.now() / 1000 - REFRESH_LIMIT * TF_SEC[tf]) {
+      this.backfilled.add(key);
+      return false;
+    }
+    return true;
+  }
+
   /** Next task: missing backfills first (higher timeframes first: most useful), then the most overdue refresh. */
   nextTask(): { pair: string; tf: TF; kind: 'backfill' | 'refresh' } | null {
     const pairs = this.pairs;
     const order: TF[] = ['1h', '4h', '1d', '15m', '5m', '1m'];
     for (const tf of order) for (const pair of pairs) {
-      if (!this.backfilled.has(`${pair}|${tf}`)) return { pair, tf, kind: 'backfill' };
+      if (this.tfsFor(pair).includes(tf) && this.needsBackfill(pair, tf)) return { pair, tf, kind: 'backfill' };
     }
     let best: { pair: string; tf: TF; at: number } | null = null;
     for (const tf of TFS) for (const pair of pairs) {
+      if (!this.tfsFor(pair).includes(tf)) continue;
       const at = this.due.get(`${pair}|${tf}`) ?? 0;
       if (at <= this.now() && (!best || at < best.at)) best = { pair, tf, at };
     }
@@ -139,7 +168,7 @@ export class CandleSync {
         this.backfilled.add(key);
         this.opts.onEvent?.(`Candles ${src.label} ${t.tf}: backfilled ${n} from GeckoTerminal`, 'info');
       } else {
-        const k = await this.gecko.ohlcv(src.pool, src.base.address, t.tf, undefined, 100, { network: src.network!, feeBps: src.feeBps });
+        const k = await this.gecko.ohlcv(src.pool, src.base.address, t.tf, undefined, REFRESH_LIMIT, { network: src.network!, feeBps: src.feeBps });
         this.store.merge(t.pair, t.tf, k, 'gecko');
       }
       this.due.set(key, this.now() + Math.max(120_000, (TF_SEC[t.tf] * 1000) / 2));
@@ -168,7 +197,8 @@ export class CandleSync {
   stop() { if (this.timer) clearTimeout(this.timer); this.timer = null; }
 
   status() {
-    const n = this.pairs.length;
-    return { enabled: this.enabled, backfilled: this.backfilled.size, total: n * TFS.length, markets: n, lastError: this.lastError, lastOkAt: this.lastOkAt, blockedUntil: this.gecko.blockedUntil || null, calls: this.gecko.calls };
+    const pairs = this.pairs;
+    const series = pairs.flatMap((p) => this.tfsFor(p).map((tf) => `${p}|${tf}`));
+    return { enabled: this.enabled, backfilled: series.filter((k) => this.backfilled.has(k)).length, total: series.length, markets: pairs.length, lastError: this.lastError, lastOkAt: this.lastOkAt, blockedUntil: this.gecko.blockedUntil || null, calls: this.gecko.calls };
   }
 }

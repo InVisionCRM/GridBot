@@ -94,6 +94,8 @@ Sources:
    The best setup per pair is kept if it made money **and** sold in at least 3 different hours. One spike is not a pattern: the first real scan ranked USDG/USDC first at +1.99% from a single stablecoin wick, and one wick through several levels completes several round trips inside the same candle.
 5. **Picks.** The 3 best pairs per chain, with the week's result, trades, buy-and-hold for comparison and the worst dip. **Why other pools were left out** lists every skip with its reason.
 
+While it runs, Home shows the chain and step ("Scanning Robinhood Chain (2 of 3): testing pairs 5 of 11…"). A scan takes a few minutes: each new token's safety simulation takes ~5 s and each pair needs one GeckoTerminal request.
+
 **Use this** adds the market if it is new (safety re-checked) and opens New bot on the custom tab with that pair, width and levels, centred on today's price. Nothing is started for you: you enter the amount and choose paper or live. Tokens paired with WPLS/WETH are added so they **spend native PLS/ETH** (wrapped inside the swap, like HEX/PLS), with the gas set-aside. The scan is off with `CANDLES_GECKO=off`.
 
 **Follow the price up** (auto-recenter, `GridEngine.followUp`) is on for grids started from New bot and can be switched on any grid's page. When the price has stayed above the range for 2 h with every level sold (nothing held, queued or in flight), the range moves up around the price. The width, level count and amount stay the same, and trades and profit carry over. It moves at most once every 6 h. It **never moves down**: below the range the grid keeps what it bought and waits. Each move is logged and notified.
@@ -290,6 +292,7 @@ Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the
 - Prices use the grid's units: quote per PLS, sell side (× (1 − 0.29%)).
 - Storage: `data/candles/<PAIR>.json`, capped per timeframe: 1m 3000 (~2 days), 5m 4000 (~14 days), 15m 4000 (~42 days), 1h 5000 (~208 days), 4h 3000, 1d 1500. Long history therefore lives in 1h and up.
 - Gaps (no trades) are filled with flat candles (greyed in the chart).
+- **What the background sync keeps:** every timeframe for pairs in use (a bot, an alert, or a chart opened in the last 30 min); only 1h / 4h / 1d for the rest (their 1m–15m candles build up from the live poll). A saved series recent enough for one refresh (100 candles) is not downloaded again after a restart. Measured (simulated clock): with all 19 built-in pairs synced on every timeframe the sync wanted ~20.5 GeckoTerminal requests a minute, nearly the whole ~24/min budget it shares with the daily scan, which then crawled through 429 back-offs; now ~0.7/min with nothing in use, ~2.8/min with two pairs in use.
 
 ```bash
 npm run candles:backfill -- --pair DAI --days 90 --source onchain   # stop the server first

@@ -95,6 +95,12 @@ function PickRow({ k, use, busy }: { k: AnyObj; use: (k: AnyObj) => void; busy: 
   );
 }
 
+/** "Scanning Robinhood Chain (2 of 3): testing pairs 5 of 11…" */
+function scanStep(g: AnyObj | null): string {
+  if (!g) return 'Scanning…';
+  return `Scanning ${g.chain} (${g.chainNo} of ${g.chains}): ${g.phase}${g.phase === 'finding pools' ? '' : ` ${g.done + 1} of ${g.total}`}…`;
+}
+
 /** Today's picks: the daily scan's best grid setups per chain, tested on the last 7 days of hourly prices. */
 function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | 'all'; nav: Nav; act: Props['act']; busy: boolean }) {
   const [p, setP] = useState<AnyObj | null>(null);
@@ -118,7 +124,7 @@ function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | '
     <section className="card" aria-label="Today's picks">
       <div className="card-head">
         <h3>Today's picks</h3>
-        <span className="muted small">{p.running ? 'Scanning the busiest pools… (a few minutes)' : p.at ? `scanned ${ago(p.at)} · next scan ${time(p.nextAt)}` : 'not scanned yet'}</span>
+        <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `scanned ${ago(p.at)} · next scan ${time(p.nextAt)}` : 'not scanned yet'}</span>
         <span className="grow" />
         <button type="button" className="btn small-btn" disabled={busy || p.running} onClick={scan}>{p.running ? 'Scanning…' : 'Scan now'}</button>
       </div>
