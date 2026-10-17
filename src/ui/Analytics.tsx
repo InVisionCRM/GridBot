@@ -19,7 +19,7 @@ export function MarketPanels({ panels }: { panels: AnyObj[] }) {
     <div className="mkt-grid">
       {panels.map((m) => (
         <div key={m.pair} className={`mkt regime-${m.regime.kind}`}>
-          <div className="mkt-head">{m.chainShort && !m.legacy ? <span className="chain-badge" style={{ ['--cc' as string]: m.chainColor }}>{m.chainShort}</span> : null}<strong>{m.base ?? 'PLS'}/{m.quote ?? m.pair}</strong>{m.custom ? <RiskBadge risk={m.safety?.risk ?? 'unknown'} /> : null}<Spark data={m.spark} /><span className={`regime-tag ${m.regime.kind}`}>{m.regime.kind}</span></div>
+          <div className="mkt-head">{m.chainShort && !m.legacy ? <span className="chain-badge" style={{ ['--cc' as string]: m.chainColor }}>{m.chainShort}</span> : null}<strong>{m.base ?? 'PLS'}/{m.quote ?? m.pair}</strong>{m.custom || m.safety ? <RiskBadge risk={m.safety?.risk ?? 'unknown'} /> : null}<Spark data={m.spark} /><span className={`regime-tag ${m.regime.kind}`}>{m.regime.kind}</span></div>
           <div className="mkt-px">{px(m.spot)} <small className="muted">{m.quote ?? m.pair}/{m.base ?? 'PLS'} · {m.dexName ?? 'PulseX V2'} {m.feeBps != null ? feeLabel({ feeBps: m.feeBps, feeTier: m.feeTier, kind: m.feeTier != null ? 'v3' : 'v2' }) : ''}</small></div>
           <div className="mkt-row"><span>24h</span><b className={cls(m.change24h)}>{pct(m.change24h, 2, true)}</b><span>7d</span><b className={cls(m.change7d)}>{pct(m.change7d, 2, true)}</b></div>
           <div className="mkt-row"><span>Liquidity</span><b>{m.liquidityUsd ? usd(m.liquidityUsd) : '—'}</b><span>Vol 24h</span><b title={m.volumeNote}>{m.volume24hUsd ? usd(m.volume24hUsd) : '—'}</b></div>

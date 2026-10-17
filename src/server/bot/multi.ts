@@ -164,7 +164,7 @@ export class MultiBot {
     for (const t of this.multi.trends) this.attachTrend(t.id);
     this.taxWatch = new TaxWatch({
       now: () => this.now(),
-      markets: () => this.watchedCustomKeys(),
+      markets: () => this.watchedSafetyKeys(),
       current: (k) => this.hub.def(k).safety,
       recheck: (k) => this.hub.recheck(k),
       pause: (k, why) => this.pauseMarket(k, why),
@@ -174,12 +174,12 @@ export class MultiBot {
     this.hub.onSuspect = (k, why) => { void this.taxWatch.suspect(k, why); };
   }
 
-  /** Custom markets that have a running or in-flight bot — the tax watcher only re-checks these. */
-  private watchedCustomKeys(): string[] {
+  /** Markets with a safety report (custom tokens, verified built-ins) that have a running or in-flight bot — the tax watcher only re-checks these. */
+  private watchedSafetyKeys(): string[] {
     const keys = new Set<string>();
     // Safety lives on the original market; a flipped bot (custom~) is watched through it.
-    for (const e of this.engines.values()) if (e.def?.custom && (e.state.status === 'running' || e.state.inFlight)) keys.add(unflipKey(e.state.stable));
-    for (const e of this.trendEngines.values()) if (e.def?.custom && (e.state.status === 'running' || e.state.inFlight)) keys.add(unflipKey(e.state.quote));
+    for (const e of this.engines.values()) if (e.def?.safety && (e.state.status === 'running' || e.state.inFlight)) keys.add(unflipKey(e.state.stable));
+    for (const e of this.trendEngines.values()) if (e.def?.safety && (e.state.status === 'running' || e.state.inFlight)) keys.add(unflipKey(e.state.quote));
     return [...keys];
   }
 
@@ -1038,7 +1038,7 @@ export class MultiBot {
       // Built-in PulseChain markets resolve their PulseX V2 pair via getPair; candlePool is that same verified pair.
       pool: d.pool.address || (d.legacy && d.pool.dex === 'pulsex-v2' ? d.candlePool ?? null : null),
       poolMode: d.poolMode ?? (d.custom ? 'manual' : 'default'), poolChoices: this.hub.rt(d.chainId).adapters.size,
-      legacy: !!d.legacy, custom: !!d.custom, risk: d.safety?.risk ?? null, liveAllowed: d.custom ? !!d.safety?.liveAllowed : true,
+      legacy: !!d.legacy, custom: !!d.custom, risk: d.safety?.risk ?? null, liveAllowed: d.safety ? d.safety.liveAllowed : true,
       buyTaxPct: d.safety?.buyTaxPct ?? null, sellTaxPct: d.safety?.sellTaxPct ?? null, transferTaxPct: d.safety?.transferTaxPct ?? null,
       taxMode: d.safety?.taxMode ?? null, maxTxTokens: d.safety?.maxTxTokens ?? null, maxWalletTokens: d.safety?.maxWalletTokens ?? null,
       tradable: this.hub.rt(d.chainId).tradable,

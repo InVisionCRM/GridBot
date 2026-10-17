@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeEconomics, MIN_SPACING_PCT } from '../src/live/economics';
+import { analyzeEconomics } from '../src/live/economics';
 import { analyzeSpacing } from '../src/live/spacing';
 import { getPreset, listPresets, resolvePreset, STRATEGY_PRESETS } from '../src/live/presets';
 import { MultiBot, type MultiState } from '../src/server/bot/multi';
@@ -64,7 +64,6 @@ describe('strategy presets', () => {
     for (const p of STRATEGY_PRESETS) {
       for (const leg of resolvePreset(p, SPOTS, 'DAI', SAMPLE)) {
         const e = econ(leg.quote, leg.lowerPrice, leg.upperPrice, leg.gridCount, leg.capital!);
-        expect(leg.spacing.worstSpacingFrac, `${p.id}/${leg.quote}`).toBeGreaterThanOrEqual(MIN_SPACING_PCT);
         expect(e.ok, `${p.id}/${leg.quote}: ${e.reasons.join(' ')}`).toBe(true);
         expect(e.netPerRoundTrip).toBeGreaterThan(0);
       }

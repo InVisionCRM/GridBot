@@ -3,7 +3,7 @@
  * math, start-check thresholds, limits or preset params.
  */
 import { useEffect } from 'react';
-import { FEE_BPS, MIN_NET_PCT, MIN_SPACING_PCT } from './live/economics';
+import { FEE_BPS, MIN_NET_PCT } from './live/economics';
 import { DEFAULT_LIMITS, HARD_CAPS } from './live/limits';
 import { STRATEGY_PRESETS } from './live/presets';
 import { MAX_GRID_COUNT, MIN_GRID_COUNT } from './live/spacing';
@@ -150,12 +150,13 @@ export function Guide({ onClose }: { onClose: () => void }) {
             <div className="guide-grid3">
               <div className="stat"><b>{p(fee)}</b><span>PulseX pool fee per swap</span></div>
               <div className="stat"><b>{p(rt, 3)}</b><span>per completed trade (buy + sell)</span></div>
-              <div className="stat"><b>{p(MIN_SPACING_PCT * 100, 1)}</b><span>minimum gap between levels</span></div>
+              <div className="stat"><b>0.01–0.05%</b><span>Uniswap pool fee per swap on Ethereum and Robinhood's main pairs</span></div>
             </div>
             <ul className="tight">
               <li><b>Price impact</b> grows with the size of each level compared to the pool. Small pools make it large.</li>
-              <li><b>Gas</b> is a fixed cost per swap, so tiny levels lose most of their gap to it. On Ethereum, gas usually makes small grids unprofitable.</li>
-              <li><b>Profit check:</b> using today's pool and gas price, New bot tells you in one sentence what each completed trade nets in the coin you spend. A level gap under {p(MIN_SPACING_PCT * 100, 1)}, or less than {p(MIN_NET_PCT * 100)} kept after costs, is flagged as likely to lose money. It never stops you from starting.</li>
+              <li><b>Gas</b> is a fixed cost per swap, so tiny levels lose most of their gap to it. PulseChain gas is the cheapest; Robinhood (an L2) is next; Ethereum gas swings a lot, so read the profit sentence before starting there.</li>
+              <li><b>Lower pool fees allow closer levels.</b> A grid on a 0.05% pool keeps money with levels well under 1% apart, where PulseX's 0.29% fee needs about 0.85% or more.</li>
+              <li><b>Profit check:</b> using today's pool fee, depth and gas price, New bot tells you in one sentence what each completed trade nets in the coin you spend. Keeping less than {p(MIN_NET_PCT * 100)} after costs is flagged. It never stops you from starting.</li>
             </ul>
           </section>
 

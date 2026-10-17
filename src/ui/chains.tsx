@@ -89,7 +89,7 @@ export function MarketOptions({ s, all = false, includeKey, flipped = false }: {
         <optgroup key={c.id} label={`${c.name}${c.status === 'testnet' ? ' (TESTNET)' : ''}`}>
           {list.map((m) => (
             <option key={m.key} value={m.key}>
-              {flipped ? mk(s, flipKey(m.key)).label : m.label}{m.custom ? ` · ${m.risk ?? 'unchecked'}${m.liveAllowed ? '' : ' (paper only)'}` : ''}
+              {flipped ? mk(s, flipKey(m.key)).label : m.label}{m.custom || m.risk ? ` · ${m.risk ?? 'unchecked'}${m.liveAllowed ? '' : ' (paper only)'}` : ''}
             </option>
           ))}
         </optgroup>
