@@ -13,8 +13,6 @@
 import { calculateGridLevels } from '../engine/gridEngine';
 
 export const FEE_BPS = 29;
-/** Gross spacing floor (worst interval). */
-export const MIN_SPACING_PCT = 0.01;
 /** Required net edge per completed round-trip, as a fraction of level size, after fee + impact + gas. */
 export const MIN_NET_PCT = 0.0025;
 export const GAS_UNITS_RT = { approve: 60_000, swap: 220_000 };
@@ -149,11 +147,9 @@ export function analyzeEconomics(i: EconInput): EconReport {
   if (buyLevels === 0) reasons.push('No grid levels below spot.');
   if (!(k > 0)) reasons.push('Pool has no liquidity.');
   if (worst) {
-    // Spacing must clear the floor PLUS the round-trip tax (a 5%/5% token needs > 10% between levels to net anything).
+    // Judged on what a round trip keeps after THIS pool's fee, token tax, impact and gas. A fixed spacing floor (the
+    // old 1%, tuned for PulseX's 0.29% fee) flagged profitable grids on 0.01–0.05% Uniswap pools as losing.
     const rtTax = 1 - (1 - tb) * (1 - ts);
-    if (minSpacing < MIN_SPACING_PCT + rtTax) {
-      reasons.push(`Spacing ${(minSpacing * 100).toFixed(3)}% < ${(MIN_SPACING_PCT * 100).toFixed(1)}% floor${rtTax > 0 ? ` + ${(rtTax * 100).toFixed(2)}% round-trip tax (buy ${(tb * 100).toFixed(2)}% / sell ${(ts * 100).toFixed(2)}%)` : ''} (round-trip fee${rtTax > 0 ? ' + tax' : ''} ${(rtFee * 100).toFixed(3)}%).`);
-    }
     if (worst.netQuote <= 0) {
       reasons.push(`Net per round-trip ≤ 0 (${worst.netQuote.toPrecision(4)}) after round-trip fee${rtTax > 0 ? ', token tax' : ''}, impact and gas.`);
     } else if (worst.netPct < MIN_NET_PCT) {

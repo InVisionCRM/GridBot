@@ -160,13 +160,49 @@ export function legacyMarkets(net: LiveNetwork): MarketDef[] {
   }));
 }
 
+/** Safety report of a built-in market on the day it was verified (re-run before every live start and while bots run). */
+const VERIFIED_AT = Date.parse('2026-10-17T10:00:00Z');
+function verified(risk: SafetyReport['risk'], reason: string, proxy: string | null, liquidityUsd: number): SafetyReport {
+  return {
+    at: VERIFIED_AT, risk, liveAllowed: true, reasons: [reason], buyTaxPct: 0, sellTaxPct: 0, transferTaxPct: 0, honeypot: false,
+    proxy: proxy ? { kind: proxy } : null, depth: [], liquidityUsd, simulated: true, taxMode: 'none', paused: false,
+  };
+}
+const CLEAN = 'Simulated buy, transfer and sell matched quotes exactly; no proxy; adequate depth.';
+const STOCK = 'Upgradeable proxy (EIP-1967 beacon) — the issuer (Robinhood) can change the token logic.';
+
+type BuiltInToken = { symbol: string; name: string; address: string; decimals: number };
 /**
- * One verified default market per non-PulseChain chain (wrapped native vs its deepest stable pool,
- * picked by on-chain quote at 2026-10-08). Pools are re-discoverable from the UI.
+ * Built-in markets outside PulseChain. `base`/`quote` 'native' = the chain's native coin (traded through the wrapper);
+ * a quote string is a stablecoin symbol of the chain. Native/stable pairs come first (the first is the chain's USD
+ * reference). Token pairs were verified 2026-10-17 with hub.inspect on live RPCs: deepest pool for a ≈$1,000 trade,
+ * decimals read on-chain, and the eth_call buy → transfer → sell simulation (no tax, no honeypot, not paused).
  */
-const DEFAULTS: { chain: string; quote: string; dex: string; tier: number; pool: string; probe: number }[] = [
-  { chain: 'robinhood', quote: 'USDG', dex: 'uniswap-v3', tier: 100, pool: '0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca', probe: 0.01 },
-  { chain: 'ethereum', quote: 'USDC', dex: 'uniswap-v3', tier: 500, pool: '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640', probe: 0.01 },
+const DEFAULTS: { chain: string; base: 'native' | BuiltInToken; quote: 'native' | string; pool: PoolRef; probe: number; safety?: SafetyReport }[] = [
+  { chain: 'robinhood', base: 'native', quote: 'USDG', pool: { dex: 'uniswap-v3', kind: 'v3', address: '0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca', feeBps: 1, feeTier: 100 }, probe: 0.01 },
+  { chain: 'robinhood', base: { symbol: 'NVDA', name: 'NVIDIA • Robinhood Token', address: '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC', decimals: 18 }, quote: 'USDG',
+    pool: { dex: 'uniswap-v3', kind: 'v3', address: '0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3', feeBps: 5, feeTier: 500 }, probe: 0.1, safety: verified('medium', STOCK, 'EIP-1967 beacon', 3_064_160) },
+  { chain: 'robinhood', base: { symbol: 'SPY', name: 'SPDR S&P 500 ETF Trust • Robinhood Token', address: '0x117cc2133c37B721F49dE2A7a74833232B3B4C0C', decimals: 18 }, quote: 'USDG',
+    pool: { dex: 'uniswap-v3', kind: 'v3', address: '0xa7Bb1AC63BBaB0C44316E6c8C455213441689167', feeBps: 5, feeTier: 500 }, probe: 0.03, safety: verified('medium', STOCK, 'EIP-1967 beacon', 245_642) },
+  { chain: 'robinhood', base: { symbol: 'GOOGL', name: 'Alphabet Class A • Robinhood Token', address: '0x2e0847E8910a9732eB3fb1bb4b70a580ADAD4FE3', decimals: 18 }, quote: 'USDG',
+    pool: { dex: 'uniswap-v3', kind: 'v3', address: '0x34D0dC122CF9A8Eb296fC5e0D3A233625D7d19b7', feeBps: 5, feeTier: 500 }, probe: 0.07, safety: verified('medium', STOCK, 'EIP-1967 beacon', 812_153) },
+  { chain: 'robinhood', base: { symbol: 'SPCX', name: 'Space Exploration Technologies Corp. Class A Common Stock • Robinhood Token', address: '0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa', decimals: 18 }, quote: 'USDG',
+    pool: { dex: 'uniswap-v3', kind: 'v3', address: '0xc61284332117c3FB23A2A56cceFFD07F7aF60029', feeBps: 5, feeTier: 500 }, probe: 0.2, safety: verified('medium', STOCK, 'EIP-1967 beacon', 1_351_331) },
+  { chain: 'robinhood', base: { symbol: 'CRCL', name: 'Circle Internet Group • Robinhood Token', address: '0xdF0992E440dD0be65BD8439b609d6D4366bf1CB5', decimals: 18 }, quote: 'USDG',
+    pool: { dex: 'uniswap-v3', kind: 'v3', address: '0x654E4143e82a5824445Ade0824351C2A9ACD95a8', feeBps: 30, feeTier: 3000 }, probe: 0.3, safety: verified('medium', STOCK, 'EIP-1967 beacon', 2_512_336) },
+  { chain: 'robinhood', base: { symbol: 'USO', name: 'United States Oil Fund • Robinhood Token', address: '0xa30FA36Db767ad9eD3f7a60fC79526fB4d56D344', decimals: 18 }, quote: 'USDG',
+    pool: { dex: 'uniswap-v3', kind: 'v3', address: '0x02175608F1b5E6b5ed221cCFdC7Be197D111D915', feeBps: 30, feeTier: 3000 }, probe: 0.15, safety: verified('medium', STOCK, 'EIP-1967 beacon', 2_198_092) },
+  { chain: 'ethereum', base: 'native', quote: 'USDC', pool: { dex: 'uniswap-v3', kind: 'v3', address: '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640', feeBps: 5, feeTier: 500 }, probe: 0.01 },
+  { chain: 'ethereum', base: { symbol: 'WBTC', name: 'Wrapped BTC', address: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599', decimals: 8 }, quote: 'USDT',
+    pool: { dex: 'uniswap-v3', kind: 'v3', address: '0x56534741CD8B152df6d48AdF7ac51f75169A83b2', feeBps: 5, feeTier: 500 }, probe: 0.0003, safety: verified('low', CLEAN, null, 32_489_594) },
+  { chain: 'ethereum', base: { symbol: 'WBTC', name: 'Wrapped BTC', address: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599', decimals: 8 }, quote: 'native',
+    pool: { dex: 'uniswap-v3', kind: 'v3', address: '0xe6ff8b9A37B0fab776134636D9981Aa778c4e718', feeBps: 1, feeTier: 100 }, probe: 0.0003, safety: verified('low', CLEAN, null, 778_754) },
+  { chain: 'ethereum', base: { symbol: 'LINK', name: 'ChainLink Token', address: '0x514910771AF9Ca656af840dff83E8264EcF986CA', decimals: 18 }, quote: 'native',
+    pool: { dex: 'uniswap-v3', kind: 'v3', address: '0x5d4F3C6fA16908609BAC31Ff148Bd002AA6b8c83', feeBps: 5, feeTier: 500 }, probe: 2, safety: verified('low', CLEAN, null, 439_110) },
+  { chain: 'ethereum', base: { symbol: 'PEPE', name: 'Pepe', address: '0x6982508145454Ce325dDbE47a25d4ec3d2311933', decimals: 18 }, quote: 'native',
+    pool: { dex: 'uniswap-v2', kind: 'v2', address: '0xA43fe16908251ee70EF74718545e4FE6C5cCEc9f', feeBps: 30 }, probe: 6_000_000, safety: verified('low', CLEAN, null, 28_930_325) },
+  { chain: 'ethereum', base: { symbol: 'HEX', name: 'HEX', address: '0x2b591e99afE9f32eAA6214f7B7629768c40Eeb39', decimals: 8 }, quote: 'native',
+    pool: { dex: 'uniswap-v2', kind: 'v2', address: '0x55D5c232D921B9eAA6b37b5845E439aCD04b4DBa', feeBps: 30 }, probe: 40_000, safety: verified('low', CLEAN, null, 350_951) },
 ];
 
 export function defaultMarkets(chains: ChainConfig[] = CHAINS): MarketDef[] {
@@ -174,14 +210,15 @@ export function defaultMarkets(chains: ChainConfig[] = CHAINS): MarketDef[] {
   for (const d of DEFAULTS) {
     const c = chains.find((x) => x.key === d.chain);
     if (!c || !c.trading.enabled) continue;
-    const st = c.stables.find((s) => s.symbol === d.quote)!;
     const wn = c.wrappedNative;
+    const native: MarketToken = { address: wn.address, symbol: c.nativeSymbol, name: c.nativeSymbol, decimals: 18, native: true };
+    const base: MarketToken = d.base === 'native' ? native : { ...d.base };
+    const st = d.quote === 'native' ? null : c.stables.find((x) => x.symbol === d.quote);
+    if (d.quote !== 'native' && !st) throw new Error(`built-in market: ${d.quote} is not a stablecoin of ${c.name}`);
+    const quote: MarketToken = st ? { address: st.address, symbol: st.symbol, name: st.name, decimals: st.decimals } : native;
     out.push({
-      key: `${c.key}:${c.nativeSymbol}/${st.symbol}`, chainId: c.id,
-      base: { address: wn.address, symbol: c.nativeSymbol, name: c.nativeSymbol, decimals: 18, native: true },
-      quote: { address: st.address, symbol: st.symbol, name: st.name, decimals: st.decimals },
-      pool: { dex: d.dex, kind: 'v3', address: d.pool, feeBps: d.tier / 100, feeTier: d.tier },
-      probe: d.probe, quoteKind: 'stable', candlePool: d.pool,
+      key: `${c.key}:${base.symbol}/${quote.symbol}`, chainId: c.id, base, quote, pool: { ...d.pool },
+      probe: d.probe, quoteKind: st ? 'stable' : 'wrapped', candlePool: d.pool.address, ...(d.safety ? { safety: { ...d.safety } } : {}),
     });
   }
   return out;

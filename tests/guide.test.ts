@@ -24,7 +24,7 @@ describe('Guide', () => {
   it('shows the real fee math, start-check thresholds and limits', () => {
     expect(html).toContain('0.29%'); // per swap
     expect(html).toContain('0.579%'); // per round-trip
-    expect(html).toContain('1.0%'); // spacing floor
+    expect(html).toContain('0.01–0.05%'); // Uniswap pool fees on Ethereum / Robinhood
     expect(html).toContain('0.25%'); // net margin
     expect(html).toMatch(/Default 3%, max 5%/); // impact
     expect(html).toMatch(/Default 1%, max 5%/); // slippage

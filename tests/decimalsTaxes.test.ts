@@ -8,7 +8,7 @@ import { getAddress } from 'ethers';
 import { amountToUnits, clearDecimalsCache, decimalsWarning, parseDecimalsWord, plainDecimal, readDecimals, unitsToString } from '../src/live/decimals';
 import { afterTax, fmtTax, isTaxed, MAX_TAX, NO_TAX, roundTripTax, taxRise, taxesOf, TAX_TOLERANCE } from '../src/live/tax';
 import { toUnits, fromUnits, applySlippage } from '../src/live/swapMath';
-import { analyzeEconomics, MIN_SPACING_PCT } from '../src/live/economics';
+import { analyzeEconomics } from '../src/live/economics';
 import { costGate, roundTripCost, simBuy, simSell, DEFAULT_COSTS } from '../src/market/costs';
 import { classify, type ProbeResult } from '../src/server/dex/safety';
 import { V2Adapter } from '../src/server/dex/v2';
@@ -115,12 +115,12 @@ describe('economics + cost gates include taxes', () => {
     expect(taxed.taxQuote).toBeGreaterThan(0);
     expect(taxed.roundTripFeePct).toBeGreaterThan(clean.roundTripFeePct);
   });
-  it('spacing floor includes the round-trip tax', () => {
-    // 8 levels over ±10% → spacing ≈ 2.86%; 5%/5% tax needs > 10.75%
+  it('a 5%/5% token tax eats a ≈1.3% level gap: the net check flags it', () => {
+    // 8 levels over ±5% → spacing ≈ 1.3%; a 5%/5% tax needs > 10% between levels to keep anything
     const tight = analyzeEconomics({ ...base, lowerPrice: 0.019, upperPrice: 0.021, buyTaxPct: 0.05, sellTaxPct: 0.05 });
     expect(tight.ok).toBe(false);
-    expect(tight.reasons.join(' ')).toMatch(/round-trip tax/);
-    expect(MIN_SPACING_PCT).toBe(0.01);
+    expect(tight.netPerRoundTrip).toBeLessThan(0);
+    expect(tight.reasons.join(' ')).toMatch(/Net per round-trip ≤ 0 .*token tax/);
   });
   it('simBuy/simSell/costGate apply buy and sell tax; trend gate blocks when edge < tax', () => {
     const m = { ...DEFAULT_COSTS, feeBps: 30, pool, gasPricePls: 0, buyTaxPct: 0.05, sellTaxPct: 0.05 };

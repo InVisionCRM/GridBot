@@ -106,6 +106,12 @@ export interface StartParams extends GridConfig {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Grid page warning from the start-time economics: "loses money" only when the net per round trip really is ≤ 0. */
+function econWarning(e: EconSummary): string | null {
+  if (e.ok) return null;
+  return `${e.netPerRoundTrip <= 0 ? 'Each completed trade is expected to lose money at this size' : 'Each completed trade is expected to make very little at this size'}: ${e.reasons.join(' ')}`;
+}
+
 function newId() {
   return `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
@@ -227,13 +233,13 @@ export class GridEngine {
     const def = this.hub.def(stable);
     if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push('Live mode needs PRIVATE_KEY in .env');
     if (errs.length) throw new Error(errs.join('; '));
-    if (p.mode === 'live' && def.custom) await this.requireLiveSafety(stable);
+    if (p.mode === 'live' && def.safety) await this.requireLiveSafety(stable);
 
     // Economics (worst interval: the pool's round-trip fee + impact at level size + gas (+ L2 L1 fee)). Never blocks
     // a start: a grid that doesn't clear its costs starts with a warning saying so.
     const quoter = this.hub.quoter(stable);
     const { summary: econ } = await gridEconomics(quoter, p, this.d.approval ?? 'exact');
-    const warn = econ.ok ? null : `Each completed trade is expected to lose money at this size: ${econ.reasons.join(' ')}`;
+    const warn = econWarning(econ);
 
     const executor = this.makeExecutor(p.mode, stable);
     // Native-spending grid (flipped HEX/PLS …): capital + gas reserve must fit in the native balance; the reserve
@@ -269,7 +275,7 @@ export class GridEngine {
     this.ev('started', `Grid started — ${this.label} ${p.lowerPrice.toPrecision(4)}–${p.upperPrice.toPrecision(4)} ×${p.gridCount} (${p.mode})`, { level: 'success' });
   }
 
-  /** Custom tokens: re-run the eth_call buy/sell simulation before going live; honeypot / tax / unknown → refuse. */
+  /** Markets with a safety report (custom tokens, verified built-ins): re-run the eth_call buy/sell simulation before going live; honeypot / tax / unknown → refuse. */
   private async requireLiveSafety(key: string) {
     let s = this.hub.def(key).safety ?? null;
     try { s = await this.hub.recheck(key); } catch (e) { this.tag('warn', `safety re-check failed: ${(e as Error).message}`); }
@@ -283,7 +289,7 @@ export class GridEngine {
     if (!this.state.config) throw new Error('No grid to resume.');
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
     if (this.state.mode === 'live' && !this.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
-    if (this.state.mode === 'live' && this.def?.custom && this.def.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
+    if (this.state.mode === 'live' && this.def?.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
     this.state.status = 'running';
     this.save();
     this.tag('info', 'Resumed.');
@@ -336,7 +342,7 @@ export class GridEngine {
     const intervals = buildIntervals(levels, price);
     this.state = {
       ...this.state, config: next, levels, intervals, usdPerBuy: usdPerBuyLevel(intervals, next.totalCapitalUsd), queue: [],
-      econ, spacingWarn: econ.ok ? null : `Each completed trade is expected to lose money at this size: ${econ.reasons.join(' ')}`,
+      econ, spacingWarn: econWarning(econ),
       recenter: { enabled: true, aboveSince: null, lastAt: now, count: r.count + 1 },
     };
     this.save();
@@ -574,7 +580,7 @@ export class GridEngine {
 
   /** Received clearly less than the post-tax quote on a custom token → ask the tax watcher to re-check now. */
   private checkShortfall(f: Fill) {
-    if (!this.def?.custom || f.shortfallPct == null) return;
+    if (!this.def?.safety || f.shortfallPct == null) return;
     const tol = Math.max(0.005, this.state.limits.slippageBps / 20_000);
     if (f.shortfallPct > tol) {
       this.tag('warn', `received ${(f.shortfallPct * 100).toFixed(2)}% less than the post-tax quote (${f.outSource}) — tax re-check requested`);

@@ -130,18 +130,18 @@ export class Hub {
     return q;
   }
 
-  /** Measured taxes of a token on a chain: from the safety report of the custom market whose BASE is that token. */
+  /** Measured taxes of a token on a chain: from the safety report of the market whose BASE is that token. */
   taxOf(chainId: number, address: string): Taxes {
     let best: SafetyReport | undefined;
     for (const m of this.byChain(chainId)) {
-      if (m.custom && m.safety && sameAddr(m.base.address, address) && (!best || m.safety.at > best.at)) best = m.safety;
+      if (m.safety && sameAddr(m.base.address, address) && (!best || m.safety.at > best.at)) best = m.safety;
     }
     return best ? taxesOf(best) : NO_TAX;
   }
 
-  /** Something looks off on a custom market (swap reverted, fill short of the post-tax quote) → tax watcher re-checks now. */
+  /** Something looks off on a safety-checked market (swap reverted, fill short of the post-tax quote) → tax watcher re-checks now. */
   onSuspect: ((key: string, why: string) => void) | null = null;
-  suspect(key: string, why: string) { key = unflipKey(key); if (this.has(key) && this.def(key).custom) this.onSuspect?.(key, why); }
+  suspect(key: string, why: string) { key = unflipKey(key); if (this.has(key) && this.def(key).safety) this.onSuspect?.(key, why); }
 
   /** V3 pool TVL in quote units from the pool's token balances (cached 5 min). */
   async poolTvl(key: string): Promise<number | null> {
@@ -412,7 +412,7 @@ export class Hub {
   async recheck(key: string): Promise<SafetyReport> {
     key = unflipKey(key);
     const d = this.def(key);
-    if (!d.custom) throw new Error('Safety checks apply to custom markets');
+    if (!d.safety) throw new Error(`${this.label(key)} has no safety check (built-in PulseChain market)`);
     const r = await this.inspect({ chainId: d.chainId, address: d.base.address, quote: d.quote.address, pool: d.pool.address });
     d.safety = r.safety ?? d.safety;
     this.persist();

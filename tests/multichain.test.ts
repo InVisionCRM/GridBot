@@ -59,7 +59,23 @@ describe('Chain registry', () => {
   });
   it('covers exactly PulseChain, Robinhood Chain and Ethereum', () => {
     expect(CHAINS.map((c) => c.key)).toEqual(['pulsechain', 'robinhood', 'ethereum']);
-    expect(defaultMarkets().map((m) => m.chainId).sort()).toEqual([1, 4663]);
+    expect([...new Set(defaultMarkets().map((m) => m.chainId))].sort()).toEqual([1, 4663]);
+  });
+  it('built-in Ethereum and Robinhood pairs: verified token pairs carry their safety report; /ETH pairs spend native ETH', () => {
+    const d = defaultMarkets();
+    expect(d.map((m) => m.key)).toEqual([
+      'robinhood:ETH/USDG', 'robinhood:NVDA/USDG', 'robinhood:SPY/USDG', 'robinhood:GOOGL/USDG', 'robinhood:SPCX/USDG', 'robinhood:CRCL/USDG', 'robinhood:USO/USDG',
+      'ethereum:ETH/USDC', 'ethereum:WBTC/USDT', 'ethereum:WBTC/ETH', 'ethereum:LINK/ETH', 'ethereum:PEPE/ETH', 'ethereum:HEX/ETH',
+    ]);
+    for (const m of d) {
+      expect(m.candlePool, m.key).toBe(m.pool.address);
+      if (m.base.native) { expect(m.safety, m.key).toBeUndefined(); continue; }
+      expect(m.safety, m.key).toMatchObject({ liveAllowed: true, taxMode: 'none', buyTaxPct: 0, sellTaxPct: 0, honeypot: false });
+      if (m.quote.symbol === 'ETH') expect(m.quote, m.key).toMatchObject({ native: true, address: ETH.wrappedNative.address });
+    }
+    expect(d.find((m) => m.key === 'ethereum:WBTC/USDT')!.base.decimals).toBe(8);
+    expect(d.find((m) => m.key === 'ethereum:HEX/ETH')!.base.decimals).toBe(8);
+    expect(d.filter((m) => m.chainId === 4663 && !m.base.native).every((m) => m.safety!.risk === 'medium' && m.safety!.proxy)).toBe(true);
   });
   it('a chain with trading disabled is not tradable', () => {
     const off = { ...ETH, trading: { enabled: false, reason: 'test: no DEX' }, dexes: [] };
@@ -230,6 +246,27 @@ describe('Multi-chain operation', () => {
     expect(bot.hub.def(key).quote).toMatchObject({ native: true, symbol: 'ETH' });
     expect(await bot.addPickMarket(req)).toBe(key);
     expect(bot.hub.byChain(1).filter((m) => m.custom)).toHaveLength(1);
+  });
+
+  it('a built-in pair that ships a safety report is re-checked before a live start, and refused when the fresh check fails', async () => {
+    const pls = new MockChain(0.00001), eth = ethWorld();
+    eth.gasPrice = 10n ** 7n;
+    const TKN: Tok = { address: '0x00000000000000000000000000000000000b0b04', symbol: 'TKN', decimals: 18 };
+    eth.addToken(TKN);
+    const pool = eth.v3Pool('uniswap-v3', TKN, 1e6, WETH, 100, 3000);
+    const shipped = { at: 1, risk: 'low' as const, liveAllowed: true, reasons: ['verified'], buyTaxPct: 0, sellTaxPct: 0, transferTaxPct: 0, honeypot: false, proxy: null, depth: [], liquidityUsd: 1e6, simulated: true, taxMode: 'none' as const };
+    const tknDef: MarketDef = {
+      key: 'ethereum:TKN/ETH', chainId: 1, base: { address: TKN.address, symbol: 'TKN', decimals: 18 }, quote: { address: WETH.address, symbol: 'ETH', decimals: 18, native: true },
+      pool: { dex: 'uniswap-v3', kind: 'v3', address: pool, feeBps: 30, feeTier: 3000 }, probe: 1, quoteKind: 'wrapped', candlePool: pool, safety: shipped,
+    };
+    const noSend = { getAddress: async () => ME, sendTransaction: async () => { throw new Error('test: must not send'); } };
+    const hub = new Hub({ runtimes: [new ChainRuntime(CHAINS[0], pls, null), new ChainRuntime(ETH, eth, noSend)], markets: [...legacyMarkets(NET), ETH_DEF, tknDef], legacyNet: NET, custom: new MemoryStore<CustomFile>() });
+    const bot = new MultiBot({ net: NET, reader: pls, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub });
+    expect(bot.marketList().find((m) => m.key === tknDef.key)).toMatchObject({ risk: 'low', liveAllowed: true, custom: false });
+    const spot = await hub.quoter(tknDef.key).getPrice();
+    await expect(bot.add({ mode: 'live', stable: tknDef.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.001 })).rejects.toThrow(/LIVE blocked/);
+    expect(hub.def(tknDef.key).safety!.risk).toBe('unknown'); // the fresh check replaced the shipped report
+    expect(bot.marketList().find((m) => m.key === tknDef.key)!.liveAllowed).toBe(false);
   });
 
   it('live trading on a custom market without a passing simulation is refused (paper allowed)', async () => {

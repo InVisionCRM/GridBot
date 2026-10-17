@@ -2,7 +2,7 @@
  * Markets tab: add a custom token on any chain (inspect → pools → safety → add), every market with its pool / fee /
  * risk, and the chain + DEX registry with verified addresses and sources.
  */
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { http } from './api';
 import { px } from './fmt';
 import { ChainBadge, RiskBadge, chainOf, chains, explorerAddr, feeLabel, flipKey, marketsOf, mk, useChainFilter, type MarketInfo } from './chains';
@@ -117,9 +117,15 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
   const [flipAll, setFlipAll] = useState(false);
   const [flipRow, setFlipRow] = useState<Record<string, boolean>>({});
 
+  // When the chain filter changes (PLS / HOOD / ETH), the token form moves to that chain; picking another chain in the
+  // form afterwards sticks. On All it keeps whatever is picked.
+  const shownChain = useRef<number | 'all' | null>(null);
   useEffect(() => {
-    if (!f.chainId && tradable.length) setF((x) => ({ ...x, chainId: String(chain !== 'all' && tradable.some((c) => c.id === chain) ? chain : tradable[0].id) }));
-  }, [chain, tradable, f.chainId]);
+    if (!tradable.length || shownChain.current === chain) return;
+    shownChain.current = chain;
+    const want = chain !== 'all' && tradable.some((c) => c.id === chain) ? String(chain) : f.chainId || String(tradable[0].id);
+    if (want !== f.chainId) { setF({ chainId: want, address: f.address, quote: '', pool: '' }); setRes(null); }
+  }, [chain, tradable]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (showReg && !reg.length) void http('/api/chains').then((r) => setReg(r.chains)).catch(() => undefined); }, [showReg, reg.length]);
 
   const cid = Number(f.chainId);
@@ -224,21 +230,19 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
                   <td><ChainBadge c={ch} /></td>
                   <td>
                     <button type="button" className={`flip-btn ${fl ? 'on' : ''}`} style={{ marginRight: 6, padding: '0 0.4rem' }} aria-pressed={fl} title={`Flip → ${mk(s, flipKey(v.key)).label}`} onClick={() => setFlipRow((r) => ({ ...r, [m.key]: !fl }))}>⇄</button>
-                    <b>{v.base}/{v.quote}</b> {m.custom ? <span className="tag">custom</span> : m.legacy ? <span className="tag">PulseChain</span> : null}
+                    <b>{v.base}/{v.quote}</b> {m.custom ? <span className="tag">custom</span> : m.legacy ? <span className="tag">PulseChain</span> : <span className="tag">built-in</span>}
                     <div className="muted small"><span className="mono">{v.key}</span> · spends {v.quote} · stacks {v.base}</div></td>
                   <td className="small">{m.dexName ?? ch?.dexes.find((d) => d.id === m.dex)?.name ?? m.dex}{m.poolMode && m.poolMode !== 'default' && !m.custom ? <span className="tag">{m.poolMode}</span> : null}</td>
                   <td>{feeLabel(m)}</td>
                   <td><Addr s={s} chainId={m.chainId} a={m.pool} /></td>
                   <td title={`${v.quote} per ${v.base}`}>{v.spot != null ? px(v.spot, 6) : '—'}</td>
                   <td className="small">{v.usdPerQuote != null ? px(v.usdPerQuote, 4) : '—'}</td>
-                  <td>{m.custom ? <RiskBadge risk={m.risk ?? 'unknown'} title={m.liveAllowed ? 'live allowed' : 'paper only'} /> : <span className="muted small">built-in</span>}</td>
+                  <td>{m.risk ? <RiskBadge risk={m.risk} title={m.liveAllowed ? 'live allowed' : 'paper only'} /> : <span className="muted small" title="Built-in market without a token safety report (the chain's own coin, stablecoins or PulseChain's original markets)">—</span>}</td>
                   <td className="small">{m.buyTaxPct != null || m.sellTaxPct != null ? `${((m.buyTaxPct ?? 0) * 100).toFixed(1)}% / ${((m.sellTaxPct ?? 0) * 100).toFixed(1)}%` : <span className="muted">—</span>}</td>
                   <td className="nowrap">
                     {ch?.tradable && <><button type="button" className="btn small-btn" onClick={() => setPoolsFor(open ? null : m.key)}>{open ? 'Hide' : 'Pools'}</button>{' '}</>}
-                    {m.custom && <>
-                      <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => http(`/api/markets/${encodeURIComponent(m.key)}/recheck`, 'POST'))}>Re-check</button>{' '}
-                      <button type="button" className="btn small-btn danger" disabled={busy} onClick={() => act(() => http(`/api/markets/${encodeURIComponent(m.key)}`, 'DELETE'))}>Remove</button>
-                    </>}
+                    {m.risk && <><button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => http(`/api/markets/${encodeURIComponent(m.key)}/recheck`, 'POST'))}>Re-check</button>{' '}</>}
+                    {m.custom && <button type="button" className="btn small-btn danger" disabled={busy} onClick={() => act(() => http(`/api/markets/${encodeURIComponent(m.key)}`, 'DELETE'))}>Remove</button>}
                   </td>
                 </tr>
                 {open && <tr className="subrow"><td colSpan={10}><PoolPicker s={s} m={m} act={act} busy={busy} /></td></tr>}

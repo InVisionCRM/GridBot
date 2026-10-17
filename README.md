@@ -154,7 +154,11 @@ Arbitrum Orbit L2, mainnet since 2026-07-01, ETH gas. An Alchemy endpoint (needs
 | PancakeSwap V3 factory | `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` | tiers 100 / 500 / 2500 / 10000 |
 | PancakeSwap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x13f4EA83D0bd40E75C8222255bc855a974568Dd4` | |
 | PancakeSwap V3 QuoterV2 | `0x8553AA1615549A86882151784b329B017aA7c832` | |
-| Default market ETH/USDG pool (uniswap-v3) | `0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca` | 0.01% |
+| Built-in ETH/USDG pool (uniswap-v3, the chain's USD reference) | `0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca` | 0.01% |
+| Built-in NVDA/USDG · SPY/USDG · GOOGL/USDG · SPCX/USDG (uniswap-v3) | `0xd4EB…14a3` · `0xa7Bb…9167` · `0x34D0…19b7` · `0xc612…0029` | 0.05% |
+| Built-in CRCL/USDG · USO/USDG (uniswap-v3) | `0x654E…95a8` · `0x0217…D915` | 0.3% |
+
+The stock tokens are Robinhood-issued, upgradeable (EIP-1967 beacon) ERC-20s: risk **medium**, no tax, not paused, verified 2026-10-17 with the safety simulation. Like custom tokens they are re-checked before every live start and watched while bots run.
 
 RPC fallbacks: `https://rpc.mainnet.chain.robinhood.com` · explorer https://robinhoodchain.blockscout.com
 
@@ -175,7 +179,11 @@ L1 gas makes small grids uneconomic: New bot will usually warn that each trade l
 | Uniswap V3 QuoterV2 | `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` | |
 | Uniswap V2 factory | `0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f` | 0.3% |
 | Uniswap V2 router | `0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D` | |
-| Default market ETH/USDC pool (uniswap-v3) | `0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640` | 0.05% |
+| Built-in ETH/USDC pool (uniswap-v3, the chain's USD reference) | `0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640` | 0.05% |
+| Built-in WBTC/USDT · WBTC/ETH · LINK/ETH (uniswap-v3) | `0x5653…83b2` · `0xe6ff…e718` · `0x5d4F…8c83` | 0.05% · 0.01% · 0.05% |
+| Built-in PEPE/ETH · HEX/ETH (uniswap-v2) | `0xA43f…Ec9f` · `0x55D5…4DBa` | 0.3% |
+
+Token pairs verified 2026-10-17 (deepest pool for a ≈$1,000 trade, decimals on-chain, safety simulation: risk low, no tax). /ETH pairs spend native ETH. Full addresses in `src/live/markets.ts`.
 
 RPC fallbacks: `https://ethereum-rpc.publicnode.com`, `https://eth.drpc.org`, `https://cloudflare-eth.com` · explorer https://etherscan.io
 
@@ -224,7 +232,7 @@ New bot (custom range and every preset) and Change range show, for the **worst**
 - gas in quote units: approve (exact mode) + 2 swaps at the current gas price
 - **net profit per completed round-trip**
 
-A grid with spacing under 1.0% or net under 0.25% of level size is flagged ("each completed buy-then-sell loses about …"), but it **starts anyway**, in paper and live alike, and carries that warning on its page. Saved grids resume on load whatever their spacing.
+A grid that keeps under 0.25% of level size per round trip after this pool's fee, token tax, impact and gas is flagged ("each completed buy-then-sell loses about …" / "nets only …"), but it **starts anyway**, in paper and live alike, and carries that warning on its page. There is no fixed spacing floor: the old 1% floor was tuned for PulseX's 0.29% fee and flagged profitable grids on 0.01–0.05% Uniswap pools. Saved grids resume on load whatever their spacing.
 
 What does stop a **live** start: not enough of the spend coin in the wallet for the amount, plus the gas set-aside when it spends PLS/ETH, plus what your running live bots already use. The message names all three in readable amounts (e.g. "needs 16.55M PLS (16.23M to trade + 324.5K kept for gas) and the wallet has 10.75M PLS").
 

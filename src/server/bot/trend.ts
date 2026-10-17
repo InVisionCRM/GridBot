@@ -232,7 +232,7 @@ export class TrendEngine {
     const def = this.hub.def(p.quote);
     if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push('Live mode needs PRIVATE_KEY in .env');
     if (errs.length) throw new Error(errs.join('; '));
-    if (p.mode === 'live' && def.custom) {
+    if (p.mode === 'live' && def.safety) {
       let sf = def.safety ?? null;
       try { sf = await this.hub.recheck(p.quote); } catch (e) { this.log('warn', `safety re-check failed: ${(e as Error).message}`); }
       if (!sf?.liveAllowed) throw new Error(`LIVE blocked — ${this.hub.label(p.quote)} safety ${sf?.risk ?? 'unknown'}: ${(sf?.reasons ?? ['no safety check']).join(' ')}`);
@@ -267,7 +267,7 @@ export class TrendEngine {
     if (!this.state.capital) throw new Error('Nothing to resume.');
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
     if (this.state.mode === 'live' && !this.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
-    if (this.state.mode === 'live' && this.def?.custom && this.def.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
+    if (this.state.mode === 'live' && this.def?.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
     this.state.status = 'running';
     this.save();
     this.log('info', 'Resumed.');
@@ -482,7 +482,7 @@ export class TrendEngine {
         this.recordFill(job, f, q.price);
         this.state.inFlight = null;
         this.save();
-        if (this.def?.custom && f.shortfallPct != null && f.shortfallPct > Math.max(0.005, s.limits.slippageBps / 20_000)) {
+        if (this.def?.safety && f.shortfallPct != null && f.shortfallPct > Math.max(0.005, s.limits.slippageBps / 20_000)) {
           this.log('warn', `received ${(f.shortfallPct * 100).toFixed(2)}% less than the post-tax quote — tax re-check requested`);
           this.hub.suspect(s.quote, `fill ${(f.shortfallPct * 100).toFixed(2)}% short of the post-tax quote (${s.name})`);
         }
