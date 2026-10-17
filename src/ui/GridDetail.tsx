@@ -4,7 +4,7 @@ import { formatPrice } from '../lib/format';
 import { http, botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
-import { cls, num, pct, px, qty, time, usd } from './fmt';
+import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { T } from './theme';
@@ -12,6 +12,7 @@ import { errMsg, gridName, gridPnlUsd, quoteSym, rangeState, spendFunds, type An
 import { AmountField, fundsProblem } from './NewBot';
 import { reserveCfg } from '../live/gasReserve';
 import { humanAmount } from '../live/amount';
+import { recenterAt } from '../live/recenter';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -72,6 +73,27 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
         <button type="button" className={`btn ${g.mode === 'live' ? 'live' : 'primary'}`} disabled={busy || running || !(+amount > 0) || !(+upper > +lower) || !!problem} onClick={restart}>Restart with this range</button>
         <span className={`small ${problem ? 'neg' : 'muted'}`}>{running ? 'Stop the grid first.' : problem ?? `Restarts as ${g.mode} on ${gridName(g)}. ${g.base} the old levels still hold stays in this grid's totals.`}</span>
       </div>
+    </div>
+  );
+}
+
+/** Something on the grid still has to sell (or a trade is queued / in flight): the range can't move yet. */
+const busyLevels = (g: AnyObj) => !!g.inFlight || g.queue.length > 0 || g.intervals.some((i: AnyObj) => i.status !== 'inactive' && i.status !== 'waitingBuy');
+
+/** "Follow the price up" (auto-recenter): switch + what it is doing now. */
+function FollowUp({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean }) {
+  const r = g.recenter ?? { enabled: false, aboveSince: null, lastAt: null, count: 0 };
+  const at = recenterAt(r);
+  const now = rangeState(g) === 'above' && r.enabled
+    ? busyLevels(g) ? `Price is above the range. Waiting for the last ${g.base} to sell before moving it.` : at ? `Price is above the range. If it stays there, the range moves up at ${time(at)}.` : 'Price is above the range.'
+    : r.enabled ? (r.count ? `Moved up ${r.count} time${r.count === 1 ? '' : 's'}, last ${ago(r.lastAt)}.` : 'On. It hasn\'t needed to move yet.') : 'Off. The range stays where you set it.';
+  return (
+    <div className="follow-row">
+      <label className="check follow">
+        <input type="checkbox" checked={r.enabled} disabled={busy} onChange={(e) => act(() => botApi(`grids/${g.id}/recenter`, 'PUT', { enabled: e.target.checked }))} />
+        <span><b>Follow the price up</b> <span className="muted">After 2 hours above the range with everything sold, the range moves up around the price: same width, levels and amount, at most every 6 hours. It never moves down.</span></span>
+      </label>
+      <span className="small">{now}</span>
     </div>
   );
 }
@@ -184,7 +206,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {g.available === false && <div className="banner error"><span className="grow">This market isn't available on the running server (its chain may be turned off in .env).</span></div>}
         {g.lastError && <div className="banner error"><span className="grow">{g.lastError}</span></div>}
         {g.spacingWarn && <div className="banner"><span className="grow">{g.spacingWarn}</span></div>}
-        {running && rs === 'above' && <div className="banner"><span className="grow"><b>Price is above the range.</b> Every level has sold, so the grid waits in {q}. Stop it and change the range to keep trading.</span></div>}
+        {running && rs === 'above' && <div className="banner"><span className="grow"><b>Price is above the range.</b> Every level has sold, so the grid waits in {q}. {g.recenter?.enabled ? 'Follow the price up is on, so the range moves up on its own (see below).' : 'Stop it and change the range, or turn on Follow the price up.'}</span></div>}
         {running && rs === 'below' && <div className="banner"><span className="grow"><b>Price is below the range.</b> Every level has bought, so the grid holds {g.base} until the price recovers. Stop it and change the range to keep trading.</span></div>}
       </div>
 
@@ -203,7 +225,8 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       {g.config && (
         <div className="card">
-          <details className="more" open={rs === 'above' || rs === 'below'}>
+          <FollowUp g={g} act={act} busy={busy} />
+          <details className="more" open={rs === 'below' || (rs === 'above' && !g.recenter?.enabled)}>
             <summary>Change range</summary>
             <ChangeRange key={`${g.config.lowerPrice}-${g.config.upperPrice}-${g.config.gridCount}`} s={s} g={g} act={act} busy={busy} />
           </details>

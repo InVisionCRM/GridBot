@@ -413,3 +413,26 @@ label.wide input { min-width: 180px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Today's picks (daily scan) */
+.picks-note { margin: 0 0 4px; }
+.pick-chain { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.pick-chain-head { display: flex; align-items: center; gap: 8px; }
+.pick { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto auto; gap: 6px 14px; align-items: center; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); }
+.pick-rank { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); border: 1px solid var(--line-2); border-radius: 50%; width: 24px; height: 24px; display: grid; place-items: center; }
+.pick-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pick-test { display: flex; flex-direction: column; align-items: flex-end; text-align: right; }
+.pick-test b { font-family: var(--mono); font-weight: 500; font-size: 1rem; }
+.skip-list { margin: 6px 0 0; padding-left: 18px; font-size: 0.8rem; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.skip-list b { color: var(--text); font-weight: 500; margin-right: 4px; }
+@media (max-width: 640px) {
+  .pick { grid-template-columns: 26px minmax(0, 1fr); }
+  .pick-test { grid-column: 2; align-items: flex-start; text-align: left; }
+  .pick .btn { grid-column: 1 / -1; }
+}
+
+/* Follow the price up (auto-recenter) */
+.check.follow { display: flex; align-items: flex-start; gap: 10px; font-size: 0.86rem; }
+.check.follow input { margin-top: 3px; }
+.follow-row { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; }
+.follow-row > .small { padding-left: 26px; }

@@ -130,7 +130,7 @@ export default function App() {
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}
 
         {view.v === 'home' && <Home s={s} nav={nav} act={act} busy={busy} />}
-        {view.v === 'new' && <NewBot s={s} kind={view.kind} trendPrefill={view.trendPrefill} nav={nav} act={act} busy={busy} />}
+        {view.v === 'new' && <NewBot s={s} kind={view.kind} trendPrefill={view.trendPrefill} gridPrefill={view.gridPrefill} nav={nav} act={act} busy={busy} />}
         {view.v === 'grid' && <GridDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
         {view.v === 'trend' && <TrendDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
         {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} prefs={prefs} setPrefs={setPrefs} />}

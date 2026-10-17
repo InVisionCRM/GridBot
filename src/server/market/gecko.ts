@@ -8,6 +8,7 @@
  * back off 65 s on 429. Prices are trade/mid prices; × (1 − fee) to match the grid's sell-side getPrice units.
  */
 import type { Candle, TF } from '../../market/candles';
+import { parseTopPools, type TopPool } from '../../market/scan';
 
 export type FetchFn = (url: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
@@ -42,6 +43,17 @@ export class GeckoSource {
     const p = this.chain.then(run, run);
     this.chain = p.catch(() => undefined);
     return p;
+  }
+
+  /** Top pools of a network by 24 h volume (20 per page). */
+  async topPools(network: string, page = 1): Promise<TopPool[]> {
+    const url = `https://api.geckoterminal.com/api/v2/networks/${network}/pools?sort=h24_volume_usd_desc&page=${page}`;
+    return this.request(async () => {
+      const r = await this.fetchFn(url, { headers: { accept: 'application/json' } });
+      if (r.status === 429) { this.nextAt = this.now() + 65_000; throw new RateLimited(this.nextAt); }
+      if (!r.ok) throw new Error(`GeckoTerminal HTTP ${r.status}`);
+      return parseTopPools(await r.json());
+    });
   }
 
   /** `token` = base token address (price is quoted per base); o.network / o.feeBps override the defaults per market. */

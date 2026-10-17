@@ -158,6 +158,10 @@ describe('Pool discovery + best-pool selection across PulseX V1 / V2 / 9mm', () 
     const manual = await hub.inspect({ chainId: 369, address: MEME.address, quote: WPLS.address, pool: pools.memeV1 });
     expect(manual.chosen!.dex).toBe('pulsex-v1');
     expect(manual.draft!.pool).toMatchObject({ dex: 'pulsex-v1', kind: 'v2', feeBps: 29 });
+    // MEME/WPLS spends native PLS (wrapped inside the swap), the same quote shape as the flipped HEX/PLS market.
+    expect(r.draft!.quote).toMatchObject({ address: WPLS.address, symbol: 'PLS', native: true });
+    expect(hub.def('HEX~').quote).toMatchObject({ address: hub.def('HEX~').quote.address, native: true });
+    expect(r.draft!.quote.address.toLowerCase()).toBe(hub.def('HEX~').quote.address.toLowerCase());
   });
 });
 

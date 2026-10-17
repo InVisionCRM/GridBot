@@ -24,7 +24,7 @@ import type { ChainReader, MarketSnapshot, Quoter, TxSender } from './chain';
 export interface PresetPool { dex: string; kind: 'v2' | 'v3'; address: string; feeBps: number; feeTier?: number; dexName: string; switchTo: boolean }
 import { getPreset, legKey, listPresets, resolvePreset, type ResolvedLeg } from '../../live/presets';
 import { sameAddr } from '../dex/types';
-import { gridEconomics, type EconCfg, type EconSummary } from './econ';
+import { costModelOf, gridEconomics, type EconCfg, type EconSummary } from './econ';
 import { ActivityBus } from './activity';
 import { CandleStore } from '../market/candleStore';
 import { closedOnly, fillGaps, isTF, sliceRange, type Candle, type TF } from '../../market/candles';
@@ -259,6 +259,7 @@ export class MultiBot {
   resume(id: string) { this.engine(id).resume(); }
   stop(id: string) { this.engine(id).stop(); }
   setLimits(id: string, l: Partial<SafetyLimits>) { this.engine(id).setLimits(l); }
+  setRecenter(id: string, enabled: boolean) { this.engine(id).setRecenter(enabled); }
   remove(id: string) {
     const eng = this.engines.get(id);
     if (eng && eng.state.status === 'running') eng.stop();
@@ -807,14 +808,7 @@ export class MultiBot {
     const def = this.hub.def(pair);
     let m: MarketSnapshot | null = null;
     try { m = await this.market(pair); } catch { /* offline: no impact/gas */ }
-    const useGas = o.useGas !== false && !!m;
-    const model: CostModel = {
-      feeBps: m?.feeBps ?? def.pool.feeBps ?? FEE_BPS, approval: this.d.approval ?? 'exact', slippageBps: o.slippageBps ?? DEFAULT_COSTS.slippageBps,
-      buyTaxPct: m?.buyTaxPct ?? 0, sellTaxPct: m?.sellTaxPct ?? 0,
-      pool: o.useImpact !== false && m ? { quoteReserve: m.quoteReserve, plsReserve: m.plsReserve } : null,
-      gasPricePls: useGas ? m!.gasPricePls : 0,
-      gasUnits: m?.gasUnits, extraPlsPerSwap: useGas ? m!.extraPlsPerSwap ?? 0 : 0,
-    };
+    const model = costModelOf(m, def.pool.feeBps ?? FEE_BPS, this.d.approval ?? 'exact', o);
     const b = def.base.symbol, q = def.quote.symbol, nat = this.hub.chain(def.chainId).nativeSymbol;
     const note = m
       ? `${this.hub.label(pair)}: LP fee ${(model.feeBps / 100).toFixed(2)}%, impact from CURRENT ${def.pool.kind === 'v3' ? 'active-range (virtual) ' : ''}reserves (${m.quoteReserve.toPrecision(4)} ${q} / ${m.plsReserve.toPrecision(4)} ${b}), gas ${((m.gasPriceNative ?? m.gasPricePls) * 1e9).toPrecision(3)} gwei ${nat}${m.basePerNative && m.basePerNative !== 1 ? ` (×${m.basePerNative.toPrecision(4)} ${b}/${nat})` : ''}${m.extraPlsPerSwap ? ` + L1 data fee ${m.extraPlsPerSwap.toPrecision(3)} ${b}/swap` : ''}${m.buyTaxPct || m.sellTaxPct ? `, token tax buy ${((m.buyTaxPct ?? 0) * 100).toFixed(2)}% / sell ${((m.sellTaxPct ?? 0) * 100).toFixed(2)}%` : ''}.`
@@ -929,7 +923,7 @@ export class MultiBot {
 
   async startPreset(
     id: string,
-    opts: { mode: Mode; quote?: string; amounts: Record<string, number>; limits?: Parameters<GridEngine['start']>[0]['limits'] },
+    opts: { mode: Mode; quote?: string; amounts: Record<string, number>; limits?: Parameters<GridEngine['start']>[0]['limits']; recenter?: boolean },
   ): Promise<{ ids: string[]; legs: ResolvedLeg[] }> {
     const { legs } = await this.previewPreset(id, opts);
     const missing = legs.filter((l) => l.capital == null).map((l) => l.label);
@@ -940,7 +934,7 @@ export class MultiBot {
       for (const leg of legs) {
         ids.push(await this.add({
           mode: opts.mode, stable: leg.quote, lowerPrice: leg.lowerPrice, upperPrice: leg.upperPrice, gridCount: leg.gridCount,
-          totalCapitalUsd: leg.capital!, limits: opts.limits,
+          totalCapitalUsd: leg.capital!, limits: opts.limits, recenter: opts.recenter,
         }));
       }
     } catch (e) {
@@ -957,6 +951,14 @@ export class MultiBot {
     this.activity.emitEvent({ type: 'info', kind: 'system', level: d.safety?.liveAllowed ? 'success' : 'warn', chainId: d.chainId, pair: d.key,
       msg: `Added ${this.hub.label(d.key)} (${this.hub.dexName(d.chainId, d.pool.dex)} ${d.pool.feeTier != null ? `${d.pool.feeTier / 10000}%` : `${d.pool.feeBps / 100}%`}) — safety ${d.safety?.risk ?? 'unknown'}${d.safety?.liveAllowed ? '' : ' · paper only'}` });
     return d;
+  }
+  /** Daily pick → market key: the market already added for this token, quote and pool, or a new one (safety re-checked). */
+  async addPickMarket(req: { chainId: number; address: string; quote: string; pool: string }): Promise<string> {
+    const have = this.hub.byChain(req.chainId).find((m) => sameAddr(m.base.address, req.address) && sameAddr(m.quote.address, req.quote) && sameAddr(m.pool.address, req.pool));
+    const key = have ? have.key : (await this.addMarket(req)).key;
+    // Priced now, not on the next all-markets poll (~30 s): New bot centres the range on this price right away.
+    await this.hub.ensureSpot(key);
+    return key;
   }
   removeMarket(key: string) {
     key = unflipKey(key);

@@ -318,7 +318,34 @@ export class Hub {
     result.safety = report;
     result.probe = pr ? { stage: pr.stage, err: pr.err, quoteIn: pr.quoteIn.toString(), expectedBuy: pr.expectedBuy.toString(), gotBuy: pr.gotBuy.toString(), transferSent: pr.transferSent.toString(), transferGot: pr.transferGot.toString(), sellIn: pr.sellIn.toString(), expectedSell: pr.expectedSell.toString(), gotSell: pr.gotSell.toString(), gasBuy: Number(pr.gasBuy), gasSell: Number(pr.gasSell) } : null;
     draft.safety = report;
+    // TOKEN/WPLS (or /WETH): buys spend the native coin the wallet holds, wrapped inside the swap, like the flipped
+    // HEX/PLS market. Set after the safety probe, which measures the token itself.
+    if (sameAddr(draft.quote.address, rt.cfg.wrappedNative.address)) draft.quote = { ...draft.quote, symbol: rt.cfg.nativeSymbol, native: true };
     return result;
+  }
+
+  /**
+   * Quoter for a market that is not added (daily scan: real pool fee, depth and gas before anything is added).
+   * Not cached. Gas converts through the spot: base per native = 1 / spot when the quote is the native coin,
+   * native USD / spot when the quote is a stablecoin.
+   */
+  draftQuoter(d: MarketDef): Quoter {
+    const rt = this.rt(d.chainId);
+    if (!rt.tradable) throw new Error(`${rt.cfg.name}: trading unavailable — ${rt.cfg.trading.reason ?? 'no DEX configured'}`);
+    const q: Quoter = new Quoter(rt.reader, d, {
+      chain: rt.cfg, adapter: rt.adapter(d.pool.dex), resolve: (id) => rt.adapter(id),
+      basePerNative: async () => {
+        const spot = await q.getPrice();
+        if (d.quote.native || sameAddr(d.quote.address, rt.cfg.wrappedNative.address)) return 1 / spot;
+        if (!this.isStable(d.chainId, d.quote.address)) throw new Error(`${marketLabel(d)}: no native price route`);
+        const nat = await this.nativeUsdAsync(d.chainId);
+        if (!nat) throw new Error(`${rt.cfg.name}: no USD price for ${rt.cfg.nativeSymbol}`);
+        return nat / spot;
+      },
+      l1Fee: rt.cfg.stack !== 'l1' ? (to, data, gp) => rt.l1Fee(to, data, gp) : undefined,
+      taxOf: (addr) => (d.safety && sameAddr(addr, d.base.address) ? taxesOf(d.safety) : NO_TAX),
+    });
+    return q;
   }
 
   /** decimals() read on-chain (cached per chain + address) and cross-checked against the registry / stored market. */

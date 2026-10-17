@@ -219,6 +219,19 @@ describe('Multi-chain operation', () => {
     expect(after.find((g) => g.id === pg)!.status).toBe('running');
   });
 
+  it('a daily pick adds its market once, priced right away, and reuses it next time', async () => {
+    const { bot, eth } = twoChains();
+    const MEME: Tok = { address: '0x00000000000000000000000000000000000b0b03', symbol: 'MEME', decimals: 18 };
+    eth.addToken(MEME);
+    const pool = eth.v3Pool('uniswap-v3', MEME, 1e6, WETH, 100, 3000);
+    const req = { chainId: 1, address: MEME.address, quote: WETH.address, pool };
+    const key = await bot.addPickMarket(req);
+    expect(bot.spots[key]).toBeGreaterThan(0);
+    expect(bot.hub.def(key).quote).toMatchObject({ native: true, symbol: 'ETH' });
+    expect(await bot.addPickMarket(req)).toBe(key);
+    expect(bot.hub.byChain(1).filter((m) => m.custom)).toHaveLength(1);
+  });
+
   it('live trading on a custom market without a passing simulation is refused (paper allowed)', async () => {
     const { bot, eth } = twoChains(true);
     eth.gasPrice = 10n ** 7n;
@@ -229,9 +242,12 @@ describe('Multi-chain operation', () => {
     const d: MarketDef = await bot.addMarket({ chainId: 1, address: MEME.address, quote: WETH.address });
     expect(d.safety!.risk).toBe('unknown'); // mock reader has no eth_call state override
     expect(d.safety!.liveAllowed).toBe(false);
+    expect(d.quote).toMatchObject({ address: WETH.address, symbol: 'ETH', native: true }); // spends native ETH
     const spot = await bot.hub.quoter(d.key).getPrice();
     const p = { stable: d.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.01 };
     await expect(bot.add({ mode: 'live', ...p })).rejects.toThrow(/safety|paper only|blocked|simulation/i);
-    await expect(bot.add({ mode: 'paper', ...p })).resolves.toBeTruthy();
+    const gid = await bot.add({ mode: 'paper', ...p });
+    // Native spend coin → the gas set-aside applies, like HEX/PLS.
+    expect(bot.status().grids.find((g) => g.id === gid)!.gasReserve).toBeGreaterThan(0);
   });
 });

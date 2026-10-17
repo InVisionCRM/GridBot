@@ -1,11 +1,11 @@
 /** Home: totals, what needs attention, and one row per bot with ≈USD profit vs just holding. */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { http, botApi } from './api';
 import { AnimatedNumber, StatusDot, useFlash } from './motion';
-import { cls, num, qty, usd } from './fmt';
+import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
 import { ChainBadge, DexTag, chainOf, chains, useChainFilter } from './chains';
 import { humanAmount } from '../live/amount';
-import { gridName, gridPnlUsd, quoteSym, rangeState, trendPnlUsd, type AnyObj, type Nav } from './model';
+import { errMsg, gridName, gridPnlUsd, quoteSym, rangeState, trendPnlUsd, type AnyObj, type Nav } from './model';
 
 interface Props { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -74,6 +74,74 @@ function WalletPanel({ s, chain }: { s: AnyObj; chain: number | 'all' }) {
   );
 }
 
+const money = (x: number) => (x >= 1e9 ? `$${(x / 1e9).toFixed(1)}B` : x >= 1e6 ? `$${(x / 1e6).toFixed(1)}M` : x >= 1e3 ? `$${(x / 1e3).toFixed(0)}K` : `$${x.toFixed(0)}`);
+
+function PickRow({ k, use, busy }: { k: AnyObj; use: (k: AnyObj) => void; busy: boolean }) {
+  const t = k.test;
+  return (
+    <div className="pick">
+      <span className="pick-rank">{k.rank}</span>
+      <div className="pick-main">
+        <div className="pick-name"><b>{k.label}</b>{k.key ? null : <span className="tag" title={k.add.address}>new token {k.add.address.slice(0, 6)}…{k.add.address.slice(-4)}</span>}{k.risk && k.risk !== 'low' ? <span className="tag live">risk {k.risk}</span> : null}</div>
+        <div className="small muted">±{Math.round(k.bandPct * 100)}% around {px(k.price)} · {k.gridCount} levels · spends {k.spend}{k.activity ? ` · ${money(k.activity.volume24Usd)} traded today · ${money(k.activity.liquidityUsd)} in the pool` : ''}</div>
+      </div>
+      <div className="pick-test">
+        <b className={cls(t.returnPct)}>{pct(t.returnPct, 2, true)}</b>
+        <span className="small muted">{t.roundTrips} trades in 7 days</span>
+        <span className="small muted">holding {pct(t.holdPct, 1, true)} · worst dip {pct(t.maxDrawdownPct, 1)}</span>
+      </div>
+      <button type="button" className="btn small-btn primary" disabled={busy} onClick={() => use(k)}>Use this</button>
+    </div>
+  );
+}
+
+/** Today's picks: the daily scan's best grid setups per chain, tested on the last 7 days of hourly prices. */
+function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | 'all'; nav: Nav; act: Props['act']; busy: boolean }) {
+  const [p, setP] = useState<AnyObj | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const load = useCallback(() => http('/api/picks').then((x) => { setP(x); setErr(null); }).catch((e) => setErr(errMsg(e))), []);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!p?.running) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [p?.running, load]);
+  if (err) return <div className="banner info"><span className="grow">Today's picks: {err}</span></div>;
+  if (!p) return null;
+  const scan = () => act(async () => { await http('/api/picks/scan', 'POST'); setP({ ...p, running: true }); });
+  const use = (k: AnyObj) => act(async () => {
+    const key = k.key ?? (await http('/api/picks/use', 'POST', { chainId: k.chainId, ...k.add })).key;
+    nav({ v: 'new', kind: 'grid', gridPrefill: { pair: key, bandPct: k.bandPct, gridCount: k.gridCount, nonce: Date.now() } });
+  });
+  const shown: AnyObj[] = p.chains.filter((c: AnyObj) => chain === 'all' || c.chainId === chain);
+  return (
+    <section className="card" aria-label="Today's picks">
+      <div className="card-head">
+        <h3>Today's picks</h3>
+        <span className="muted small">{p.running ? 'Scanning the busiest pools… (a few minutes)' : p.at ? `scanned ${ago(p.at)} · next scan ${time(p.nextAt)}` : 'not scanned yet'}</span>
+        <span className="grow" />
+        <button type="button" className="btn small-btn" disabled={busy || p.running} onClick={scan}>{p.running ? 'Scanning…' : 'Scan now'}</button>
+      </div>
+      <p className="small muted picks-note">Each chain's busiest pools are checked for real trading and safety, then the grid is replayed on the last 7 days of hourly prices with the pool's fee, price impact and gas, using about ${p.testUsd.toLocaleString('en-US')} of the coin it spends. These are the setups that made the most. A good week doesn't promise the next one, so start in paper first.</p>
+      {shown.map((c) => (
+        <div key={c.chainId} className="pick-chain">
+          <div className="pick-chain-head"><ChainBadge c={chainOf(s, c.chainId)} testnet={false} /><b>{c.name}</b><span className="muted small">{c.tested} pairs tested</span></div>
+          {c.error ? <p className="small neg">{c.error}</p>
+            : !c.picks.length ? <p className="small muted">Nothing made money here over the last 7 days. A grid would have lost to fees or to a one-way move.</p>
+            : c.picks.map((k: AnyObj) => <PickRow key={`${k.rank}-${k.label}`} k={k} use={use} busy={busy} />)}
+          {c.skipped.length > 0 && (
+            <details className="more">
+              <summary>Why other pools were left out ({c.skipped.length})</summary>
+              <ul className="skip-list">{c.skipped.map((x: AnyObj, i: number) => <li key={i}><b>{x.name}</b> {x.why}</li>)}</ul>
+            </details>
+          )}
+        </div>
+      ))}
+      {!shown.length && !p.running && <p className="small muted">No scan yet. Press Scan now.</p>}
+    </section>
+  );
+}
+
 export function Home({ s, nav, act, busy }: Props) {
   const { chain } = useChainFilter();
   const [ov, setOv] = useState<AnyObj | null>(null);
@@ -121,7 +189,7 @@ export function Home({ s, nav, act, busy }: Props) {
     else if (b.lastError) notices.push({ key: `err-${b.id}`, level: 'error', text: <><b>{name}:</b> {b.lastError}</>, open });
     else if (b.kind === 'grid' && b.status === 'running') {
       const rs = rangeState(b);
-      if (rs === 'above') notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is above its range.</b> Everything is sold and it waits for the price to come back. Open it to move the range.</>, open });
+      if (rs === 'above' && !b.recenter?.enabled) notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is above its range.</b> Everything is sold and it waits for the price to come back. Open it to move the range or turn on Follow the price up.</>, open });
       if (rs === 'below') notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is below its range.</b> Every level has bought and it holds {b.base} until the price recovers. Open it to move the range.</>, open });
     }
   }
@@ -160,6 +228,8 @@ export function Home({ s, nav, act, busy }: Props) {
           </div>
         )}
       </section>
+
+      <PicksPanel s={s} chain={chain} nav={nav} act={act} busy={busy} />
     </main>
   );
 }

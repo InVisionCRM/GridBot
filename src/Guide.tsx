@@ -12,6 +12,8 @@ import { CHAINS, chainFromNetwork } from './live/chains';
 import { NETWORKS } from './live/networks';
 import { MAX_TAX } from './live/tax';
 import { DEFAULT_GAS_RESERVE } from './live/gasReserve';
+import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from './live/recenter';
+import { MIN_SELL_HOURS, PICKS_PER_CHAIN, SCAN_CANDLES, SCAN_RULES, SETUP_BANDS, SETUP_LEVELS, TEST_USD } from './market/scan';
 
 const PLS_DEXES = chainFromNetwork(NETWORKS.mainnet).dexes;
 const dexFee = (d: (typeof PLS_DEXES)[number]) => (d.kind === 'v3' ? d.feeTiers!.map((t) => `${t / 10_000}%`).join(' / ') : `${d.feeBps! / 100}%`);
@@ -25,6 +27,7 @@ export const GUIDE_SECTIONS = [
   ['pnl', 'Wins and losses'],
   ['costs', 'What a trade costs'],
   ['presets', 'Presets'],
+  ['auto', 'Daily picks & follow-up'],
   ['trend', 'Trend bot'],
   ['safety', 'Paper, live & safety'],
   ['faq', 'FAQ'],
@@ -171,6 +174,20 @@ export function Guide({ onClose }: { onClose: () => void }) {
               </tbody>
             </table></div>
             <p className="muted small">A preset sets the range and number of levels. You choose how much of each pair's coin to use; the box shows your wallet balance and has a Max button. "Stack" presets spend PLS and pick the best pool across PulseX and 9mm.</p>
+          </section>
+
+          <section id="g-auto">
+            <h2>Daily picks & follow-up</h2>
+            <p><b>Today's picks</b> (on Home) are found once a day, or when you press Scan now:</p>
+            <ol className="tight">
+              <li>Take each chain's busiest pools from GeckoTerminal.</li>
+              <li>Drop pools that don't pair a token with PLS/ETH or a stablecoin, hold less than ${SCAN_RULES.minLiquidityUsd.toLocaleString('en-US')} of liquidity, had fewer than {SCAN_RULES.minTx24} trades in 24 hours, or show volume more than {SCAN_RULES.maxVolumeToLiquidity}× their liquidity (fake volume).</li>
+              <li>Run new tokens through the same honeypot and tax check as Markets → Add.</li>
+              <li>Replay the last {SCAN_CANDLES / 24} days of hourly prices through the grid with the pool's real fee, price impact and gas, using about ${TEST_USD.toLocaleString('en-US')} of the coin it spends. Ranges ±{SETUP_BANDS.map((b) => b * 100).join('/')}% and {SETUP_LEVELS.join('/')} levels are tried.</li>
+              <li>Show the {PICKS_PER_CHAIN} setups that made the most per chain. A setup only counts if it made money and sold in at least {MIN_SELL_HOURS} different hours, because one price spike isn't a pattern.</li>
+            </ol>
+            <p><b>Use this</b> opens New bot with that pair, width and levels, centred on today's price. You still choose the amount and paper or live. A good last week doesn't promise the next one.</p>
+            <p><b>Follow the price up</b> is on for new grids and can be switched on any grid's page. When the price has stayed above the range for {RECENTER_AFTER_MS / 3600_000} hours and every level has sold, the range moves up around the price: same width, levels and amount, at most once every {RECENTER_COOLDOWN_MS / 3600_000} hours. It never moves down. Below the range the grid keeps what it bought and waits for the price to come back.</p>
           </section>
 
           <section id="g-trend">

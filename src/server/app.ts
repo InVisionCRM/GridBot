@@ -18,6 +18,8 @@ export interface AppOpts {
   net: LiveNetwork;
   /** Background candle backfill (server only) */
   backfill?: (pair: string, source: 'gecko' | 'onchain', days: number) => Promise<unknown>;
+  /** Daily pair scan (server only) */
+  scanner?: { status(): unknown; run(): Promise<unknown> };
   heartbeatMs?: number;
   statusThrottleMs?: number;
 }
@@ -71,6 +73,7 @@ export function createApp(o: AppOpts) {
       mode, stable: b.stable as string | undefined,
       lowerPrice: Number(b.lowerPrice), upperPrice: Number(b.upperPrice), gridCount: Number(b.gridCount), totalCapitalUsd: Number(b.totalCapitalUsd),
       limits: b.limits as never,
+      recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined,
     };
   }
   const limitsBody = (b: Record<string, unknown>) => ({
@@ -108,7 +111,7 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     if (mode === 'live' && !bot.hasSigner) throw new Error('Live mode needs PRIVATE_KEY in .env');
-    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits });
+    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined });
     void bot.tickAll();
     return { ok: true, ...out };
   }));
@@ -117,6 +120,7 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/grids/:id/resume', wrap((req) => { bot.resume(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/grids/:id/stop', wrap((req) => bot.stop(req.params.id)));
   app.put('/api/bot/grids/:id/limits', wrap((req) => bot.setLimits(req.params.id, limitsBody(req.body ?? {}))));
+  app.put('/api/bot/grids/:id/recenter', wrap((req) => bot.setRecenter(req.params.id, req.body?.enabled === true)));
   app.delete('/api/bot/grids/:id', wrap((req) => bot.remove(req.params.id)));
   app.post('/api/bot/stop-all', wrap(() => bot.stopAll()));
 
@@ -133,6 +137,17 @@ export function createApp(o: AppOpts) {
   app.post('/api/chains/:id/stop', wrap((req) => ({ ok: true, stopped: bot.stopChain(Number(req.params.id)) })));
   app.post('/api/tokens/inspect', wrap(async (req) => plain(await bot.hub.inspect(marketReq(req.body ?? {})))));
   app.get('/api/markets', wrap(() => ({ markets: bot.marketList() })));
+
+  // ── Daily picks ──────────────────────────────────────────────────────
+  const scanner = () => { if (!o.scanner) throw new Error('The daily scan is off (CANDLES_GECKO=off).'); return o.scanner; };
+  app.get('/api/picks', wrap(() => scanner().status()));
+  app.post('/api/picks/scan', wrap(() => { const sc = scanner(); void sc.run().catch(() => undefined); return { ok: true }; }));
+  app.post('/api/picks/use', wrap(async (req) => {
+    const b = req.body ?? {};
+    const key = await bot.addPickMarket({ chainId: Number(b.chainId), address: String(b.address ?? ''), quote: String(b.quote ?? ''), pool: String(b.pool ?? '') });
+    void bot.tickAll();
+    return { ok: true, key };
+  }));
   app.post('/api/markets', wrap(async (req) => { const d = await bot.addMarket(marketReq(req.body ?? {})); void bot.tickAll(); return plain({ ok: true, market: d }); }));
   app.post('/api/markets/:key/recheck', wrap(async (req) => plain({ ok: true, safety: await bot.recheckMarket(req.params.key) })));
   app.delete('/api/markets/:key', wrap((req) => { bot.removeMarket(req.params.key); return { ok: true }; }));
