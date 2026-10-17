@@ -45,9 +45,9 @@ export class GeckoSource {
     return p;
   }
 
-  /** Top pools of a network by 24 h volume (20 per page). */
-  async topPools(network: string, page = 1): Promise<TopPool[]> {
-    const url = `https://api.geckoterminal.com/api/v2/networks/${network}/pools?sort=h24_volume_usd_desc&page=${page}`;
+  /** Top pools of one DEX on a network by 24 h volume (20 per page). */
+  async topPools(network: string, dex: string, page = 1): Promise<TopPool[]> {
+    const url = `https://api.geckoterminal.com/api/v2/networks/${network}/dexes/${dex}/pools?sort=h24_volume_usd_desc&page=${page}`;
     return this.request(async () => {
       const r = await this.fetchFn(url, { headers: { accept: 'application/json' } });
       if (r.status === 429) { this.nextAt = this.now() + 65_000; throw new RateLimited(this.nextAt); }

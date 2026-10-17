@@ -34,9 +34,10 @@ const bot = new MultiBot({
   approval: cfg.approval, maxRetries: cfg.maxRetries, retryDelayMs: cfg.retryDelayMs, candles, activity, hub,
 });
 const gecko = new GeckoSource();
-const sync = new CandleSync(gecko, () => hub.candleSources(), candles, {
+const sync: CandleSync = new CandleSync(gecko, () => hub.candleSources(), candles, {
   onEvent: (msg, level) => activity.emitEvent({ type: 'candles', kind: 'system', level, msg }),
   active: () => bot.activeCandleKeys(),
+  paused: (): boolean => scanner?.status().running ?? false,
 });
 sync.enabled = process.env.CANDLES_GECKO !== 'off';
 bot.candleSyncStatus = () => sync.status();
@@ -67,7 +68,7 @@ const backfill = async (pair: string, source: 'gecko' | 'onchain', days: number)
 };
 
 // Daily pair scan shares the GeckoTerminal client (one rate limit) and is off with it (CANDLES_GECKO=off).
-const scanner = sync.enabled ? new DailyScanner(scanDepsFromHub(hub, {
+const scanner: DailyScanner | undefined = sync.enabled ? new DailyScanner(scanDepsFromHub(hub, {
   gecko, store: new JsonStore<ScanFile>(path.join(dataDir, 'picks.json')), approval: cfg.approval, emit: activity.emitEvent,
 })) : undefined;
 

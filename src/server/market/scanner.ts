@@ -31,6 +31,8 @@ export interface ScanPick {
   dex: string;
   feeBps: number;
   risk: SafetyReport['risk'] | null;
+  /** Why the safety check gave that risk (shown with the badge) */
+  riskWhy: string | null;
   /** Spot when scanned; the suggested range is centred on it */
   price: number;
   lowerPrice: number;
@@ -44,7 +46,8 @@ export interface ScanPick {
 export interface ScanChain { chainId: number; name: string; at: number; picks: ScanPick[]; tested: number; skipped: Skipped[]; error: string | null }
 export interface ScanFile { version: 1; at: number | null; chains: ScanChain[] }
 
-export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[] }
+/** `dexes` = GeckoTerminal ids of the DEXes this app trades on the chain (only their pools are read). */
+export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[]; dexes: string[] }
 
 export interface ScanDeps {
   chains(): ScanChainInfo[];
@@ -56,7 +59,7 @@ export interface ScanDeps {
   /** USD per unit of the market's spend coin */
   usdPerSpend(def: MarketDef): Promise<number>;
   gecko: {
-    topPools(network: string, page?: number): Promise<TopPool[]>;
+    topPools(network: string, dex: string, page?: number): Promise<TopPool[]>;
     ohlcv(pool: string, token: string, tf: TF, beforeSec?: number, limit?: number, o?: { network?: string; feeBps?: number }): Promise<Candle[]>;
   };
   store: Store<ScanFile>;
@@ -132,7 +135,11 @@ export class DailyScanner {
     const out: ScanChain = { chainId: c.id, name: c.name, at: this.now(), picks: [], tested: 0, skipped: [], error: null };
     if (!c.slug) { out.error = 'No GeckoTerminal price history for this chain.'; return out; }
     try {
-      const pools = [...await retryOnce(() => this.d.gecko.topPools(c.slug!, 1)), ...await retryOnce(() => this.d.gecko.topPools(c.slug!, 2))];
+      // Busiest pools of each DEX this app trades. The chain-wide list is the wrong input: on 2026-10-17, 33 of
+      // Robinhood's 40 busiest pools were Uniswap V4 (not tradable here, and GeckoTerminal reports most of them with
+      // $0 liquidity), which crowded out the real Uniswap V3 stock pools (NVDA ~6.9k trades/day, SPCX ~12k).
+      const pools: TopPool[] = [];
+      for (const dex of c.dexes) pools.push(...await retryOnce(() => this.d.gecko.topPools(c.slug!, dex)));
       const { picked, skipped } = pickTokens(pools, c.spendable, c.wrapped);
       out.skipped.push(...skipped);
       const stackOf = (m: MarketDef) => lc(m.base.native ? c.wrapped : m.base.address);
@@ -176,7 +183,7 @@ export class DailyScanner {
       key: isNew ? null : d.key,
       add: isNew ? { address: d.base.address, quote: d.quote.address, pool: d.pool.address } : null,
       label: `${d.base.symbol}/${d.quote.symbol}`, spend: d.quote.symbol, stack: d.base.symbol,
-      dex: d.pool.dex, feeBps: d.pool.feeBps, risk: d.safety?.risk ?? null,
+      dex: d.pool.dex, feeBps: d.pool.feeBps, risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null,
       price: snap.spot, lowerPrice: sig(snap.spot * (1 - s.bandPct)), upperPrice: sig(snap.spot * (1 + s.bandPct)), gridCount: s.gridCount, bandPct: s.bandPct,
       test: { ...s, capital, usd: TEST_USD },
       activity: pool ? { volume24Usd: pool.volume24Usd, liquidityUsd: pool.liquidityUsd, tx24: pool.tx24, change24Pct: pool.change24Pct } : null,
@@ -192,6 +199,7 @@ export function scanDepsFromHub(hub: Hub, rest: Pick<ScanDeps, 'gecko' | 'store'
     chains: () => hub.runtimes().filter((rt) => rt.tradable && rt.cfg.status === 'live').map((rt) => ({
       id: rt.cfg.id, name: rt.cfg.name, slug: rt.cfg.geckoSlug, wrapped: rt.cfg.wrappedNative.address,
       spendable: [rt.cfg.wrappedNative.address, ...rt.cfg.stables.map((s) => s.address)],
+      dexes: rt.cfg.dexes.flatMap((d) => (d.gecko ? [d.gecko] : [])),
     })),
     // PLS/DAI and ETH/USDC spend the stablecoin; PLS/HEX is turned around to HEX/PLS so it spends PLS.
     existing: (chainId) => hub.byChain(chainId).flatMap((d) => (spends(chainId, d.quote) ? [d] : spends(chainId, d.base) ? [hub.def(`${d.key}~`)] : [])),

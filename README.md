@@ -78,11 +78,11 @@ Sources:
 
 **Today's picks** (Home) are found by `src/server/market/scanner.ts` once a day (checked every 30 min; results in `data/picks.json`), or by **Scan now**. For each chain (PulseChain, Ethereum, Robinhood):
 
-1. **Busiest pools.** GeckoTerminal `/networks/{slug}/pools?sort=h24_volume_usd_desc`, 2 pages (40 pools). A 429 or 5xx is retried once.
+1. **Busiest pools of the DEXes this app trades.** GeckoTerminal `/networks/{slug}/dexes/{dex}/pools?sort=h24_volume_usd_desc` for each tradable DEX (ids in `src/live/chains.ts`, field `gecko`; PulseChain: pulsex-v2, pulsex (V1), 9mm-v2, 9mm-v3; Robinhood: uniswap-v3/v2-robinhood, pancakeswap-v3-robinhood; Ethereum: uniswap_v3, uniswap_v2). The chain-wide list was the wrong input: on 2026-10-17, 33 of Robinhood's 40 busiest pools were Uniswap V4 (not tradable here, most reported with $0 liquidity), which crowded out the real Uniswap V3 stock pools (NVDA ~6.7k trades/day, SPCX ~11k). A 429 or 5xx is retried once. The background candle download pauses while a scan runs.
 2. **Filter** (`pickTokens` in `src/market/scan.ts`). Volume alone is misleading: on 2026-10-17 the top Ethereum list had $53M of "volume" on a $45 pool and stablecoin/stablecoin pairs that never move, and Robinhood had $30–60M "volume" pools with ~19 trades. A pool is kept only if:
    - one side is something the bot can spend (wrapped native or a stablecoin; the zero address and `0xEeee…` count as the native coin);
    - it has at least $50,000 of liquidity and 100 trades in 24 h;
-   - its volume is at most 20× its liquidity.
+   - its volume is at most 20× its liquidity (more is likely wash trading).
 
    One pool per token, up to 8 tokens per chain. Every market already in the app is tested too: PLS/HEX is turned around to HEX/PLS so it spends PLS.
 3. **Safety.** New tokens go through the same `hub.inspect` as Markets → Add (deepest pool on a DEX the app trades, honeypot / tax simulation). Anything not allowed live is left out, with the reason.

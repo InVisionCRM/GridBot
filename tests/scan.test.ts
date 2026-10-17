@@ -56,7 +56,7 @@ describe('pickTokens: real activity, something the bot can spend', () => {
     expect(why['USDC / ETH (0xEeee)']).toBe('both sides are the native coin or stablecoins');
     expect(why['cirBTC / WBTC']).toBe('neither side is the native coin or a stablecoin');
     expect(why['PONS / USDG']).toBe('only 19 trades in 24h');
-    expect(why['WASH / USDC']).toBe('volume is 50× its liquidity (looks fake)');
+    expect(why['WASH / USDC']).toBe('volume is 50× its liquidity (likely wash trading)');
     expect(why['WBTC / WETH']).toBeUndefined(); // same token as a busier pool: tested once
   });
 
@@ -117,16 +117,19 @@ function fakeDeps(o: { candles?: Record<string, Candle[]>; inspectFails?: Record
   const calls: string[] = [];
   let limited = !!o.rateLimitOnce, http500 = !!o.http500Once;
   const deps: ScanDeps = {
-    chains: () => [{ id: 1, name: 'Ethereum', slug: 'eth', wrapped: WETH, spendable: SPEND }],
+    chains: () => [{ id: 1, name: 'Ethereum', slug: 'eth', wrapped: WETH, spendable: SPEND, dexes: ['uniswap_v3', 'uniswap_v2'] }],
     existing: () => [ethUsdc],
     inspect: async (_c, token) => {
       if (o.inspectFails?.[token]) throw new Error(o.inspectFails[token]);
-      return mkt(`ethereum:${token}/USDT`, tok(token, token.slice(0, 6)), tok(USDT, 'USDT'), { custom: true, safety: { risk: 'low', liveAllowed: true } as MarketDef['safety'] });
+      return mkt(`ethereum:${token}/USDT`, tok(token, token.slice(0, 6)), tok(USDT, 'USDT'), { custom: true, safety: { risk: 'low', liveAllowed: true, reasons: ['Simulated buy, transfer and sell matched quotes exactly.'] } as MarketDef['safety'] });
     },
     snapshot: async () => ({ spot: 2, quoteReserve: 1e9, plsReserve: 5e8, gasPricePls: 0, feeBps: 30 }),
     usdPerSpend: async () => 1,
     gecko: {
-      topPools: async (_n, page) => (page === 1 ? [pool({ name: 'WBTC / USDT', base: WBTC, quote: USDT }), pool({ name: 'DEAD / USDC', base: '0xdead', quote: USDC })] : []),
+      topPools: async (n, dex) => {
+        calls.push(`top:${n}/${dex}`);
+        return dex === 'uniswap_v3' ? [pool({ name: 'WBTC / USDT', base: WBTC, quote: USDT })] : [pool({ name: 'DEAD / USDC', base: '0xdead', quote: USDC })];
+      },
       ohlcv: async (p, token) => {
         calls.push(`${p}:${token}`);
         if (limited) { limited = false; throw new RateLimited(0); }
@@ -160,6 +163,8 @@ describe('DailyScanner', () => {
     expect(eth.upperPrice).toBeCloseTo(2 * (1 + eth.bandPct), 6);
     expect(eth.test).toMatchObject({ usd: TEST_USD, capital: TEST_USD });
     expect(wbtc.test.returnPct).toBeGreaterThan(eth.test.returnPct);
+    // Only the DEXes this app trades are read (not the chain-wide list, which on Robinhood is mostly Uniswap V4).
+    expect(calls.filter((x) => x.startsWith('top:'))).toEqual(['top:eth/uniswap_v3', 'top:eth/uniswap_v2']);
     // Native base asks GeckoTerminal for the wrapped token's price.
     expect(calls).toContain(`0xpoolethereum:ETH/USDC:${WETH}`);
     expect(c.skipped).toContainEqual({ name: 'DEAD / USDC', why: 'failed the safety check (blocked): honeypot' });

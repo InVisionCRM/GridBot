@@ -1047,7 +1047,7 @@ export class MultiBot {
       // Built-in PulseChain markets resolve their PulseX V2 pair via getPair; candlePool is that same verified pair.
       pool: d.pool.address || (d.legacy && d.pool.dex === 'pulsex-v2' ? d.candlePool ?? null : null),
       poolMode: d.poolMode ?? (d.custom ? 'manual' : 'default'), poolChoices: this.hub.rt(d.chainId).adapters.size,
-      legacy: !!d.legacy, custom: !!d.custom, risk: d.safety?.risk ?? null, liveAllowed: d.safety ? d.safety.liveAllowed : true,
+      legacy: !!d.legacy, custom: !!d.custom, risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null, liveAllowed: d.safety ? d.safety.liveAllowed : true,
       buyTaxPct: d.safety?.buyTaxPct ?? null, sellTaxPct: d.safety?.sellTaxPct ?? null, transferTaxPct: d.safety?.transferTaxPct ?? null,
       taxMode: d.safety?.taxMode ?? null, maxTxTokens: d.safety?.maxTxTokens ?? null, maxWalletTokens: d.safety?.maxWalletTokens ?? null,
       tradable: this.hub.rt(d.chainId).tradable,
