@@ -10,17 +10,23 @@ export interface TrendPrefill { pair: string; tf: TF; cfg: TrendConfig; capital?
 export interface BtPrefill { pair: string; tf: TF; cfg: TrendConfig; nonce: number }
 /** A daily pick opened in New bot: the range is re-centred on the live price with the pick's width. */
 export interface GridPrefill { pair: string; bandPct: number; gridCount: number; nonce: number }
+/** A liquidity setup from the daily scan's comparison opened in New bot. */
+export interface LpPrefill { pair: string; bandPct: number; nonce: number }
 
 export const TOOL_TABS = [['chart', 'Charts'], ['backtest', 'Backtest'], ['analytics', 'Analytics'], ['markets', 'Markets'], ['alerts', 'Alerts']] as const;
 export type ToolTab = (typeof TOOL_TABS)[number][0];
 
 export type View =
   | { v: 'home' }
-  | { v: 'new'; kind: 'grid' | 'trend'; trendPrefill?: TrendPrefill; gridPrefill?: GridPrefill }
+  | { v: 'new'; kind: BotKind; trendPrefill?: TrendPrefill; gridPrefill?: GridPrefill; lpPrefill?: LpPrefill }
   | { v: 'grid'; id: string }
   | { v: 'trend'; id: string }
+  | { v: 'lp'; id: string }
   | { v: 'tools'; tab: ToolTab; btPrefill?: BtPrefill };
 export type Nav = (v: View) => void;
+export type BotKind = 'grid' | 'trend' | 'lp';
+/** Detail view of a bot */
+export const botView = (kind: BotKind, id: string): View => ({ v: kind, id });
 
 /** 'PLS/DAI', 'ETH/USDC' (chain suffix dropped: the chain badge shows it). */
 export const gridName = (g: AnyObj) => String(g.label ?? `PLS/${g.stable}`).replace(/·.*/, '');
@@ -30,6 +36,9 @@ export const quoteSym = (b: AnyObj) => b.quoteSym ?? b.stable ?? b.quote;
 export const gridPnlUsd = (g: AnyObj): number | null => (g.usdPerQuote == null ? null : (g.pnl.realized + g.pnl.unrealized) * g.usdPerQuote);
 /** Trend bot profit (equity − capital) in ≈USD, or null when the quote has no USD route. */
 export const trendPnlUsd = (t: AnyObj): number | null => (t.usdPerQuote == null ? null : (t.pnl.equity - t.capital) * t.usdPerQuote);
+
+/** Liquidity bot profit (fees − gas ± price, see LpEngine.pnl) in ≈USD, or null when unknown. */
+export const lpPnlUsd = (b: AnyObj): number | null => (b.usdPerQuote == null || !b.pnl ? null : b.pnl.profit * b.usdPerQuote);
 
 export function rangeState(g: AnyObj): 'in' | 'below' | 'above' | null {
   if (!g.config || g.price == null) return null;

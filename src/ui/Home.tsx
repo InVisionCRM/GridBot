@@ -5,7 +5,7 @@ import { AnimatedNumber, StatusDot, useFlash } from './motion';
 import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
 import { ChainBadge, DexTag, chainOf, chains, useChainFilter } from './chains';
 import { humanAmount } from '../live/amount';
-import { errMsg, gridName, gridPnlUsd, quoteSym, rangeState, trendPnlUsd, type AnyObj, type Nav } from './model';
+import { botView, errMsg, gridName, gridPnlUsd, quoteSym, rangeState, trendPnlUsd, type AnyObj, type Nav } from './model';
 
 interface Props { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -50,6 +50,41 @@ function BotRow({ s, b, hold, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: nu
         {b.status === 'running'
           ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`${path}/stop`, 'POST'))}>Stop</button>
           : (grid ? b.config : true) && <button type="button" className="btn small-btn" disabled={busy || b.available === false} onClick={() => act(() => botApi(`${path}/resume`, 'POST'))}>Resume</button>}
+      </div>
+    </div>
+  );
+}
+
+/** A liquidity bot: fees earned (after gas) is what it makes; the price side moves with the price. */
+function LpRow({ s, b, nav, act, busy }: { s: AnyObj; b: AnyObj; nav: Nav; act: Props['act']; busy: boolean }) {
+  const flash = useFlash(b.reranges);
+  const q = quoteSym(b), pnl: AnyObj | null = b.pnl;
+  const state = b.lastError ? 'error' : b.status === 'closed' ? 'stopped' : b.status;
+  const meta = [
+    b.status === 'closed' ? 'Closed' : b.status === 'running' ? 'Running' : 'Paused',
+    b.position ? (b.inRange == null ? null : b.inRange ? 'in range' : 'out of range') : b.step ? 'opening' : null,
+    `${b.reranges} range move${b.reranges === 1 ? '' : 's'}`,
+  ];
+  const open = () => nav(botView('lp', b.id));
+  return (
+    <div className={`bot-row ${flash ? 'fill-flash' : ''}`} role="button" tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.key === 'Enter') open(); }}>
+      <div className="bot-name">
+        <StatusDot beat={b.priceAt} state={state} />
+        {b.available !== false && <ChainBadge c={chainOf(s, b.chainId)} testnet={false} />}
+        {b.label}
+        <span className="tag">Liquidity</span>
+        {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
+        <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
+      </div>
+      <div className={`bot-pnl ${cls(pnl ? pnl.fees - pnl.gas : null)}`} title="Fees earned (collected + waiting in the position) minus gas">
+        {pnl ? <AnimatedNumber value={pnl.fees - pnl.gas} format={(x) => qty(x, q, 4)} /> : '—'}
+      </div>
+      <div className="bot-meta">{b.available === false ? <span className="warn-t">Unavailable on this server</span> : b.lastError ? <span className="neg">{b.lastError}</span> : meta.filter(Boolean).join(' · ')}</div>
+      <div className="bot-hold" title="What price moves and swaps did to the coins: it moves with the price">{pnl ? `price: ${qty(pnl.price, q, 4)}` : ''}</div>
+      <div className="bot-act" onClick={(e) => e.stopPropagation()}>
+        {b.status === 'running'
+          ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST'))}>Pause</button>
+          : b.status === 'stopped' && <button type="button" className="btn small-btn" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
       </div>
     </div>
   );
@@ -111,8 +146,9 @@ function scanStep(g: AnyObj | null): string {
 
 /** Today's picks: the daily scan's best grid setups per chain, tested on the last 7 days of hourly prices. */
 /** Grid vs liquidity position vs hold for every pair the scan tested on one chain (same week, same test size). */
-function CompareList({ s, c, testUsd }: { s: AnyObj; c: AnyObj; testUsd: number }) {
+function CompareList({ s, c, testUsd, nav }: { s: AnyObj; c: AnyObj; testUsd: number; nav: Nav }) {
   if (!c.compare?.length) return null;
+  const lpOk = (r: AnyObj) => r.key && r.lp?.bandPct != null && (s.marketList ?? []).some((m: AnyObj) => m.key === r.key && m.lpOk);
   const dexName = (id: string) => chainOf(s, c.chainId)?.dexes?.find((d: AnyObj) => d.id === id)?.name ?? id;
   return (
     <details className="more">
@@ -133,6 +169,7 @@ function CompareList({ s, c, testUsd }: { s: AnyObj; c: AnyObj; testUsd: number 
                 {r.lp
                   ? `LP ${r.lp.bandPct == null ? 'full range' : `±${Math.round(r.lp.bandPct * 100)}%`}: fees ${pct(r.lp.feesPct, 2, true)}, in range ${pct(r.lp.inRangePct, 0)} of the time, ${pct(r.lp.poolSharePct, 2)} of the pool. LPs keep ${pct(r.lpShare, 0)} of the fee here.`
                   : `LP not tested: ${r.lpWhy}`}
+                {lpOk(r) && <> <button type="button" className="btn small-btn" onClick={() => nav({ v: 'new', kind: 'lp', lpPrefill: { pair: r.key, bandPct: r.lp.bandPct, nonce: Date.now() } })}>Start LP ±{Math.round(r.lp.bandPct * 100)}%</button></>}
               </span>
             </div>
           );
@@ -178,7 +215,7 @@ function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | '
           {c.error ? <p className="small neg">{c.error}</p>
             : !c.picks.length ? <p className="small muted">Nothing made money here over the last 7 days. A grid would have lost to fees or to a one-way move.</p>
             : c.picks.map((k: AnyObj) => <PickRow key={`${k.rank}-${k.label}`} k={k} use={use} busy={busy} />)}
-          <CompareList s={s} c={c} testUsd={p.testUsd} />
+          <CompareList s={s} c={c} testUsd={p.testUsd} nav={nav} />
           {c.skipped.length > 0 && (
             <details className="more">
               <summary>Why other pools were left out ({c.skipped.length})</summary>
@@ -205,7 +242,7 @@ export function Home({ s, nav, act, busy }: Props) {
   }, [sig]);
 
   const here = (b: AnyObj) => chain === 'all' || (b.chainId ?? s.legacyChainId) === chain;
-  const bots: AnyObj[] = [...s.grids.map((g: AnyObj) => ({ ...g, kind: 'grid' })), ...(s.trends ?? []).map((t: AnyObj) => ({ ...t, kind: 'trend' }))]
+  const bots: AnyObj[] = [...s.grids.map((g: AnyObj) => ({ ...g, kind: 'grid' })), ...(s.trends ?? []).map((t: AnyObj) => ({ ...t, kind: 'trend' })), ...(s.lps ?? [])]
     .filter(here)
     .sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
   const ovBots: AnyObj[] = (ov?.bots ?? []).filter(here);
@@ -215,12 +252,13 @@ export function Home({ s, nav, act, busy }: Props) {
   };
   // Banked from completed trades vs the change on coins not sold yet, each in ≈USD at today's prices (bots spend
   // different coins, so dollars are the only way to add them up).
+  // A liquidity bot's fees (after gas) count as earned; what price did to its coins counts with the unsold side.
   const sumUsd = (part: (b: AnyObj) => number) => {
-    const xs = bots.filter((b) => b.usdPerQuote != null).map((b) => part(b) * b.usdPerQuote);
+    const xs = bots.filter((b) => b.usdPerQuote != null && (b.kind !== 'lp' || b.pnl)).map((b) => part(b) * b.usdPerQuote);
     return xs.length ? xs.reduce((a, x) => a + x, 0) : null;
   };
-  const earned = sumUsd((b) => b.pnl.realized);
-  const unsold = sumUsd((b) => (b.kind === 'grid' ? b.pnl.unrealized : b.pnl.equity - b.capital - b.pnl.realized));
+  const earned = sumUsd((b) => (b.kind === 'lp' ? b.pnl.fees - b.pnl.gas : b.pnl.realized));
+  const unsold = sumUsd((b) => (b.kind === 'grid' ? b.pnl.unrealized : b.kind === 'lp' ? b.pnl.price : b.pnl.equity - b.capital - b.pnl.realized));
   const value = ovBots.length ? ovBots.reduce((a, o) => a + o.equityUsd, 0) : null;
   const running = bots.filter((b) => b.status === 'running').length;
 
@@ -237,11 +275,13 @@ export function Home({ s, nav, act, busy }: Props) {
     notices.push({ key: 'alloc', level: 'error', text: <><b>Not enough in your wallet for your running live bots:</b> {short}. Stop a bot or add funds.</> });
   }
   for (const b of bots) {
-    const name = b.kind === 'grid' ? gridName(b) : b.name;
-    const open = () => nav(b.kind === 'grid' ? { v: 'grid', id: b.id } : { v: 'trend', id: b.id });
+    const name = b.kind === 'grid' ? gridName(b) : b.kind === 'lp' ? `Liquidity ${b.label}` : b.name;
+    const open = () => nav(botView(b.kind, b.id));
     if (b.available === false) notices.push({ key: `na-${b.id}`, level: 'warn', text: <><b>{name}</b> trades on a chain or token this server doesn't load (removed, or turned off in .env). It is stopped; open it to remove it.</>, open });
     else if (b.lastError) notices.push({ key: `err-${b.id}`, level: 'error', text: <><b>{name}:</b> {b.lastError}</>, open });
-    else if (b.kind === 'grid' && b.status === 'running') {
+    else if (b.kind === 'lp' && b.status === 'running' && b.position && b.inRange === false && !b.config?.rerange) {
+      notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is out of range</b> and isn't earning. Moving the range is off, so it waits for the price to come back. Open it to turn moving on or close it.</>, open });
+    } else if (b.kind === 'grid' && b.status === 'running') {
       const rs = rangeState(b);
       if (rs === 'above' && !b.recenter?.enabled) notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is above its range.</b> Everything is sold and it waits for the price to come back. Open it to move the range or turn on Follow the price up.</>, open });
       if (rs === 'below') notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is below its range.</b> Every level has bought and it holds {b.base} until the price recovers. Open it to move the range.</>, open });
@@ -252,7 +292,7 @@ export function Home({ s, nav, act, busy }: Props) {
     <main className="stack">
       <div className="summary">
         <Kpi label="Total value" sub={`${bots.length} bots · ${running} running`}>{value != null ? usd(value) : '—'}</Kpi>
-        <Kpi label="Earned by trading" sub="completed trades, after fees and gas · ≈ today's $"><span className={cls(earned)}>{earned != null ? <AnimatedNumber value={earned} format={(x) => usd(x, true)} /> : '—'}</span></Kpi>
+        <Kpi label="Earned by trading" sub="completed trades and liquidity fees, after gas · ≈ today's $"><span className={cls(earned)}>{earned != null ? <AnimatedNumber value={earned} format={(x) => usd(x, true)} /> : '—'}</span></Kpi>
         <Kpi label="Bought, not sold yet" sub="moves with the price until it sells"><span className={cls(unsold)}>{unsold != null ? usd(unsold, true) : '—'}</span></Kpi>
       </div>
 
@@ -274,7 +314,9 @@ export function Home({ s, nav, act, busy }: Props) {
           <h3>Your bots</h3>
           <button type="button" className="btn primary small-btn" onClick={() => nav({ v: 'new', kind: 'grid' })}>New bot</button>
         </div>
-        {bots.map((b) => <BotRow key={b.id} s={s} b={b} hold={holdOf(b.id)} nav={nav} act={act} busy={busy} />)}
+        {bots.map((b) => (b.kind === 'lp'
+          ? <LpRow key={b.id} s={s} b={b} nav={nav} act={act} busy={busy} />
+          : <BotRow key={b.id} s={s} b={b} hold={holdOf(b.id)} nav={nav} act={act} busy={busy} />))}
         {bots.length === 0 && (
           <div className="empty">
             <p>No bots{chain !== 'all' ? ' on this chain' : ''} yet. Start one in paper mode to see how it behaves with real prices and no real money.</p>

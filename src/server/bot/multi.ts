@@ -14,6 +14,7 @@ import { totals, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
 import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
+import { LpEngine, freshLp, type LpStartParams, type LpState } from './lpEngine';
 import { TaxWatch } from './taxWatch';
 import type { Logger } from './logger';
 import type { Store } from './store';
@@ -55,6 +56,8 @@ export interface MultiState {
   defaults: SafetyLimits;
   grids: BotState[];
   trends: TrendState[];
+  /** Liquidity-position bots */
+  lps: LpState[];
   alerts: Alert[];
   /** [ms, total equity USD, realized USD] every ≥60 s */
   /** [t, equityUsd, realizedUsd, capitalUsd?] — capital lets period changes exclude bots added/removed */
@@ -91,7 +94,7 @@ export interface ChainWallet {
 }
 
 function migrate(raw: unknown, net: LiveNetwork): MultiState {
-  const empty = (): MultiState => ({ version: 3, defaults: { ...DEFAULT_LIMITS }, grids: [], trends: [], alerts: [], portfolio: [] });
+  const empty = (): MultiState => ({ version: 3, defaults: { ...DEFAULT_LIMITS }, grids: [], trends: [], lps: [], alerts: [], portfolio: [] });
   if (!raw || typeof raw !== 'object') return empty();
   const o = raw as Record<string, unknown>;
   if ((o.version === 2 || o.version === 3) && Array.isArray(o.grids)) {
@@ -100,6 +103,7 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
       defaults: { ...DEFAULT_LIMITS, ...((o.defaults as SafetyLimits) ?? {}) },
       grids: (o.grids as BotState[]).map((g) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
       trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
+      lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => ({ ...freshLp(net, t.id), ...t })) : [],
       alerts: Array.isArray(o.alerts) ? (o.alerts as Alert[]) : [],
       portfolio: Array.isArray(o.portfolio) ? (o.portfolio as MultiState['portfolio']) : [],
     };
@@ -140,6 +144,7 @@ export class MultiBot {
   private multi: MultiState;
   private engines = new Map<string, GridEngine>();
   private trendEngines = new Map<string, TrendEngine>();
+  private lpEngines = new Map<string, LpEngine>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
   /** Legacy-chain wallet (PLS + legacy quotes by symbol) — kept for the existing UI/tests */
@@ -162,6 +167,7 @@ export class MultiBot {
     this.persist();
     for (const g of this.multi.grids) this.attach(g.id);
     for (const t of this.multi.trends) this.attachTrend(t.id);
+    for (const t of this.multi.lps) this.attachLp(t.id);
     this.taxWatch = new TaxWatch({
       now: () => this.now(),
       markets: () => this.watchedSafetyKeys(),
@@ -228,6 +234,21 @@ export class MultiBot {
     });
     this.trendEngines.set(id, eng);
     return eng;
+  }
+
+  private attachLp(id: string): LpEngine {
+    let eng = this.lpEngines.get(id);
+    if (eng) return eng;
+    eng = new LpEngine({
+      net: this.d.net, store: new SliceStore(() => this.multi.lps, () => this.persist(), id), log: this.d.log, hub: this.hub,
+      emit: (e) => this.activity.emitEvent(e), approval: this.d.approval, receiptTimeoutMs: this.d.receiptTimeoutMs, now: this.d.now, id,
+    });
+    this.lpEngines.set(id, eng);
+    return eng;
+  }
+  private lp(id: string): LpEngine {
+    if (!this.multi.lps.some((g) => g.id === id)) throw new Error(`Unknown liquidity bot ${id}`);
+    return this.lpEngines.get(id) ?? this.attachLp(id);
   }
 
   private engine(id: string): GridEngine {
@@ -297,12 +318,37 @@ export class MultiBot {
     this.d.log.info(`[${id}] removed`);
   }
 
+  // ── Liquidity-position bots ─────────────────────────────────────────────
+  async addLp(p: LpStartParams): Promise<string> {
+    if (p.mode === 'live') await this.assertCovers(p.market, p.capital, p.limits);
+    const slot = freshLp(this.d.net);
+    this.multi.lps.push(slot);
+    this.persist();
+    const eng = this.attachLp(slot.id);
+    try { await eng.start(p); } catch (e) { this.removeLp(slot.id, true); throw e; }
+    return slot.id;
+  }
+  stopLp(id: string) { this.lp(id).stop(); }
+  resumeLp(id: string) { this.lp(id).resume(); }
+  closeLp(id: string) { this.lp(id).close(); }
+  setLpRerange(id: string, enabled: boolean) { this.lp(id).setRerange(enabled); }
+  setLpProfits(id: string, p: ProfitMode) { return this.lp(id).setProfits(p); }
+  /** Only a closed bot (or one that never opened) can be removed: a live position must be closed first. */
+  removeLp(id: string, force = false) {
+    const eng = this.lpEngines.get(id);
+    if (!force && eng && (eng.state.position || eng.state.step)) throw new Error('Close the position first: it still holds coins.');
+    this.lpEngines.delete(id);
+    this.multi.lps = this.multi.lps.filter((g) => g.id !== id);
+    this.persist();
+  }
+
   /** KILL ALL: stop every grid and trend bot; queued jobs dropped, nothing new is sent. */
   stopAll() {
     let n = 0;
     for (const e of this.engines.values()) if (e.state.status === 'running') { e.stop(); n++; }
     for (const e of this.trendEngines.values()) if (e.state.status === 'running') { e.stop('KILL ALL'); n++; }
-    this.d.log.warn(`KILL ALL — ${n} bot(s) stopped (grids + trend bots).`);
+    for (const e of this.lpEngines.values()) if (e.state.status === 'running') { e.stop('KILL ALL'); n++; }
+    this.d.log.warn(`KILL ALL — ${n} bot(s) stopped (grids, trend and liquidity bots).`);
     this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'error', notify: true, msg: `KILL ALL — ${n} bot(s) stopped` });
   }
 
@@ -312,6 +358,7 @@ export class MultiBot {
     let n = 0;
     for (const e of this.engines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(); n++; }
     for (const e of this.trendEngines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(`STOP ${c.short}`); n++; }
+    for (const e of this.lpEngines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(`STOP ${c.short}`); n++; }
     this.d.log.warn(`STOP ${c.name} — ${n} bot(s) stopped.`);
     this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'warn', notify: true, chainId: c.id, msg: `STOP ${c.name} — ${n} bot(s) stopped` });
     return n;
@@ -331,9 +378,9 @@ export class MultiBot {
   }
 
   allocations() {
-    type Row = { token: string; chainId: number; address: string; native: boolean; allocated: number; wallet: number | null; bots: { id: string; kind: 'grid' | 'trend'; amount: number }[] };
+    type Row = { token: string; chainId: number; address: string; native: boolean; allocated: number; wallet: number | null; bots: { id: string; kind: 'grid' | 'trend' | 'lp'; amount: number }[] };
     const rows = new Map<string, Row>();
-    const add = (d: MarketDef, side: 'base' | 'quote', id: string, kind: 'grid' | 'trend', amount: number) => {
+    const add = (d: MarketDef, side: 'base' | 'quote', id: string, kind: 'grid' | 'trend' | 'lp', amount: number) => {
       if (!(amount > 1e-12)) return;
       const tk = d[side];
       const token = this.tokLabel(d.chainId, tk.symbol);
@@ -353,6 +400,13 @@ export class MultiBot {
       if (!d || s.mode !== 'live' || (s.status !== 'running' && !s.position)) continue;
       add(d, 'quote', s.id, 'trend', s.cash);
       add(d, 'base', s.id, 'trend', s.position?.pls ?? 0);
+    }
+    // Liquidity bots: only their idle coins are in the wallet balance (a position's coins sit in the pool).
+    for (const e of this.lpEngines.values()) {
+      const s = e.state, d = e.def;
+      if (!d || s.mode !== 'live' || s.status === 'closed' || s.status === 'idle') continue;
+      add(d, 'quote', s.id, 'lp', s.idle.quote);
+      add(d, 'base', s.id, 'lp', s.idle.base);
     }
     const out = [...rows.values()].map((r) => {
       const wallet = this.walletAmount(r.chainId, r);
@@ -464,6 +518,10 @@ export class MultiBot {
       for (const e of this.trendEngines.values()) {
         if (e.state.status === 'running' || e.state.inFlight) push(e.chainId, () => e.tick(this.spots[e.state.quote]));
       }
+      // A stopped liquidity bot still reads its position (value, fees) and settles a tx already sent.
+      for (const e of this.lpEngines.values()) {
+        if (e.state.status === 'running' || e.state.status === 'stopped') push(e.chainId, () => e.tick());
+      }
       await Promise.all([...byChain.values()].map(async (jobs) => { for (const j of jobs) await j(); }));
       this.checkRanges();
       this.evaluateAlerts();
@@ -490,6 +548,7 @@ export class MultiBot {
     for (const d of this.hub.list()) if (d.legacy) used.add(d.key);
     for (const g of this.multi.grids) used.add(g.stable);
     for (const t of this.multi.trends) used.add(t.quote);
+    for (const t of this.multi.lps) used.add(t.market);
     for (const a of this.multi.alerts) used.add(a.pair);
     if (all) for (const d of this.hub.list()) used.add(d.key);
     // A flipped market's candles are derived from its original: always price the original too.
@@ -607,7 +666,7 @@ export class MultiBot {
   // ── Portfolio / analytics ──────────────────────────────────────────────
   private botRows() {
     const rows: {
-      id: string; kind: 'grid' | 'trend'; name: string; pair: string; chainId: number; mode: Mode; status: string; usdPerQuote: number | null;
+      id: string; kind: 'grid' | 'trend' | 'lp'; name: string; pair: string; chainId: number; mode: Mode; status: string; usdPerQuote: number | null;
       capital: number; equity: number; realized: number; unrealized: number; fees: number; gas: number; hodl: number | null;
       plsHeld: number; quoteFree: number; startedAt: number | null; equityHist: [number, number][];
       closed: { pnl: number; t: number; holdMs?: number }[]; trades: LiveTrade[]; inMarket: number;
@@ -641,6 +700,18 @@ export class MultiBot {
         hodl: st.hodl, plsHeld: st.position?.pls ?? 0, quoteFree: st.cash, startedAt: st.startedAt, equityHist: e.state.equity,
         closed: e.modeTrades().filter((x) => x.side === 'sell' && !x.failed).map((x) => ({ pnl: x.realizedPnlUsd, t: x.timestamp, holdMs: (x as TrendTrade).holdMs })),
         trades: e.modeTrades(), inMarket: st.stats.timeInMarket,
+      });
+    }
+    for (const e of this.lpEngines.values()) {
+      const s = e.state, pnl = e.pnl(), vw = e.view;
+      if (!s.config || !pnl || !vw) continue;
+      rows.push({
+        id: s.id, kind: 'lp', name: `Liquidity ${e.label}`, pair: s.market, chainId: e.chainId, mode: s.mode, status: s.status, usdPerQuote: this.usdPerQuote(s.market),
+        // fees earned (net of gas) are the LP's "banked" side; the price side moves with the price like unsold coins
+        capital: s.config.capital, equity: pnl.equity, realized: pnl.fees - pnl.gas, unrealized: pnl.price, fees: 0, gas: pnl.gas,
+        hodl: s.startPrice && s.lastPrice ? (s.config.capital / s.startPrice) * s.lastPrice : null,
+        plsHeld: vw.coins.base + vw.owed.base + s.idle.base, quoteFree: vw.coins.quote + vw.owed.quote + s.idle.quote, startedAt: s.startedAt, equityHist: s.equity,
+        closed: [], trades: [], inMarket: s.position ? 1 : 0,
       });
     }
     return rows;
@@ -1057,6 +1128,8 @@ export class MultiBot {
       buyTaxPct: d.safety?.buyTaxPct ?? null, sellTaxPct: d.safety?.sellTaxPct ?? null, transferTaxPct: d.safety?.transferTaxPct ?? null,
       taxMode: d.safety?.taxMode ?? null, maxTxTokens: d.safety?.maxTxTokens ?? null, maxWalletTokens: d.safety?.maxWalletTokens ?? null,
       tradable: this.hub.rt(d.chainId).tradable,
+      // A liquidity bot needs a V3 pool on a DEX with a verified position manager.
+      lpOk: d.pool.kind === 'v3' && !!d.pool.address && !!this.hub.chain(d.chainId).dexes.find((x) => x.id === d.pool.dex)?.positionManager,
       // Flipped spot: its own poll when a bot uses it, else ≈ 1 / original (mid-ish; the LP fee makes them differ by ~2× fee).
       spot: this.spots[d.key] ?? (d.flipOf && this.spots[d.flipOf] > 0 ? 1 / this.spots[d.flipOf] : null), usdPerQuote: this.hub.usdPerQuote(d.key),
     }));
@@ -1071,6 +1144,7 @@ export class MultiBot {
       const st = (this.trendEngines.get(t.id) ?? this.attachTrend(t.id)).status();
       return { ...st, usdPerQuote: this.usdPerQuote(st.quote) };
     });
+    const lps = this.multi.lps.map((t) => (this.lpEngines.get(t.id) ?? this.attachLp(t.id)).status());
     const z = { realized: 0, unrealized: 0, gasUsd: 0, feesUsd: 0, roundTrips: 0, plsHeld: 0, unpriced: 0 };
     const aggregate = grids.reduce((a, g) => {
       const k = g.usdPerQuote;
@@ -1091,7 +1165,7 @@ export class MultiBot {
       legacyChainId: this.hub.legacyChainId,
       chains: this.chainsStatus(),
       marketList: this.marketList(),
-      grids, trends, aggregate, allocations: this.allocations(), alerts: this.multi.alerts,
+      grids, trends, lps, aggregate, allocations: this.allocations(), alerts: this.multi.alerts,
       candleSync: this.candleSyncStatus?.() ?? null,
       log: this.d.log.entries.slice(-80).reverse(),
     };

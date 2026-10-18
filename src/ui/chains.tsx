@@ -16,6 +16,8 @@ export interface MarketInfo {
   flipped?: boolean; pairKey?: string; spends?: string; stacks?: string; quoteNative?: boolean;
   /** Lowercase token addresses (the wrapped native token's address for native sides) */
   quoteAddress?: string; baseAddress?: string; baseNative?: boolean;
+  /** A liquidity bot can run here (V3 pool on a DEX with a verified position manager) */
+  lpOk?: boolean;
 }
 export interface ChainInfo {
   id: number; key: string; name: string; short: string; color: string; status: 'live' | 'testnet'; tradable: boolean; reason: string | null;
@@ -77,10 +79,10 @@ export const feeLabel = (m: Pick<MarketInfo, 'feeBps' | 'feeTier' | 'kind'>) =>
  * Grouped <option>s for every tradable market (respects the global chain filter unless `all`). Values are the
  * ORIGINAL keys; `flipped` only changes the labels (HEX/PLS instead of PLS/HEX) — PairPicker adds the '~'.
  */
-export function MarketOptions({ s, all = false, includeKey, flipped = false }: { s: AnyObj; all?: boolean; includeKey?: string; flipped?: boolean }) {
+export function MarketOptions({ s, all = false, includeKey, flipped = false, only }: { s: AnyObj; all?: boolean; includeKey?: string; flipped?: boolean; only?: (m: MarketInfo) => boolean }) {
   const { chain } = useChainFilter();
   const inc = includeKey ? unflipKey(includeKey) : undefined;
-  const ms = marketsOf(s).filter((m) => (m.tradable && (all || chain === 'all' || m.chainId === chain)) || m.key === inc);
+  const ms = marketsOf(s).filter((m) => (m.tradable && (!only || only(m)) && (all || chain === 'all' || m.chainId === chain)) || m.key === inc);
   if (!ms.length) return <>{(s.quotes ?? []).map((q: string) => <option key={q} value={q}>PLS/{q}</option>)}</>;
   const groups = chains(s).map((c) => ({ c, list: ms.filter((m) => m.chainId === c.id) })).filter((g) => g.list.length);
   return (
@@ -154,13 +156,13 @@ export function DexTag({ name, feeBps, feeTier, title }: { name: string | null |
  * Pair picker with the ⇄ orientation toggle. `value` is the market key in its orientation ('HEX' = PLS/HEX,
  * 'HEX~' = HEX/PLS); the select picks the pair, the button flips base ↔ quote.
  */
-export function PairPicker({ s, value, onChange, all = false, label = 'Pair', disabled = false }: { s: AnyObj; value: string; onChange: (key: string) => void; all?: boolean; label?: string; disabled?: boolean }) {
+export function PairPicker({ s, value, onChange, all = false, label = 'Pair', disabled = false, only }: { s: AnyObj; value: string; onChange: (key: string) => void; all?: boolean; label?: string; disabled?: boolean; only?: (m: MarketInfo) => boolean }) {
   const fl = isFlipKey(value), m = mk(s, value);
   return (
     <label>{label}
       <span className="pair-pick">
         <select value={unflipKey(value)} disabled={disabled} onChange={(e) => onChange(orientedKey(e.target.value, fl))} aria-label={`${label} (${m.label})`}>
-          <MarketOptions s={s} all={all} includeKey={value} flipped={fl} />
+          <MarketOptions s={s} all={all} includeKey={value} flipped={fl} only={only} />
         </select>
         <button type="button" className={`flip-btn ${fl ? 'on' : ''}`} disabled={disabled} aria-pressed={fl} aria-label="flip base and quote"
           title={`Flip orientation → ${mk(s, flipKey(value)).label} (spend ${mk(s, flipKey(value)).quote}, stack ${mk(s, flipKey(value)).base})`}

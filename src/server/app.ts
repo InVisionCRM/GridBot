@@ -203,6 +203,23 @@ export function createApp(o: AppOpts) {
   app.put('/api/bot/trends/:id/limits', wrap((req) => bot.setTrendLimits(req.params.id, limitsBody(req.body ?? {}))));
   app.delete('/api/bot/trends/:id', wrap((req) => bot.removeTrend(req.params.id)));
 
+  // ── Liquidity bots (V3 positions) ────────────────────────────────────
+  app.post('/api/bot/lps', wrap(async (req) => {
+    const b = req.body ?? {};
+    const id = await bot.addLp({
+      mode: b.mode === 'live' ? 'live' : 'paper', market: String(b.market ?? ''), bandPct: Number(b.bandPct), capital: Number(b.capital),
+      rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined, profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
+    });
+    void bot.tickAll();
+    return { ok: true, id };
+  }));
+  app.post('/api/bot/lps/:id/resume', wrap((req) => { bot.resumeLp(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
+  app.post('/api/bot/lps/:id/close', wrap((req) => { bot.closeLp(req.params.id); void bot.tickAll(); }));
+  app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
+  app.put('/api/bot/lps/:id/profits', wrap((req) => bot.setLpProfits(req.params.id, profitsBody(req.body) ?? (() => { throw new Error('profits required'); })())));
+  app.delete('/api/bot/lps/:id', wrap((req) => bot.removeLp(req.params.id)));
+
   // ── Candles / market ─────────────────────────────────────────────────
   app.get('/api/market/candles', wrap((req) => {
     const pair = String(req.query.pair ?? net.defaultQuote), tf = String(req.query.tf ?? '1h');

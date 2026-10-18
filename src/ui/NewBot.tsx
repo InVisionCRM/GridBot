@@ -5,11 +5,14 @@ import { TFS, type TF } from '../market/candles';
 import { STRATEGY_PRESETS } from '../live/presets';
 import { DEFAULT_GAS_RESERVE, parseGasRes, type GasReserveCfg } from '../live/gasReserve';
 import { humanAmount } from '../live/amount';
+import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from '../live/recenter';
+import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
+import { LP_BAND } from '../market/lp';
 import { botApi } from './api';
 import { pct, px } from './fmt';
 import { ChainBadge, Orientation, PairPicker, chainOf, feeLabel, marketsOf, mk, unflipKey, useChainFilter } from './chains';
 import { TrendConfigEditor, strategyRule } from './TrendConfig';
-import { errMsg, floorSig, spendFunds, type AnyObj, type Funds, type GridPrefill, type Nav, type TrendPrefill } from './model';
+import { errMsg, floorSig, spendFunds, type AnyObj, type BotKind, type Funds, type GridPrefill, type LpPrefill, type Nav, type TrendPrefill } from './model';
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 type Mode = 'paper' | 'live';
@@ -118,14 +121,21 @@ export interface ProfitsChoice { mode: 'reinvest' | 'send'; to: string }
 export const isAddress = (a: string) => /^0x[0-9a-fA-F]{40}$/.test(a.trim());
 export const profitsBody = (p: ProfitsChoice) => (p.mode === 'send' ? { mode: 'send' as const, to: p.to.trim() } : { mode: 'reinvest' as const });
 
-export function ProfitsField({ p, set }: { p: ProfitsChoice; set: (p: ProfitsChoice) => void }) {
+/** What profits mean for each bot type. */
+const PROFITS_COPY = {
+  grid: { head: 'from each completed buy → sell', reinvest: "Added to that level's next buy, so buys grow as it earns.", send: `Buys stay the same size. Profit is sent once it's worth at least ${PAYOUT_MIN_GAS_MULTIPLE}× the transfer's gas.` },
+  lp: { head: 'the trading fees the position earns', reinvest: 'Fees go back into the position each time the range moves (and when you close), so it grows as it earns. No extra transactions.', send: `Fees are collected straight to that address once they're worth at least ${PAYOUT_MIN_GAS_MULTIPLE}× the collect's gas. The position itself stays the same size.` },
+} as const;
+
+export function ProfitsField({ p, set, kind = 'grid' }: { p: ProfitsChoice; set: (p: ProfitsChoice) => void; kind?: keyof typeof PROFITS_COPY }) {
+  const c = PROFITS_COPY[kind];
   return (
     <div className="profits">
-      <span className="profits-head"><b>Profits</b> <span className="muted small">from each completed buy → sell</span></span>
+      <span className="profits-head"><b>Profits</b> <span className="muted small">{c.head}</span></span>
       <label className="check"><input type="radio" name="profits" checked={p.mode === 'reinvest'} onChange={() => set({ ...p, mode: 'reinvest' })} />
-        <span><b>Reinvest</b> <span className="muted">Added to that level's next buy, so buys grow as it earns.</span></span></label>
+        <span><b>Reinvest</b> <span className="muted">{c.reinvest}</span></span></label>
       <label className="check"><input type="radio" name="profits" checked={p.mode === 'send'} onChange={() => set({ ...p, mode: 'send' })} />
-        <span><b>Send to an address</b> <span className="muted">Buys stay the same size. Profit is sent once it's worth at least 10× the transfer's gas.</span></span></label>
+        <span><b>Send to an address</b> <span className="muted">{c.send}</span></span></label>
       {p.mode === 'send' && (
         <input className="mono" placeholder="0x… address that receives the profit" value={p.to} onChange={(e) => set({ ...p, to: e.target.value.trim() })} spellCheck={false} />
       )}
@@ -351,10 +361,85 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
   );
 }
 
-export function NewBot({ s, kind, trendPrefill, gridPrefill, nav, act, busy }: Common & { kind: 'grid' | 'trend'; trendPrefill?: TrendPrefill; gridPrefill?: GridPrefill }) {
+const LP_BANDS = [0.02, 0.05, 0.08, 0.12, 0.2];
+const hours = (ms: number) => `${ms / 3600_000} hours`;
+
+/** "Move the range" checkbox for a liquidity bot (re-range both ways), on by default. */
+function Rerange({ on, set }: { on: boolean; set: (v: boolean) => void }) {
+  return (
+    <label className="check follow">
+      <input type="checkbox" checked={on} onChange={(e) => set(e.target.checked)} />
+      <span><b>Move the range with the price</b> <span className="muted">When the price stays outside the range for {hours(RECENTER_AFTER_MS)} (up or down), take the position out and open the same width around the price. At most once every {hours(RECENTER_COOLDOWN_MS)}. Each move costs a swap and gas, and locks in the coin mix it had.</span></span>
+    </label>
+  );
+}
+
+function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }) {
+  const { chain } = useChainFilter();
+  const lpMarkets = (c: number | 'all') => marketsOf(s).filter((x) => x.tradable && x.lpOk && (c === 'all' || x.chainId === c));
+  const [pair, setPair] = useState(() => prefill?.pair ?? lpMarkets(chain)[0]?.key ?? '');
+  const [band, setBand] = useState(String((prefill?.bandPct ?? 0.08) * 100));
+  const [amount, setAmount] = useState('');
+  const [rerange, setRerange] = useState(true);
+  const [profits, setProfits] = useState<ProfitsChoice>({ mode: 'reinvest', to: '' });
+  const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
+  const [mode, setMode] = useState<Mode>('paper');
+  const shownChain = useRef(chain);
+  useEffect(() => {
+    if (shownChain.current === chain) return;
+    shownChain.current = chain;
+    const ms = lpMarkets(chain);
+    if (ms.length && !ms.some((x) => x.key === unflipKey(pair))) setPair(ms[0].key);
+  }, [chain]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!pair) return <div className="card"><p className="muted">No pair here can hold a liquidity position. It needs a V3 pool (Uniswap V3 on Ethereum or Robinhood, 9mm V3 on PulseChain). Pick another chain, or add a pair with a V3 pool under Tools → Markets.</p></div>;
+
+  const m = mk(s, pair);
+  const spot = s.spots?.[pair] ?? m.spot ?? null;
+  const b = +band / 100;
+  const bandOk = b >= LP_BAND.min && b <= LP_BAND.max;
+  const funds = spendFunds(s, pair, +amount || 0, parseGasRes(limits.gasRes) ?? DEFAULT_GAS_RESERVE);
+  const start = () => act(async () => {
+    if (mode === 'live' && !confirm(`Start a LIVE liquidity position on ${m.label}? It signs real transactions from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
+    const r = await botApi('lps', 'POST', {
+      mode, market: pair, bandPct: b, capital: +amount, rerange, profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative),
+    });
+    nav({ v: 'lp', id: r.id });
+  });
+
+  return (
+    <div className="card">
+      <div className="form-row">
+        <PairPicker s={s} value={pair} onChange={setPair} only={(x) => !!x.lpOk} />
+        <label title="How far the range reaches each side of today's price. Narrower earns more fees per coin while the price is inside, and leaves the range sooner.">Range ± %<input value={band} inputMode="decimal" onChange={(e) => setBand(e.target.value.replace(/[%\s]/g, ''))} /></label>
+        <AmountField label={`Amount (${m.quote})`} value={amount} f={funds} onChange={setAmount} />
+      </div>
+      <div className="quick">
+        <span className="muted small">Range around {spot ? px(spot) : '—'} {m.quote}/{m.base}:</span>
+        {LP_BANDS.map((x) => <button key={x} type="button" className={`btn small-btn ${Math.abs(b - x) < 1e-9 ? 'primary' : ''}`} onClick={() => setBand(String(x * 100))}>±{x * 100}%</button>)}
+      </div>
+      {!bandOk && <p className="small neg">The range must be between ±{LP_BAND.min * 100}% and ±{LP_BAND.max * 100}%.</p>}
+      <div className="verdict ok">
+        <span>Puts your {m.quote} into the {m.dexName ?? m.dex} {feeLabel(m)} pool between <b>{spot && bandOk ? px(spot * (1 - b)) : '—'}</b> and <b>{spot && bandOk ? px(spot * (1 + b)) : '—'}</b> {m.quote}/{m.base}. About half is swapped to {m.base} first (the exact mix depends on where the price sits in the range).</span>
+        <span className="detail">It earns its share of the {feeLabel(m)} fee on every trade while the price is inside the range. Like a grid, it ends up holding more of whichever coin fell. Outside the range it earns nothing until the price comes back or the range moves. Gas: opening is a swap plus about 480k; moving the range is a take-out (about 250k), a swap and a new open; closing is about 250k.</span>
+      </div>
+      <Rerange on={rerange} set={setRerange} />
+      <ProfitsField p={profits} set={setProfits} kind="lp" />
+      <details className="more">
+        <summary>Advanced</summary>
+        <LimitsFields l={limits} set={setLimits} quoteNative={!!m.quoteNative} quote={m.quote} />
+      </details>
+      <StartRow s={s} pairKey={pair} mode={mode} setMode={setMode} busy={busy} disabled={!(+amount > 0) || !bandOk || !(profits.mode === 'reinvest' || isAddress(profits.to))}
+        problem={fundsProblem(funds, +amount || 0, mode)} label={mode === 'live' ? 'Open live position' : 'Open paper position'} onStart={start} />
+    </div>
+  );
+}
+
+export function NewBot({ s, kind, trendPrefill, gridPrefill, lpPrefill, nav, act, busy }: Common & { kind: BotKind; trendPrefill?: TrendPrefill; gridPrefill?: GridPrefill; lpPrefill?: LpPrefill }) {
   const pick = useMemo(() => [
     ['grid', 'Grid bot', 'Buys a little on each dip and sells it one level higher. Earns when the price swings sideways inside a range.'],
     ['trend', 'Trend bot', 'Buys when a trend starts and sells on a stop, take-profit or exit signal. Earns when the price moves in one direction.'],
+    ['lp', 'Liquidity', 'Puts both coins in a V3 pool around the price and earns a share of every trade\'s fee. Earns when lots of trading happens inside the range.'],
   ] as const, []);
   return (
     <main className="stack">
@@ -366,9 +451,9 @@ export function NewBot({ s, kind, trendPrefill, gridPrefill, nav, act, busy }: C
           </button>
         ))}
       </div>
-      {kind === 'grid'
-        ? <GridForm key={gridPrefill?.nonce ?? 0} s={s} nav={nav} act={act} busy={busy} prefill={gridPrefill} />
-        : <TrendForm key={trendPrefill?.nonce ?? 0} s={s} nav={nav} act={act} busy={busy} prefill={trendPrefill} />}
+      {kind === 'grid' && <GridForm key={gridPrefill?.nonce ?? 0} s={s} nav={nav} act={act} busy={busy} prefill={gridPrefill} />}
+      {kind === 'trend' && <TrendForm key={trendPrefill?.nonce ?? 0} s={s} nav={nav} act={act} busy={busy} prefill={trendPrefill} />}
+      {kind === 'lp' && <LpForm key={lpPrefill?.nonce ?? 0} s={s} nav={nav} act={act} busy={busy} prefill={lpPrefill} />}
     </main>
   );
 }

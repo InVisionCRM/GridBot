@@ -11,13 +11,14 @@ import { Home } from './ui/Home';
 import { NewBot } from './ui/NewBot';
 import { GridDetail } from './ui/GridDetail';
 import { TrendDetail } from './ui/TrendDetail';
+import { LpDetail } from './ui/LpDetail';
 import { Tools } from './ui/Tools';
 import { TOOL_TABS, type View } from './ui/model';
 
 function loadView(): View {
   try {
     const v = JSON.parse(localStorage.getItem('view') ?? 'null') as View | null;
-    if (v && ['home', 'new', 'grid', 'trend', 'tools'].includes(v.v)) return v;
+    if (v && ['home', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
   } catch { /* storage unavailable */ }
   return { v: 'home' };
 }
@@ -78,8 +79,8 @@ export default function App() {
   const prevIds = useRef<Set<string> | null>(null);
   useEffect(() => {
     if (!s) return;
-    const ids = new Set<string>([...s.grids, ...(s.trends ?? [])].map((b: { id: string }) => b.id));
-    if ((view.v === 'grid' || view.v === 'trend') && !ids.has(view.id) && (prevIds.current === null || prevIds.current.has(view.id))) nav({ v: 'home' });
+    const ids = new Set<string>([...s.grids, ...(s.trends ?? []), ...(s.lps ?? [])].map((b: { id: string }) => b.id));
+    if ((view.v === 'grid' || view.v === 'trend' || view.v === 'lp') && !ids.has(view.id) && (prevIds.current === null || prevIds.current.has(view.id))) nav({ v: 'home' });
     prevIds.current = ids;
   }, [s]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -92,7 +93,7 @@ export default function App() {
 
   const cs = chains(s);
   const sel = chain === 'all' ? null : chainOf(s, chain);
-  const running = s.grids.filter((g: { status: string }) => g.status === 'running').length + (s.trends ?? []).filter((t: { status: string }) => t.status === 'running').length;
+  const running = [...s.grids, ...(s.trends ?? []), ...(s.lps ?? [])].filter((b: { status: string }) => b.status === 'running').length;
   const stopAll = () => act(() => (sel ? http(`/api/chains/${sel.id}/stop`, 'POST') : botApi('stop-all', 'POST')));
   const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
@@ -102,7 +103,7 @@ export default function App() {
         <header className="topbar">
           <span className="logo"><i />GridBot</span>
           <nav className="nav" aria-label="main">
-            <button type="button" className={view.v === 'home' || view.v === 'grid' || view.v === 'trend' ? 'on' : ''} onClick={() => nav({ v: 'home' })}>Home</button>
+            <button type="button" className={view.v === 'home' || view.v === 'grid' || view.v === 'trend' || view.v === 'lp' ? 'on' : ''} onClick={() => nav({ v: 'home' })}>Home</button>
             <button type="button" className={view.v === 'new' ? 'on' : ''} onClick={() => nav({ v: 'new', kind: 'grid' })}>New bot</button>
             <button type="button" className={view.v === 'tools' ? 'on' : ''} onClick={() => nav({ v: 'tools', tab: view.v === 'tools' ? view.tab : TOOL_TABS[0][0] })}>Tools</button>
           </nav>
@@ -130,9 +131,10 @@ export default function App() {
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}
 
         {view.v === 'home' && <Home s={s} nav={nav} act={act} busy={busy} />}
-        {view.v === 'new' && <NewBot s={s} kind={view.kind} trendPrefill={view.trendPrefill} gridPrefill={view.gridPrefill} nav={nav} act={act} busy={busy} />}
+        {view.v === 'new' && <NewBot s={s} kind={view.kind} trendPrefill={view.trendPrefill} gridPrefill={view.gridPrefill} lpPrefill={view.lpPrefill} nav={nav} act={act} busy={busy} />}
         {view.v === 'grid' && <GridDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
         {view.v === 'trend' && <TrendDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
+        {view.v === 'lp' && <LpDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
         {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} prefs={prefs} setPrefs={setPrefs} />}
 
         {drawer && <>

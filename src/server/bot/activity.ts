@@ -12,7 +12,7 @@ export interface ActivityEvent {
   level: 'info' | 'success' | 'warn' | 'error';
   msg: string;
   botId?: string;
-  kind?: 'grid' | 'trend' | 'system';
+  kind?: 'grid' | 'trend' | 'lp' | 'system';
   pair?: string;
   /** EVM chain id of the market (explorer links, chain badge) */
   chainId?: number;

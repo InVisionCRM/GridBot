@@ -2,6 +2,7 @@
  * Single-grid engine. Polls price, queues trades on level crosses, executes one job at a time.
  * MultiBot owns many of these and shares a TxGate + SharedNonce across them.
  */
+import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import { calculateGridLevels } from '../../engine/gridEngine';
 import { DEFAULT_LIMITS, validateLimits, type SafetyLimits } from '../../live/limits';
 import { applySell, replay, roundTripStats, totals, type LiveTrade } from '../../live/ledger';
@@ -32,8 +33,6 @@ export interface GridConfig { lowerPrice: number; upperPrice: number; gridCount:
 export type ProfitMode = { mode: 'reinvest' } | { mode: 'send'; to: string };
 /** One profit transfer (paper: bookkeeping only) */
 export interface Payout { at: number; amount: number; to: string; txHash: string; gasQuote: number; ok: boolean; paper: boolean }
-/** Profits wait until they are worth this many times the transfer's gas, so fees never eat them. */
-export const PAYOUT_MIN_GAS_MULTIPLE = 10;
 /** After a failed transfer, wait this long before trying again. */
 export const PAYOUT_RETRY_MS = 10 * 60_000;
 
