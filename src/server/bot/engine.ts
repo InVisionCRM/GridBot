@@ -402,6 +402,8 @@ export class GridEngine {
       }
       this.save();
       await this.drain();
+      // A tick that got through means the last error (often one RPC timeout) is over; the Activity log keeps it.
+      this.lastError = null;
     } catch (e) {
       this.lastError = (e as Error).message;
       this.tag('error', `tick: ${this.lastError}`);

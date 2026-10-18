@@ -1,14 +1,14 @@
 /** One grid: profit vs holding, chart with levels and fills, its own log, change range (restarts on its own pair). */
 import { useEffect, useState } from 'react';
 import { formatPrice } from '../lib/format';
-import { http, botApi } from './api';
+import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
 import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { T } from './theme';
-import { errMsg, gridName, gridPnlUsd, quoteSym, rangeState, spendFunds, type AnyObj, type Nav } from './model';
+import { errMsg, gridName, quoteSym, rangeState, spendFunds, type AnyObj, type Nav } from './model';
 import { AmountField, fundsProblem } from './NewBot';
 import { reserveCfg } from '../live/gasReserve';
 import { humanAmount } from '../live/amount';
@@ -163,23 +163,13 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
 
 export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const g: AnyObj | undefined = s.grids.find((x: AnyObj) => x.id === id);
-  const [hold, setHold] = useState<number | null>(null);
-  useEffect(() => {
-    let dead = false;
-    const load = () => http('/api/analytics/overview').then((o) => {
-      const b = o.bots.find((x: AnyObj) => x.id === id);
-      if (!dead) setHold(b && b.hodlUsd != null ? b.hodlUsd - b.capitalUsd : null);
-    }).catch(() => undefined);
-    void load();
-    const t = setInterval(load, 20_000);
-    return () => { dead = true; clearInterval(t); };
-  }, [id]);
   if (!g) return null;
 
   const k: number | null = g.usdPerQuote ?? null;
   const q = quoteSym(g);
-  const pnl = gridPnlUsd(g);
   const rs = rangeState(g);
+  const earned: number = g.pnl.realized, open: number = g.pnl.unrealized, held: number = g.pnl.plsHeld;
+  const inUsd = (x: number) => (k ? ` · ≈ ${usd(x * k, true)} today` : '');
   const running = g.status === 'running';
   const money = (x: number) => (k ? usd(x * k, true) : qty(x, q, 4));
   const remove = () => act(async () => { if (confirm(`Remove the ${gridName(g)} grid and its history? ${g.base} it still holds stays in your wallet.`)) { await botApi(`grids/${g.id}`, 'DELETE'); nav({ v: 'home' }); } });
@@ -211,11 +201,23 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="kpi-row">
-        <div className="kpi"><span>Profit</span><div className={`kpi-v ${cls(pnl ?? g.pnl.realized + g.pnl.unrealized)}`}>{pnl != null ? <AnimatedNumber value={pnl} format={(x) => usd(x, true)} /> : qty(g.pnl.realized + g.pnl.unrealized, q, 4)}</div><span className="sub">{money(g.pnl.realized)} banked · {money(g.pnl.unrealized)} open</span></div>
-        <div className="kpi"><span>If you'd held</span><div className="kpi-v">{hold != null ? usd(hold, true) : '—'}</div><span className="sub">{hold != null && pnl != null ? (pnl >= hold ? `grid ahead by ${usd(pnl - hold)}` : `holding ahead by ${usd(hold - pnl)}`) : 'buying at the start price'}</span></div>
+        <div className="kpi" title="Every completed buy then sell: what the sell brought in minus what that buy cost, after pool fees and gas. This is money the grid has made, and the coin's price no longer changes it.">
+          <span>Earned by trading</span>
+          <div className={`kpi-v ${cls(earned)}`}><AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} /></div>
+          <span className="sub">from {g.stats.roundTrips} completed buy → sell trade{g.stats.roundTrips === 1 ? '' : 's'}, after fees and gas{inUsd(earned)}</span>
+        </div>
+        <div className="kpi" title="Coins the grid bought that haven't sold yet. Their value goes up and down with the price until they sell at the next level up.">
+          <span>Bought, not sold yet</span>
+          <div className={`kpi-v ${cls(open)}`}>{held > 0 ? qty(open, q, 5) : '—'}</div>
+          <span className="sub">{held > 0 ? `${num(held, held < 10 ? 6 : 2)} ${g.base} bought for ${qty(g.pnl.costUsd, q, 5, false)}, worth ${qty(held * (g.price ?? 0), q, 5, false)} now` : 'nothing waiting to sell'}</span>
+        </div>
+        <div className="kpi" title="Earned by trading plus the change on the coins not sold yet, in the coin this grid spends">
+          <span>Overall, in {q}</span>
+          <div className={`kpi-v ${cls(earned + open)}`}>{qty(earned + open, q, 5)}</div>
+          <span className="sub">{k ? `≈ ${usd((earned + open) * k, true)} at today's ${q} price` : 'no dollar price for this coin'}</span>
+        </div>
         <div className="kpi"><span>Completed trades</span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg {money(g.stats.avgNet)} each · {g.stats.wins} profitable</span></div>
         <div className="kpi"><span>Price</span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>
-        <div className="kpi"><span>Holding</span><div className="kpi-v">{num(g.pnl.plsHeld, g.pnl.plsHeld < 10 ? 6 : 2)}</div><span className="sub">{g.base} bought by this grid</span></div>
       </div>
 
       <div className="card">
