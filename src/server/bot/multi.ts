@@ -12,7 +12,7 @@ import { checkGasReserve, reserveCfg } from '../../live/gasReserve';
 import { humanAmount } from '../../live/amount';
 import { totals, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
-import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type StartParams } from './engine';
+import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
 import { TaxWatch } from './taxWatch';
 import type { Logger } from './logger';
@@ -260,6 +260,7 @@ export class MultiBot {
   stop(id: string) { this.engine(id).stop(); }
   setLimits(id: string, l: Partial<SafetyLimits>) { this.engine(id).setLimits(l); }
   setRecenter(id: string, enabled: boolean) { this.engine(id).setRecenter(enabled); }
+  setProfits(id: string, p: ProfitMode) { return this.engine(id).setProfits(p); }
   remove(id: string) {
     const eng = this.engines.get(id);
     if (eng && eng.state.status === 'running') eng.stop();
@@ -937,7 +938,7 @@ export class MultiBot {
 
   async startPreset(
     id: string,
-    opts: { mode: Mode; quote?: string; amounts: Record<string, number>; limits?: Parameters<GridEngine['start']>[0]['limits']; recenter?: boolean },
+    opts: { mode: Mode; quote?: string; amounts: Record<string, number>; limits?: Parameters<GridEngine['start']>[0]['limits']; recenter?: boolean; profits?: ProfitMode },
   ): Promise<{ ids: string[]; legs: ResolvedLeg[] }> {
     const { legs } = await this.previewPreset(id, opts);
     const missing = legs.filter((l) => l.capital == null).map((l) => l.label);
@@ -948,7 +949,7 @@ export class MultiBot {
       for (const leg of legs) {
         ids.push(await this.add({
           mode: opts.mode, stable: leg.quote, lowerPrice: leg.lowerPrice, upperPrice: leg.upperPrice, gridCount: leg.gridCount,
-          totalCapitalUsd: leg.capital!, limits: opts.limits, recenter: opts.recenter,
+          totalCapitalUsd: leg.capital!, limits: opts.limits, recenter: opts.recenter, profits: opts.profits,
         }));
       }
     } catch (e) {

@@ -98,7 +98,7 @@ function Verdict({ e, quote, fee }: { e: Econ; quote: string; fee: string }) {
       {e.ok
         ? <span>Each completed buy-then-sell nets about <b>{amt(e.netPerRoundTrip, quote, true)}</b> ({pct(e.netPct, 2)} of a {amt(e.levelSize, quote)} level) after fees, price impact and gas. Levels are {pct(e.spacingPct, 2)} apart.</span>
         : <span><b className="neg">Each completed buy-then-sell {e.netPerRoundTrip < 0 ? `loses about ${amt(-e.netPerRoundTrip, quote)}` : `nets only ${amt(e.netPerRoundTrip, quote)}`} at this size.</b> You can still start it. A bigger amount, fewer levels or a wider range usually fixes this.</span>}
-      <span className="detail">{e.ok ? '' : `${e.reasons.join(' ')} · `}Worst level: pool fee {fee} each way ({pct(e.roundTripFeePct, 3)} round trip) · impact {pct(e.impactPct, 3)} · gas {amt(e.gasQuote, quote)}{e.buyTaxPct || e.sellTaxPct ? ` · token tax ${pct(e.buyTaxPct ?? 0, 1)} buy / ${pct(e.sellTaxPct ?? 0, 1)} sell` : ''} · {e.buyLevels} levels below the price get funds</span>
+      <span className="detail">{e.ok ? '' : `${e.reasons.join(' ')} · `}Worst level: pool fee {fee} each way ({pct(e.roundTripFeePct, 3)} round trip) · impact {pct(e.impactPct, 3)} · gas {amt(e.gasQuote, quote)}{e.buyTaxPct || e.sellTaxPct ? ` · token tax ${pct(e.buyTaxPct ?? 0, 1)} buy / ${pct(e.sellTaxPct ?? 0, 1)} sell` : ''} · every level trades: the ones below the price wait to buy, the ones above are bought at the start</span>
     </div>
   );
 }
@@ -108,8 +108,29 @@ function FollowUp({ on, set }: { on: boolean; set: (v: boolean) => void }) {
   return (
     <label className="check follow">
       <input type="checkbox" checked={on} onChange={(e) => set(e.target.checked)} />
-      <span><b>Follow the price up</b> <span className="muted">When the price stays above the range for 2 hours with everything sold, move the range up around it (same width, levels and amount). Never moves down.</span></span>
+      <span><b>Follow the price up</b> <span className="muted">When the price stays above the range for 2 hours with everything sold, move the range up around it (same width and levels; coins for the new levels above the price are bought then). Never moves down.</span></span>
     </label>
+  );
+}
+
+/** Reinvest (default) or send profits to an address. `to` is checked again on the server. */
+export interface ProfitsChoice { mode: 'reinvest' | 'send'; to: string }
+export const isAddress = (a: string) => /^0x[0-9a-fA-F]{40}$/.test(a.trim());
+export const profitsBody = (p: ProfitsChoice) => (p.mode === 'send' ? { mode: 'send' as const, to: p.to.trim() } : { mode: 'reinvest' as const });
+
+export function ProfitsField({ p, set }: { p: ProfitsChoice; set: (p: ProfitsChoice) => void }) {
+  return (
+    <div className="profits">
+      <span className="profits-head"><b>Profits</b> <span className="muted small">from each completed buy → sell</span></span>
+      <label className="check"><input type="radio" name="profits" checked={p.mode === 'reinvest'} onChange={() => set({ ...p, mode: 'reinvest' })} />
+        <span><b>Reinvest</b> <span className="muted">Added to that level's next buy, so buys grow as it earns.</span></span></label>
+      <label className="check"><input type="radio" name="profits" checked={p.mode === 'send'} onChange={() => set({ ...p, mode: 'send' })} />
+        <span><b>Send to an address</b> <span className="muted">Buys stay the same size. Profit is sent once it's worth at least 10× the transfer's gas.</span></span></label>
+      {p.mode === 'send' && (
+        <input className="mono" placeholder="0x… address that receives the profit" value={p.to} onChange={(e) => set({ ...p, to: e.target.value.trim() })} spellCheck={false} />
+      )}
+      {p.mode === 'send' && p.to && !isAddress(p.to) && <span className="small neg">That isn't a 0x… address (42 characters).</span>}
+    </div>
   );
 }
 
@@ -121,6 +142,7 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
   const [upper, setUpper] = useState('');
   const [count, setCount] = useState(prefill ? String(prefill.gridCount) : '12');
   const [follow, setFollow] = useState(true);
+  const [profits, setProfits] = useState<ProfitsChoice>({ mode: 'reinvest', to: '' });
   const [amount, setAmount] = useState('');
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [mode, setMode] = useState<Mode>('paper');
@@ -179,7 +201,7 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
     if (!confirmLive(`grid on ${m.label}`)) return;
     const r = await botApi('grids', 'POST', {
       mode, stable: pair, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: +amount,
-      limits: limitsBody(limits, !!m.quoteNative), recenter: follow,
+      limits: limitsBody(limits, !!m.quoteNative), recenter: follow, profits: profitsBody(profits),
     });
     nav({ v: 'grid', id: r.id });
   });
@@ -187,7 +209,7 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
   const startPreset = () => act(async () => {
     if (!confirmLive(`${preset.name} preset`)) return;
     const r = await botApi(`presets/${presetId}/start`, 'POST', {
-      mode, quote: pair, amounts: JSON.parse(amountsKey), limits: limitsBody(limits, legQuoteNative), recenter: follow,
+      mode, quote: pair, amounts: JSON.parse(amountsKey), limits: limitsBody(limits, legQuoteNative), recenter: follow, profits: profitsBody(profits),
     });
     nav(r.ids?.length === 1 ? { v: 'grid', id: r.ids[0] } : { v: 'home' });
   });
@@ -200,9 +222,9 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
   const problem = tab === 'custom'
     ? fundsProblem(customFunds, +amount || 0, mode)
     : legFunds.map(({ l, f }) => fundsProblem(f, +(legAmounts[l.quote] ?? 0) || 0, mode)).find(Boolean) ?? null;
-  const canStart = tab === 'custom'
+  const canStart = (profits.mode === 'reinvest' || isAddress(profits.to)) && (tab === 'custom'
     ? +amount > 0 && +lower > 0 && +upper > +lower && +count >= 2
-    : !!legs && legs.every((l) => +(legAmounts[l.quote] ?? 0) > 0);
+    : !!legs && legs.every((l) => +(legAmounts[l.quote] ?? 0) > 0));
   const startKey = tab === 'preset' && legs?.length ? legs[0].quote : pair;
 
   return (
@@ -264,6 +286,7 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
       </>}
 
       <FollowUp on={follow} set={setFollow} />
+      <ProfitsField p={profits} set={setProfits} />
 
       <details className="more">
         <summary>Advanced</summary>

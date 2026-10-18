@@ -80,8 +80,9 @@ describe('strategy presets', () => {
     expect(ladder[0].lowerPrice).toBeCloseTo(LIVE.DAI.spot * 0.9, 12);
   });
 
-  it('USDT is excluded because its pool is too shallow (impact eats the edge)', () => {
-    const e = econ('USDT', LIVE.USDT.spot * 0.9, LIVE.USDT.spot * 1.1, 12, 50);
+  it('a ~$1.5k/side pool (USDT on PulseX V2, the old default) is too shallow: impact eats the edge', () => {
+    // $100 over 12 levels: the same ≈$8.3 level the snapshot was checked at
+    const e = econ('USDT', LIVE.USDT.spot * 0.9, LIVE.USDT.spot * 1.1, 12, 100);
     expect(e.impactPct).toBeGreaterThan(0.009);
     expect(e.ok).toBe(false);
   });
@@ -96,7 +97,7 @@ describe('strategy presets', () => {
     expect(prev.legs).toHaveLength(2);
     for (const l of prev.legs) {
       expect([6, 7]).toContain(l.econ!.buyLevels);
-      expect(l.econ!.levelSize).toBeCloseTo(l.capital! / l.econ!.buyLevels, 6);
+      expect(l.econ!.levelSize).toBeCloseTo(l.capital! / l.gridCount, 6); // every level trades
       expect(l.econ!.netPerRoundTrip).toBeGreaterThan(0);
     }
     await expect(bot.startPreset('stable-ladder', { mode: 'paper', amounts: { DAI: 50 } })).rejects.toThrow('Enter an amount for PLS/USDC.');

@@ -52,10 +52,11 @@ function GridDiagram() {
   const path: [number, number][] = [[20, 3.4], [80, 1.8], [140, 3.2], [200, 0.8], [260, 2.2], [320, 1.0], [380, 3.6], [440, 2.6], [500, 4.2]];
   const P = path.map(([x, l]) => [x, y(l)] as const);
   // Simulate the grid along the path so markers sit exactly on level crossings (same rules as the engine:
-  // levels below the start price wait for a buy; a lot bought at level k sells on the cross of level k+1).
-  const marks: { x: number; l: number; s: 'B' | 'S' }[] = [];
+  // levels below the start price wait for a buy, the ones above get their coins from one start-up buy;
+  // a lot bought at level k sells on the cross of level k+1).
+  const marks: { x: number; l: number; s: 'B' | 'S' }[] = [{ x: path[0][0], l: path[0][1], s: 'B' }];
   const waiting = new Set<number>(), holding = new Set<number>();
-  for (let k = 0; k < n - 1; k++) if (k < path[0][1]) waiting.add(k);
+  for (let k = 0; k < n - 1; k++) (k < path[0][1] ? waiting : holding).add(k);
   for (let i = 1; i < path.length; i++) {
     const [x0, l0] = path[i - 1], [x1, l1] = path[i];
     const at = (k: number) => x0 + ((k - l0) / (l1 - l0)) * (x1 - x0);
@@ -118,7 +119,8 @@ export function Guide({ onClose }: { onClose: () => void }) {
                 <li>When the price drops to a level, the bot <span className="buy">buys</span> with that level's share of your money.</li>
                 <li>When the price rises to the <b>next level up</b>, it <span className="sell">sells</span> exactly what it bought there.</li>
                 <li>Each buy followed by its sell is one <b>completed trade</b>. Its profit is the gap between levels minus costs.</li>
-                <li>At the start only levels <b>below</b> the current price get money; levels above stay idle.</li>
+                <li>Your amount is split over <b>every</b> level. Levels below the price wait to buy; for the levels above it the bot buys their coins <b>at the start</b> (the first B), so they sell as the price rises.</li>
+                <li>Profit is <b>reinvested</b> (added to that level's next buy) unless you choose to <b>send it to an address</b>.</li>
               </ul>
             </div>
           </section>
@@ -225,7 +227,7 @@ export function Guide({ onClose }: { onClose: () => void }) {
               <dt>No fills?</dt>
               <dd>The price hasn't dropped a full level yet, it's above the range, or the bot is stopped. The bot's log shows any skipped trades and why.</dd>
               <dt>Start refused?</dt>
-              <dd>The message says why: usually not enough of the coin in your wallet for a live bot (the amount, plus the gas set-aside when it spends PLS or ETH), or no levels below the price. Use a smaller amount or Max, or start it in paper mode.</dd>
+              <dd>The message says why: usually not enough of the coin in your wallet for a live bot (the amount, plus the gas set-aside when it spends PLS or ETH), or the price is below the range. Use a smaller amount or Max, or start it in paper mode.</dd>
               <dt>Price left the range?</dt>
               <dd>Nothing moves it automatically. Stop the grid, open Change range, centre it on today's price and restart. Coins the old levels still hold stay in that grid's totals.</dd>
               <dt>Why do I need HEX for PLS/HEX?</dt>

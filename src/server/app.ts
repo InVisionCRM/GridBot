@@ -4,6 +4,7 @@
  */
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { MultiBot } from './bot/multi';
+import type { ProfitMode } from './bot/engine';
 import type { ActivityEvent } from './bot/activity';
 import { analyzeSpacing, DENSE_PRESETS, MAX_GRID_COUNT } from '../live/spacing';
 import { listPresets } from '../live/presets';
@@ -77,7 +78,14 @@ export function createApp(o: AppOpts) {
       lowerPrice: Number(b.lowerPrice), upperPrice: Number(b.upperPrice), gridCount: Number(b.gridCount), totalCapitalUsd: Number(b.totalCapitalUsd),
       limits: b.limits as never,
       recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined,
+      profits: profitsBody(b.profits),
     };
+  }
+  /** { mode: 'reinvest' } | { mode: 'send', to } — checked by the grid (checkProfitMode); omitted = keep. */
+  function profitsBody(v: unknown): ProfitMode | undefined {
+    if (v == null) return undefined;
+    const o = v as { mode?: unknown; to?: unknown };
+    return o.mode === 'send' ? { mode: 'send', to: String(o.to ?? '').trim() } : o.mode === 'reinvest' ? { mode: 'reinvest' } : (() => { throw new Error('profits must be { mode: "reinvest" } or { mode: "send", to }'); })();
   }
   const limitsBody = (b: Record<string, unknown>) => ({
     ...(b.maxPriceImpact != null && { maxPriceImpact: Number(b.maxPriceImpact) }),
@@ -114,7 +122,7 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     if (mode === 'live' && !bot.hasSigner) throw new Error('Live mode needs PRIVATE_KEY in .env');
-    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined });
+    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined, profits: profitsBody(b.profits) });
     void bot.tickAll();
     return { ok: true, ...out };
   }));
@@ -124,6 +132,7 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/grids/:id/stop', wrap((req) => bot.stop(req.params.id)));
   app.put('/api/bot/grids/:id/limits', wrap((req) => bot.setLimits(req.params.id, limitsBody(req.body ?? {}))));
   app.put('/api/bot/grids/:id/recenter', wrap((req) => bot.setRecenter(req.params.id, req.body?.enabled === true)));
+  app.put('/api/bot/grids/:id/profits', wrap((req) => bot.setProfits(req.params.id, profitsBody(req.body) ?? (() => { throw new Error('profits required'); })())));
   app.delete('/api/bot/grids/:id', wrap((req) => bot.remove(req.params.id)));
   app.post('/api/bot/stop-all', wrap(() => bot.stopAll()));
 

@@ -100,7 +100,9 @@ describe('Engine pricing on PLS/HEX (8 decimals)', () => {
   it('live round-trip: buy fills below sell, sell beats the lot cost, diagnostics come from the receipt', async () => {
     const chain = hexChain();
     const { engine } = make(chain);
-    await hexGrid(engine, chain);
+    // spot at the top of the range: every level waits to buy, no start-up buy (single-level mechanics only)
+    const spot = await new Quoter(chain, NET, HEX).getPrice();
+    await hexGrid(engine, chain, 'live', { lowerPrice: spot * 0.76, upperPrice: spot });
     expect(engine.state.econ?.ok).toBe(true);
     const iv = topWaiting(engine);
     expect(iv.buyPrice).toBeLessThan(iv.sellPrice);
@@ -206,7 +208,8 @@ describe('Engine pricing on PLS/HEX (8 decimals)', () => {
     const lastBuy = new Map<number, typeof trades[number]>();
     let rts = 0;
     for (const t of trades) {
-      if (t.side === 'buy') { lastBuy.set(t.intervalIndex, t); continue; }
+      // the start-up buy funds several levels above the start price with equal shares
+      if (t.side === 'buy') { for (const i of t.seed ?? [t.intervalIndex]) lastBuy.set(i, { ...t, plsAmount: t.plsAmount / (t.seed?.length ?? 1) }); continue; }
       const b = lastBuy.get(t.intervalIndex)!;
       expect(b, 'sell without a prior buy on that interval').toBeDefined();
       expect(t.execPrice!).toBeGreaterThan(b.execPrice!);
@@ -266,7 +269,7 @@ describe('Economics warning (never blocks a start) + paper/live parity', () => {
     for (const approval of ['exact', 'max'] as const) {
       const chain = new MockChain(P0);
       const { engine } = make(chain, null, { approval });
-      await engine.start({ mode: 'paper', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 50 });
+      await engine.start({ mode: 'paper', lowerPrice: P0 * 0.8, upperPrice: P0, gridCount: 10, totalCapitalUsd: 50 }); // top of range: no start-up buy
       chain.setPrice(P0 * 0.955); await engine.tick(); // two buys
       const buys = engine.state.trades.filter((t) => t.side === 'buy');
       expect(buys).toHaveLength(2);

@@ -425,6 +425,10 @@ label.wide input { min-width: 180px; }
 .pick-test b { font-family: var(--mono); font-weight: 500; font-size: 1rem; }
 .skip-list { margin: 6px 0 0; padding-left: 18px; font-size: 0.8rem; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
 .skip-list b { color: var(--text); font-weight: 500; margin-right: 4px; }
+/* Profits: reinvest or send to an address (New bot + grid page) */
+.profits { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
+.profits-head { display: flex; align-items: baseline; gap: 8px; }
+.profits input.mono { width: 100%; max-width: 460px; font-family: var(--mono); font-size: 0.82rem; }
 .test-usd { display: inline-flex; align-items: center; gap: 2px; }
 .test-usd input { width: 86px; padding: 3px 6px; font-family: var(--mono); font-size: 0.8rem; }
 /* Grid vs LP vs hold (daily scan) */

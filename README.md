@@ -218,7 +218,7 @@ A preset is a range and a level count per pair. It carries no amount: you enter 
 | **Stable ladder** | DAI+USDC · ±10% · 12 | 1.54% / ~0.88% DAI, ~0.79% USDC |
 | **Stack HEX / PLSX / eHEX with PLS** ⇄ | Flipped (HEX/PLS …) · ±12% · 12 · spends PLS · best pool | 1.82% / ~1.20% HEX (PulseX V1), ~1.30% PLSX (9mm V3 0.25%), ~1.19% eHEX (PulseX V2) |
 
-USDT is left out of the ladder because its WPLS pool is only about $1.5k per side. At $8–20 per level, impact (0.8–2.5% per round-trip) is bigger than the edge.
+USDT was left out of the ladder when it traded on a PulseX V2 pool of about $1.5k per side, where impact at $8–20 per level (0.8–2.5% per round-trip) was bigger than the edge. Built-in stables trade on PulseX V1 since 2026-10-18 (about $228k USDT per side), so it could be added back.
 `npm run check:onchain` re-checks every preset against live reserves (read-only).
 
 ## Orientation ⇄ (base/quote flip): start with only PLS, stack HEX
@@ -239,10 +239,16 @@ Every market trades either way round. Labels show the base first, plus what the 
 - **Existing grids keep their orientation.** Stored keys never contain `~`, so every saved grid/bot/alert loads exactly as before.
 - **Custom markets** (e.g. `pulse:TOKEN/WPLS`) are already token-first: they spend WPLS and stack the token, and they trade WPLS as an ERC-20, as before. ⇄ turns them into WPLS/TOKEN. For these markets, keep **WPLS** (not native PLS) in the wallet. The gas reserve applies only to markets that spend native PLS or ETH.
 
+## Trade sizes and profits
+
+- **Every level gets an equal share:** amount ÷ levels (e.g. $500 over 10 levels = $50). The levels below the start price wait to buy. The ones at or above it get their coins from **one start-up buy** when the grid starts, so they sell as the price rises; on a live restart, coins the grid already holds are used first and only the rest is bought. If the price has already risen past those levels' first sell price when the start-up buy runs, it is skipped and they buy on the way back down. A start below the range is refused. "Follow the price up" does the same start-up buy for its new range.
+- **Profits: reinvest (default)** adds each completed trade's profit (after fees and gas) to that level's next buy, so buys grow as the grid earns. **Send to an address** keeps buys the same size and sends the profit, in the spend coin, once what's waiting is worth at least 10× the transfer's gas (ERC-20 65k / native 21k gas). A sent transfer is tracked by hash and never resent until it's settled; a failed one is retried after 10 minutes. Paper mode only books it. Change it any time on the grid page.
+- The backtester and the daily scan use the same rules (reinvest on), so their results match what a live grid would do.
+
 ## Profit check (never blocks)
 
 New bot (custom range and every preset) and Change range show, for the **worst** interval, as one plain sentence plus a detail line:
-- per-level size
+- per-level size (amount ÷ levels)
 - spacing %
 - round-trip fee
 - price impact at that size from current reserves

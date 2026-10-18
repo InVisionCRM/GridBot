@@ -300,7 +300,9 @@ describe('Auto-recenter: follows the price up only', () => {
     expect(g.config.lowerPrice).toBeCloseTo(px * 0.9, 9);
     expect(g.config.upperPrice).toBeCloseTo(px * 1.1, 9);
     expect(g.config).toMatchObject({ gridCount: 10, totalCapitalUsd: 30 });
-    expect(g.trades.length).toBe(trades);
+    // the trades carry over; the new levels above the price got their coins from one start-up buy
+    expect(g.trades.length).toBe(trades + 1);
+    expect(g.trades[0]).toMatchObject({ side: 'buy', seed: [5, 6, 7, 8, 9] });
     expect(g.recenter).toMatchObject({ enabled: true, count: 1, aboveSince: null });
     expect(bot.activity.recent(50).some((e) => e.type === 'range' && /moved up/.test(e.msg))).toBe(true);
   });
