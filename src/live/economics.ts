@@ -102,8 +102,9 @@ export function analyzeEconomics(i: EconInput): EconReport {
   const ts = Math.max(0, Math.min(i.sellTaxPct ?? 0, 0.99));
   const reasons: string[] = [];
   const levels = calculateGridLevels(i.lowerPrice, i.upperPrice, i.gridCount);
+  // Every level trades: the ones below the price wait to buy, the ones above are bought at the start (liveGrid).
   const buyLevels = levels.slice(0, -1).filter((l) => l.price < i.spot).length;
-  const levelSize = buyLevels > 0 ? i.capital / buyLevels : 0;
+  const levelSize = buyLevels > 0 ? i.capital / i.gridCount : 0;
   const gu = i.gasUnits ?? GAS_UNITS_RT;
   const gasPlsPerRoundTrip =
     ((i.approval === 'exact' ? gu.approve : 0) + 2 * gu.swap) * i.gasPricePls + 2 * (i.extraPlsPerSwap ?? 0);

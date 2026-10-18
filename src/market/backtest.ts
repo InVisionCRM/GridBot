@@ -179,38 +179,48 @@ export function runTrendBacktest(k: Candle[], cfg: TrendConfig, tf: TF, o: Trend
   };
 }
 
-export interface GridBtConfig { lowerPrice: number; upperPrice: number; gridCount: number; capital: number }
+export interface GridBtConfig {
+  lowerPrice: number; upperPrice: number; gridCount: number; capital: number;
+  /** A level's profit is added to its next buy (the live default); false = fixed sizes, profit set aside */
+  reinvest?: boolean;
+}
 
 /**
- * Grid backtest: intervals below the first open start with a buy (same bootstrap as live). Each candle is
- * walked o→l→h→c (bullish) or o→h→l→c (bearish); fills at the level price (optimistic vs live polling).
+ * Grid backtest, same rules as the live grid (liveGrid.ts): the capital is split over every level; the levels below
+ * the first open wait to buy, the ones at or above it get their coins from one start-up buy at that open. Each candle
+ * is walked o→l→h→c (bullish) or o→h→l→c (bearish); fills at the level price (optimistic vs live polling).
  */
 export function runGridBacktest(k: Candle[], g: GridBtConfig, tf: TF, costs: CostModel): BtResult {
   if (k.length < 2) throw new Error('need ≥ 2 candles');
   const levels = calculateGridLevels(g.lowerPrice, g.upperPrice, g.gridCount).map((l) => l.price);
   const p0 = k[0].o;
-  const iv = levels.slice(0, -1).map((b, i) => ({ buy: b, sell: levels[i + 1], state: (b < p0 ? 'wait' : 'off') as 'wait' | 'hold' | 'off', pls: 0, cost: 0, t: 0, fee: 0, gas: 0 }));
-  const nBuy = iv.filter((x) => x.state === 'wait').length;
-  if (!nBuy) throw new Error('no grid levels below the first price');
-  const per = g.capital / nBuy;
+  const per = g.capital / g.gridCount;
+  const iv = levels.slice(0, -1).map((b, i) => ({ buy: b, sell: levels[i + 1], state: (b < p0 ? 'wait' : 'hold') as 'wait' | 'hold', pls: 0, cost: 0, t: 0, fee: 0, gas: 0, size: per, entry: b }));
+  if (!iv.some((x) => x.state === 'wait')) throw new Error('the first price is below the range');
   const bh = buyHold(k, 0, g.capital, costs);
   let cash = g.capital, inPos = 0;
+  const up = iv.filter((x) => x.state === 'hold');
+  if (up.length) {
+    const amt = per * up.length, b = simBuy(amt, p0, costs), n = up.length;
+    cash -= amt + b.gasQuote;
+    for (const x of up) Object.assign(x, { pls: b.pls / n, cost: (amt + b.gasQuote) / n, t: k[0].t, fee: b.fee / n, gas: b.gasQuote / n, entry: p0 });
+  }
   const trades: BtTrade[] = [];
   const eq: BtResult['equity'] = [];
   const visit = (from: number, to: number, t: number) => {
     if (to < from) { // falling: buys from high to low
-      for (const x of [...iv].reverse()) if (x.state === 'wait' && x.buy <= from && x.buy >= to && cash >= per) {
-        const b = simBuy(per, x.buy, costs);
-        cash -= per + b.gasQuote;
-        Object.assign(x, { state: 'hold', pls: b.pls, cost: per + b.gasQuote, t, fee: b.fee, gas: b.gasQuote });
+      for (const x of [...iv].reverse()) if (x.state === 'wait' && x.buy <= from && x.buy >= to && cash >= x.size) {
+        const b = simBuy(x.size, x.buy, costs);
+        cash -= x.size + b.gasQuote;
+        Object.assign(x, { state: 'hold', pls: b.pls, cost: x.size + b.gasQuote, t, fee: b.fee, gas: b.gasQuote, entry: x.buy });
       }
     } else {
       for (const x of iv) if (x.state === 'hold' && x.sell >= from && x.sell <= to) {
         const s = simSell(x.pls, x.sell, costs);
         const proceeds = s.quote - s.gasQuote;
         cash += proceeds;
-        trades.push({ entryT: x.t, exitT: t, entryPrice: x.buy, exitPrice: x.sell, pls: x.pls, cost: x.cost, proceeds, pnl: proceeds - x.cost, pnlPct: (proceeds - x.cost) / x.cost, fees: x.fee + s.fee, gas: x.gas + s.gasQuote, bars: 0, reason: 'grid' });
-        Object.assign(x, { state: 'wait', pls: 0, cost: 0 });
+        trades.push({ entryT: x.t, exitT: t, entryPrice: x.entry, exitPrice: x.sell, pls: x.pls, cost: x.cost, proceeds, pnl: proceeds - x.cost, pnlPct: (proceeds - x.cost) / x.cost, fees: x.fee + s.fee, gas: x.gas + s.gasQuote, bars: 0, reason: 'grid' });
+        Object.assign(x, { state: 'wait', pls: 0, cost: 0, size: g.reinvest === false ? x.size : x.size + proceeds - x.cost });
       }
     }
   };

@@ -5,7 +5,7 @@
 import { calculateGridLevels } from '../../engine/gridEngine';
 import { DEFAULT_LIMITS, validateLimits, type SafetyLimits } from '../../live/limits';
 import { applySell, replay, roundTripStats, totals, type LiveTrade } from '../../live/ledger';
-import { buildIntervals, evaluateTick, onTradeFilled, onTradeSkipped, usdPerBuyLevel, type LiveInterval, type QueuedTrade } from '../../live/liveGrid';
+import { buildIntervals, buyAmountPerInterval, evaluateTick, onTradeFilled, onTradeSkipped, seedIntervals, type LiveInterval, type QueuedTrade } from '../../live/liveGrid';
 import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import type { ChainConfig } from '../../live/chains';
@@ -27,6 +27,15 @@ export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
 
 export interface GridConfig { lowerPrice: number; upperPrice: number; gridCount: number; totalCapitalUsd: number }
+
+/** What happens to a completed trade's profit: added to that level's next buy, or sent to an address. */
+export type ProfitMode = { mode: 'reinvest' } | { mode: 'send'; to: string };
+/** One profit transfer (paper: bookkeeping only) */
+export interface Payout { at: number; amount: number; to: string; txHash: string; gasQuote: number; ok: boolean; paper: boolean }
+/** Profits wait until they are worth this many times the transfer's gas, so fees never eat them. */
+export const PAYOUT_MIN_GAS_MULTIPLE = 10;
+/** After a failed transfer, wait this long before trying again. */
+export const PAYOUT_RETRY_MS = 10 * 60_000;
 
 export interface InFlight {
   job: QueuedTrade;
@@ -67,6 +76,12 @@ export interface BotState {
   equity?: [number, number][];
   /** Follow the price up: when it stays above the range, move the range up around it */
   recenter?: RecenterState;
+  profits: ProfitMode;
+  /** Profit waiting to be sent (send mode), in the spend coin */
+  payoutPending: number;
+  /** A transfer that was sent and isn't settled yet: never resend while this is set */
+  payoutInFlight: { hash: string; amount: number; to: string; at: number } | null;
+  payouts: Payout[];
 }
 
 
@@ -102,6 +117,18 @@ export interface StartParams extends GridConfig {
   limits?: Partial<SafetyLimits>;
   /** Auto-recenter (follow the price up); omitted = keep this grid's current setting */
   recenter?: boolean;
+  /** Reinvest (default) or send profits to an address; omitted = keep this grid's current setting */
+  profits?: ProfitMode;
+}
+
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+/** A payout address must be a real 20-byte address and not the zero address. */
+export function checkProfitMode(p: ProfitMode): ProfitMode {
+  if (p.mode === 'reinvest') return { mode: 'reinvest' };
+  if (p.mode !== 'send') throw new Error('Profits must be reinvested or sent to an address.');
+  if (!ADDRESS_RE.test(p.to ?? '')) throw new Error('The payout address must be a 0x… address (42 characters).');
+  if (/^0x0{40}$/i.test(p.to)) throw new Error('The payout address can\'t be the zero address.');
+  return { mode: 'send', to: p.to };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -121,6 +148,7 @@ export function freshState(net: LiveNetwork, id?: string): BotState {
     version: 1, id: id ?? newId(), mode: 'paper', network: net.key, stable: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, levels: [], intervals: [], usdPerBuy: 0, queue: [], inFlight: null,
     trades: [], paperStartStable: 0, lastPrice: null, lastPriceAt: null, spacingWarn: null,
+    profits: { mode: 'reinvest' }, payoutPending: 0, payoutInFlight: null, payouts: [],
   };
 }
 
@@ -146,6 +174,9 @@ export class GridEngine {
     this.state = accept
       ? { ...base, ...loaded!, id: loaded!.id || d.id || base.id, spacingWarn: loaded!.spacingWarn ?? null }
       : base;
+    // Saved before per-level buy sizes: every funded level spent the grid's one buy size; levels above the old start
+    // price never had money (0, so a later re-range spreads only the real capital).
+    this.state.intervals = this.state.intervals.map((iv) => (iv.buyAmount == null ? { ...iv, buyAmount: iv.status === 'inactive' ? 0 : this.state.usdPerBuy } : iv));
     if (this.state.mode === 'live' && !this.signer) {
       this.tag('warn', 'LIVE mode but no PRIVATE_KEY — stopped.');
       this.state.status = 'stopped';
@@ -216,6 +247,7 @@ export class GridEngine {
       if (!t.paper || t.failed) continue;
       if (t.side === 'buy') { stable -= t.stableAmount; pls += t.plsAmount; } else { stable += t.stableAmount; pls -= t.plsAmount; }
     }
+    for (const p of this.state.payouts) if (p.paper && p.ok) stable -= p.amount;
     return { pls, stable };
   }
 
@@ -251,9 +283,11 @@ export class GridEngine {
     }
     const price = await executor.getPrice();
     const levels = calculateGridLevels(p.lowerPrice, p.upperPrice, p.gridCount);
-    const intervals = buildIntervals(levels, price);
-    const usdPerBuy = usdPerBuyLevel(intervals, p.totalCapitalUsd);
-    if (usdPerBuy === 0) throw new Error(`No grid levels below the current price (${price}).`);
+    const usdPerBuy = buyAmountPerInterval(p.gridCount, p.totalCapitalUsd);
+    const intervals = buildIntervals(levels, price, usdPerBuy);
+    if (!intervals.some((i) => i.status === 'waitingBuy')) throw new Error(`The price (${price}) is below the range. Start when it's inside the range, or lower the range.`);
+    const profits = checkProfitMode(p.profits ?? this.state.profits);
+    await this.checkPayoutTarget(profits);
 
     this.executor = executor;
     const paperReset = p.mode === 'paper';
@@ -267,7 +301,10 @@ export class GridEngine {
       spacingWarn: warn, econ,
       startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalUsd]],
       recenter: { enabled: p.recenter ?? this.state.recenter?.enabled ?? false, aboveSince: null, lastAt: this.state.recenter?.lastAt ?? null, count: this.state.recenter?.count ?? 0 },
+      profits,
+      ...(paperReset ? { payoutPending: 0, payoutInFlight: null, payouts: this.state.payouts.filter((x) => !x.paper) } : {}),
     };
+    this.seedUpper(price);
     this.lastError = null;
     this.save();
     this.tag('info', `Started ${p.mode.toUpperCase()} ${this.label} ${p.lowerPrice}–${p.upperPrice} ×${p.gridCount}, ${usdPerBuy.toPrecision(5)} ${stable}/buy, spacing ${(econ.spacingPct * 100).toFixed(3)}%, impact ${(econ.impactPct * 100).toFixed(3)}%, gas ${econ.gasQuote.toPrecision(3)} ${stable}/RT, net ${econ.netPerRoundTrip.toPrecision(4)} ${stable} (${(econ.netPct * 100).toFixed(3)}%)/RT worst, price ${price}`);
@@ -322,7 +359,8 @@ export class GridEngine {
 
   /**
    * Auto-recenter (up only). Once the price has stayed above the range for RECENTER_AFTER_MS with every level sold
-   * (nothing held, queued or in flight), the range moves up around the price: same ±width, same levels, same amount;
+   * (nothing held, queued or in flight), the range moves up around the price: same ±width, same levels; the levels'
+   * buy sizes (with reinvested profit) carry over and the new levels above the price get coins from a start-up buy;
    * trades and profit carry over. At most once per RECENTER_COOLDOWN_MS. A fall below the range never moves it:
    * the grid keeps what it bought and waits for the price to come back.
    */
@@ -339,16 +377,104 @@ export class GridEngine {
     const next: GridConfig = { ...c, lowerPrice: +(price * (1 - band)).toPrecision(6), upperPrice: +(price * (1 + band)).toPrecision(6) };
     const { summary: econ } = await gridEconomics(this.hub.quoter(this.state.stable), next, this.d.approval ?? 'exact');
     const levels = calculateGridLevels(next.lowerPrice, next.upperPrice, next.gridCount);
-    const intervals = buildIntervals(levels, price);
+    // Everything is sold at this point: the levels' buy sizes (start size + reinvested profit) carry over, spread evenly.
+    const perLevel = this.state.intervals.reduce((a, i) => a + i.buyAmount, 0) / next.gridCount;
+    const intervals = buildIntervals(levels, price, perLevel);
     this.state = {
-      ...this.state, config: next, levels, intervals, usdPerBuy: usdPerBuyLevel(intervals, next.totalCapitalUsd), queue: [],
+      ...this.state, config: next, levels, intervals, usdPerBuy: perLevel, queue: [],
       econ, spacingWarn: econWarning(econ),
       recenter: { enabled: true, aboveSince: null, lastAt: now, count: r.count + 1 },
     };
+    this.seedUpper(price);
     this.save();
     const msg = `Grid ${this.label}: price stayed above the range for ${RECENTER_AFTER_MS / 3600_000}h, so the range moved up to ${next.lowerPrice.toPrecision(5)}–${next.upperPrice.toPrecision(5)} (±${(band * 100).toFixed(0)}%, ${next.gridCount} levels)`;
     this.tag('info', msg);
     this.ev('range', msg, { level: 'success', notify: true, data: { recenter: true, lowerPrice: next.lowerPrice, upperPrice: next.upperPrice } });
+  }
+
+  /**
+   * Coins for the levels at or above the price (seedIntervals): first coins this grid already holds that no level
+   * owns (a live restart), then one start-up buy queued for the rest.
+   */
+  private seedUpper(price: number) {
+    const pos = replay(this.modeTrades());
+    const owned = this.state.intervals.reduce((a, i) => a + (i.status === 'holding' ? i.plsAmount : 0), 0);
+    const free = Math.max(0, pos.plsHeld - owned);
+    const avg = pos.plsHeld > 0 ? pos.costUsd / pos.plsHeld : 0;
+    const { intervals, job } = seedIntervals(this.state.intervals, price, { pls: free, cost: free * avg }, this.now());
+    const fromHeld = intervals.filter((iv, i) => iv.status === 'holding' && this.state.intervals[i].status !== 'holding').length;
+    this.state.intervals = intervals;
+    if (job) this.state.queue.push(job);
+    if (fromHeld || job) {
+      const sym = this.def?.quote.symbol ?? this.state.stable;
+      this.tag('info', `Levels above the price: ${fromHeld} use ${this.baseSym} the grid already holds${job ? `; buying ${this.baseSym} for ${job.seed!.length} with ${job.amount.toPrecision(5)} ${sym}` : ''}`);
+    }
+  }
+
+  /** Payouts to the bot's own wallet would do nothing but burn gas. */
+  private async checkPayoutTarget(p: ProfitMode) {
+    const me = p.mode === 'send' && this.signer ? await this.signer.getAddress() : null;
+    if (me && p.mode === 'send' && me.toLowerCase() === p.to.toLowerCase()) throw new Error('That is the bot\'s own wallet: profits already stay there when reinvested.');
+  }
+
+  /** Change what happens to profits from now on (switching to reinvest leaves any unsent profit in the wallet). */
+  async setProfits(p: ProfitMode) {
+    if (!this.state.config) throw new Error('Start the grid first.');
+    if (this.state.payoutInFlight) throw new Error('A profit transfer is still being confirmed. Try again in a minute.');
+    const next = checkProfitMode(p);
+    await this.checkPayoutTarget(next);
+    this.state.profits = next;
+    if (next.mode === 'reinvest') this.state.payoutPending = 0;
+    this.save();
+    this.ev('info', `Grid ${this.label}: profits ${next.mode === 'reinvest' ? 'are reinvested' : `go to ${next.to}`}`, { level: 'success' });
+  }
+
+  /**
+   * Send mode: settle a transfer in flight first (never resend while one is unresolved), then send the waiting profit
+   * once it is worth PAYOUT_MIN_GAS_MULTIPLE × the transfer's gas. Paper mode only books it.
+   */
+  private payoutRetryAt = 0;
+  payoutMin: number | null = null;
+  private payoutMinAt = 0;
+  private async payOut(price: number) {
+    const s = this.state;
+    if (s.payoutInFlight) {
+      const f = s.payoutInFlight;
+      const r = await this.executor.transferStatus(f.hash);
+      if (!r) return;
+      s.payoutInFlight = null;
+      s.payouts.push({ at: this.now(), amount: r.ok ? f.amount : 0, to: f.to, txHash: f.hash, gasQuote: r.gasPls * price, ok: r.ok, paper: s.mode === 'paper' });
+      const sym = this.def?.quote.symbol ?? s.stable;
+      if (r.ok) {
+        s.payoutPending = Math.max(0, s.payoutPending - f.amount);
+        this.ev('info', `Grid ${this.label}: sent ${f.amount.toPrecision(5)} ${sym} profit to ${f.to}`, { level: 'success', notify: true, data: { hash: f.hash } });
+      } else {
+        this.payoutRetryAt = this.now() + PAYOUT_RETRY_MS;
+        this.ev('info', `Grid ${this.label}: profit transfer ${f.hash} reverted; will try again in ${PAYOUT_RETRY_MS / 60_000} min`, { level: 'error', notify: true });
+      }
+      this.save();
+      return;
+    }
+    if (s.profits.mode !== 'send' || s.status !== 'running' || s.inFlight || s.queue.length || !(s.payoutPending > 0) || this.now() < this.payoutRetryAt) return;
+    // Gas price read at most every 10 min while profit builds up (public RPCs).
+    if (this.payoutMin == null || this.now() - this.payoutMinAt > PAYOUT_RETRY_MS) {
+      this.payoutMin = PAYOUT_MIN_GAS_MULTIPLE * (await this.executor.transferGasPls()) * price;
+      this.payoutMinAt = this.now();
+    }
+    if (s.payoutPending < this.payoutMin) return;
+    const to = s.profits.to, amount = s.payoutPending;
+    const send = async () => {
+      const hash = await this.executor.sendTransfer(to, amount);
+      s.payoutInFlight = { hash, amount, to, at: this.now() };
+      this.save();
+      this.tag('info', `sent profit transfer ${hash}: ${amount} → ${to}`);
+    };
+    try {
+      if (this.gate) await this.gate.run(send); else await send();
+    } catch (e) {
+      this.payoutRetryAt = this.now() + PAYOUT_RETRY_MS;
+      this.ev('info', `Grid ${this.label}: couldn't send profit (${(e as Error).message.slice(0, 160)}); will try again in ${PAYOUT_RETRY_MS / 60_000} min`, { level: 'error', notify: true });
+    }
   }
 
   startLoop(pollMs: number) {
@@ -384,7 +510,7 @@ export class GridEngine {
         } catch { /* keep last */ }
       }
       if (this.state.status === 'running' && !this.state.inFlight) {
-        const { intervals, queued } = evaluateTick(this.state.intervals, price, this.state.usdPerBuy, this.now());
+        const { intervals, queued } = evaluateTick(this.state.intervals, price, this.now());
         this.state.intervals = intervals;
         if (queued.length) {
           this.state.queue.push(...queued);
@@ -402,6 +528,7 @@ export class GridEngine {
       }
       this.save();
       await this.drain();
+      await this.payOut(price);
       // A tick that got through means the last error (often one RPC timeout) is over; the Activity log keeps it.
       this.lastError = null;
     } catch (e) {
@@ -482,13 +609,19 @@ export class GridEngine {
       plsAmount, stableAmount, price: execPrice, gasPls, gasUsd: gasQuote, txHash: f.txHash, approvalTxHash: f.approvalTxHash,
       timestamp: this.now(), realizedPnlUsd: realized, paper: this.state.mode === 'paper',
       triggerPrice: job.triggerPrice, levelPrice: job.levelPrice, quotedPrice: f.quotedPrice, execPrice, slippagePct,
-      fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet,
+      fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.seed ? { seed: job.seed } : {}),
       ...(f.taxPct ? { taxPct: f.taxPct } : {}), ...(f.outSource ? { outSource: f.outSource } : {}), ...(f.expectedOut != null ? { expectedOut: f.expectedOut } : {}),
       ...(this.def ? { dex: this.def.pool.dex, feeBps: this.def.pool.feeBps, ...(this.def.pool.feeTier != null ? { feeTier: this.def.pool.feeTier } : {}) } : {}),
     });
-    this.state.intervals = onTradeFilled(this.state.intervals, job, job.side === 'buy' ? plsAmount : 0, job.side === 'buy' ? lotCost : undefined);
+    // A completed sell's profit: added to that level's next buy (reinvest), or set aside to send (send mode).
+    let nextBuy: number | undefined;
+    if (job.side === 'sell' && iv && !job.manual) {
+      if (this.state.profits.mode === 'reinvest') nextBuy = iv.buyAmount + realized;
+      else if (realized > 0) this.state.payoutPending += realized;
+    }
+    this.state.intervals = onTradeFilled(this.state.intervals, job, job.side === 'buy' ? plsAmount : 0, job.side === 'buy' ? lotCost : undefined, nextBuy);
     const sym = this.def?.quote.symbol ?? this.state.stable, bs = this.baseSym;
-    this.ev('filled', `Grid ${this.label}: ${job.side === 'buy' ? 'BOUGHT' : 'SOLD'} ${plsAmount.toPrecision(6)} ${bs} @ ${execPrice.toPrecision(6)}${roundTripNet != null ? ` — RT net ${roundTripNet >= 0 ? '+' : ''}${roundTripNet.toPrecision(4)} ${sym}` : ''}`, {
+    this.ev('filled', `Grid ${this.label}: ${job.side === 'buy' ? 'BOUGHT' : 'SOLD'} ${plsAmount.toPrecision(6)} ${bs} @ ${execPrice.toPrecision(6)}${job.seed ? ` for the ${job.seed.length} levels above the price` : ''}${roundTripNet != null ? ` — RT net ${roundTripNet >= 0 ? '+' : ''}${roundTripNet.toPrecision(4)} ${sym}` : ''}`, {
       level: job.side === 'sell' ? (realized >= 0 ? 'success' : 'warn') : 'success', notify: true,
       data: { side: job.side, price: execPrice, pls: plsAmount, level: job.levelPrice, pnl: roundTripNet },
     });
@@ -496,6 +629,13 @@ export class GridEngine {
   }
 
   private async runJob(job: QueuedTrade): Promise<void> {
+    if (job.seed) {
+      // Coins bought above a level's sell price could only sell at a loss: if the price already rose past the first of
+      // these levels since the start, they wait to buy on the way back down instead.
+      const firstSell = Math.min(...this.state.intervals.filter((i) => job.seed!.includes(i.index)).map((i) => i.sellPrice));
+      const now = this.state.lastPrice ?? job.triggerPrice;
+      if (now >= firstSell) return this.skip(job, `the price rose past ${firstSell.toPrecision(5)} before the start-up buy; those levels will buy on the way back down`);
+    }
     const maxAttempts = (this.d.maxRetries ?? 1) + 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (this.state.status !== 'running') return;
@@ -646,6 +786,15 @@ export class GridEngine {
       intervals: this.state.intervals, usdPerBuy: this.state.usdPerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
       trades: trades.slice(-100).reverse(),
       pnl: { realized: t.realized, unrealized: t.unrealized, gasUsd: t.gasUsd, plsHeld: t.pos.plsHeld, costUsd: t.pos.costUsd },
+      profits: this.state.profits,
+      payout: (() => {
+        const mine = this.state.payouts.filter((x) => x.paper === (this.state.mode === 'paper'));
+        return {
+          pending: this.state.payoutPending, inFlight: this.state.payoutInFlight, min: this.payoutMin,
+          sent: mine.reduce((a, x) => a + x.amount, 0), count: mine.filter((x) => x.ok).length, gasQuote: mine.reduce((a, x) => a + x.gasQuote, 0),
+          last: mine[mine.length - 1] ?? null,
+        };
+      })(),
       stats: roundTripStats(trades),
       econ: this.state.econ ?? null,
       lastError: this.lastError,

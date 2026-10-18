@@ -10,7 +10,7 @@ const status = (allocations: unknown[] = []) => ({
     { key: 'HEX~', label: 'HEX/PLS', chainId: 369, base: 'HEX', quote: 'PLS', quoteNative: true, quoteAddress: WPLS, flipped: true },
     { key: 'DAI', label: 'PLS/DAI', chainId: 369, base: 'PLS', quote: 'DAI', quoteNative: false, quoteAddress: DAI },
   ],
-  wallets: [{ chainId: 369, address: '0xabc', error: null, coins: [{ symbol: 'PLS', address: null, native: true, amount: 10_749_500 }, { symbol: 'DAI', address: DAI, native: false, amount: 40 }] }],
+  wallets: [{ chainId: 369, address: '0xabc', error: null, at: 1, coins: [{ symbol: 'PLS', address: null, native: true, amount: 10_749_500 }, { symbol: 'DAI', address: DAI, native: false, amount: 40 }] }],
   allocations: { rows: allocations },
 });
 
@@ -40,6 +40,16 @@ describe('spendFunds (New bot wallet line, Max and live check)', () => {
 
   it('no signing key → balance unknown, nothing blocked', () => {
     const s = { ...status(), wallets: [] };
-    expect(spendFunds(s, 'DAI', 1e9, DEFAULT_GAS_RESERVE)).toMatchObject({ have: null, max: null, ok: null });
+    expect(spendFunds(s, 'DAI', 1e9, DEFAULT_GAS_RESERVE)).toMatchObject({ have: null, max: null, ok: null, readError: null });
+  });
+
+  it('a balance that failed to read is unknown with the reason, never 0 (the USDG "zero" report)', () => {
+    const s = status();
+    s.wallets[0].coins[1] = { symbol: 'DAI', address: DAI, native: false, amount: null as unknown as number, error: 'request timeout' } as never;
+    expect(spendFunds(s, 'DAI', 10, DEFAULT_GAS_RESERVE)).toMatchObject({ have: null, max: null, ok: null, readError: 'request timeout' });
+    // still loading is not 0 either
+    expect(spendFunds({ ...status(), wallets: [{ ...status().wallets[0], at: null, coins: [] }] }, 'DAI', 10, DEFAULT_GAS_RESERVE)).toMatchObject({ have: null, readError: 'still loading' });
+    // a coin missing from a wallet that read fine really is 0
+    expect(spendFunds({ ...status(), wallets: [{ ...status().wallets[0], coins: [] }] }, 'DAI', 10, DEFAULT_GAS_RESERVE)).toMatchObject({ have: 0, ok: false, readError: null });
   });
 });

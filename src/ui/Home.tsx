@@ -72,6 +72,7 @@ function WalletPanel({ s, chain }: { s: AnyObj; chain: number | 'all' }) {
             : !w.coins.length ? <span className="small muted">Loading…</span>
             : <span className="coins">{w.coins.map((c: AnyObj) => {
               const used = inUse(w, c);
+              if (c.error) return <span key={c.address} className="coin neg" title={c.error}><b>?</b> {c.symbol} <small>couldn't read: {c.error}</small></span>;
               return <span key={c.address ?? 'native'} className="coin" title={`${c.amount.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${c.symbol}`}><b>{humanAmount(c.amount)}</b> {c.symbol}{used > 0 ? <small> · {humanAmount(used)} in live bots</small> : null}</span>;
             })}</span>}
         </div>

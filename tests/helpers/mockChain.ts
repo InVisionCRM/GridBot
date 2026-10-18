@@ -1,5 +1,5 @@
 /**
- * In-memory PulseX V2 mock: one WPLS/<quote> pool per quote token, each with its own pair address,
+ * In-memory PulseX V1/V2 mock (both routers and factories serve the same pools): one WPLS/<quote> pool per quote token, each with its own pair address,
  * token0 ordering and reserves held in the token's OWN raw decimals (DAI 18, USDC 6, HEX 8, …).
  * Raw-unit constant product means any decimals or reserve-order mistake in the bot shows up as a
  * wildly wrong price instead of being masked by the mock.
@@ -7,6 +7,7 @@
 import { zeroPadValue, toBeHex, getAddress } from 'ethers';
 import { NETWORKS, type QuoteToken } from '../../src/live/networks';
 import { getAmountOut } from '../../src/live/swapMath';
+import { PULSECHAIN_EXTRA_DEXES } from '../../src/live/chains';
 import { ERC20, FACTORY, PAIR, ROUTER, WPLS_EVENTS, type ChainReader, type ReceiptLike, type SentTx, type TxSender } from '../../src/server/bot/chain';
 
 export const NET = NETWORKS.mainnet;
@@ -16,6 +17,10 @@ export const ALL_STABLES = NET.quotes;
 export const ME = '0x1234567890123456789012345678901234567890';
 const E18 = 10n ** 18n;
 const WPLS = NET.pulsex.wpls.toLowerCase();
+// PulseX V1 and V2 share the Router02 / factory interface; the built-in stables trade on V1, the rest on V2.
+const V1 = PULSECHAIN_EXTRA_DEXES.find((d) => d.id === 'pulsex-v1')!;
+const ROUTERS = new Set([NET.pulsex.routerV2, V1.router].map((a) => a.toLowerCase()));
+const FACTORIES = new Set([NET.pulsex.factoryV2, V1.factory].map((a) => a.toLowerCase()));
 
 export type Fault = 'sendThrow' | 'revert' | 'timeout';
 
@@ -44,6 +49,12 @@ export class MockChain implements ChainReader, TxSender {
   gasPrice = 10n ** 12n; // 1000 gwei → 100k gas = 0.1 PLS
   onSend?: (method: string) => void;
   txCountCalls = 0;
+  /** ERC-20 transfers sent (profit payouts) */
+  transfers: { token: string; to: string; amount: bigint }[] = [];
+  /** Sent with the 'timeout' fault and not yet visible by hash */
+  unmined = new Map<string, ReceiptLike>();
+  /** Make every 'timeout' tx visible by hash */
+  mine() { for (const [h, r] of this.unmined) this.receipts.set(h, r); this.unmined.clear(); }
   /** Inject a pricing bug into getAmountsOut for tests that prove detection */
   corrupt: ((amountIn: bigint, amountOut: bigint, path: string[]) => bigint) | null = null;
 
@@ -105,12 +116,12 @@ export class MockChain implements ChainReader, TxSender {
 
   async call({ to, data }: { to: string; data: string }): Promise<string> {
     const t = to.toLowerCase();
-    if (t === NET.pulsex.routerV2.toLowerCase()) {
+    if (ROUTERS.has(t)) {
       const f = ROUTER.parseTransaction({ data })!;
       const [amountIn, path] = f.args as unknown as [bigint, string[]];
       return ROUTER.encodeFunctionResult('getAmountsOut', [[amountIn, this.out(amountIn, path).out]]);
     }
-    if (t === NET.pulsex.factoryV2.toLowerCase()) {
+    if (FACTORIES.has(t)) {
       const f = FACTORY.parseTransaction({ data })!;
       const [a, b] = f.args as unknown as [string, string];
       const other = a.toLowerCase() === WPLS ? b : a;
@@ -177,7 +188,7 @@ export class MockChain implements ChainReader, TxSender {
         this.allowances.set(tk, (this.allowances.get(tk) ?? 0n) - amountIn);
         this.pls += out;
         const ev = WPLS_EVENTS.getEvent('Withdrawal')!;
-        receipt = { status: 1, ...gas, logs: [{ address: NET.pulsex.wpls, topics: [ev.topicHash, zeroPadValue(NET.pulsex.routerV2, 32)], data: zeroPadValue(toBeHex(out), 32) }] };
+        receipt = { status: 1, ...gas, logs: [{ address: NET.pulsex.wpls, topics: [ev.topicHash, zeroPadValue(tx.to, 32)], data: zeroPadValue(toBeHex(out), 32) }] };
       }
     } else if (parsed.name === 'swapExactETHForTokens' || parsed.name === 'swapExactETHForTokensSupportingFeeOnTransferTokens') {
       const [minOut, path, to] = parsed.args as unknown as [bigint, string[], string];
@@ -207,10 +218,20 @@ export class MockChain implements ChainReader, TxSender {
         const ev = ERC20.getEvent('Transfer')!;
         receipt = { status: 1, ...gas, logs: [{ address: outTok, topics: [ev.topicHash, zeroPadValue(pool.pair, 32), zeroPadValue(to, 32)], data: zeroPadValue(toBeHex(out), 32) }] };
       }
+    } else if (parsed.name === 'transfer') {
+      const [to, amount] = parsed.args as unknown as [string, bigint];
+      const tk = tx.to.toLowerCase();
+      if ((this.balances.get(tk) ?? 0n) < amount) receipt = { status: 0, ...gas, logs: [] };
+      else {
+        this.balances.set(tk, (this.balances.get(tk) ?? 0n) - amount);
+        this.transfers.push({ token: tk, to: to.toLowerCase(), amount });
+        receipt = { status: 1, ...gas, logs: [] };
+      }
     } else throw new Error(`mock: unexpected method ${parsed.name}`);
     if (fault === 'timeout') {
-      // Mined, but the bot's wait() times out; receipt only discoverable later by hash.
+      // Mined, but the bot's wait() times out; receipt only discoverable later by hash (or after mine()).
       const r = receipt;
+      this.unmined.set(hash, r);
       return { hash, wait: async () => { this.receipts.set(hash, r); throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); } };
     }
     this.receipts.set(hash, receipt);

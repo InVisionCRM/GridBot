@@ -4,7 +4,8 @@
  * leg's orientation), so sizing is always in coin units, never dollars.
  *
  * Range checks (live mainnet reserves, Oct 2026): ±8%×12 → worst spacing 1.25%; ±12%×12 → 1.82%; ±10%×12 → 1.54%.
- * USDT is left out of the ladder: its WPLS pool is ~$1.5k/side, so impact at small levels exceeds the edge.
+ * USDT is left out of the ladder: it was chosen when USDT traded on a ~$1.5k/side PulseX V2 pool, where impact at small
+ * levels exceeded the edge. Built-in stables trade on PulseX V1 since 2026-10-18 (~$228k USDT/side), so it could return.
  *
  * "Stack …" presets are FLIPPED (HEX/PLS, PLSX/PLS, eHEX/PLS): they spend native PLS, levels are PLS per token,
  * buys spend PLS for the token on dips and sells give each level's own lot back for PLS on bounces. Their

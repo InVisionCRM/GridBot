@@ -41,8 +41,10 @@ export function rangeState(g: AnyObj): 'in' | 'below' | 'above' | null {
 /** The coin a market spends on buys, in the signing wallet, and what is free for a new bot. */
 export interface Funds {
   symbol: string;
-  /** Balance in the signing address; null when there is no signing key (paper only) or the balance hasn't loaded yet */
+  /** Balance in the signing address; null when there is no signing key (paper only), or see readError */
   have: number | null;
+  /** Why the balance is unknown although there is a signing key (still loading, or the read failed) */
+  readError: string | null;
   /** Already committed to running live bots */
   inUse: number;
   /** Kept aside for gas when the coin is also the gas coin (PLS / ETH) */
@@ -60,14 +62,16 @@ export function spendFunds(s: AnyObj, key: string, amount: number, gas: GasReser
   const m = mk(s, key);
   const wallet = (s.wallets ?? []).find((w: AnyObj) => w.chainId === m.chainId);
   const coin = wallet?.coins.find((c: AnyObj) => (m.quoteNative ? c.native : c.address === m.quoteAddress));
-  const have: number | null = wallet && !wallet.error ? coin?.amount ?? 0 : null;
+  const readError: string | null = !wallet ? null : wallet.error ?? (wallet.at == null ? 'still loading' : coin?.error ?? null);
+  // A coin missing from a wallet that read fine really is 0; a failed read is never shown as 0.
+  const have: number | null = wallet && !readError ? coin?.amount ?? 0 : null;
   const row = (s.allocations?.rows ?? []).find((r: AnyObj) => r.chainId === m.chainId && (m.quoteNative ? r.native : String(r.address).toLowerCase() === m.quoteAddress));
   const inUse: number = row?.allocated ?? 0;
   const reserve = m.quoteNative ? gasReserve(Math.max(0, amount), gas) : 0;
   const need = Math.max(0, amount) + reserve + inUse;
   const free = have == null ? null : have - inUse;
   const max = free == null ? null : Math.max(0, m.quoteNative ? Math.min(free / (1 + gas.pct), free - gas.fixed) : free);
-  return { symbol: m.quote, have, inUse, reserve, need, max, ok: have == null ? null : have + 1e-9 >= need };
+  return { symbol: m.quote, have, readError, inUse, reserve, need, max, ok: have == null ? null : have + 1e-9 >= need };
 }
 
 /** Round down to `sig` significant digits (a Max that never overshoots the balance). */

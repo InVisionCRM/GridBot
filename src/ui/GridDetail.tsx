@@ -9,7 +9,7 @@ import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel
 import type { ActivityEvent, Ticks } from './useStream';
 import { T } from './theme';
 import { errMsg, gridName, quoteSym, rangeState, spendFunds, type AnyObj, type Nav } from './model';
-import { AmountField, fundsProblem } from './NewBot';
+import { AmountField, fundsProblem, isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { reserveCfg } from '../live/gasReserve';
 import { humanAmount } from '../live/amount';
 import { recenterAt } from '../live/recenter';
@@ -80,6 +80,25 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
 /** Something on the grid still has to sell (or a trade is queued / in flight): the range can't move yet. */
 const busyLevels = (g: AnyObj) => !!g.inFlight || g.queue.length > 0 || g.intervals.some((i: AnyObj) => i.status !== 'inactive' && i.status !== 'waitingBuy');
 
+/** Reinvest or send profits, and what the payouts have done so far. */
+function GridProfits({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean }) {
+  const cur: { mode: 'reinvest' | 'send'; to?: string } = g.profits ?? { mode: 'reinvest' };
+  const [p, setP] = useState<ProfitsChoice>({ mode: cur.mode, to: cur.to ?? '' });
+  const changed = p.mode !== cur.mode || (p.mode === 'send' && p.to !== (cur.to ?? ''));
+  const q = quoteSym(g), pay = g.payout, n = (x: number) => qty(x, q, 5, false);
+  const status = cur.mode !== 'send' || !pay ? null
+    : pay.inFlight ? `Sending ${n(pay.inFlight.amount)} to ${cur.to}… (${pay.inFlight.hash.slice(0, 12)}…)`
+    : `Waiting to send: ${n(pay.pending)}${pay.min != null ? ` (sends at ${n(pay.min)} or more)` : ''}. Sent so far: ${n(pay.sent)} in ${pay.count} transfer${pay.count === 1 ? '' : 's'}${pay.gasQuote > 0 ? `, gas ${n(pay.gasQuote)}` : ''}.`;
+  return (
+    <div className="follow-row">
+      <ProfitsField p={p} set={setP} />
+      {changed && <button type="button" className="btn small-btn primary" disabled={busy || (p.mode === 'send' && !isAddress(p.to))}
+        onClick={() => act(() => botApi(`grids/${g.id}/profits`, 'PUT', profitsBody(p)))}>Save</button>}
+      {status && <span className="small">{status}</span>}
+    </div>
+  );
+}
+
 /** "Follow the price up" (auto-recenter): switch + what it is doing now. */
 function FollowUp({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean }) {
   const r = g.recenter ?? { enabled: false, aboveSince: null, lastAt: null, count: 0 };
@@ -91,7 +110,7 @@ function FollowUp({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolea
     <div className="follow-row">
       <label className="check follow">
         <input type="checkbox" checked={r.enabled} disabled={busy} onChange={(e) => act(() => botApi(`grids/${g.id}/recenter`, 'PUT', { enabled: e.target.checked }))} />
-        <span><b>Follow the price up</b> <span className="muted">After 2 hours above the range with everything sold, the range moves up around the price: same width, levels and amount, at most every 6 hours. It never moves down.</span></span>
+        <span><b>Follow the price up</b> <span className="muted">After 2 hours above the range with everything sold, the range moves up around the price (same width and levels; coins for the new levels above the price are bought then), at most every 6 hours. It never moves down.</span></span>
       </label>
       <span className="small">{now}</span>
     </div>
@@ -138,7 +157,7 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
             const profitTxt = profit == null ? '' : k ? usd(profit * k, true) : qty(profit, q, 4);
             return all ? (
               <tr key={t.id} className={t.failed ? 'failed-row' : ''}>
-                <td>{time(t.timestamp)}</td><td className={`side ${t.side}`}>{t.side}{t.failed ? ' ✗' : ''}</td><td className="muted">{t.intervalIndex}</td>
+                <td>{time(t.timestamp)}</td><td className={`side ${t.side}`} title={t.seed ? `Start-up buy for levels ${t.seed.join(', ')} above the start price` : undefined}>{t.side}{t.seed ? ' (start-up)' : ''}{t.failed ? ' ✗' : ''}</td><td className="muted">{t.intervalIndex}</td>
                 <td>{num(t.plsAmount, t.plsAmount < 10 ? 6 : 2)}</td><td>{num(t.stableAmount, 6)}</td>
                 <td>{t.triggerPrice ? formatPrice(t.triggerPrice) : '—'}</td><td>{t.quotedPrice ? formatPrice(t.quotedPrice) : '—'}</td>
                 <td title={t.fromReceipt === false && !t.paper ? 'receipt log missing: minimum-out used' : ''}>{t.execPrice ?? t.price ? formatPrice(t.execPrice ?? t.price) : '—'}{t.fromReceipt === false && !t.paper ? '*' : ''}</td>
@@ -148,7 +167,7 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
               </tr>
             ) : (
               <tr key={t.id} className={t.failed ? 'failed-row' : ''}>
-                <td>{time(t.timestamp)}</td><td className={`side ${t.side}`}>{t.side}{t.failed ? ' ✗' : ''}</td>
+                <td>{time(t.timestamp)}</td><td className={`side ${t.side}`} title={t.seed ? `Start-up buy for levels ${t.seed.join(', ')} above the start price` : undefined}>{t.side}{t.seed ? ' (start-up)' : ''}{t.failed ? ' ✗' : ''}</td>
                 <td>{num(t.plsAmount, t.plsAmount < 10 ? 6 : 2)}</td><td>{t.execPrice ?? t.price ? formatPrice(t.execPrice ?? t.price) : '—'}</td>
                 <td className={cls(profit)}>{profitTxt}</td><td>{tx(t.txHash)}</td>
               </tr>
@@ -228,6 +247,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       {g.config && (
         <div className="card">
           <FollowUp g={g} act={act} busy={busy} />
+          <GridProfits key={`${g.profits?.mode}-${g.profits?.to ?? ''}`} g={g} act={act} busy={busy} />
           <details className="more" open={rs === 'below' || (rs === 'above' && !g.recenter?.enabled)}>
             <summary>Change range</summary>
             <ChangeRange key={`${g.config.lowerPrice}-${g.config.upperPrice}-${g.config.gridCount}`} s={s} g={g} act={act} busy={busy} />
@@ -247,7 +267,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
               <tr key={iv.index}>
                 <td className="muted">#{iv.index}</td><td>{formatPrice(iv.buyPrice)} → {formatPrice(iv.sellPrice)}</td>
                 <td className={`st ${iv.status}`}>{({ waitingBuy: 'waiting to buy', pendingBuy: 'buying', holding: 'holding', pendingSell: 'selling', inactive: 'inactive' } as Record<string, string>)[iv.status] ?? iv.status}{iv.needsRearm ? ' (re-arm)' : ''}</td>
-                <td>{iv.plsAmount ? `${num(iv.plsAmount, iv.plsAmount < 10 ? 6 : 0)} ${g.base}` : ''}</td>
+                <td>{iv.plsAmount ? `${num(iv.plsAmount, iv.plsAmount < 10 ? 6 : 0)} ${g.base}` : iv.status === 'waitingBuy' || iv.status === 'pendingBuy' ? `buys ${qty(iv.buyAmount, quoteSym(g), 4, false)}` : ''}</td>
               </tr>
             ))}
             {!g.intervals.length && <tr><td className="txt muted">No levels.</td></tr>}

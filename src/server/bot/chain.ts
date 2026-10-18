@@ -168,7 +168,16 @@ export interface Executor {
   execute(q: Quote, hooks: ExecHooks): Promise<Fill>;
   /** Look up a swap sent before a restart. null = not mined (yet). */
   recover(swapTxHash: string, tokenOut: string, decimalsOut: number): Promise<{ ok: boolean; amountOutHuman: number; gasPls: number } | null>;
+  /** Gas (base units) of one transfer of the spend coin, for the profit payout threshold */
+  transferGasPls(): Promise<number>;
+  /** Send `amountHuman` of the spend coin to `to`; returns the tx hash without waiting for it (paper: a simulated id) */
+  sendTransfer(to: string, amountHuman: number): Promise<string>;
+  /** A transfer by hash: null = not mined yet; ok false = reverted (gas still paid) */
+  transferStatus(hash: string): Promise<{ ok: boolean; gasPls: number } | null>;
 }
+
+/** Gas units of one transfer: plain native send, or ERC-20 transfer (typical 35–55k; 65k covers proxied tokens like USDG). */
+export const TRANSFER_GAS = { native: 21_000, token: 65_000 };
 
 function shortErr(e: unknown): string {
   const a = e as { shortMessage?: string; reason?: string; message?: string };
@@ -460,6 +469,26 @@ export class LiveExecutor implements Executor {
     return { pls: fromUnits(b, base.decimals), stable: fromUnits(st, stable.decimals) };
   }
 
+  async transferGasPls() {
+    const m = await this.quoter.market();
+    return (this.quoter.stable.native ? TRANSFER_GAS.native : TRANSFER_GAS.token) * m.gasPricePls + (m.extraPlsPerSwap ?? 0);
+  }
+
+  async sendTransfer(to: string, amountHuman: number) {
+    const t = this.quoter.stable;
+    await this.quoter.ensureDecimals();
+    const units = amountToUnits(amountHuman, t.decimals);
+    if (!(units > 0n)) throw new Error(`nothing to send (${amountHuman} ${t.symbol})`);
+    const req = t.native ? { to, data: '0x', value: units } : { to: t.address, data: ERC20.encodeFunctionData('transfer', [to, units]), value: 0n };
+    return (await this.send(req)).hash;
+  }
+
+  async transferStatus(hash: string) {
+    const r = await this.quoter.reader.getTransactionReceipt(hash);
+    if (!r) return null;
+    return { ok: r.status === 1, gasPls: fromUnits(gasOf(r), 18) * (await this.quoter.basePerNative()) };
+  }
+
   async quote(side: Side, amount: number, limits: SafetyLimits): Promise<Quote> {
     const a = await this.address();
     const tin = this.quoter.tokenIn(side);
@@ -656,6 +685,13 @@ export class PaperExecutor implements Executor {
     };
   }
   async recover() { return null; }
+  async transferGasPls() {
+    const m = await this.quoter.market();
+    return (this.quoter.stable.native ? TRANSFER_GAS.native : TRANSFER_GAS.token) * m.gasPricePls + (m.extraPlsPerSwap ?? 0);
+  }
+  /** Paper payouts are bookkeeping only: nothing leaves the wallet. */
+  async sendTransfer() { return `paper-payout-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+  async transferStatus() { return { ok: true, gasPls: await this.transferGasPls() }; }
 }
 
 /** Placeholder executor for a bot whose market is no longer configured (custom market removed). */
@@ -668,4 +704,7 @@ export class UnavailableExecutor implements Executor {
   async quote(): Promise<Quote> { throw new Error(this.why); }
   async execute(): Promise<Fill> { throw new ExecError(this.why, { aborted: true }); }
   async recover() { return null; }
+  async transferGasPls(): Promise<number> { throw new Error(this.why); }
+  async sendTransfer(): Promise<string> { throw new Error(this.why); }
+  async transferStatus(): Promise<{ ok: boolean; gasPls: number } | null> { throw new Error(this.why); }
 }

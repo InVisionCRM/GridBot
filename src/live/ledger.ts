@@ -7,6 +7,8 @@ export interface LiveTrade {
   network: NetworkKey | string;
   side: 'buy' | 'sell';
   intervalIndex: number;
+  /** Start-up buy: the levels above the start price it bought coins for (split between them) */
+  seed?: number[];
   stable: string;
   /** PLS amount bought or sold (human units) */
   plsAmount: number;

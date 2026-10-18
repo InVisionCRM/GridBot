@@ -134,4 +134,25 @@ describe('grid backtester', () => {
     }
     expect(() => runGridBacktest(k, { lowerPrice: 2, upperPrice: 3, gridCount: 5, capital: 1000 }, '1h', FEE_ONLY)).toThrow(/below/);
   });
+
+  it('same rules as the live grid: every level gets capital ÷ levels; the ones above the first price are bought at the start and sell on the way up', () => {
+    // straight up from 1.00 to 1.10 through a ±10% grid of 10 levels
+    const k = candlesFromCloses(Array.from({ length: 11 }, (_, i) => 1 + i * 0.01));
+    const r = runGridBacktest(k, { lowerPrice: 0.9, upperPrice: 1.1, gridCount: 10, capital: 1000 }, '1h', FREE);
+    // the 5 levels from 1.00 up each sold their share; nothing below the start ever bought
+    expect(r.trades.map((t) => +t.exitPrice.toFixed(2))).toEqual([1.02, 1.04, 1.06, 1.08, 1.1]);
+    for (const t of r.trades) { expect(t.entryPrice).toBe(1); expect(t.cost).toBeCloseTo(100, 9); }
+    expect(r.metrics.totalReturn).toBeCloseTo((0.02 + 0.04 + 0.06 + 0.08 + 0.1) * 100 / 1000, 9);
+  });
+
+  it('reinvest (default) grows each level\'s next buy by its profit; reinvest: false keeps the sizes', () => {
+    const k = candlesFromCloses(Array.from({ length: 300 }, (_, i) => 1 + 0.06 * Math.sin(i / 3)));
+    const g = { lowerPrice: 0.9, upperPrice: 1.1, gridCount: 8, capital: 1000 };
+    const grow = runGridBacktest(k, g, '1h', FEE_ONLY), flat = runGridBacktest(k, { ...g, reinvest: false }, '1h', FEE_ONLY);
+    expect(flat.trades.every((t) => Math.abs(t.cost - 125) < 1e-9 || t.entryPrice === 1)).toBe(true);
+    expect(Math.max(...grow.trades.map((t) => t.cost))).toBeGreaterThan(125);
+    expect(grow.trades.length).toBe(flat.trades.length);
+    expect(grow.metrics.endEquity).toBeGreaterThan(flat.metrics.endEquity);
+  });
 });
+

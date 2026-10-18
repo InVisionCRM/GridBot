@@ -5,7 +5,11 @@ import { MemoryStore } from '../src/server/bot/store';
 import { NET, MockChain, DAI } from './helpers/mockChain';
 
 const P0 = 0.00001;
-const grid = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 50 };
+// The price starts at the top of the range: every level waits to buy and nothing is bought at the start, so these tests
+// are about level mechanics only (the start-up buy for levels above the price has its own tests below).
+const grid = { lowerPrice: P0 * 0.8, upperPrice: P0, gridCount: 10, totalCapitalUsd: 50 };
+/** Level 9 spans 0.98·P0 (buy) → P0 (sell) */
+const TOP = 9;
 
 function make(chain = new MockChain(P0), store = new MemoryStore<BotState>(), signer: MockChain | null = chain, opts = {}) {
   const log = new Logger(true);
@@ -17,7 +21,7 @@ describe('GridEngine live auto-execution (mocked chain + signer)', () => {
   it('trigger → exact approve → swap, nonces 0,1, fill recorded with tx hash and gas', async () => {
     const { chain, engine } = make();
     await engine.start({ mode: 'live', ...grid });
-    expect(engine.state.intervals.filter((i) => i.status === 'waitingBuy')).toHaveLength(5);
+    expect(engine.state.intervals.filter((i) => i.status === 'waitingBuy')).toHaveLength(10);
     await engine.tick();
     expect(chain.sent).toHaveLength(0); // no crossing yet
 
@@ -32,7 +36,7 @@ describe('GridEngine live auto-execution (mocked chain + signer)', () => {
     expect(fill.approvalTxHash).toMatch(/^0x/);
     expect(fill.gasPls).toBeCloseTo(0.2); // approve + swap, 0.1 PLS each
     expect(fill.plsAmount).toBeGreaterThan(0);
-    expect(engine.state.intervals[4].status).toBe('holding');
+    expect(engine.state.intervals[TOP].status).toBe('holding');
     expect(engine.state.inFlight).toBeNull();
   });
 
@@ -47,7 +51,7 @@ describe('GridEngine live auto-execution (mocked chain + signer)', () => {
     expect(sell.side).toBe('sell');
     expect(sell.plsAmount).toBeCloseTo(buy.plsAmount);
     expect(sell.realizedPnlUsd).toBeCloseTo(sell.stableAmount - buy.stableAmount - buy.gasUsd - sell.gasUsd, 10);
-    expect(engine.state.intervals[4].status).toBe('waitingBuy');
+    expect(engine.state.intervals[TOP].status).toBe('waitingBuy');
   });
 
   it('several levels crossed at once execute one at a time with sequential nonces', async () => {
@@ -66,13 +70,13 @@ describe('GridEngine live auto-execution (mocked chain + signer)', () => {
     const { engine, log } = make(chain);
     chain.dai = 10_000n * 10n ** 18n;
     await engine.start({ mode: 'live', ...grid, totalCapitalUsd: 500 }); // deep pool at start: economics OK
-    // Pool drains after start: $1k of DAI → $100 buys now carry ~10% impact
+    // Pool drains after start: $1k of DAI → $50 buys now carry ~5% impact
     chain.rD = 1_000n * 10n ** 18n;
     chain.rW = (chain.rD * 100_000n * 1026n) / 1000n; // price −2.5%
     await engine.tick();
     expect(chain.sent).toHaveLength(0);
     expect(log.entries.some((e) => /price impact .* > cap 3\.00%/.test(e.msg))).toBe(true);
-    expect(engine.state.intervals[4]).toMatchObject({ status: 'waitingBuy', needsRearm: true });
+    expect(engine.state.intervals[TOP]).toMatchObject({ status: 'waitingBuy', needsRearm: true });
   });
 
   it('a reverted swap is recorded with its gas, then retried with a fresh quote', async () => {
@@ -99,7 +103,7 @@ describe('GridEngine live auto-execution (mocked chain + signer)', () => {
     await engine.tick();
     expect(chain.sent).toHaveLength(0);
     expect(chain.txCountCalls - before).toBeGreaterThanOrEqual(2);
-    expect(engine.state.intervals[4]).toMatchObject({ status: 'waitingBuy', needsRearm: true });
+    expect(engine.state.intervals[TOP]).toMatchObject({ status: 'waitingBuy', needsRearm: true });
     expect(log.entries.some((e) => /Skipped buy/.test(e.msg))).toBe(true);
     // re-arms once price moves back above, then trades normally
     chain.setPrice(P0); await engine.tick();
@@ -141,7 +145,7 @@ describe('GridEngine live auto-execution (mocked chain + signer)', () => {
     expect(chain.sent).toHaveLength(2); // nothing resent
     expect(b.engine.state.inFlight).toBeNull();
     expect(b.engine.state.trades[0]).toMatchObject({ side: 'buy', txHash: hash });
-    expect(b.engine.state.intervals[4].status).toBe('holding');
+    expect(b.engine.state.intervals[TOP].status).toBe('holding');
     // and keeps trading with the next nonce
     chain.setPrice(P0 * 1.005); await b.engine.tick();
     expect(chain.sent.at(-1)).toMatchObject({ method: 'swapExactETHForTokens', nonce: 2 });
@@ -161,7 +165,7 @@ describe('GridEngine live auto-execution (mocked chain + signer)', () => {
     now += 20 * 60_000;
     await engine.tick();
     expect(engine.state.inFlight).toBeNull();
-    expect(engine.state.intervals[4].needsRearm).toBe(true);
+    expect(engine.state.intervals[TOP].needsRearm).toBe(true);
   });
 
   it('paper mode runs on the same engine with no signer and sends nothing', async () => {
@@ -190,3 +194,133 @@ describe('GridEngine live auto-execution (mocked chain + signer)', () => {
     expect(DAI.symbol).toBe('DAI');
   });
 });
+
+describe('Levels above the start price get coins at the start (#5)', () => {
+  const mid = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 50 };
+
+  it('the amount is split over all 10 levels; the 5 above the price are bought in one swap and sell as it rises', async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'live', ...mid });
+    expect(engine.state.usdPerBuy).toBeCloseTo(5, 12);
+    expect(engine.state.queue).toMatchObject([{ side: 'buy', amount: 25, seed: [5, 6, 7, 8, 9] }]);
+    await engine.tick();
+    expect(chain.sent.map((x) => x.method)).toEqual(['approve', 'swapExactTokensForETH']);
+    const [seed] = engine.state.trades;
+    const up = engine.state.intervals.filter((i) => i.index >= 5);
+    expect(up.every((i) => i.status === 'holding')).toBe(true);
+    expect(up.reduce((a, i) => a + i.plsAmount, 0)).toBeCloseTo(seed.plsAmount, 9);
+    expect(engine.state.intervals.filter((i) => i.status === 'waitingBuy').map((i) => i.index)).toEqual([0, 1, 2, 3, 4]);
+    // up through 1.02·P0: level 5 (P0 → 1.02·P0) sells its share
+    chain.setPrice(P0 * 1.025); await engine.tick();
+    const sell = engine.state.trades.at(-1)!;
+    expect(sell).toMatchObject({ side: 'sell', intervalIndex: 5 });
+    expect(sell.plsAmount).toBeCloseTo(seed.plsAmount / 5, 9);
+  });
+
+  it('a price below the range is refused (nothing to wait for, everything would be bought at once)', async () => {
+    const { engine } = make();
+    await expect(engine.start({ mode: 'live', ...mid, lowerPrice: P0 * 1.1, upperPrice: P0 * 1.3 })).rejects.toThrow(/below the range/);
+  });
+
+  it("a live restart uses the coins the grid already holds before buying more", async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'live', ...mid });
+    await engine.tick();
+    expect(chain.sent).toHaveLength(2);
+    engine.stop();
+    await engine.start({ mode: 'live', ...mid });
+    expect(engine.state.queue).toHaveLength(0);
+    expect(engine.state.intervals.filter((i) => i.index >= 5).every((i) => i.status === 'holding')).toBe(true);
+    await engine.tick();
+    expect(chain.sent).toHaveLength(2); // nothing bought again
+  });
+
+  it('if the start-up buy can\'t happen, those levels wait to buy like any other level', async () => {
+    const { chain, engine } = make();
+    chain.faults = ['sendThrow', 'sendThrow'];
+    await engine.start({ mode: 'live', ...mid });
+    await engine.tick();
+    expect(engine.state.intervals.filter((i) => i.index >= 5).every((i) => i.status === 'waitingBuy' && i.needsRearm)).toBe(true);
+  });
+});
+
+describe('Profits: reinvested by default, or sent to an address (#6)', () => {
+  const ME_TOO = '0x1234567890123456789012345678901234567890';
+  const PAYEE = '0x00000000000000000000000000000000000beef1';
+  async function roundTrip(o: { profits?: { mode: 'send'; to: string } } = {}, beforeSell?: (c: MockChain) => void) {
+    const m = make();
+    await m.engine.start({ mode: 'live', ...grid, ...o });
+    m.chain.setPrice(P0 * 0.975); await m.engine.tick();
+    beforeSell?.(m.chain);
+    m.chain.setPrice(P0 * 1.005); await m.engine.tick(); // the sell, then the transfer in the same tick
+    return m;
+  }
+
+  it('reinvest (default): a level\'s profit is added to its next buy', async () => {
+    const { engine } = await roundTrip();
+    expect(engine.state.profits).toEqual({ mode: 'reinvest' });
+    const sell = engine.state.trades.find((t) => t.side === 'sell')!;
+    expect(sell.realizedPnlUsd).toBeGreaterThan(0);
+    expect(engine.state.intervals[TOP].buyAmount).toBeCloseTo(5 + sell.realizedPnlUsd, 9);
+    expect(engine.state.intervals[TOP - 1].buyAmount).toBe(5);
+  });
+
+  it('send: the next buy stays the same size and the profit goes to the address in one transfer', async () => {
+    const { chain, engine } = await roundTrip({ profits: { mode: 'send', to: PAYEE } });
+    const sell = engine.state.trades.find((t) => t.side === 'sell')!;
+    expect(engine.state.intervals[TOP].buyAmount).toBe(5);
+    expect(chain.transfers).toEqual([{ token: DAI.address.toLowerCase(), to: PAYEE, amount: expect.any(BigInt) }]);
+    expect(Number(chain.transfers[0].amount) / 1e18).toBeCloseTo(sell.realizedPnlUsd, 9);
+    await engine.tick(); // settles by hash
+    expect(engine.state.payoutInFlight).toBeNull();
+    expect(engine.status().payout).toMatchObject({ pending: 0, count: 1 });
+    expect(engine.status().payout.sent).toBeCloseTo(sell.realizedPnlUsd, 9);
+  });
+
+  it('a transfer that isn\'t confirmed yet is never sent again', async () => {
+    const { chain, engine } = await roundTrip({ profits: { mode: 'send', to: PAYEE } }, (c) => { c.faults = [undefined as never, 'timeout']; });
+    expect(engine.state.payoutInFlight).not.toBeNull();
+    for (let i = 0; i < 3; i++) await engine.tick();
+    expect(chain.transfers).toHaveLength(1);
+    chain.mine(); await engine.tick();
+    expect(engine.state.payoutInFlight).toBeNull();
+    expect(engine.state.payoutPending).toBe(0);
+    expect(chain.transfers).toHaveLength(1);
+  });
+
+  it('refuses a bad address or the bot\'s own wallet; can switch while running', async () => {
+    const { engine } = make();
+    await expect(engine.start({ mode: 'live', ...grid, profits: { mode: 'send', to: '0x123' } })).rejects.toThrow(/0x… address/);
+    await expect(engine.start({ mode: 'live', ...grid, profits: { mode: 'send', to: ME_TOO } })).rejects.toThrow(/own wallet/);
+    await engine.start({ mode: 'live', ...grid });
+    await engine.setProfits({ mode: 'send', to: PAYEE });
+    expect(engine.state.profits).toEqual({ mode: 'send', to: PAYEE });
+  });
+
+  it('paper mode books the payout without sending anything', async () => {
+    const chain = new MockChain(P0);
+    const { engine } = make(chain, undefined, null);
+    await engine.start({ mode: 'paper', ...grid, profits: { mode: 'send', to: PAYEE } });
+    chain.setPrice(P0 * 0.975); await engine.tick();
+    chain.setPrice(P0 * 1.005); await engine.tick();
+    await engine.tick(); await engine.tick();
+    expect(chain.sent).toHaveLength(0);
+    const sell = engine.state.trades.find((t) => t.side === 'sell')!;
+    expect(engine.status().payout).toMatchObject({ count: 1, pending: 0 });
+    expect(engine.paperBalances().stable).toBeCloseTo(50 - engine.state.trades[0].stableAmount + sell.stableAmount - sell.realizedPnlUsd, 9);
+  });
+});
+
+describe('Grids saved before per-level sizes', () => {
+  it('load with the old buy size on funded levels and 0 on the idle levels above the old start price', async () => {
+    const store = new MemoryStore<BotState>();
+    const { engine } = make(new MockChain(P0), store);
+    await engine.start({ mode: 'paper', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 50 });
+    // what an old save looked like: $50 over the 5 levels below the start, the 5 above idle, no buyAmount
+    store.save({ ...engine.state, usdPerBuy: 10, queue: [], intervals: engine.state.intervals.map(({ buyAmount: _b, ...iv }) => ({ ...iv, status: iv.index < 5 ? 'waitingBuy' : 'inactive' })) as never });
+    const again = make(new MockChain(P0), store).engine;
+    expect(again.state.intervals.map((i) => i.buyAmount)).toEqual([10, 10, 10, 10, 10, 0, 0, 0, 0, 0]);
+    expect(again.state.intervals.reduce((a, i) => a + i.buyAmount, 0)).toBe(50); // a re-range spreads the real $50
+  });
+});
+
