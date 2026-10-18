@@ -24,6 +24,8 @@ import { MIN_SCAN_CANDLES, SETUP_BANDS } from './scan';
  * V3 open (position mint) 9mm 480 k, Ethereum 402 k, Robinhood 410–510 k; close (decrease + collect) 197–276 k.
  * V2 add 157 k (PulseX V2 DAI/WPLS), remove 215 k (PulseX V2 HEX/WPLS).
  */
+/** Ranges a liquidity bot allows: ±1% … ±50% around the price. */
+export const LP_BAND = { min: 0.01, max: 0.5 };
 export const LP_GAS = { v3: { open: 480_000, close: 250_000 }, v2: { open: 170_000, close: 215_000 } } as const;
 
 /** Ranges tried for a V3 position (± around the start price); null = full range (the only option on V2). */

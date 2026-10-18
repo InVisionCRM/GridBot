@@ -17,7 +17,7 @@ import { ChainBadge, MarketOptions, chainOf, feeLabel, flipKey, isFlipKey, mk, o
 import { IND, T, alpha, chartBase } from './theme';
 
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-const C = { up: T.profit, down: T.loss, fast: IND.fast, slow: IND.slow, dc: IND.band, bb: IND.band, grid: alpha(T.muted, 0.45), stop: T.loss, tp: T.profit, entry: T.text, flat: alpha(T.muted, 0.35) };
+const C = { up: T.profit, down: T.loss, fast: IND.fast, slow: IND.slow, dc: IND.band, bb: IND.band, grid: alpha(T.muted, 0.45), stop: T.loss, tp: T.profit, entry: T.text, flat: alpha(T.muted, 0.35), lp: IND.signal };
 const fmtPx = (p: number) => px(p, 5);
 const ts = (s: number) => s as UTCTimestamp;
 
@@ -144,8 +144,11 @@ export function Chart(p: ChartProps) {
   // bot overlays: grid levels, fills, trend entries/exits, stop/TP
   const botsHere = useMemo(() => {
     const s = p.status;
-    if (!s) return { grids: [] as AnyObj[], trends: [] as AnyObj[] };
-    return { grids: (s.grids ?? []).filter((g: AnyObj) => g.stable === pair && g.config), trends: (s.trends ?? []).filter((t: AnyObj) => t.quote === pair) };
+    if (!s) return { grids: [] as AnyObj[], trends: [] as AnyObj[], lps: [] as AnyObj[] };
+    return {
+      grids: (s.grids ?? []).filter((g: AnyObj) => g.stable === pair && g.config), trends: (s.trends ?? []).filter((t: AnyObj) => t.quote === pair),
+      lps: (s.lps ?? []).filter((l: AnyObj) => l.market === pair && l.position),
+    };
   }, [p.status, pair]);
   useEffect(() => {
     const c = cs.current;
@@ -179,6 +182,10 @@ export function Chart(p: ChartProps) {
         lines.current.push(c.createPriceLine({ price: r.stop, color: C.stop, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: r.stop > r.initialStop ? 'trail' : 'stop' }));
         if (r.tp) lines.current.push(c.createPriceLine({ price: r.tp, color: C.tp, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'TP' }));
       }
+    }
+    for (const l of botsHere.lps) {
+      lines.current.push(c.createPriceLine({ price: l.position.upper, color: C.lp, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'LP top' }));
+      lines.current.push(c.createPriceLine({ price: l.position.lower, color: C.lp, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'LP bottom' }));
     }
     for (const t of p.btTrades ?? []) {
       // backtest times are candle open times in seconds

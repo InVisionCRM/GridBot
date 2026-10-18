@@ -20,7 +20,7 @@ import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { feesOwed } from '../../live/v3Liquidity';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from '../../live/recenter';
-import { LP_GAS } from '../../market/lp';
+import { LP_BAND, LP_GAS } from '../../market/lp';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
 import { fromUnits } from '../../live/swapMath';
@@ -31,7 +31,8 @@ import { readCall, sameAddr } from '../dex/types';
 import { LpPool, type Coins, type PoolView } from '../lp/lpPool';
 import { collectData, exitData, mintTx } from '../lp/npmCalls';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type ReceiptLike, type TxSender } from './chain';
-import { checkProfitMode, PAYOUT_MIN_GAS_MULTIPLE, type Mode, type ProfitMode } from './engine';
+import { checkProfitMode, type Mode, type ProfitMode } from './engine';
+import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
 import type { Logger } from './logger';
 import type { Store } from './store';
@@ -89,6 +90,8 @@ export interface LpState {
   /** Fees collected so far (quote, valued when collected), gas paid (quote), fees sent to the payout address (quote) */
   totals: { fees: number; gas: number; sent: number };
   startedAt: number | null;
+  /** Price when the bot started (for "if you'd held") */
+  startPrice: number | null;
   lastPrice: number | null;
   lastPriceAt: number | null;
   /** [ms, value in quote] */
@@ -117,8 +120,6 @@ export interface LpDeps {
   id?: string;
 }
 
-/** Ranges allowed: ±1% … ±50% around the price. */
-export const LP_BAND = { min: 0.01, max: 0.5 };
 /** A swap smaller than this share of the value isn't worth its fee and gas: the leftover just stays idle. */
 const MIN_SWAP_SHARE = 0.01;
 /** A tx stage that keeps reverting stops the bot after this many tries. */
@@ -129,7 +130,7 @@ export function freshLp(net: LiveNetwork, id?: string): LpState {
   return {
     kind: 'lp', version: 1, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
-    outSince: null, lastRerangeAt: null, reranges: 0, totals: { fees: 0, gas: 0, sent: 0 }, startedAt: null, lastPrice: null, lastPriceAt: null, equity: [],
+    outSince: null, lastRerangeAt: null, reranges: 0, totals: { fees: 0, gas: 0, sent: 0 }, startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
   };
 }
 
@@ -221,7 +222,7 @@ export class LpEngine {
       ...this.state, status: 'running', config: { bandPct: p.bandPct, capital: p.capital, rerange: p.rerange ?? true },
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: 0, quote: p.capital },
       step: { action: 'open', stage: 'swap', tries: 0 }, outSince: null, lastRerangeAt: null, reranges: 0,
-      totals: { fees: 0, gas: 0, sent: 0 }, startedAt: this.now(), lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital]],
+      totals: { fees: 0, gas: 0, sent: 0 }, startedAt: this.now(), startPrice: v.price, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital]],
     };
     this.lastError = null;
     this.save();
@@ -278,6 +279,7 @@ export class LpEngine {
       } else if (this.state.status === 'running' && this.state.position) {
         this.watchRange(v);
         if (!this.state.step && this.state.profits.mode === 'send') await this.maybeSend(pool, v);
+        if (this.state.step) await this.advance(pool, v); // a re-range or send that just became due starts now
       }
       await this.measure(pool, v);
       this.save();
@@ -301,6 +303,13 @@ export class LpEngine {
     if (this.state.lastRerangeAt != null && now - this.state.lastRerangeAt < RECENTER_COOLDOWN_MS) return;
     this.state.step = { action: 'rerange', stage: 'exit', tries: 0 };
     this.ev('range', `Liquidity ${this.label}: price ${v.price.toPrecision(6)} stayed outside ${p.lower.toPrecision(6)}–${p.upper.toPrecision(6)} for ${RECENTER_AFTER_MS / 3600_000}h; moving the range to the price`, { level: 'info', notify: true });
+  }
+
+  /** When an out-of-range position will be moved (null = in range, or re-ranging is off). */
+  private rerangeAt(): number | null {
+    const s = this.state;
+    if (s.outSince == null || !s.config?.rerange) return null;
+    return Math.max(s.outSince + RECENTER_AFTER_MS, s.lastRerangeAt == null ? 0 : s.lastRerangeAt + RECENTER_COOLDOWN_MS);
   }
 
   /** Fees owed now (coins), from the pool's counters. */
@@ -330,12 +339,35 @@ export class LpEngine {
     const val = (c: Coins) => c.base * v.price + c.quote;
     const value = val(coins) + val(owedCoins) + val(this.state.idle);
     this.view = { v, inRange: !!p && v.tick >= p.tickLower && v.tick < p.tickUpper, coins, owed: owedCoins, value };
-    const eq = this.state.equity;
-    if (this.state.startedAt && (!eq.length || this.now() - eq[eq.length - 1][0] >= 60_000)) pushCapped(eq, [this.now(), value], 3000);
+    const eq = this.state.equity, pnl = this.pnl();
+    if (pnl && (!eq.length || this.now() - eq[eq.length - 1][0] >= 60_000)) pushCapped(eq, [this.now(), pnl.equity], 3000);
+  }
+
+  /**
+   * Where the money stands, in the quote coin at today's price (null until the first reading):
+   *  equity = the bot's coins (position + fees owed + idle) + fees sent out − gas paid
+   *  profit = equity − capital = fees − gas + price, where price is what price moves and swap costs did to the coins
+   */
+  pnl(): { equity: number; profit: number; fees: number; gas: number; price: number } | null {
+    const c = this.state.config, vw = this.view;
+    if (!c || !vw || this.state.startedAt == null) return null;
+    const t = this.state.totals;
+    const equity = vw.value + t.sent - t.gas;
+    const fees = t.fees + vw.owed.base * vw.v.price + vw.owed.quote;
+    return { equity, profit: equity - c.capital, fees, gas: t.gas, price: equity - c.capital - fees + t.gas };
   }
 
   // ── Steps ──────────────────────────────────────────────────────────────
+  /** Run steps until one is waiting on the chain (a tx sent, not mined yet) or nothing moved; paper runs straight through. */
   private async advance(pool: LpPool, v: PoolView) {
+    const key = () => { const s = this.state.step; return s ? `${s.action}:${s.stage}:${s.hash ?? ''}:${s.swap?.hash ?? ''}:${s.tries}` : 'done'; };
+    for (let i = 0; i < 8 && this.state.step; i++) {
+      const before = key();
+      await this.advanceOnce(pool, v);
+      if (this.state.step?.hash || this.state.step?.swap || key() === before) return;
+    }
+  }
+  private async advanceOnce(pool: LpPool, v: PoolView) {
     const s = this.state.step!;
     if (s.stage === 'exit') return this.exit(pool, v, s);
     if (s.stage === 'swap') return this.swap(pool, v, s);
@@ -579,7 +611,7 @@ export class LpEngine {
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
       status: s.status, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, startedAt: s.startedAt, equity: s.equity.slice(-500),
+      outSince: s.outSince, rerangeAt: this.rerangeAt(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }

@@ -7,13 +7,20 @@
 import { getAddress } from 'ethers';
 import { getAmountOut } from '../../src/live/swapMath';
 import { Q96 } from '../../src/live/v3Math';
-import { ERC20, FACTORY, PAIR, ROUTER, V3_FACTORY, V3_POOL, V3_QUOTER } from '../../src/server/dex/abis';
+import { ERC20, FACTORY, PAIR, ROUTER, V3_FACTORY, V3_POOL, V3_POOL_LP, V3_QUOTER } from '../../src/server/dex/abis';
+import { tickAtPrice } from '../../src/live/v3Liquidity';
 import type { ReceiptLike } from '../../src/server/bot/chain';
 
 export interface Tok { address: string; symbol: string; decimals: number; name?: string }
 interface V2Pair { addr: string; t0: string; t1: string; r0: bigint; r1: bigint }
 interface V2Dex { router: string; factory: string; feeBps: number; wrapped: string; pairs: V2Pair[] }
-interface V3Pool { addr: string; t0: string; t1: string; fee: number; r0: bigint; r1: bigint }
+interface V3Pool {
+  addr: string; t0: string; t1: string; fee: number; r0: bigint; r1: bigint;
+  /** Fee counters (Q128 per unit of liquidity) and per-tick "outside" values; unset ticks read 0 */
+  g0: bigint; g1: bigint; outside: Map<number, { o0: bigint; o1: bigint }>;
+}
+/** Tick spacing per fee tier (Uniswap 100/500/3000/10000; PancakeSwap-style 2500) */
+const SPACING: Record<number, number> = { 100: 1, 500: 10, 2500: 50, 3000: 60, 10000: 200 };
 interface V3Dex { factory: string; quoter: string; pools: V3Pool[] }
 
 const ZERO = '0x' + '0'.repeat(40);
@@ -55,9 +62,22 @@ export class MultiDexMock {
     const d = this.v3.get(dex)!;
     const [x, y] = lc(a.address) < lc(b.address) ? [[a, ra], [b, rb]] as const : [[b, rb], [a, ra]] as const;
     const addr = at ?? this.nextAddr();
-    d.pools.push({ addr, t0: x[0].address, t1: y[0].address, fee, r0: raw(x[1], x[0].decimals), r1: raw(y[1], y[0].decimals) });
+    d.pools.push({ addr, t0: x[0].address, t1: y[0].address, fee, r0: raw(x[1], x[0].decimals), r1: raw(y[1], y[0].decimals), g0: 0n, g1: 0n, outside: new Map() });
     return addr;
   }
+  v3ByAddr(addr: string): V3Pool {
+    for (const d of this.v3.values()) for (const p of d.pools) if (lc(p.addr) === lc(addr)) return p;
+    throw new Error(`mock: no V3 pool ${addr}`);
+  }
+  /** Fees earned by the pool's in-range liquidity: raise the global counters (Q128 per unit of liquidity). */
+  addFees(addr: string, d0: bigint, d1: bigint) { const p = this.v3ByAddr(addr); p.g0 += d0; p.g1 += d1; }
+  /** Move a V3 pool's price by scaling reserves: × k on token1 per token0 (keeps √(r0·r1)). */
+  movePrice(addr: string, k: number) {
+    const p = this.v3ByAddr(addr), s = Math.sqrt(k);
+    p.r0 = BigInt(Math.round(Number(p.r0) / s)); p.r1 = BigInt(Math.round(Number(p.r1) * s));
+  }
+  /** Current tick of a V3 pool (from its reserves) */
+  v3Tick(addr: string) { const p = this.v3ByAddr(addr); return tickAtPrice(Number(p.r1) / Number(p.r0)); }
 
   private findV2(d: V2Dex, a: string, b: string) { return d.pairs.find((p) => (lc(p.t0) === lc(a) && lc(p.t1) === lc(b)) || (lc(p.t0) === lc(b) && lc(p.t1) === lc(a))); }
   private findV3(d: V3Dex, a: string, b: string, fee: number) { return d.pools.find((p) => p.fee === fee && ((lc(p.t0) === lc(a) && lc(p.t1) === lc(b)) || (lc(p.t0) === lc(b) && lc(p.t1) === lc(a)))); }
@@ -110,12 +130,20 @@ export class MultiDexMock {
       }
       const p = d.pools.find((x) => lc(x.addr) === t);
       if (p) {
+        const lp = V3_POOL_LP.parseTransaction({ data });
+        if (lp?.name === 'tickSpacing') return V3_POOL_LP.encodeFunctionResult('tickSpacing', [SPACING[p.fee]]);
+        if (lp?.name === 'feeGrowthGlobal0X128') return V3_POOL_LP.encodeFunctionResult('feeGrowthGlobal0X128', [p.g0]);
+        if (lp?.name === 'feeGrowthGlobal1X128') return V3_POOL_LP.encodeFunctionResult('feeGrowthGlobal1X128', [p.g1]);
+        if (lp?.name === 'ticks') {
+          const o = p.outside.get(Number(lp.args[0])) ?? { o0: 0n, o1: 0n };
+          return V3_POOL_LP.encodeFunctionResult('ticks', [0n, 0n, o.o0, o.o1, 0n, 0n, 0n, false]);
+        }
         const f = V3_POOL.parseTransaction({ data })!;
         if (f.name === 'token0') return V3_POOL.encodeFunctionResult('token0', [p.t0]);
         if (f.name === 'token1') return V3_POOL.encodeFunctionResult('token1', [p.t1]);
         if (f.name === 'fee') return V3_POOL.encodeFunctionResult('fee', [p.fee]);
         if (f.name === 'liquidity') return V3_POOL.encodeFunctionResult('liquidity', [isqrt(p.r0 * p.r1)]);
-        return V3_POOL.encodeFunctionResult('slot0', [isqrt((p.r1 * Q96 * Q96) / p.r0), 0]);
+        return V3_POOL.encodeFunctionResult('slot0', [isqrt((p.r1 * Q96 * Q96) / p.r0), tickAtPrice(Number(p.r1) / Number(p.r0))]);
       }
     }
     const tok = this.tokens.get(t);
@@ -139,5 +167,5 @@ export class MultiDexMock {
   async getBalance() { return this.native; }
   async getFeeData() { return { gasPrice: this.gasPrice, maxFeePerGas: this.gasPrice }; }
   async getTransactionCount() { return 0; }
-  async getTransactionReceipt(): Promise<ReceiptLike | null> { return null; }
+  async getTransactionReceipt(_hash: string): Promise<ReceiptLike | null> { return null; }
 }

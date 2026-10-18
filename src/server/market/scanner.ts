@@ -52,6 +52,8 @@ export interface ScanPick {
 
 /** Grid vs liquidity position vs hold for one tested pair, same week, same test size. */
 export interface CompareRow {
+  /** Market key (null = a token the app hasn't added yet) */
+  key: string | null;
   label: string;
   dex: string;
   feeBps: number;
@@ -224,7 +226,7 @@ export class DailyScanner {
     const movePct = week[week.length - 1].c / week[0].o - 1;
     const bh = buyHold(week, 0, capital, costs);
     const row: CompareRow = {
-      label: `${d.base.symbol}/${d.quote.symbol}`, dex: d.pool.dex, feeBps: d.pool.feeBps,
+      key: isNew ? null : d.key, label: `${d.base.symbol}/${d.quote.symbol}`, dex: d.pool.dex, feeBps: d.pool.feeBps,
       holdPct: (bh.pls * week[week.length - 1].c + bh.cashLeft) / capital - 1,
       entryImpactPct: simBuy(capital, week[0].o, costs).impactPct,
       grid: s ? { returnPct: s.returnPct, bandPct: s.bandPct, gridCount: s.gridCount } : null,
