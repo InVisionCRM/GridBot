@@ -142,7 +142,7 @@ export function Guide({ onClose }: { onClose: () => void }) {
                 </ul>
               </div>
             </div>
-            <p className="muted small">Home and every bot show "If you'd held" next to the profit, so you can see whether the bot is actually beating just holding.</p>
+            <p className="muted small">Each grid shows two numbers separately. <b>Earned by trading</b> is what completed buy → sell trades made, after fees and gas, in the coin the grid spends; price moves no longer change it. <b>Bought, not sold yet</b> is the coins waiting for the next level up, which go up and down with the price until they sell. To compare with just holding the coin, see Tools → Analytics.</p>
           </section>
 
           <section id="g-costs">

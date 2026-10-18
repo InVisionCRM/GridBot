@@ -35,11 +35,17 @@ function BotRow({ s, b, hold, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: nu
         {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
       </div>
-      <div className={`bot-pnl ${cls(pnl ?? pnlQuote)}`}>
-        {pnl != null ? <AnimatedNumber value={pnl} format={(x) => usd(x, true)} /> : qty(pnlQuote, quoteSym(b), 4)}
-      </div>
+      {grid
+        ? <div className={`bot-pnl ${cls(b.pnl.realized)}`} title="Earned by trading: completed buy → sell trades, after fees and gas">
+          <AnimatedNumber value={b.pnl.realized} format={(x) => qty(x, quoteSym(b), 4)} />
+        </div>
+        : <div className={`bot-pnl ${cls(pnl ?? pnlQuote)}`}>
+          {pnl != null ? <AnimatedNumber value={pnl} format={(x) => usd(x, true)} /> : qty(pnlQuote, quoteSym(b), 4)}
+        </div>}
       <div className="bot-meta">{b.available === false ? <span className="warn-t">Unavailable on this server</span> : b.lastError ? <span className="neg">{b.lastError}</span> : meta.filter(Boolean).join(' · ')}</div>
-      <div className="bot-hold" title="What the same money would have made by buying and holding at the bot's start">{hold != null ? `holding: ${usd(hold, true)}` : ''}</div>
+      {grid
+        ? <div className="bot-hold" title="Coins bought and not sold yet: their value moves with the price until they sell">{b.pnl.plsHeld > 0 ? `not sold yet: ${qty(b.pnl.unrealized, quoteSym(b), 4)}` : ''}</div>
+        : <div className="bot-hold" title="What the same money would have made by buying and holding at the bot's start">{hold != null ? `holding: ${usd(hold, true)}` : ''}</div>}
       <div className="bot-act" onClick={(e) => e.stopPropagation()}>
         {b.status === 'running'
           ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`${path}/stop`, 'POST'))}>Stop</button>
@@ -206,10 +212,14 @@ export function Home({ s, nav, act, busy }: Props) {
     const o = ovBots.find((x) => x.id === id);
     return o && o.hodlUsd != null ? o.hodlUsd - o.capitalUsd : null;
   };
-  const priced = bots.map((b) => (b.kind === 'grid' ? gridPnlUsd(b) : trendPnlUsd(b))).filter((x): x is number => x != null);
-  const profit = priced.length ? priced.reduce((a, b) => a + b, 0) : null;
-  const holds = ovBots.filter((o) => o.hodlUsd != null).map((o) => o.hodlUsd - o.capitalUsd);
-  const held = holds.length ? holds.reduce((a, b) => a + b, 0) : null;
+  // Banked from completed trades vs the change on coins not sold yet, each in ≈USD at today's prices (bots spend
+  // different coins, so dollars are the only way to add them up).
+  const sumUsd = (part: (b: AnyObj) => number) => {
+    const xs = bots.filter((b) => b.usdPerQuote != null).map((b) => part(b) * b.usdPerQuote);
+    return xs.length ? xs.reduce((a, x) => a + x, 0) : null;
+  };
+  const earned = sumUsd((b) => b.pnl.realized);
+  const unsold = sumUsd((b) => (b.kind === 'grid' ? b.pnl.unrealized : b.pnl.equity - b.capital - b.pnl.realized));
   const value = ovBots.length ? ovBots.reduce((a, o) => a + o.equityUsd, 0) : null;
   const running = bots.filter((b) => b.status === 'running').length;
 
@@ -241,8 +251,8 @@ export function Home({ s, nav, act, busy }: Props) {
     <main className="stack">
       <div className="summary">
         <Kpi label="Total value" sub={`${bots.length} bots · ${running} running`}>{value != null ? usd(value) : '—'}</Kpi>
-        <Kpi label="Bot profit" sub="since each bot started"><span className={cls(profit)}>{profit != null ? <AnimatedNumber value={profit} format={(x) => usd(x, true)} /> : '—'}</span></Kpi>
-        <Kpi label="If you'd held" sub={profit != null && held != null ? (profit >= held ? `bots ahead by ${usd(profit - held)}` : `holding ahead by ${usd(held - profit)}`) : 'buying at each bot\'s start'}>{held != null ? usd(held, true) : '—'}</Kpi>
+        <Kpi label="Earned by trading" sub="completed trades, after fees and gas · ≈ today's $"><span className={cls(earned)}>{earned != null ? <AnimatedNumber value={earned} format={(x) => usd(x, true)} /> : '—'}</span></Kpi>
+        <Kpi label="Bought, not sold yet" sub="moves with the price until it sells"><span className={cls(unsold)}>{unsold != null ? usd(unsold, true) : '—'}</span></Kpi>
       </div>
 
       <WalletPanel s={s} chain={chain} />
