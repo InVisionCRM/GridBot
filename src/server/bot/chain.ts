@@ -483,6 +483,11 @@ export class LiveExecutor implements Executor {
     return (await this.send(req)).hash;
   }
 
+  /** Send any transaction (liquidity position calls) with this wallet's shared nonce; returns its hash without waiting. */
+  async sendTx(req: { to: string; data: string; value: bigint }): Promise<string> {
+    return (await this.send(req)).hash;
+  }
+
   async transferStatus(hash: string) {
     const r = await this.quoter.reader.getTransactionReceipt(hash);
     if (!r) return null;

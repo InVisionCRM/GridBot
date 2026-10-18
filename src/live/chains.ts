@@ -39,6 +39,11 @@ export interface DexConfig {
    * uniswap: low/high 4 bits = N, protocol takes 1/N (0 = off). pancake: low/high 16 bits = protocol share × 10 000.
    */
   protocolFee?: 'uniswap' | 'pancake';
+  /**
+   * V3 only: NonfungiblePositionManager for liquidity positions (the LP bot). Verified 2026-10-18: factory() and WETH9()
+   * match this config on-chain, and fees computed from the pool's counters equal what collect() pays on live positions.
+   */
+  positionManager?: string;
 }
 
 export interface ChainToken {
@@ -99,6 +104,7 @@ const UNI_V3_CANON = {
   factory: '0x1F98431c8aD98523631AE4a59f267346ea31F984',
   router: '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45',
   quoter: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
+  positionManager: '0xC36442b4a4522E871399CD717aBDD847Ab11FE88',
 };
 const uniV3 = (chainSrc: string, gecko: string, a = UNI_V3_CANON): DexConfig => ({
   id: 'uniswap-v3', name: 'Uniswap V3', kind: 'v3', ...a, feeTiers: TIERS_UNI, source: chainSrc, gecko, protocolFee: 'uniswap',
@@ -133,7 +139,7 @@ export const PULSECHAIN_EXTRA_DEXES: DexConfig[] = [
   {
     id: '9mm-v3', name: '9mm V3', kind: 'v3', gecko: '9mm-v3', factory: '0xe50DbDC88E87a2C92984d794bcF3D1d76f619C68',
     router: '0xa9444246d80d6E3496C9242395213B4f22226a59', quoter: '0x500260dD7C27eCE20b89ea0808d05a13CF867279',
-    feeTiers: [100, 500, 2500, 10000, 20000], protocolFee: 'pancake',
+    feeTiers: [100, 500, 2500, 10000, 20000], protocolFee: 'pancake', positionManager: '0xCC05bf158202b4F461Ede8843d76dcd7Bbad07f2',
     source: 'https://github.com/9mm-exchange/deployments/blob/main/pulsechain/v3.json',
     note: 'PancakeSwap-V3 fork (SmartRouter interface); 0.3% tier not enabled',
   },
@@ -180,6 +186,7 @@ export const CHAINS: ChainConfig[] = [
     dexes: [
       uniV3('https://developers.uniswap.org/docs/protocols/v3/deployments/v3-robinhood-deployments', 'uniswap-v3-robinhood', {
         factory: '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA', router: '0xCaf681a66D020601342297493863E78C959E5cb2', quoter: '0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7',
+        positionManager: '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3',
       }),
       { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap-v2-robinhood', factory: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f', router: '0x89e5DB8B5aA49aA85AC63f691524311AEB649eba', feeBps: 30, lpShare: UNI_V2_LP_SHARE, source: 'https://github.com/Uniswap/contracts/blob/main/deployments/4663.md' },
       { id: 'pancakeswap-v3', name: 'PancakeSwap V3', kind: 'v3', gecko: 'pancakeswap-v3-robinhood', factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865', router: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4', quoter: '0x8553AA1615549A86882151784b329B017aA7c832', feeTiers: TIERS_CAKE, protocolFee: 'pancake', source: 'https://developer.pancakeswap.finance/contracts/v3/addresses', note: 'Thin liquidity on WETH/USDG (Oct 2026); auto-pick prefers Uniswap.' },
