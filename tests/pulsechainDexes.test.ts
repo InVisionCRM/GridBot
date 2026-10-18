@@ -50,6 +50,16 @@ describe('PulseChain DEX registry (verified addresses)', () => {
     expect(CH.dexes.map((d) => d.id)).toEqual(['pulsex-v2', 'pulsex-v1', '9mm-v2', '9mm-v3']);
     expect(chainFromNetwork(NETWORKS.testnet).dexes.map((d) => d.id)).toEqual(['pulsex-v2']);
   });
+  it('built-in stables trade on PulseX V1 (deepest, 2026-10-18), HEX / eHEX / PLSX on V2; testnet stays on V2', () => {
+    const dexOf = (net: typeof NET) => Object.fromEntries(legacyMarkets(net).map((m) => [m.key, m.pool.dex]));
+    expect(dexOf(NET)).toEqual({ DAI: 'pulsex-v1', USDC: 'pulsex-v1', USDT: 'pulsex-v1', HEX: 'pulsex-v2', eHEX: 'pulsex-v2', PLSX: 'pulsex-v2' });
+    expect(Object.values(dexOf(NETWORKS.testnet)).every((d) => d === 'pulsex-v2')).toBe(true);
+    // candles come from the same pair the market trades on
+    expect(Object.fromEntries(legacyMarkets(NET).filter((m) => m.pool.dex === 'pulsex-v1').map((m) => [m.key, m.candlePool]))).toEqual({
+      DAI: '0xE56043671df55dE5CDf8459710433C10324DE0aE', USDC: '0x6753560538ECa67617A9Ce605178F788bE7E524E', USDT: '0x322Df7921F28F1146Cdf62aFdaC0D6bC0Ab80711',
+    });
+  });
+
   it('PulseX V1 is a separate router + factory from V2, 29 bps', () => {
     const v1 = dex('pulsex-v1'), v2 = dex('pulsex-v2');
     expect(v1.router).toBe('0x98bf93ebf5c380C0e6Ae8e192A7e2AE08edAcc02');
@@ -84,7 +94,7 @@ describe('Pool discovery + best-pool selection across PulseX V1 / V2 / 9mm', () 
     expect(c.pools.find((p) => p.dex === 'pulsex-v1')!.dexName).toBe('PulseX V1');
     expect(c.best!.address).toBe(pools.v1); // deepest → best output for ≈$250
     expect(c.mode).toBe('default');
-    expect(c.current.dex).toBe('pulsex-v2'); // legacy default unchanged until the user switches
+    expect(c.current.dex).toBe('pulsex-v1'); // built-in stables default to the deeper PulseX V1 pair
   });
 
   it('ranking = best output at the reference size; a deeper 9mm V3 pool wins over PulseX', async () => {
@@ -113,7 +123,7 @@ describe('Pool discovery + best-pool selection across PulseX V1 / V2 / 9mm', () 
     expect(buy.call.method).toBe('swapExactTokensForETH');
   });
 
-  it('manual override to 9mm V3 builds a SmartRouter multicall; reset returns to PulseX V2', async () => {
+  it('manual override to 9mm V3 builds a SmartRouter multicall; reset returns to the default (PulseX V1)', async () => {
     const { hub, pools } = world();
     const q = hub.quoter('DAI'); // same Quoter object must follow the switch
     const { def } = await hub.setPool('DAI', { pool: pools.mm3 });
@@ -125,10 +135,10 @@ describe('Pool discovery + best-pool selection across PulseX V1 / V2 / 9mm', () 
     expect(sell.call.value).toBe(10n ** 23n);
     const buy = await q.quote('buy', 5, DEFAULT_LIMITS, ME, 0n);
     expect(buy.spender).toBe(dex('9mm-v3').router);
-    // candles stay on the original PulseX V2 pair (no mixed series)
+    // candles stay on the original default pair (no mixed series)
     expect(hub.candleSource('DAI')).toMatchObject({ pool: DAIq.pool, kind: 'v2' });
     await hub.setPool('DAI', { reset: true });
-    expect(hub.def('DAI').pool).toMatchObject({ dex: 'pulsex-v2', kind: 'v2' });
+    expect(hub.def('DAI').pool).toMatchObject({ dex: 'pulsex-v1', kind: 'v2' });
     expect(hub.def('DAI').poolMode).toBe('default');
   });
 
@@ -147,7 +157,7 @@ describe('Pool discovery + best-pool selection across PulseX V1 / V2 / 9mm', () 
     expect(again.def('DAI').poolMode).toBe('manual');
     expect(again.candleSource('DAI').kind).toBe('v2');
     // other legacy markets untouched
-    expect(again.def('USDC').pool.dex).toBe('pulsex-v2');
+    expect(again.def('USDC').pool.dex).toBe('pulsex-v1');
   });
 
   it('custom token discovery searches PulseX V1 and 9mm V3 too and defaults to the deepest pool', async () => {
@@ -176,10 +186,10 @@ describe('DEX/version on fills, grids and pool switches (MultiBot)', () => {
     chain.setPrice(P0 * 0.975);
     await bot.tickAll();
     const g = bot.status().grids.find((x) => x.id === id)!;
-    expect(g.dexName).toBe('PulseX V2');
+    expect(g.dexName).toBe('PulseX V1');
     expect(g.trades.length).toBeGreaterThan(0);
-    for (const t of g.trades) expect(t).toMatchObject({ dex: 'pulsex-v2', feeBps: 29 });
-    expect(bot.marketList().find((m) => m.key === 'DAI')).toMatchObject({ dexName: 'PulseX V2', poolMode: 'default', poolChoices: 4 });
+    for (const t of g.trades) expect(t).toMatchObject({ dex: 'pulsex-v1', feeBps: 29 });
+    expect(bot.marketList().find((m) => m.key === 'DAI')).toMatchObject({ dexName: 'PulseX V1', poolMode: 'default', poolChoices: 4 });
   });
 
   it('setMarketPool switches, logs the change, and is refused while a tx is in flight', async () => {
@@ -187,9 +197,9 @@ describe('DEX/version on fills, grids and pool switches (MultiBot)', () => {
     const hub = new Hub({ runtimes: [new ChainRuntime(CH, m, null)], markets: legacyMarkets(NET), legacyNet: NET });
     const chain = new MockChain(P0);
     const bot = new MultiBot({ net: NET, reader: chain, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub });
-    const d = await bot.setMarketPool('DAI', { pool: pools.v1 });
-    expect(d.pool.dex).toBe('pulsex-v1');
-    expect(bot.activity.recent(5, 0).some((e) => /PulseX V2 0\.29% → PulseX V1 0\.29% \(manual\)/.test(e.msg))).toBe(true);
+    const d = await bot.setMarketPool('DAI', { pool: pools.v2 });
+    expect(d.pool.dex).toBe('pulsex-v2');
+    expect(bot.activity.recent(5, 0).some((e) => /PulseX V1 0\.29% → PulseX V2 0\.29% \(manual\)/.test(e.msg))).toBe(true);
     // simulate an in-flight tx on a DAI grid
     const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.000027, upperPrice: 0.000033, gridCount: 10, totalCapitalUsd: 30 });
     const st = (bot as unknown as { engines: Map<string, { state: { inFlight: unknown } }> }).engines.get(id)!.state;

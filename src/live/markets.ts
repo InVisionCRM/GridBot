@@ -148,14 +148,17 @@ export function marketKey(chain: Pick<ChainConfig, 'key'>, base: string, quote: 
   for (let i = 2; ; i++) if (!taken(`${k0}#${i}`)) return `${k0}#${i}`;
 }
 
-/** The six verified PulseX V2 markets, keyed by quote symbol exactly as before. Base = native PLS. */
+/**
+ * The six verified PulseX markets, keyed by quote symbol exactly as before. Base = native PLS. The pair is resolved via
+ * the DEX's factory.getPair (address ''); stables trade on PulseX V1, the rest on V2 (networks.ts). Both charge 29 bps.
+ */
 export function legacyMarkets(net: LiveNetwork): MarketDef[] {
   const wpls = net.pulsex.wpls;
   return net.quotes.map((q) => ({
     key: q.symbol, chainId: net.chainId, legacy: true,
     base: { address: wpls, symbol: net.nativeSymbol, name: net.isTestnet ? 'Test Pulse' : 'Pulse', decimals: 18, native: true },
     quote: { address: q.address, symbol: q.symbol, name: q.name, decimals: q.decimals },
-    pool: { dex: 'pulsex-v2', kind: 'v2' as const, address: '', feeBps: net.pulsex.feeBps },
+    pool: { dex: q.dex ?? 'pulsex-v2', kind: 'v2' as const, address: '', feeBps: net.pulsex.feeBps },
     probe: 1000, quoteKind: q.kind === 'stable' ? 'stable' as const : 'token' as const, candlePool: q.pool,
   }));
 }

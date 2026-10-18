@@ -18,8 +18,10 @@ export interface QuoteToken {
   decimals: number;
   /** On-chain ERC-20 symbol() when it differs from `symbol` (eHEX → HEX). */
   onChainSymbol?: string;
-  /** Verified PulseX V2 WPLS/<quote> pair (factory.getPair), used for candles/depth */
+  /** Verified WPLS/<quote> pair on `dex` (factory.getPair): the trading pool and the candle source */
   pool?: string;
+  /** PulseX version the built-in market trades on (default PulseX V2) */
+  dex?: 'pulsex-v1' | 'pulsex-v2';
   kind: 'stable' | 'token';
 }
 
@@ -52,9 +54,11 @@ export interface LiveNetwork {
 }
 
 const MAINNET_QUOTES: QuoteToken[] = [
-  { symbol: 'DAI', name: 'Dai Stablecoin from Ethereum', address: '0xefD766cCb38EaF1dfd701853BFCe31359239F305', decimals: 18, pool: '0x146E1f1e060e5b5016Db0D118D2C5a11A240ae32', kind: 'stable' },
-  { symbol: 'USDC', name: 'USD Coin from Ethereum', address: '0x15D38573d2feeb82e7ad5187aB8c1D52810B1f07', decimals: 6, pool: '0x8eBe62D5e9D26b637673d91f56900233d6A4910d', kind: 'stable' },
-  { symbol: 'USDT', name: 'Tether USD from Ethereum', address: '0x0Cb6F5a34ad42ec934882A05265A7d5F59b51A2f', decimals: 6, pool: '0x21e4d9dfB30B097316De38ea49c68776C9735329', kind: 'stable' },
+  // Stables trade on PulseX V1 (2026-10-18, app pool discovery): V1 pools hold $643k DAI / $621k USDC / $456k USDT vs
+  // $60k / $19k / $2.3k on V2 (same 0.29% fee); a $5,000 buy got 15% / 50% / 5.1× more PLS on V1.
+  { symbol: 'DAI', name: 'Dai Stablecoin from Ethereum', address: '0xefD766cCb38EaF1dfd701853BFCe31359239F305', decimals: 18, pool: '0xE56043671df55dE5CDf8459710433C10324DE0aE', dex: 'pulsex-v1', kind: 'stable' },
+  { symbol: 'USDC', name: 'USD Coin from Ethereum', address: '0x15D38573d2feeb82e7ad5187aB8c1D52810B1f07', decimals: 6, pool: '0x6753560538ECa67617A9Ce605178F788bE7E524E', dex: 'pulsex-v1', kind: 'stable' },
+  { symbol: 'USDT', name: 'Tether USD from Ethereum', address: '0x0Cb6F5a34ad42ec934882A05265A7d5F59b51A2f', decimals: 6, pool: '0x322Df7921F28F1146Cdf62aFdaC0D6bC0Ab80711', dex: 'pulsex-v1', kind: 'stable' },
   // Native PulseChain HEX (same address as Ethereum HEX). WPLS pair 0x19BB…a98 ~143M HEX + ~35B WPLS (2026-10-07). DAI pool ~$243 — not used.
   { symbol: 'HEX', name: 'HEX', address: '0x2b591e99afE9f32eAA6214f7B7629768c40Eeb39', decimals: 8, pool: '0x19BB45a7270177e303DEe6eAA6F5Ad700812bA98', kind: 'token' },
   // Bridged Ethereum HEX ("eHEX"). On-chain symbol() is "HEX". WPLS pair 0xF0eA…D3F ~157M + ~14.5B WPLS. DAI ~$34 — not used.

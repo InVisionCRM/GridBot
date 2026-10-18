@@ -1044,8 +1044,8 @@ export class MultiBot {
       quoteAddress: d.quote.address.toLowerCase(), baseAddress: d.base.address.toLowerCase(), baseNative: !!d.base.native,
       baseDecimals: d.base.decimals, quoteDecimals: d.quote.decimals,
       dex: d.pool.dex, dexName: this.hub.dexName(d.chainId, d.pool.dex), kind: d.pool.kind, feeBps: d.pool.feeBps, feeTier: d.pool.feeTier ?? null,
-      // Built-in PulseChain markets resolve their PulseX V2 pair via getPair; candlePool is that same verified pair.
-      pool: d.pool.address || (d.legacy && d.pool.dex === 'pulsex-v2' ? d.candlePool ?? null : null),
+      // Built-in PulseChain markets resolve their PulseX pair via getPair; candlePool is that same verified pair.
+      pool: d.pool.address || (d.legacy ? d.candlePool ?? null : null),
       poolMode: d.poolMode ?? (d.custom ? 'manual' : 'default'), poolChoices: this.hub.rt(d.chainId).adapters.size,
       legacy: !!d.legacy, custom: !!d.custom, risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null, liveAllowed: d.safety ? d.safety.liveAllowed : true,
       buyTaxPct: d.safety?.buyTaxPct ?? null, sellTaxPct: d.safety?.sellTaxPct ?? null, transferTaxPct: d.safety?.transferTaxPct ?? null,
