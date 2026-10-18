@@ -339,6 +339,8 @@ export class TrendEngine {
       if (s.startedAt && (!s.equity.length || this.now() - s.equity[s.equity.length - 1][0] >= 60_000)) pushCapped(s.equity, [this.now(), this.equityNow(p)], 3000);
       this.save();
       await this.drain();
+      // A tick that got through means the last error (often one RPC timeout) is over; the Activity log keeps it.
+      this.lastError = null;
     } catch (e) {
       this.lastError = (e as Error).message;
       this.log('error', `tick: ${this.lastError}`);
