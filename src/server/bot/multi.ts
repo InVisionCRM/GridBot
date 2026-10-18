@@ -84,8 +84,8 @@ export interface ChainWallet {
   chainId: number;
   address: string;
   native: number;
-  /** token address (lowercase) → balance */
-  tokens: Record<string, { symbol: string; amount: number }>;
+  /** token address (lowercase) → balance; amount null + error when that read failed (never shown as 0) */
+  tokens: Record<string, { symbol: string; amount: number | null; error: string | null }>;
   at: number;
   error: string | null;
 }
@@ -380,7 +380,9 @@ export class MultiBot {
         if (gas.native == null || !gas.address) throw new Error(gas.error ?? 'balance unavailable');
         const tokens: ChainWallet['tokens'] = {};
         await Promise.all([...this.walletTokens(rt.cfg.id)].map(async ([addr, t]) => {
-          try { tokens[addr] = { symbol: t.symbol, amount: Number(await rt.tokenBalance(gas.address!, addr)) / 10 ** t.decimals }; } catch { /* skip */ }
+          try { tokens[addr] = { symbol: t.symbol, amount: Number(await rt.tokenBalance(gas.address!, addr)) / 10 ** t.decimals, error: null }; } catch (e) {
+            tokens[addr] = { symbol: t.symbol, amount: null, error: (e as Error).message.slice(0, 160) };
+          }
         }));
         this.wallets.set(rt.cfg.id, { chainId: rt.cfg.id, address: gas.address, native: gas.native, tokens, at: this.now(), error: null });
         if (gas.low && !wasLow) this.activity.emitEvent({ type: 'info', kind: 'system', level: 'warn', notify: true, chainId: rt.cfg.id, msg: `${rt.cfg.name}: low gas — ${gas.native.toPrecision(4)} ${rt.cfg.nativeSymbol} < ${rt.cfg.lowGasNative} ${rt.cfg.nativeSymbol}` });
@@ -395,7 +397,7 @@ export class MultiBot {
       const quotes: Record<string, number> = {};
       for (const d of this.hub.byChain(this.hub.legacyChainId)) if (d.legacy) {
         const t = lw.tokens[d.quote.address.toLowerCase()];
-        if (t) quotes[d.key] = t.amount;
+        if (t?.amount != null) quotes[d.key] = t.amount;
       }
       this.walletBalances = { pls: lw.native, quotes };
     } else if (!this.address) {
@@ -407,9 +409,12 @@ export class MultiBot {
     const d = this.hub.def(key);
     if (!this.hub.rt(d.chainId).signer) return;
     await this.refreshWallet(true);
-    const have = this.walletAmount(d.chainId, d.quote);
-    if (have == null) return;
     const label = this.tokLabel(d.chainId, d.quote.symbol);
+    // A balance that couldn't be read stops a live start: it used to skip this check entirely.
+    const w = this.wallets.get(d.chainId), tok = d.quote.native ? null : w?.tokens[d.quote.address.toLowerCase()];
+    const unread = !w ? 'no balance read yet' : w.error ?? (d.quote.native ? null : tok ? tok.error : `${label} isn't tracked in this wallet`);
+    if (unread) throw new Error(`Couldn't read your ${label} balance (${unread}), so nothing was started. Try again in a minute.`);
+    const have = this.walletAmount(d.chainId, d.quote)!;
     const cur = this.allocations().rows.find((r) => r.token === label)?.allocated ?? 0;
     if (d.quote.native) {
       // Spending the native coin (flipped HEX/PLS …): capital + gas reserve + other live bots' native must fit.
@@ -1012,7 +1017,7 @@ export class MultiBot {
       const w = this.wallets.get(rt.cfg.id);
       const coins = w ? [
         { symbol: rt.cfg.nativeSymbol, address: null as string | null, native: true, amount: w.native },
-        ...Object.entries(w.tokens).filter(([, t]) => t.amount > 0).map(([address, t]) => ({ symbol: t.symbol, address, native: false, amount: t.amount }))
+        ...Object.entries(w.tokens).filter(([, t]) => t.error != null || (t.amount ?? 0) > 0).map(([address, t]) => ({ symbol: t.symbol, address, native: false, amount: t.amount, error: t.error }))
           .sort((a, b) => a.symbol.localeCompare(b.symbol)),
       ] : [];
       return { chainId: rt.cfg.id, name: rt.cfg.name, short: rt.cfg.short, address: w?.address ?? rt.gas.address, at: w?.at ?? null, error: w?.error ?? rt.gas.error ?? null, coins };

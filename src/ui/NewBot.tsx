@@ -60,7 +60,7 @@ export function AmountField({ label, value, onChange, f }: { label: string; valu
         <button type="button" className="btn small-btn" disabled={f.max == null || f.max <= 0} title="Everything you can use after the gas set-aside and your other live bots"
           onClick={() => onChange(String(floorSig(f.max!)))}>Max</button>
       </span>
-      <span className="muted">{+value > 0 ? `${amt(+value, f.symbol)} of ` : ''}{f.have == null ? 'your wallet (no signing key: paper only)' : `${amt(f.have, f.symbol)} in your wallet${f.inUse > 0 ? ` · ${amt(f.inUse, f.symbol)} used by your live bots` : ''}`}</span>
+      <span className="muted">{+value > 0 ? `${amt(+value, f.symbol)} of ` : ''}{f.have == null ? (f.readError ? `your wallet (couldn't read your ${f.symbol} balance: ${f.readError})` : 'your wallet (no signing key: paper only)') : `${amt(f.have, f.symbol)} in your wallet${f.inUse > 0 ? ` · ${amt(f.inUse, f.symbol)} used by your live bots` : ''}`}</span>
     </label>
   );
 }
