@@ -240,11 +240,15 @@ export function Guide({ onClose }: { onClose: () => void }) {
             <h2>FAQ</h2>
             <dl className="faq">
               <dt>No fills?</dt>
-              <dd>The price hasn't dropped a full level yet, it's above the range, or the bot is stopped. The bot's log shows any skipped trades and why.</dd>
+              <dd>Each grid on Home shows its next buy and next sell with the price moving between them: it trades when the price reaches one. If it looks stuck, open <b>Tools → System</b>: the self-test checks every chain, your wallet and every bot, and says what to fix.</dd>
+              <dt>Is my app up to date?</dt>
+              <dd>The pill at the top says so. It compares the running server with your built copy, your downloaded code and GitHub, and gives the exact commands when one is behind (pull, build, restart).</dd>
+              <dt>Why did the total value drop?</dt>
+              <dd>Coins went down in price. <b>Earned by trading</b> on Home is counted in the coins themselves, so only a losing trade lowers it, and every trade in the Live feed shows its own result.</dd>
               <dt>Start refused?</dt>
               <dd>The message says why: usually not enough of the coin in your wallet for a live bot (the amount, plus the gas set-aside when it spends PLS or ETH), or the price is below the range. Use a smaller amount or Max, or start it in paper mode.</dd>
               <dt>Price left the range?</dt>
-              <dd>Nothing moves it automatically. Stop the grid, open Change range, centre it on today's price and restart. Coins the old levels still hold stay in that grid's totals.</dd>
+              <dd>With Follow the price up on, a grid that sold everything moves its range up on its own. Otherwise stop the grid, open Change range, centre it on today's price and start it again: it keeps the coins it holds.</dd>
               <dt>Why do I need HEX for PLS/HEX?</dt>
               <dd>In PLS/HEX the bot spends HEX to buy PLS. Press ⇄ to get HEX/PLS, which spends PLS to buy HEX, or use a "Stack" preset.</dd>
               <dt>Swap reverted?</dt>

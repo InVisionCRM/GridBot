@@ -13,6 +13,7 @@ import { GridDetail } from './ui/GridDetail';
 import { TrendDetail } from './ui/TrendDetail';
 import { LpDetail } from './ui/LpDetail';
 import { Tools } from './ui/Tools';
+import { useVersion, VersionPill } from './ui/System';
 import { TOOL_TABS, type View } from './ui/model';
 
 function loadView(): View {
@@ -50,6 +51,7 @@ export default function App() {
   const chainCtx = useMemo(() => ({ chain, setChain }), [chain]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const ver = useVersion();
   const [guide, setGuide] = useState(false);
   const closeGuide = useCallback(() => setGuide(false), []);
   const [drawer, setDrawer] = useState(false);
@@ -120,7 +122,8 @@ export default function App() {
           {s.address
             ? <span className="pill" title={s.address}>Address {short(s.address)}</span>
             : <span className="pill warn" title="No signing key in .env: every bot runs in paper mode">Paper only</span>}
-          {!connected && <span className="pill warn" title="Live stream lost; polling every 3 s">Reconnecting</span>}
+          {connected ? <span className="pill live-pill" title="Live: prices and trades stream in as they happen"><i />Live</span> : <span className="pill warn" title="Live stream lost; polling every 3 s">Reconnecting</span>}
+          <VersionPill v={ver.v} nav={nav} />
           <button type="button" className="btn ghost small-btn" onClick={() => setDrawer(true)}>Activity</button>
           <button type="button" className="btn ghost small-btn" onClick={() => setGuide(true)}>Guide</button>
           <button type="button" className="btn kill small-btn" disabled={busy || running === 0}
@@ -130,12 +133,12 @@ export default function App() {
 
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}
 
-        {view.v === 'home' && <Home s={s} nav={nav} act={act} busy={busy} />}
+        {view.v === 'home' && <Home s={s} events={events} ticks={ticks} ver={ver.v} nav={nav} act={act} busy={busy} />}
         {view.v === 'new' && <NewBot s={s} kind={view.kind} trendPrefill={view.trendPrefill} gridPrefill={view.gridPrefill} lpPrefill={view.lpPrefill} nav={nav} act={act} busy={busy} />}
         {view.v === 'grid' && <GridDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
         {view.v === 'trend' && <TrendDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
         {view.v === 'lp' && <LpDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
-        {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} prefs={prefs} setPrefs={setPrefs} />}
+        {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} prefs={prefs} setPrefs={setPrefs} ver={ver} />}
 
         {drawer && <>
           <div className="drawer-scrim" onClick={() => setDrawer(false)} />

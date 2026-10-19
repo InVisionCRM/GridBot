@@ -9,6 +9,7 @@ import { Alerts, type NotifyPrefs } from './Alerts';
 import { lbl, marketsOf, useChainFilter } from './chains';
 import type { Ticks } from './useStream';
 import { TOOL_TABS, type AnyObj, type Nav, type View } from './model';
+import { SystemTab, type useVersion } from './System';
 
 function ChartTab({ s, ticks }: { s: AnyObj; ticks: Ticks | null }) {
   const { chain } = useChainFilter();
@@ -31,9 +32,9 @@ function ChartTab({ s, ticks }: { s: AnyObj; ticks: Ticks | null }) {
   );
 }
 
-export function Tools({ s, view, ticks, nav, act, busy, prefs, setPrefs }: {
+export function Tools({ s, view, ticks, nav, act, busy, prefs, setPrefs, ver }: {
   s: AnyObj; view: Extract<View, { v: 'tools' }>; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean;
-  prefs: NotifyPrefs; setPrefs: (p: NotifyPrefs) => void;
+  prefs: NotifyPrefs; setPrefs: (p: NotifyPrefs) => void; ver: ReturnType<typeof useVersion>;
 }) {
   const tab = view.tab;
   return (
@@ -47,6 +48,7 @@ export function Tools({ s, view, ticks, nav, act, busy, prefs, setPrefs }: {
       {tab === 'analytics' && <Analytics status={s} />}
       {tab === 'markets' && <Markets status={s} act={act} busy={busy} />}
       {tab === 'alerts' && <Alerts status={s} prefs={prefs} setPrefs={setPrefs} />}
+      {tab === 'system' && <SystemTab ver={ver} />}
     </main>
   );
 }

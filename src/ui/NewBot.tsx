@@ -7,12 +7,13 @@ import { DEFAULT_GAS_RESERVE, parseGasRes, type GasReserveCfg } from '../live/ga
 import { humanAmount } from '../live/amount';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from '../live/recenter';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
-import { LP_BAND } from '../market/lp';
+import { LP_BAND, LP_MIN_SWAP_SHARE } from '../market/lp';
+import { rangeBaseShare } from '../live/v3Liquidity';
 import { botApi } from './api';
 import { pct, px } from './fmt';
 import { ChainBadge, Orientation, PairPicker, chainOf, feeLabel, marketsOf, mk, unflipKey, useChainFilter } from './chains';
 import { TrendConfigEditor, strategyRule } from './TrendConfig';
-import { errMsg, floorSig, spendFunds, type AnyObj, type BotKind, type Funds, type GridPrefill, type LpPrefill, type Nav, type TrendPrefill } from './model';
+import { coinFunds, errMsg, floorSig, spendFunds, type AnyObj, type BotKind, type Funds, type GridPrefill, type LpPrefill, type Nav, type TrendPrefill } from './model';
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 type Mode = 'paper' | 'live';
@@ -362,6 +363,14 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
 }
 
 const LP_BANDS = [0.02, 0.05, 0.08, 0.12, 0.2];
+
+/** What the bot swaps before opening ±band around `spot` with `quote` + `base` coins: buy base with quote, or sell base. */
+function swapPlan(spot: number, band: number, quote: number, base: number): { share: number; side: 'buy' | 'sell' | null; amount: number } {
+  const share = rangeBaseShare(spot, spot * (1 - band), spot * (1 + band));
+  const value = quote + base * spot, gap = share * value - base * spot;
+  if (Math.abs(gap) <= value * LP_MIN_SWAP_SHARE) return { share, side: null, amount: 0 };
+  return gap > 0 ? { share, side: 'buy', amount: gap } : { share, side: 'sell', amount: -gap / spot };
+}
 const hours = (ms: number) => `${ms / 3600_000} hours`;
 
 /** "Move the range" checkbox for a liquidity bot (re-range both ways), on by default. */
@@ -380,6 +389,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const [pair, setPair] = useState(() => prefill?.pair ?? lpMarkets(chain)[0]?.key ?? '');
   const [band, setBand] = useState(String((prefill?.bandPct ?? 0.08) * 100));
   const [amount, setAmount] = useState('');
+  const [baseAmt, setBaseAmt] = useState('');
   const [rerange, setRerange] = useState(true);
   const [profits, setProfits] = useState<ProfitsChoice>({ mode: 'reinvest', to: '' });
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
@@ -398,11 +408,14 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const spot = s.spots?.[pair] ?? m.spot ?? null;
   const b = +band / 100;
   const bandOk = b >= LP_BAND.min && b <= LP_BAND.max;
-  const funds = spendFunds(s, pair, +amount || 0, parseGasRes(limits.gasRes) ?? DEFAULT_GAS_RESERVE);
+  const gasCfg = parseGasRes(limits.gasRes) ?? DEFAULT_GAS_RESERVE;
+  const q = +amount || 0, a = +baseAmt || 0;
+  const funds = spendFunds(s, pair, q, gasCfg), baseFunds = coinFunds(s, pair, 'base', a, gasCfg);
+  const plan = spot && bandOk && q + a > 0 ? swapPlan(spot, b, q, a) : null;
   const start = () => act(async () => {
     if (mode === 'live' && !confirm(`Start a LIVE liquidity position on ${m.label}? It signs real transactions from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
     const r = await botApi('lps', 'POST', {
-      mode, market: pair, bandPct: b, capital: +amount, rerange, profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative),
+      mode, market: pair, bandPct: b, capital: q, baseAmount: a, rerange, profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative),
     });
     nav({ v: 'lp', id: r.id });
   });
@@ -413,6 +426,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
         <PairPicker s={s} value={pair} onChange={setPair} only={(x) => !!x.lpOk} />
         <label title="How far the range reaches each side of today's price. Narrower earns more fees per coin while the price is inside, and leaves the range sooner.">Range ± %<input value={band} inputMode="decimal" onChange={(e) => setBand(e.target.value.replace(/[%\s]/g, ''))} /></label>
         <AmountField label={`Amount (${m.quote})`} value={amount} f={funds} onChange={setAmount} />
+        <AmountField label={`Also use ${m.base} you hold (optional)`} value={baseAmt} f={baseFunds} onChange={setBaseAmt} />
       </div>
       <div className="quick">
         <span className="muted small">Range around {spot ? px(spot) : '—'} {m.quote}/{m.base}:</span>
@@ -420,7 +434,10 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
       </div>
       {!bandOk && <p className="small neg">The range must be between ±{LP_BAND.min * 100}% and ±{LP_BAND.max * 100}%.</p>}
       <div className="verdict ok">
-        <span>Puts your {m.quote} into the {m.dexName ?? m.dex} {feeLabel(m)} pool between <b>{spot && bandOk ? px(spot * (1 - b)) : '—'}</b> and <b>{spot && bandOk ? px(spot * (1 + b)) : '—'}</b> {m.quote}/{m.base}. About half is swapped to {m.base} first (the exact mix depends on where the price sits in the range).</span>
+        <span>Puts your coins into the {m.dexName ?? m.dex} {feeLabel(m)} pool between <b>{spot && bandOk ? px(spot * (1 - b)) : '—'}</b> and <b>{spot && bandOk ? px(spot * (1 + b)) : '—'}</b> {m.quote}/{m.base}. {plan
+          ? plan.side == null ? <>Your {m.base} and {m.quote} already match the range's mix, so <b>nothing is swapped</b>.</>
+            : <>The range needs about {pct(plan.share, 0)} of the value in {m.base}, so it first swaps about <b>{plan.side === 'buy' ? `${humanAmount(plan.amount)} ${m.quote} → ${m.base}` : `${humanAmount(plan.amount)} ${m.base} → ${m.quote}`}</b>{a > 0 ? '' : `. Add ${m.base} you already hold above to swap less`}.</>
+          : <>The range needs both coins: what's missing is swapped first. {m.base} you already hold can go in too, so less is swapped.</>}</span>
         <span className="detail">It earns its share of the {feeLabel(m)} fee on every trade while the price is inside the range. Like a grid, it ends up holding more of whichever coin fell. Outside the range it earns nothing until the price comes back or the range moves. Gas: opening is a swap plus about 480k; moving the range is a take-out (about 250k), a swap and a new open; closing is about 250k.</span>
       </div>
       <Rerange on={rerange} set={setRerange} />
@@ -429,8 +446,8 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
         <summary>Advanced</summary>
         <LimitsFields l={limits} set={setLimits} quoteNative={!!m.quoteNative} quote={m.quote} />
       </details>
-      <StartRow s={s} pairKey={pair} mode={mode} setMode={setMode} busy={busy} disabled={!(+amount > 0) || !bandOk || !(profits.mode === 'reinvest' || isAddress(profits.to))}
-        problem={fundsProblem(funds, +amount || 0, mode)} label={mode === 'live' ? 'Open live position' : 'Open paper position'} onStart={start} />
+      <StartRow s={s} pairKey={pair} mode={mode} setMode={setMode} busy={busy} disabled={!(q + a > 0) || q < 0 || a < 0 || !bandOk || !(profits.mode === 'reinvest' || isAddress(profits.to))}
+        problem={fundsProblem(funds, q, mode) ?? fundsProblem(baseFunds, a, mode)} label={mode === 'live' ? 'Open live position' : 'Open paper position'} onStart={start} />
     </div>
   );
 }

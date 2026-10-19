@@ -156,3 +156,10 @@ export function onTradeSkipped(intervals: LiveInterval[], q: QueuedTrade): LiveI
     return { ...iv, status: q.side === 'buy' ? 'waitingBuy' : 'holding', needsRearm: true };
   });
 }
+
+/** The levels the price meets next: the highest armed buy at or below the price and the lowest sell of held coins. */
+export function nextLevels(intervals: Pick<LiveInterval, 'status' | 'needsRearm' | 'buyPrice' | 'sellPrice'>[], price: number): { buy: number | null; sell: number | null } {
+  const buys = intervals.filter((i) => i.status === 'waitingBuy' && !i.needsRearm && i.buyPrice <= price).map((i) => i.buyPrice);
+  const sells = intervals.filter((i) => i.status === 'holding' && !i.needsRearm).map((i) => i.sellPrice);
+  return { buy: buys.length ? Math.max(...buys) : null, sell: sells.length ? Math.min(...sells) : null };
+}

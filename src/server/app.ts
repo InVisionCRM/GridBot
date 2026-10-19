@@ -14,6 +14,8 @@ import { checkTestUsd } from '../market/scan';
 import { TFS, isTF } from '../market/candles';
 import type { LiveNetwork } from '../live/networks';
 import { fmtFeeTier } from '../live/chains';
+import type { VersionCheck } from './system/version';
+import { runChecks } from './system/checks';
 
 export interface AppOpts {
   bot: MultiBot;
@@ -26,6 +28,8 @@ export interface AppOpts {
   viewCandles?: (pair: string) => void;
   heartbeatMs?: number;
   statusThrottleMs?: number;
+  /** Version check + self-test (server only: needs the git checkout and the build stamp) */
+  system?: { version: VersionCheck; pollMs: number };
 }
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
@@ -207,7 +211,8 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/lps', wrap(async (req) => {
     const b = req.body ?? {};
     const id = await bot.addLp({
-      mode: b.mode === 'live' ? 'live' : 'paper', market: String(b.market ?? ''), bandPct: Number(b.bandPct), capital: Number(b.capital),
+      mode: b.mode === 'live' ? 'live' : 'paper', market: String(b.market ?? ''), bandPct: Number(b.bandPct), capital: Number(b.capital ?? 0),
+      baseAmount: b.baseAmount == null ? undefined : Number(b.baseAmount),
       rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined, profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
     });
     void bot.tickAll();
@@ -219,6 +224,20 @@ export function createApp(o: AppOpts) {
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
   app.put('/api/bot/lps/:id/profits', wrap((req) => bot.setLpProfits(req.params.id, profitsBody(req.body) ?? (() => { throw new Error('profits required'); })())));
   app.delete('/api/bot/lps/:id', wrap((req) => bot.removeLp(req.params.id)));
+
+  // ── System: version + self-test ───────────────────────────────────────
+  if (o.system) {
+    const { version, pollMs } = o.system;
+    app.get('/api/system/version', wrap((req) => version.report(req.query.refresh === '1')));
+    app.get('/api/system/check', wrap(() => runChecks({
+      version: () => version.report(true),
+      status: async () => { await bot.refreshWallet(true); return plain(bot.status()); },
+      probeChain: async (id) => { const t0 = Date.now(); await bot.hub.rt(id).reader.getFeeData(); return Date.now() - t0; },
+      probeMarket: async (k) => { await bot.hub.quoter(k).market(); },
+      scan: o.scanner ? () => o.scanner!.status() as Record<string, unknown> : null,
+      pollMs,
+    })));
+  }
 
   // ── Candles / market ─────────────────────────────────────────────────
   app.get('/api/market/candles', wrap((req) => {

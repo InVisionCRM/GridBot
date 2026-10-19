@@ -8,7 +8,8 @@ import { MemoryStore } from '../src/server/bot/store';
 import { Logger } from '../src/server/bot/logger';
 import { LpEngine, type LpState } from '../src/server/bot/lpEngine';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from '../src/live/recenter';
-import { Q128 } from '../src/live/v3Liquidity';
+import { Q128, rangeBaseShare } from '../src/live/v3Liquidity';
+import { LpPool } from '../src/server/lp/lpPool';
 import { MultiDexMock, type Tok } from './helpers/multiDex';
 import { ERC20, V3_NPM } from '../src/server/dex/abis';
 import type { ReceiptLike } from '../src/server/bot/chain';
@@ -183,7 +184,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     const make = () => { const e = new LpEngine({ net: NET, store, log: new Logger(true), hub, now: () => 1_800_000_000_000 }); (e as unknown as { executor: unknown }).executor = exec; return e; };
     const ok = (hash: string, logs: ReceiptLike['logs'] = []) => receipts.set(hash, { status: 1, gasUsed: 100_000n, gasPrice: 10n ** 9n, logs });
     const ev = (name: 'IncreaseLiquidity' | 'DecreaseLiquidity' | 'Collect', args: unknown[]) => ({ address: NPM, ...V3_NPM.encodeEventLog(name, args) });
-    return { m, make, sent, receipts, ok, ev, approve: () => { approved = true; } };
+    return { m, hub, signer, make, sent, receipts, ok, ev, approve: () => { approved = true; } };
   }
 
   it('approve → mint: each sent once, nothing resent while unmined, position from the receipt; a restart resumes by hash', async () => {
@@ -256,6 +257,16 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(value).toBeLessThanOrEqual(0.2084);
   });
 
+  it('a live start with coins from the wallet checks the wallet holds them (after other live bots)', async () => {
+    const w = live();
+    w.m.native = 10n ** 18n * 1000n; // 1000 PLS in the wallet
+    const bot = new MultiBot({ net: NET, reader: w.m, signer: w.signer as never, store: new MemoryStore<MultiState>(), log: new Logger(true), hub: w.hub });
+    w.m.addToken({ ...DAI });
+    await expect(bot.addLp({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0, baseAmount: 1500 }))
+      .rejects.toThrow('Not enough PLS in your wallet. This needs 1500 PLS (1500 for this bot), and the wallet has 1000 PLS.');
+    expect(bot.status().lps).toHaveLength(0);
+  });
+
   it('a step that keeps reverting stops the bot after 3 tries (nothing lost)', async () => {
     const w = live();
     const e = w.make();
@@ -273,6 +284,41 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   });
 });
 
+
+describe('LP bot funded with coins already in the wallet', () => {
+  it('puts in both coins and swaps only the difference to the range\'s mix; profit counts from what it was given', async () => {
+    const { lp, pool, m } = world();
+    const v = await new LpPool(m, (lp as unknown as { hub: Hub }).hub.def('pulsechain:PLS/DAI#9mm'), CH.dexes.find((d) => d.id === '9mm-v3')!, NET.pulsex.wpls).view();
+    // the formula the form uses agrees with the engine's own (the pool widens the range to its tick spacing)
+    expect(rangeBaseShare(PRICE, PRICE * 0.9, PRICE * 1.1)).toBeCloseTo(0.5, 1);
+    const p = new LpPool(m, (lp as unknown as { hub: Hub }).hub.def('pulsechain:PLS/DAI#9mm'), CH.dexes.find((d) => d.id === '9mm-v3')!, NET.pulsex.wpls);
+    const t = p.ticksFor(PRICE * 0.9, PRICE * 1.1, v), r = p.rangePrices(t.tickLower, t.tickUpper, v);
+    expect(rangeBaseShare(v.price, r.lower, r.upper)).toBeCloseTo(p.baseShare(t.tickLower, t.tickUpper, v), 9);
+    void pool;
+    const share = p.baseShare(t.tickLower, t.tickUpper, v);
+    // 600 DAI + 400 DAI worth of PLS: only ~76 DAI (share × 1000 − 400) is swapped to PLS, not ~476
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 600, baseAmount: 400 / PRICE });
+    expect(lp.status().equity[0][1]).toBeCloseTo(1000, 6);
+    await lp.tick();
+    const s = lp.status();
+    expect(s.position).not.toBeNull();
+    expect((s.coins!.base * PRICE) / s.value!).toBeCloseTo(share, 2);
+    expect(s.pnl!.profit).toBeCloseTo(s.pnl!.equity - 1000, 9);
+    // the same 1000 given only as DAI swaps ~6× more, so it starts with less (fee + price impact)
+    const only = world().lp;
+    await only.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await only.tick();
+    expect(s.value!).toBeGreaterThan(only.status().value!);
+  });
+  it('only coins, no amount of the spend coin, works too; nothing at all is refused', async () => {
+    const { lp } = world();
+    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0 })).rejects.toThrow('Enter an amount.');
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0, baseAmount: 1000 / PRICE });
+    await lp.tick();
+    expect(lp.status().position).not.toBeNull();
+    expect(lp.status().coins!.quote).toBeGreaterThan(490);
+  });
+});
 
 describe('LP bot in the app: API, status, restart, money split', () => {
   async function serve(store = new MemoryStore<MultiState>()) {

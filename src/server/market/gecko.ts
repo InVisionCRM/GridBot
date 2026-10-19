@@ -35,6 +35,8 @@ export class GeckoSource {
   private gap: number;
   private okStreak = 0;
   calls = 0;
+  /** When each 429 came back (the last 200), for the System check */
+  readonly limits: number[] = [];
   constructor(
     private readonly fetchFn: FetchFn = (globalThis.fetch as unknown as FetchFn),
     private readonly opts: { minIntervalMs?: number; network?: string; feeBps?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
@@ -44,6 +46,8 @@ export class GeckoSource {
   /** Current spacing between requests (ms). */
   get pace() { return this.gap; }
   private limited() {
+    this.limits.push(this.now());
+    if (this.limits.length > 200) this.limits.shift();
     this.gap = Math.min(MAX_GAP_MS, this.gap * 2);
     this.okStreak = 0;
     this.nextAt = this.now() + 65_000;
@@ -57,6 +61,8 @@ export class GeckoSource {
   }
   private sleep(ms: number) { return (this.opts.sleep ?? ((m) => new Promise((r) => setTimeout(r, m))))(ms); }
   get blockedUntil() { return this.nextAt > this.now() ? this.nextAt : 0; }
+  /** 429s received in the last `ms` */
+  limitedWithin(ms: number) { const from = this.now() - ms; return this.limits.filter((t) => t >= from).length; }
 
   /** Throttled, serialized request. */
   private request<T>(fn: () => Promise<T>): Promise<T> {

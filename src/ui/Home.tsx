@@ -1,19 +1,23 @@
-/** Home: totals, what needs attention, and one row per bot with ≈USD profit vs just holding. */
-import { useCallback, useEffect, useState } from 'react';
+/**
+ * Home: what the bots earned by trading (in the coins themselves, so daily price moves don't blur it), what they are
+ * doing right now (each grid's price gliding between its next buy and sell), a live feed where every trade shows its
+ * own result, and what needs attention.
+ */
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { http, botApi } from './api';
 import { AnimatedNumber, StatusDot, useFlash } from './motion';
 import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
 import { ChainBadge, DexTag, chainOf, chains, useChainFilter } from './chains';
 import { humanAmount } from '../live/amount';
-import { botView, errMsg, gridName, gridPnlUsd, quoteSym, rangeState, trendPnlUsd, type AnyObj, type Nav } from './model';
+import { botView, earnedByCoin, errMsg, gridName, gridPnlUsd, quoteSym, rangeState, trendPnlUsd, type AnyObj, type Nav } from './model';
+import { buildFeed, LiveFeed, LiveLevels, LivePrice, livePrice, LiveRange } from './live';
+import { nextLevels } from '../live/liveGrid';
+import type { ActivityEvent, Ticks } from './useStream';
 
 interface Props { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
+interface HomeProps extends Props { events: ActivityEvent[]; ticks: Ticks | null; ver: AnyObj | null }
 
-function Kpi({ label, children, sub }: { label: string; children: React.ReactNode; sub?: React.ReactNode }) {
-  return <div className="kpi"><span>{label}</span><div className="kpi-v">{children}</div>{sub ? <span className="sub">{sub}</span> : null}</div>;
-}
-
-function BotRow({ s, b, hold, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: number | null; nav: Nav; act: Props['act']; busy: boolean }) {
+function BotRow({ s, b, hold, price, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: number | null; price: number | null; nav: Nav; act: Props['act']; busy: boolean }) {
   const grid = b.kind === 'grid';
   const flash = useFlash(b.trades.length);
   const pnl = grid ? gridPnlUsd(b) : trendPnlUsd(b);
@@ -21,7 +25,7 @@ function BotRow({ s, b, hold, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: nu
   const rs = grid ? rangeState(b) : null;
   const state = b.lastError ? 'error' : b.status;
   const meta = grid
-    ? [b.status === 'running' ? 'Running' : 'Stopped', `${b.stats.roundTrips} completed trades`, rs === 'in' ? 'price in range' : rs ? `price ${rs} range` : null]
+    ? [b.status === 'running' ? 'Running' : 'Stopped', `${b.stats.roundTrips} completed trades${b.stats.roundTrips ? ` (${b.stats.wins} won${b.stats.roundTrips - b.stats.wins ? `, ${b.stats.roundTrips - b.stats.wins} lost` : ''})` : ''}`, rs === 'in' ? null : rs ? `price ${rs} range` : null]
     : [b.status === 'running' ? (b.position ? `Holding ${b.base}` : 'Waiting for a signal') : 'Stopped', `${b.tf} candles`, `${b.stats.count} trades`];
   const path = grid ? `grids/${b.id}` : `trends/${b.id}`;
   const open = () => nav(grid ? { v: 'grid', id: b.id } : { v: 'trend', id: b.id });
@@ -32,6 +36,7 @@ function BotRow({ s, b, hold, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: nu
         {b.available !== false && <ChainBadge c={chainOf(s, b.chainId ?? s.legacyChainId)} testnet={false} />}
         {grid ? gridName(b) : b.name}
         <span className="tag">{grid ? 'Grid' : 'Trend'}</span>
+        {price != null && <LivePrice value={price} />}
         {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
       </div>
@@ -46,6 +51,7 @@ function BotRow({ s, b, hold, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: nu
       {grid
         ? <div className="bot-hold" title="Coins bought and not sold yet: their value moves with the price until they sell">{b.pnl.plsHeld > 0 ? `not sold yet: ${qty(b.pnl.unrealized, quoteSym(b), 4)}` : ''}</div>
         : <div className="bot-hold" title="What the same money would have made by buying and holding at the bot's start">{hold != null ? `holding: ${usd(hold, true)}` : ''}</div>}
+      {grid && b.status === 'running' && <div className="bot-live"><LiveLevels g={b} price={price} /></div>}
       <div className="bot-act" onClick={(e) => e.stopPropagation()}>
         {b.status === 'running'
           ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`${path}/stop`, 'POST'))}>Stop</button>
@@ -56,7 +62,7 @@ function BotRow({ s, b, hold, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: nu
 }
 
 /** A liquidity bot: fees earned (after gas) is what it makes; the price side moves with the price. */
-function LpRow({ s, b, nav, act, busy }: { s: AnyObj; b: AnyObj; nav: Nav; act: Props['act']; busy: boolean }) {
+function LpRow({ s, b, price, nav, act, busy }: { s: AnyObj; b: AnyObj; price: number | null; nav: Nav; act: Props['act']; busy: boolean }) {
   const flash = useFlash(b.reranges);
   const q = quoteSym(b), pnl: AnyObj | null = b.pnl;
   const state = b.lastError ? 'error' : b.status === 'closed' ? 'stopped' : b.status;
@@ -71,8 +77,9 @@ function LpRow({ s, b, nav, act, busy }: { s: AnyObj; b: AnyObj; nav: Nav; act: 
       <div className="bot-name">
         <StatusDot beat={b.priceAt} state={state} />
         {b.available !== false && <ChainBadge c={chainOf(s, b.chainId)} testnet={false} />}
-        {b.label}
+        {gridName(b)}
         <span className="tag">Liquidity</span>
+        {price != null && <LivePrice value={price} />}
         {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
       </div>
@@ -81,6 +88,7 @@ function LpRow({ s, b, nav, act, busy }: { s: AnyObj; b: AnyObj; nav: Nav; act: 
       </div>
       <div className="bot-meta">{b.available === false ? <span className="warn-t">Unavailable on this server</span> : b.lastError ? <span className="neg">{b.lastError}</span> : meta.filter(Boolean).join(' · ')}</div>
       <div className="bot-hold" title="What price moves and swaps did to the coins: it moves with the price">{pnl ? `price: ${qty(pnl.price, q, 4)}` : ''}</div>
+      {b.status !== 'closed' && <div className="bot-live"><LiveRange b={b} price={price} /></div>}
       <div className="bot-act" onClick={(e) => e.stopPropagation()}>
         {b.status === 'running'
           ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST'))}>Pause</button>
@@ -229,7 +237,23 @@ function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | '
   );
 }
 
-export function Home({ s, nav, act, busy }: Props) {
+/** The trade most likely to happen next: the running grid whose next level is closest to its price. */
+function closestNext(grids: AnyObj[], priceOf: (g: AnyObj) => number | null) {
+  let best: { bot: string; side: 'buy' | 'sell'; at: number; dist: number } | null = null;
+  for (const g of grids) {
+    const p = priceOf(g);
+    if (g.status !== 'running' || p == null) continue;
+    const n = nextLevels(g.intervals ?? [], p);
+    for (const [side, at] of [['buy', n.buy], ['sell', n.sell]] as const) {
+      if (at == null) continue;
+      const dist = Math.abs(at / p - 1);
+      if (!best || dist < best.dist) best = { bot: gridName(g), side, at, dist };
+    }
+  }
+  return best;
+}
+
+export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
   const { chain } = useChainFilter();
   const [ov, setOv] = useState<AnyObj | null>(null);
   const sig = `${s.grids.length}:${(s.trends ?? []).length}:${s.aggregate?.roundTrips}`;
@@ -250,19 +274,26 @@ export function Home({ s, nav, act, busy }: Props) {
     const o = ovBots.find((x) => x.id === id);
     return o && o.hodlUsd != null ? o.hodlUsd - o.capitalUsd : null;
   };
-  // Banked from completed trades vs the change on coins not sold yet, each in ≈USD at today's prices (bots spend
-  // different coins, so dollars are the only way to add them up).
-  // A liquidity bot's fees (after gas) count as earned; what price did to its coins counts with the unsold side.
+  // The change on coins not sold yet in ≈USD at today's prices (bots spend different coins, so dollars are the only way
+  // to add them up); for a liquidity bot, what price moves did to its coins.
   const sumUsd = (part: (b: AnyObj) => number) => {
     const xs = bots.filter((b) => b.usdPerQuote != null && (b.kind !== 'lp' || b.pnl)).map((b) => part(b) * b.usdPerQuote);
     return xs.length ? xs.reduce((a, x) => a + x, 0) : null;
   };
-  const earned = sumUsd((b) => (b.kind === 'lp' ? b.pnl.fees - b.pnl.gas : b.pnl.realized));
   const unsold = sumUsd((b) => (b.kind === 'grid' ? b.pnl.unrealized : b.kind === 'lp' ? b.pnl.price : b.pnl.equity - b.capital - b.pnl.realized));
   const value = ovBots.length ? ovBots.reduce((a, o) => a + o.equityUsd, 0) : null;
   const running = bots.filter((b) => b.status === 'running').length;
+  const priceOf = (b: AnyObj) => livePrice(ticks, b.kind === 'lp' ? b.market : b.kind === 'grid' ? b.stable : b.quote, b.price);
+  const earn = earnedByCoin(bots);
+  const tot = earn.reduce((a, e) => ({ trades: a.trades + e.trades, wins: a.wins + e.wins, losses: a.losses + e.losses, fees: a.fees + e.fees }), { trades: 0, wins: 0, losses: 0, fees: 0 });
+  const lastTrade = Math.max(0, ...bots.flatMap((b) => (b.trades ?? []).map((t: AnyObj) => t.timestamp as number)));
+  const next = closestNext(bots.filter((b) => b.kind === 'grid'), priceOf);
+  const feed = useMemo(() => buildFeed(s, events).filter((it) => chain === 'all' || it.chainId == null || it.chainId === chain), [s, events, chain]);
 
   const notices: { key: string; level: 'warn' | 'error'; text: React.ReactNode; open?: () => void }[] = [];
+  if (ver && ver.state !== 'current') {
+    notices.push({ key: 'version', level: ver.state === 'update-available' ? 'warn' : 'error', text: <><b>{ver.title}.</b> {ver.detail} Fix: {ver.steps.join(' → ')}.</>, open: () => nav({ v: 'tools', tab: 'system' }) });
+  }
   for (const c of chains(s)) {
     // Only where a live bot runs: paper bots and unused chains spend no real gas.
     const liveHere = bots.some((b) => b.mode === 'live' && (b.chainId ?? s.legacyChainId) === c.id);
@@ -290,13 +321,31 @@ export function Home({ s, nav, act, busy }: Props) {
 
   return (
     <main className="stack">
-      <div className="summary">
-        <Kpi label="Total value" sub={`${bots.length} bots · ${running} running`}>{value != null ? usd(value) : '—'}</Kpi>
-        <Kpi label="Earned by trading" sub="completed trades and liquidity fees, after gas · ≈ today's $"><span className={cls(earned)}>{earned != null ? <AnimatedNumber value={earned} format={(x) => usd(x, true)} /> : '—'}</span></Kpi>
-        <Kpi label="Bought, not sold yet" sub="moves with the price until it sells"><span className={cls(unsold)}>{unsold != null ? usd(unsold, true) : '—'}</span></Kpi>
-      </div>
-
-      <WalletPanel s={s} chain={chain} />
+      <section className="hero" aria-label="Earned by trading">
+        <div className="hero-earn">
+          <span className="k">Earned by trading</span>
+          <div className="coins-earned">
+            {earn.length ? earn.map((e) => (
+              <span key={e.symbol} className={`ce ${cls(e.amount)}`}>
+                <AnimatedNumber value={e.amount} duration={900} format={(x) => `${x > 0 ? '+' : x < 0 ? '−' : ''}${humanAmount(Math.abs(x))}`} /><small>{e.symbol}</small>
+              </span>
+            )) : <span className="muted">nothing yet</span>}
+          </div>
+          <span className="sub">
+            {tot.trades} completed trade{tot.trades === 1 ? '' : 's'} · <b className="pos">{tot.wins} won</b> · <b className={tot.losses ? 'neg' : ''}>{tot.losses} lost</b>{tot.fees > 0 ? ' · liquidity fees after gas included' : ''}.
+            {' '}Counted in the coins themselves: a price drop doesn't change it, only a losing trade does.
+          </span>
+        </div>
+        <div className="hero-now">
+          <span className="k">Right now</span>
+          <div className="now-line"><span className={`pulse ${running ? '' : 'off'}`} key={ticks?.t ?? 0} />{running} of {bots.length} bot{bots.length === 1 ? '' : 's'} running</div>
+          <div className="small">{lastTrade ? <>Last trade <b>{ago(lastTrade)}</b></> : 'No trades yet'}</div>
+          {next && <div className="small">Next likely trade: <b>{next.bot}</b> {next.side === 'buy' ? 'buys' : 'sells'} at <b>{px(next.at)}</b>, {pct(next.dist, 2)} away</div>}
+        </div>
+      </section>
+      <p className="hero-foot muted small" title="The bots' coins valued at today's prices. It moves with the market every day, whether or not the bots trade.">
+        Holdings at today's prices: <b>{value != null ? usd(value) : '—'}</b>{unsold != null && unsold !== 0 ? <> (coins not sold yet: <span className={cls(unsold)}>{usd(unsold, true)}</span>)</> : null}. This moves with the market every day; it isn't a trading result.
+      </p>
 
       {notices.length > 0 && (
         <div className="notices">
@@ -309,21 +358,29 @@ export function Home({ s, nav, act, busy }: Props) {
         </div>
       )}
 
-      <section className="bots" aria-label="Your bots">
-        <div className="bots-head">
-          <h3>Your bots</h3>
-          <button type="button" className="btn primary small-btn" onClick={() => nav({ v: 'new', kind: 'grid' })}>New bot</button>
-        </div>
-        {bots.map((b) => (b.kind === 'lp'
-          ? <LpRow key={b.id} s={s} b={b} nav={nav} act={act} busy={busy} />
-          : <BotRow key={b.id} s={s} b={b} hold={holdOf(b.id)} nav={nav} act={act} busy={busy} />))}
-        {bots.length === 0 && (
-          <div className="empty">
-            <p>No bots{chain !== 'all' ? ' on this chain' : ''} yet. Start one in paper mode to see how it behaves with real prices and no real money.</p>
-            <button type="button" className="btn primary" onClick={() => nav({ v: 'new', kind: 'grid' })}>Start a paper bot</button>
+      <div className="split live-split">
+        <section className="bots" aria-label="Your bots">
+          <div className="bots-head">
+            <h3>Your bots</h3>
+            <button type="button" className="btn primary small-btn" onClick={() => nav({ v: 'new', kind: 'grid' })}>New bot</button>
           </div>
-        )}
-      </section>
+          {bots.map((b) => (b.kind === 'lp'
+            ? <LpRow key={b.id} s={s} b={b} price={priceOf(b)} nav={nav} act={act} busy={busy} />
+            : <BotRow key={b.id} s={s} b={b} hold={holdOf(b.id)} price={priceOf(b)} nav={nav} act={act} busy={busy} />))}
+          {bots.length === 0 && (
+            <div className="empty">
+              <p>No bots{chain !== 'all' ? ' on this chain' : ''} yet. Start one in paper mode to see how it behaves with real prices and no real money.</p>
+              <button type="button" className="btn primary" onClick={() => nav({ v: 'new', kind: 'grid' })}>Start a paper bot</button>
+            </div>
+          )}
+        </section>
+        <section className="card live-card" aria-label="Live">
+          <div className="card-head"><h3><span className="pulse" key={ticks?.t ?? 0} />Live</h3><span className="muted small">every buy, sell and transaction as it happens</span></div>
+          <LiveFeed s={s} items={feed} nav={nav} />
+        </section>
+      </div>
+
+      <WalletPanel s={s} chain={chain} />
 
       <PicksPanel s={s} chain={chain} nav={nav} act={act} busy={busy} />
     </main>

@@ -60,3 +60,16 @@ export function feesOwed(insideNow: bigint, insideLast: bigint, liquidity: bigin
   const d = (((insideNow - insideLast) % U256) + U256) % U256;
   return (d * liquidity) / Q128;
 }
+
+/**
+ * Share of a position's value held in the base coin, for a range [lower, upper] around `price` (all quote per base,
+ * human units). Per unit of liquidity a position holds 1/√P − 1/√Pb base and √P − √Pa quote, so the share depends only
+ * on where the price sits in the range: ½ in the geometric middle, 1 at or below the bottom, 0 at or above the top.
+ */
+export function rangeBaseShare(price: number, lower: number, upper: number): number {
+  if (!(lower > 0 && upper > lower && price > 0)) throw new Error('bad range');
+  if (price <= lower) return 1;
+  if (price >= upper) return 0;
+  const s = Math.sqrt(price), base = (1 / s - 1 / Math.sqrt(upper)) * price, quote = s - Math.sqrt(lower);
+  return base / (base + quote);
+}

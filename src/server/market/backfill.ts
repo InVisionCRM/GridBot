@@ -203,6 +203,6 @@ export class CandleSync {
   status() {
     const pairs = this.pairs;
     const series = pairs.flatMap((p) => this.tfsFor(p).map((tf) => `${p}|${tf}`));
-    return { enabled: this.enabled, backfilled: series.filter((k) => this.backfilled.has(k)).length, total: series.length, markets: pairs.length, lastError: this.lastError, lastOkAt: this.lastOkAt, blockedUntil: this.gecko.blockedUntil || null, calls: this.gecko.calls };
+    return { enabled: this.enabled, backfilled: series.filter((k) => this.backfilled.has(k)).length, total: series.length, markets: pairs.length, lastError: this.lastError, lastOkAt: this.lastOkAt, blockedUntil: this.gecko.blockedUntil || null, calls: this.gecko.calls, limited1h: this.gecko.limitedWithin(3600_000), paceMs: this.gecko.pace };
   }
 }

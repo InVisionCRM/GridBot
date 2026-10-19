@@ -13,6 +13,7 @@ import { AmountField, fundsProblem, isAddress, ProfitsField, profitsBody, type P
 import { reserveCfg } from '../live/gasReserve';
 import { humanAmount } from '../live/amount';
 import { recenterAt } from '../live/recenter';
+import { LiveLevels, livePrice } from './live';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -218,6 +219,8 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {running && rs === 'above' && <div className="banner"><span className="grow"><b>Price is above the range.</b> Every level has sold, so the grid waits in {q}. {g.recenter?.enabled ? 'Follow the price up is on, so the range moves up on its own (see below).' : 'Stop it and change the range, or turn on Follow the price up.'}</span></div>}
         {running && rs === 'below' && <div className="banner"><span className="grow"><b>Price is below the range.</b> Every level has bought, so the grid holds {g.base} until the price recovers. Stop it and change the range to keep trading.</span></div>}
       </div>
+
+      {running && <div className="card live-strip"><LiveLevels g={g} price={livePrice(ticks, g.stable, g.price)} /></div>}
 
       <div className="kpi-row">
         <div className="kpi" title="Every completed buy then sell: what the sell brought in minus what that buy cost, after pool fees and gas. This is money the grid has made, and the coin's price no longer changes it.">

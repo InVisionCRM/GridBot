@@ -20,7 +20,7 @@ import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { feesOwed } from '../../live/v3Liquidity';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from '../../live/recenter';
-import { LP_BAND, LP_GAS } from '../../market/lp';
+import { LP_BAND, LP_GAS, LP_MIN_SWAP_SHARE } from '../../market/lp';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
 import { fromUnits } from '../../live/swapMath';
@@ -76,8 +76,8 @@ export interface LpState {
   /** Market key */
   market: string;
   status: 'idle' | 'running' | 'stopped' | 'closed';
-  /** ± range around the price at each (re-)open; capital in the spend coin */
-  config: { bandPct: number; capital: number; rerange: boolean } | null;
+  /** ± range around the price at each (re-)open; capital in the spend coin, plus base coins from the wallet (may be 0) */
+  config: { bandPct: number; capital: number; baseAmount: number; rerange: boolean } | null;
   limits: SafetyLimits;
   profits: ProfitMode;
   position: LpPosition | null;
@@ -103,6 +103,8 @@ export interface LpStartParams {
   market: string;
   bandPct: number;
   capital: number;
+  /** Base coins already in the wallet to put in too (only the difference to the range's mix is swapped) */
+  baseAmount?: number;
   rerange?: boolean;
   profits?: ProfitMode;
   limits?: Partial<SafetyLimits>;
@@ -120,8 +122,6 @@ export interface LpDeps {
   id?: string;
 }
 
-/** A swap smaller than this share of the value isn't worth its fee and gas: the leftover just stays idle. */
-const MIN_SWAP_SHARE = 0.01;
 /** A tx stage that keeps reverting stops the bot after this many tries. */
 const MAX_TRIES = 3;
 /** A native base side keeps this many times the open's estimated gas out of the position, so the open can pay for itself. */
@@ -211,7 +211,8 @@ export class LpEngine {
   async start(p: LpStartParams): Promise<void> {
     if (this.state.status === 'running') throw new Error('Already running.');
     if (!(p.bandPct >= LP_BAND.min && p.bandPct <= LP_BAND.max)) throw new Error(`Range must be ±${LP_BAND.min * 100}% to ±${LP_BAND.max * 100}%.`);
-    if (!(p.capital > 0)) throw new Error('Enter an amount.');
+    const baseAmount = p.baseAmount ?? 0;
+    if (!(p.capital >= 0 && baseAmount >= 0 && p.capital + baseAmount > 0)) throw new Error('Enter an amount.');
     const profits = checkProfitMode(p.profits ?? this.state.profits);
     this.state.market = p.market;
     this.state.mode = p.mode;
@@ -221,14 +222,14 @@ export class LpEngine {
     if (p.mode === 'live' && this.def?.safety && !(await this.hub.recheck(p.market)).liveAllowed) throw new Error(`LIVE blocked — ${this.label} failed the safety check`);
     if (profits.mode === 'send' && this.signer && sameAddr(await this.signer.getAddress(), profits.to)) throw new Error('That is the bot\'s own wallet: fees already stay there when reinvested.');
     this.state = {
-      ...this.state, status: 'running', config: { bandPct: p.bandPct, capital: p.capital, rerange: p.rerange ?? true },
-      limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: 0, quote: p.capital },
+      ...this.state, status: 'running', config: { bandPct: p.bandPct, capital: p.capital, baseAmount, rerange: p.rerange ?? true },
+      limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },
       step: { action: 'open', stage: 'swap', tries: 0 }, outSince: null, lastRerangeAt: null, reranges: 0,
-      totals: { fees: 0, gas: 0, sent: 0 }, startedAt: this.now(), startPrice: v.price, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital]],
+      totals: { fees: 0, gas: 0, sent: 0 }, startedAt: this.now(), startPrice: v.price, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital + baseAmount * v.price]],
     };
     this.lastError = null;
     this.save();
-    this.ev('started', `Liquidity ${this.label}: opening ±${(p.bandPct * 100).toFixed(0)}% around ${v.price.toPrecision(6)} with ${p.capital} ${this.quoteSym} (${p.mode})`, { level: 'success' });
+    this.ev('started', `Liquidity ${this.label}: opening ±${(p.bandPct * 100).toFixed(0)}% around ${v.price.toPrecision(6)} with ${p.capital} ${this.quoteSym}${baseAmount > 0 ? ` + ${baseAmount} ${this.baseSym}` : ''} (${p.mode})`, { level: 'success' });
   }
 
   /** Pause managing (no re-range, no sends); a position stays open and keeps earning. A tx already sent is still settled. */
@@ -348,15 +349,20 @@ export class LpEngine {
   /**
    * Where the money stands, in the quote coin at today's price (null until the first reading):
    *  equity = the bot's coins (position + fees owed + idle) + fees sent out − gas paid
-   *  profit = equity − capital = fees − gas + price, where price is what price moves and swap costs did to the coins
+   *  profit = equity − start value = fees − gas + price, where price is what price moves and swap costs did to the coins
    */
   pnl(): { equity: number; profit: number; fees: number; gas: number; price: number } | null {
-    const c = this.state.config, vw = this.view;
-    if (!c || !vw || this.state.startedAt == null) return null;
+    const c = this.state.config, vw = this.view, start = this.startValue();
+    if (!c || !vw || start == null) return null;
     const t = this.state.totals;
     const equity = vw.value + t.sent - t.gas;
     const fees = t.fees + vw.owed.base * vw.v.price + vw.owed.quote;
-    return { equity, profit: equity - c.capital, fees, gas: t.gas, price: equity - c.capital - fees + t.gas };
+    return { equity, profit: equity - start, fees, gas: t.gas, price: equity - start - fees + t.gas };
+  }
+  /** What the bot was given, in the quote coin at the start price (the amount + its base coins). */
+  startValue(): number | null {
+    const c = this.state.config, p = this.state.startPrice;
+    return c && p != null && this.state.startedAt != null ? c.capital + c.baseAmount * p : null;
   }
 
   // ── Steps ──────────────────────────────────────────────────────────────
@@ -491,7 +497,7 @@ export class LpEngine {
     const wantBase = share * value, haveBase = idle.base * v.price;
     const side: 'buy' | 'sell' = wantBase > haveBase ? 'buy' : 'sell';
     const gap = Math.abs(wantBase - haveBase);
-    if (gap > value * MIN_SWAP_SHARE) {
+    if (gap > value * LP_MIN_SWAP_SHARE) {
       const amountIn = side === 'buy' ? gap : gap / v.price;
       const q = await this.executor.quote(side, amountIn, this.state.limits);
       if (!q.balanceOk) throw new Error(`can't swap to the range's mix: ${q.balanceNote}`);
@@ -623,9 +629,9 @@ export class LpEngine {
     return {
       kind: 'lp' as const, id: s.id, mode: s.mode, market: s.market, label: this.label, chainId: this.chainId, base: this.baseSym, quote: this.quoteSym,
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
-      status: s.status, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null } : null,
+      status: s.status, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, rerangeAt: this.rerangeAt(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
+      outSince: s.outSince, rerangeAt: this.rerangeAt(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }
