@@ -150,11 +150,13 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 describe('LP bot (live): every step sent once, settled by hash, safe across restarts', () => {
   const ME = '0x1234567890123456789012345678901234567890';
   const NPM = dex('9mm-v3').positionManager!;
-  function live() {
+  /** `price` = DAI per PLS in the pool; `balances` = the wallet as the executor reads it (base, quote). */
+  function live(o: { price?: number; balances?: { pls: number; stable: number } } = {}) {
+    const price = o.price ?? PRICE, balances = o.balances ?? { pls: 1e12, stable: 1e9 };
     const m = new MultiDexMock();
     [WPLS, DAI].forEach((t) => m.addToken(t));
     m.addV3('9mm-v3', { factory: dex('9mm-v3').factory, quoter: dex('9mm-v3').quoter! });
-    const pool = m.v3Pool('9mm-v3', WPLS, 1e10, DAI, 3e5, 2500);
+    const pool = m.v3Pool('9mm-v3', WPLS, 1e10, DAI, 1e10 * price, 2500);
     const def: MarketDef = {
       key: 'pulsechain:PLS/DAI#9mm', chainId: 369, custom: true,
       base: { address: WPLS.address, symbol: 'PLS', decimals: 18, native: true }, quote: { address: DAI.address, symbol: 'DAI', decimals: 18 },
@@ -171,9 +173,9 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     const sent: { to: string; data: string; value: bigint; hash: string }[] = [];
     // Scripted executor: swaps fill at the pool price; every other tx is recorded and mined only when the test says so.
     const exec = {
-      mode: 'live' as const, address: async () => ME, getPrice: async () => PRICE,
-      balances: async () => ({ pls: 1e12, stable: 1e9 }),
-      quote: async (side: 'buy' | 'sell', amount: number) => ({ side, amountInHuman: amount, quotedOutHuman: side === 'buy' ? amount / PRICE : amount * PRICE, balanceOk: true, priceImpact: 0, tokenOut: side === 'buy' ? WPLS.address : DAI.address, decimalsOut: 18, price: PRICE }),
+      mode: 'live' as const, address: async () => ME, getPrice: async () => price,
+      balances: async () => balances,
+      quote: async (side: 'buy' | 'sell', amount: number) => ({ side, amountInHuman: amount, quotedOutHuman: side === 'buy' ? amount / price : amount * price, balanceOk: true, priceImpact: 0, tokenOut: side === 'buy' ? WPLS.address : DAI.address, decimalsOut: 18, price }),
       execute: async (q: { side: string; amountInHuman: number; quotedOutHuman: number }) => ({ txHash: '0xswap', amountInHuman: q.amountInHuman, amountOutHuman: q.quotedOutHuman, gasPls: 0.1 }),
       recover: async () => null,
       sendTx: async (req: { to: string; data: string; value: bigint }) => { const hash = `0x${(sent.length + 1).toString(16).padStart(64, '0')}`; sent.push({ ...req, hash }); return hash; },
@@ -236,6 +238,22 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     const s = e.status();
     expect(s).toMatchObject({ status: 'closed', position: null });
     expect(s.totals.fees).toBeCloseTo(10 * PRICE + 0.01, 9);
+  });
+
+  it('a pricey native base (like ETH/USDG): the native side goes in, keeping only gas for the open (bug: 2% of the USDG amount was kept back as ETH)', async () => {
+    // 1000 DAI at 2400 DAI per PLS: about half (≈0.21 PLS) is bought for the position; the wallet already had 0.46 PLS for gas.
+    const w = live({ price: 2400, balances: { pls: 0.46 + 0.2083, stable: 500 } });
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.05, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    expect(e.lastError).toBeNull();
+    expect(w.sent).toHaveLength(1);
+    const mint = w.sent[0];
+    const value = Number(mint.value) / 1e18;
+    expect(value).toBeGreaterThan(0.2); // the PLS bought for the position goes in (paid as the tx value)
+    expect(value).toBeLessThanOrEqual(0.2084);
   });
 
   it('a step that keeps reverting stops the bot after 3 tries (nothing lost)', async () => {

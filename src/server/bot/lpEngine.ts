@@ -124,6 +124,8 @@ export interface LpDeps {
 const MIN_SWAP_SHARE = 0.01;
 /** A tx stage that keeps reverting stops the bot after this many tries. */
 const MAX_TRIES = 3;
+/** A native base side keeps this many times the open's estimated gas out of the position, so the open can pay for itself. */
+const OPEN_GAS_HEADROOM = 2;
 const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
@@ -376,8 +378,20 @@ export class LpEngine {
     return this.collect(pool, v, s);
   }
 
+  /** Gas for `units` in base units (gasPricePls is per gas unit in base units; extraPlsPerSwap is the L2's L1 part). */
+  private gasBase(units: number, snap: { gasPricePls: number; extraPlsPerSwap?: number }) {
+    return units * snap.gasPricePls + (snap.extraPlsPerSwap ?? 0);
+  }
   private gasQuote(units: number, v: PoolView, snap: { gasPricePls: number; extraPlsPerSwap?: number }) {
-    return (units * snap.gasPricePls + (snap.extraPlsPerSwap ?? 0)) * v.price;
+    return this.gasBase(units, snap) * v.price;
+  }
+  /**
+   * Native coin kept out of the position, in native units. Spending the native coin (its amount is native): the gas
+   * set-aside of that amount. Native base (ETH/USDG …: the amount is in the quote coin): room for the open's own gas.
+   */
+  private async nativeKeep(pool: LpPool): Promise<number> {
+    if (pool.def.quote.native) return gasReserve(this.state.config!.capital, reserveCfg(this.state.limits));
+    return OPEN_GAS_HEADROOM * this.gasBase(LP_GAS.v3.open, await this.hub.quoter(this.state.market).market());
   }
   private async receiptGas(r: ReceiptLike, v: PoolView) {
     return fromUnits(r.gasUsed * (r.gasPrice ?? 0n), 18) * (await this.hub.quoter(this.state.market).basePerNative()) * v.price;
@@ -537,12 +551,12 @@ export class LpEngine {
       return this.minted(s, (inc.args.tokenId as bigint).toString(), inc.args.liquidity as bigint, pool.coinsFromRaw(inc.args.amount0 as bigint, inc.args.amount1 as bigint, v), v, pool);
     }
     const ex = this.executor as LiveExecutor, me = await ex.address();
-    // Never more than the wallet has (and the gas set-aside stays out of a native side).
+    // Never more than the wallet has (and the native side keeps what gas needs).
     const bal = await ex.balances();
-    const reserve = gasReserve(this.state.config!.capital, reserveCfg(this.state.limits));
+    const keep = pool.def.base.native || pool.def.quote.native ? await this.nativeKeep(pool) : 0;
     const have: Coins = {
-      base: Math.min(this.state.idle.base, pool.def.base.native ? Math.max(0, bal.pls - reserve) : bal.pls),
-      quote: Math.min(this.state.idle.quote, pool.def.quote.native ? Math.max(0, bal.stable - reserve) : bal.stable),
+      base: Math.min(this.state.idle.base, pool.def.base.native ? Math.max(0, bal.pls - keep) : bal.pls),
+      quote: Math.min(this.state.idle.quote, pool.def.quote.native ? Math.max(0, bal.stable - keep) : bal.stable),
     };
     const { L, used } = pool.fund(have, range.tickLower, range.tickUpper, v);
     if (!(L > 0)) throw new Error('nothing to put in the position');
