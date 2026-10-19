@@ -64,7 +64,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const pos = b.position, step = b.step;
   const running = b.status === 'running', closed = b.status === 'closed';
   const owedQ = b.owed && b.price != null ? b.owed.base * b.price + b.owed.quote : 0;
-  const hold = b.startPrice && b.price && b.config ? (b.config.capital / b.startPrice) * b.price - b.config.capital : null;
+  const hold = b.startPrice && b.price && b.startValue ? (b.startValue / b.startPrice) * b.price - b.startValue : null;
   const close = () => act(async () => { if (confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}.`)) await botApi(`lps/${b.id}/close`, 'POST'); });
   const remove = () => act(async () => { if (confirm(`Remove the ${b.label} liquidity bot and its history?`)) { await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' }); } });
 
@@ -112,7 +112,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi" title="Fees earned − gas ± price change, in the coin this bot started with">
           <span>Overall, in {q}</span>
           <div className={`kpi-v ${cls(pnl?.profit)}`}>{pnl ? qty(pnl.profit, q, 5) : '—'}</div>
-          <span className="sub">{pnl && b.config ? `${pct(pnl.profit / b.config.capital, 2, true)} of ${qty(b.config.capital, q, 5, false)}` : ''}{profitUsd != null ? ` · ${usd(profitUsd, true)}` : ''}</span>
+          <span className="sub">{pnl && b.startValue ? `${pct(pnl.profit / b.startValue, 2, true)} of ${qty(b.startValue, q, 5, false)} put in` : ''}{profitUsd != null ? ` · ${usd(profitUsd, true)}` : ''}</span>
         </div>
       </div>
 

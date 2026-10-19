@@ -9,7 +9,7 @@ function world(o: { active?: string[]; store?: CandleStore } = {}) {
   let now = 1_800_000_000_000;
   const calls: { pool: string; tf: TF; limit: number }[] = [];
   const gecko = {
-    calls: 0, blockedUntil: 0,
+    calls: 0, blockedUntil: 0, pace: 2500, limitedWithin: () => 0,
     ohlcv: async (pool: string, _t: string, tf: TF, _b?: number, limit = 1000) => { calls.push({ pool, tf, limit }); return [{ t: Math.floor(now / 1000) - TF_SEC[tf], o: 1, h: 1, l: 1, c: 1, v: 1 }]; },
   };
   const store = o.store ?? new CandleStore(null);

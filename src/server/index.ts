@@ -10,6 +10,7 @@ import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
 import { CandleSync, geckoBackfill, onchainBackfill } from './market/backfill';
+import { VersionCheck } from './system/version';
 import { DailyScanner, scanDepsFromHub, type ScanFile } from './market/scanner';
 import { TFS } from '../market/candles';
 import { buildHub } from './chains/build';
@@ -72,7 +73,8 @@ const scanner: DailyScanner | undefined = sync.enabled ? new DailyScanner(scanDe
   gecko, store: new JsonStore<ScanFile>(path.join(dataDir, 'picks.json')), approval: cfg.approval, emit: activity.emitEvent,
 })) : undefined;
 
-const app = createApp({ bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair) });
+const version = await VersionCheck.start(process.cwd(), process.env.NODE_ENV !== 'production');
+const app = createApp({ bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs } });
 if (isProd) {
   const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../client');
   app.use(express.static(clientDir));

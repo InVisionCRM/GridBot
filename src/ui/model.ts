@@ -13,7 +13,7 @@ export interface GridPrefill { pair: string; bandPct: number; gridCount: number;
 /** A liquidity setup from the daily scan's comparison opened in New bot. */
 export interface LpPrefill { pair: string; bandPct: number; nonce: number }
 
-export const TOOL_TABS = [['chart', 'Charts'], ['backtest', 'Backtest'], ['analytics', 'Analytics'], ['markets', 'Markets'], ['alerts', 'Alerts']] as const;
+export const TOOL_TABS = [['chart', 'Charts'], ['backtest', 'Backtest'], ['analytics', 'Analytics'], ['markets', 'Markets'], ['alerts', 'Alerts'], ['system', 'System']] as const;
 export type ToolTab = (typeof TOOL_TABS)[number][0];
 
 export type View =
@@ -66,21 +66,51 @@ export interface Funds {
   ok: boolean | null;
 }
 
-/** Same arithmetic as the server's live-start check (checkGasReserve / assertCovers). */
+/** Same arithmetic as the server's live-start check (checkGasReserve / assertCovers) for the coin a market spends. */
 export function spendFunds(s: AnyObj, key: string, amount: number, gas: GasReserveCfg): Funds {
+  return coinFunds(s, key, 'quote', amount, gas);
+}
+
+/**
+ * Either coin of a market in the signing wallet. The gas set-aside applies to the coin a bot SPENDS when it is the
+ * native coin (the quote side); a base coin given to a liquidity bot only has to be there (assertHolds).
+ */
+export function coinFunds(s: AnyObj, key: string, side: 'base' | 'quote', amount: number, gas: GasReserveCfg): Funds {
   const m = mk(s, key);
+  const native = side === 'quote' ? !!m.quoteNative : !!m.baseNative, address = side === 'quote' ? m.quoteAddress : m.baseAddress;
   const wallet = (s.wallets ?? []).find((w: AnyObj) => w.chainId === m.chainId);
-  const coin = wallet?.coins.find((c: AnyObj) => (m.quoteNative ? c.native : c.address === m.quoteAddress));
+  const coin = wallet?.coins.find((c: AnyObj) => (native ? c.native : c.address === address));
   const readError: string | null = !wallet ? null : wallet.error ?? (wallet.at == null ? 'still loading' : coin?.error ?? null);
   // A coin missing from a wallet that read fine really is 0; a failed read is never shown as 0.
   const have: number | null = wallet && !readError ? coin?.amount ?? 0 : null;
-  const row = (s.allocations?.rows ?? []).find((r: AnyObj) => r.chainId === m.chainId && (m.quoteNative ? r.native : String(r.address).toLowerCase() === m.quoteAddress));
+  const row = (s.allocations?.rows ?? []).find((r: AnyObj) => r.chainId === m.chainId && (native ? r.native : String(r.address).toLowerCase() === address));
   const inUse: number = row?.allocated ?? 0;
-  const reserve = m.quoteNative ? gasReserve(Math.max(0, amount), gas) : 0;
+  const reserved = side === 'quote' && native;
+  const reserve = reserved ? gasReserve(Math.max(0, amount), gas) : 0;
   const need = Math.max(0, amount) + reserve + inUse;
   const free = have == null ? null : have - inUse;
-  const max = free == null ? null : Math.max(0, m.quoteNative ? Math.min(free / (1 + gas.pct), free - gas.fixed) : free);
-  return { symbol: m.quote, have, readError, inUse, reserve, need, max, ok: have == null ? null : have + 1e-9 >= need };
+  const max = free == null ? null : Math.max(0, reserved ? Math.min(free / (1 + gas.pct), free - gas.fixed) : free);
+  return { symbol: side === 'quote' ? m.quote : m.base, have, readError, inUse, reserve, need, max, ok: have == null ? null : have + 1e-9 >= need };
+}
+
+/** What every bot made by trading, per coin (no price conversion): banked trades, and liquidity fees after gas. */
+export interface CoinEarnings { symbol: string; amount: number; trades: number; wins: number; losses: number; fees: number }
+export function earnedByCoin(bots: AnyObj[]): CoinEarnings[] {
+  const m = new Map<string, CoinEarnings>();
+  const at = (sym: string) => { const e = m.get(sym) ?? { symbol: sym, amount: 0, trades: 0, wins: 0, losses: 0, fees: 0 }; m.set(sym, e); return e; };
+  for (const b of bots) {
+    if (b.kind === 'grid') {
+      const e = at(quoteSym(b));
+      e.amount += b.pnl.realized; e.trades += b.stats.roundTrips; e.wins += b.stats.wins; e.losses += b.stats.roundTrips - b.stats.wins;
+    } else if (b.kind === 'trend') {
+      const e = at(quoteSym(b)), won = Math.round(b.stats.count * b.stats.winRate);
+      e.amount += b.pnl.realized; e.trades += b.stats.count; e.wins += won; e.losses += b.stats.count - won;
+    } else if (b.pnl) {
+      const e = at(quoteSym(b));
+      e.amount += b.pnl.fees - b.pnl.gas; e.fees += b.pnl.fees;
+    }
+  }
+  return [...m.values()].sort((a, b) => b.trades + b.fees - (a.trades + a.fees));
 }
 
 /** Round down to `sig` significant digits (a Max that never overshoots the balance). */

@@ -103,7 +103,8 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
       defaults: { ...DEFAULT_LIMITS, ...((o.defaults as SafetyLimits) ?? {}) },
       grids: (o.grids as BotState[]).map((g) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
       trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
-      lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => ({ ...freshLp(net, t.id), ...t })) : [],
+      // config.baseAmount arrived with funding from wallet coins: earlier bots put in none
+      lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => ({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],
       alerts: Array.isArray(o.alerts) ? (o.alerts as Alert[]) : [],
       portfolio: Array.isArray(o.portfolio) ? (o.portfolio as MultiState['portfolio']) : [],
     };
@@ -320,7 +321,10 @@ export class MultiBot {
 
   // ── Liquidity-position bots ─────────────────────────────────────────────
   async addLp(p: LpStartParams): Promise<string> {
-    if (p.mode === 'live') await this.assertCovers(p.market, p.capital, p.limits);
+    if (p.mode === 'live') {
+      await this.assertCovers(p.market, p.capital, p.limits);
+      if (p.baseAmount) this.assertHolds(p.market, p.baseAmount);
+    }
     const slot = freshLp(this.d.net);
     this.multi.lps.push(slot);
     this.persist();
@@ -483,6 +487,19 @@ export class MultiBot {
     }
   }
 
+  /** Base coins a bot is given from the wallet must be there (after what live bots already use). Runs after assertCovers read the wallet. */
+  private assertHolds(key: string, amount: number) {
+    const d = this.hub.def(key);
+    const label = this.tokLabel(d.chainId, d.base.symbol);
+    const have = this.walletAmount(d.chainId, d.base);
+    if (have == null) throw new Error(`Couldn't read your ${label} balance, so nothing was started. Try again in a minute.`);
+    const cur = this.allocations().rows.find((r) => r.token === label)?.allocated ?? 0;
+    if (have + 1e-12 < cur + amount) {
+      const f = humanAmount;
+      throw new Error(`Not enough ${label} in your wallet. This needs ${f(cur + amount)} ${label} (${f(amount)} for this bot${cur ? ` + ${f(cur)} already used by your other live bots` : ''}), and the wallet has ${f(have)} ${label}.`);
+    }
+  }
+
   // ── Loop ───────────────────────────────────────────────────────────────
   startLoop(pollMs: number) {
     if (this.timer) return;
@@ -538,6 +555,7 @@ export class MultiBot {
     const s = new Set<string>();
     for (const g of this.multi.grids) s.add(unflipKey(g.stable));
     for (const t of this.multi.trends) s.add(unflipKey(t.quote));
+    for (const t of this.multi.lps) s.add(unflipKey(t.market));
     for (const a of this.multi.alerts) s.add(unflipKey(a.pair));
     return s;
   }
@@ -708,7 +726,7 @@ export class MultiBot {
       rows.push({
         id: s.id, kind: 'lp', name: `Liquidity ${e.label}`, pair: s.market, chainId: e.chainId, mode: s.mode, status: s.status, usdPerQuote: this.usdPerQuote(s.market),
         // fees earned (net of gas) are the LP's "banked" side; the price side moves with the price like unsold coins
-        capital: s.config.capital, equity: pnl.equity, realized: pnl.fees - pnl.gas, unrealized: pnl.price, fees: 0, gas: pnl.gas,
+        capital: e.startValue()!, equity: pnl.equity, realized: pnl.fees - pnl.gas, unrealized: pnl.price, fees: 0, gas: pnl.gas,
         hodl: s.startPrice && s.lastPrice ? (s.config.capital / s.startPrice) * s.lastPrice : null,
         plsHeld: vw.coins.base + vw.owed.base + s.idle.base, quoteFree: vw.coins.quote + vw.owed.quote + s.idle.quote, startedAt: s.startedAt, equityHist: s.equity,
         closed: [], trades: [], inMarket: s.position ? 1 : 0,
@@ -1100,7 +1118,7 @@ export class MultiBot {
   chainsStatus() {
     return this.hub.runtimes().map((rt) => {
       const c = rt.cfg, w = this.wallets.get(c.id);
-      const bots = [...this.engines.values()].filter((e) => e.chainId === c.id).length + [...this.trendEngines.values()].filter((e) => e.chainId === c.id).length;
+      const bots = [...this.engines.values(), ...this.trendEngines.values(), ...this.lpEngines.values()].filter((e) => e.chainId === c.id).length;
       return {
         id: c.id, key: c.key, name: c.name, short: c.short, color: c.color, status: c.status, stack: c.stack,
         tradable: rt.tradable, reason: rt.tradable ? null : c.trading.reason ?? 'no DEX configured',

@@ -25,10 +25,10 @@ Dev: `npm run dev` (UI :5173, API :3847).
 
 ## Using the app
 
-- **Home**: total value, **Earned by trading** (completed buy → sell trades after fees and gas, which price moves no longer change) and **Bought, not sold yet** (coins waiting to sell, which move with the price), plus **Your wallet** (every coin the signing address holds on each chain, and how much your live bots use). Notices for anything that needs you (low gas, errors, a grid that left its range, a wallet that doesn't cover live bots). One row per bot with Stop / Resume, then **Today's picks** (below).
+- **Home**: **Earned by trading** counted in each coin (completed buy → sell trades after fees and gas, plus liquidity fees after gas) with how many trades won and lost, so a falling price never looks like a losing trade. **Right now** shows how many bots run, the last trade and the next likely one. Each grid row shows its live price gliding between its next buy and next sell, and a **Live** feed lists every buy, sell and transaction the moment it happens, with each sell's own result. Holdings at today's prices sit below as a separate line. Plus **Your wallet** (every coin the signing address holds on each chain, and how much your live bots use). Notices for anything that needs you (low gas, errors, a grid that left its range, a wallet that doesn't cover live bots). One row per bot with Stop / Resume, then **Today's picks** (below).
 - **New bot**: choose a grid, a trend bot or a liquidity position. Grids start from a preset or a custom range. Every amount is entered in the coin the bot spends (PLS, DAI, HEX …), with your wallet balance and a **Max** button beside the box; live starts are checked against the wallet before you press Start. One sentence tells you what each completed buy-then-sell nets after fees, impact and gas. Paper / Live sits next to the Start button; live always asks first. Limits live under *Advanced*.
 - **Bot detail**: for grids, earned by trading (in the coin it spends), coins bought and not sold yet, and the two together; for trend bots, profit vs holding; the chart (grid levels and fills, or the trend bot's entry / stop / take-profit lines), the bot's own log, levels, fills (compact, or *All columns*), and for grids **Follow the price up** and **Change range**, which restarts a stopped grid on its own pair and mode.
-- **Tools**: Charts, Backtest, Analytics, Markets (custom tokens, pool picker, chain registry) and Alerts.
+- **Tools**: Charts, Backtest, Analytics, Markets (custom tokens, pool picker, chain registry), Alerts and **System** (below).
 - **Top bar**: chain filter (All / PLS / HOOD / ETH, with a dot when gas is low), signing address or *Paper only*, the Activity feed, the Guide, and **Stop all** (or *Stop all on* the filtered chain). Stopping never sells holdings.
 - **Guide**: a short in-app explainer. Its numbers are imported from the code (fees, start-check thresholds, limits, preset params).
 
@@ -290,11 +290,23 @@ PnL is shown in ≈USD (each bot's quote converted at today's rate), with the qu
 
 Limits: price-impact cap (≤5%), slippage, deadline. No dollar limits.
 
+## System: version check and self-test
+
+The pill in the top bar and **Tools → System** answer "is the app running the latest code, and is everything working?"
+
+- **Version.** Four commits are compared: GitHub `main` (`git ls-remote`, using your own git access), your checkout (`git rev-parse HEAD`), the build (`dist/server/build.json`, written by `npm run build`) and the running server (the build it started from). The first gap is named with its exact fix: *Update available* → `git pull && npm install && npm run build` and restart; *Pulled but not built* → `npm run build` and restart; *Built but not restarted* → restart. It also notes a checkout that isn't on `main` or has hand-edited files.
+- **Self-test** (`GET /api/system/check`):
+  - Each chain's RPC is timed, and the wallet and gas are read.
+  - Each running bot's pool is read the way a trade would read it.
+  - Every bot is checked for: reading prices (no price for 3 polls = not ticking), errors, stuck transactions and range.
+  - Grids are also checked for **levels that can never trade**: left empty by an older version, or whose start-up buy didn't happen. Each says where the grid trades next.
+  - **GeckoTerminal 429s on this machine in the last hour** are counted. Trading never uses GeckoTerminal; charts and the daily scan do.
+
 ## Liquidity bot (V3 positions)
 
 New bot → **Liquidity**, or **Start LP** on a row of Today's picks' *Grid vs liquidity position vs holding* list (opens the form with that week's best range). Any pair on a V3 pool whose DEX has a verified position manager can hold one: Uniswap V3 on Ethereum (`0xC36442b4a4522E871399CD717aBDD847Ab11FE88`) and Robinhood (`0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3`), 9mm V3 on PulseChain (`0xCC05bf158202b4F461Ede8843d76dcd7Bbad07f2`); each was checked on-chain (its `factory()` and `WETH9()` match the DEX). PulseChain's built-in pairs use PulseX, so a PLS pair qualifies once its pool is switched to a 9mm V3 pool under Tools → Markets.
 
-- **Open.** The amount is in the coin the bot spends. Part is swapped to the other coin (the range's mix at today's price; skipped if under 1% of the value), the position manager is approved for the ERC-20 side(s), and the position is minted. A native side (ETH, PLS) is paid with the tx value (`mint` + `refundETH`), and the gas set-aside stays out of it.
+- **Open.** The amount is in the coin the bot spends, optionally plus base coins you already hold (*Also use ETH you hold*): only the difference to the range's mix at today's price is swapped (nothing when it's under 1% of the value), and a live start checks the wallet holds both. Then the position manager is approved for the ERC-20 side(s), and the position is minted. A native side (ETH, PLS) is paid with the tx value (`mint` + `refundETH`); enough of it for gas stays in the wallet (the gas set-aside when the bot spends the native coin, otherwise twice the open's gas).
 - **Earn.** Fees owed come from the pool's own counters (fee growth inside the range), the same numbers `collect()` pays out. This was checked against `collect()` on live positions on all three chains.
 - **Move the range (both ways, on by default).** After 2 h outside the range, with at most one move every 6 h: exit (`decreaseLiquidity` + `collect` + `burn` in one multicall), swap back to the mix, and open the same width around the price.
 - **Profits.** *Reinvest* (default) rolls fees into the next position when the range moves or the bot closes, with no extra transactions. *Send* collects fees to the payout address once they're worth 10× the collect's gas.
