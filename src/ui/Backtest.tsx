@@ -1,19 +1,20 @@
 /** Backtester UI: trend or grid on stored candles, realistic costs, metrics vs buy & hold, sweep heatmap, "Use these settings". */
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_TREND, type TrendConfig } from '../market/strategy';
+import { SWEEP_AXES, type SweepKey } from '../market/backtest';
 import { TFS, type TF } from '../market/candles';
 import { http, botApi } from './api';
 import { Orientation, PairPicker, chainOf, ChainBadge, feeLabel, mk, unflipKey } from './chains';
 import { Chart, EquityChart } from './Chart';
 import { TrendConfigEditor } from './TrendConfig';
+import { LinesEditor } from './LinesEditor';
 import { IND, T, alpha } from './theme';
 import type { AnyObj, BtPrefill } from './model';
 import { cls, dur, num, pct, px, qty, time, usd } from './fmt';
 import { L, Tip } from './Tip';
 import { humanAmount } from '../live/amount';
 
-const AXES: Record<string, [string, string]> = { ema: ['fast', 'slow'], ema_rsi: ['fast', 'slow'], macd: ['macdFast', 'macdSlow'], donchian: ['donchianEntry', 'donchianExit'] };
-const AXIS_DEFAULTS: Record<string, string> = {
+const AXIS_DEFAULTS: Record<SweepKey, string> = {
   fast: '5,8,10,13,20,30', slow: '20,30,40,50,80,100', macdFast: '6,8,12,16', macdSlow: '20,26,35,50',
   donchianEntry: '10,20,30,55', donchianExit: '5,10,15,20', stopAtr: '1,1.5,2,3,4', tpR: '0,1,2,3,5', trailAtr: '0,1.5,2,3,4',
 };
@@ -77,13 +78,13 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
   const [costs, setCosts] = useState({ useImpact: true, useGas: true, slippageBps: '10' });
   const [res, setRes] = useState<AnyObj | null>(null);
   const [sweep, setSweep] = useState<AnyObj | null>(null);
-  const [axes, setAxes] = useState({ x: 'fast', xs: AXIS_DEFAULTS.fast, y: 'slow', ys: AXIS_DEFAULTS.slow });
+  const [axes, setAxes] = useState<{ x: SweepKey; xs: string; y: SweepKey; ys: string }>({ x: 'fast', xs: AXIS_DEFAULTS.fast, y: 'slow', ys: AXIS_DEFAULTS.slow });
   const [busy, setBusy] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [summary, setSummary] = useState<AnyObj[]>([]);
 
   useEffect(() => { if (prefill) { setKind('trend'); setPair(prefill.pair); setTf(prefill.tf); setCfg(prefill.cfg); } }, [prefill]);
-  useEffect(() => { const [x, y] = AXES[cfg.strategy]; setAxes({ x, xs: AXIS_DEFAULTS[x], y, ys: AXIS_DEFAULTS[y] }); }, [cfg.strategy]);
+  useEffect(() => { const [x, y] = SWEEP_AXES[cfg.strategy]; setAxes({ x, xs: AXIS_DEFAULTS[x], y, ys: AXIS_DEFAULTS[y] }); }, [cfg.strategy]);
   useEffect(() => { void http('/api/market/summary').then((r) => setSummary(r.series)).catch(() => undefined); }, [res]);
   // Grid range defaults to ±15 % of spot in the selected orientation (HEX/PLS ≈ 1 / PLS/HEX); re-centred on a pair/flip change.
   const lastPair = useRef(pair);
@@ -156,6 +157,7 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
         </div>
         <p className="small"><Orientation m={mk(s, pair)} /> <span className="muted">· {kind === 'grid' ? `levels in ${mk(s, pair).quote}/${mk(s, pair).base}, capital & PnL in ${mk(s, pair).quote}` : `long ${mk(s, pair).base} / flat in ${mk(s, pair).quote}`}{mk(s, pair).flipped ? ' · candles = original inverted (high ↔ 1/low)' : ''}</span></p>
         <p className="muted small">Data: {pairSummary ? `${pairSummary.count} ${tf} candles${pairSummary.from ? ` · ${time(pairSummary.from * 1000)} → ${time(pairSummary.to * 1000)}` : ''} · ${pairSummary.source ?? '—'}` : 'loading…'}</p>
+        {kind === 'trend' && cfg.strategy === 'lines' && <LinesEditor s={s} pair={pair} tf={tf} lines={cfg.lines} onChange={(lines) => setCfg({ ...cfg, lines })} />}
         {kind === 'trend' ? <TrendConfigEditor cfg={cfg} onChange={setCfg} /> : (
           <div className="form-row">
             <label><L tip="Lowest grid level. Below it every level has bought and the grid waits for the price to come back.">Lowest price</L><input value={grid.lower} onChange={(e) => setGrid((g) => ({ ...g, lower: e.target.value }))} /></label>
@@ -193,7 +195,7 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
             <Breakdown m={m} sym={sym} />
             <h4 className="muted small">Price · {kind === 'trend' ? 'trade entries (▲) / exits (▼, reason, net %)' : 'grid round-trips'} · latest 1500 candles</h4>
             <Chart status={s} ticks={null} pairs={[res.pair]} pair={res.pair} tf={(res.tf ?? tf) as TF} height={360} compact
-              btTrades={res.trades} emaFast={kind === 'trend' && res.cfg?.strategy?.startsWith('ema') ? res.cfg.fast : undefined} emaSlow={kind === 'trend' && res.cfg?.strategy?.startsWith('ema') ? res.cfg.slow : undefined} />
+              btTrades={res.trades} drawn={res.cfg?.strategy === 'lines' ? res.cfg.lines : undefined} emaFast={kind === 'trend' && res.cfg?.strategy?.startsWith('ema') ? res.cfg.fast : undefined} emaSlow={kind === 'trend' && res.cfg?.strategy?.startsWith('ema') ? res.cfg.slow : undefined} />
             <h4 className="muted small"><L tip={`The bot's value over time (solid) and the same amount simply bought as ${pm.base} at the start and held (dashed).`}>Value vs holding {pm.base}</L></h4>
             <EquityChart series={series} height={300} format={(v) => num(v, 3)} />
             <ul className="notes small muted">{res.notes.map((x: string, i: number) => <li key={i}>{x}</li>)}</ul>
@@ -222,9 +224,9 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
         <div className="card">
           <h3>Parameter sweep <span className="muted small">heatmap of total return · click a cell to load it</span></h3>
           <div className="form-row">
-            <label>X<select value={axes.x} onChange={(e) => setAxes((a) => ({ ...a, x: e.target.value, xs: AXIS_DEFAULTS[e.target.value] }))}>{Object.keys(AXIS_DEFAULTS).map((x) => <option key={x}>{x}</option>)}</select></label>
+            <label>X<select value={axes.x} onChange={(e) => setAxes((a) => ({ ...a, x: e.target.value as SweepKey, xs: AXIS_DEFAULTS[e.target.value as SweepKey] }))}>{Object.keys(AXIS_DEFAULTS).map((x) => <option key={x}>{x}</option>)}</select></label>
             <label className="wide">X values<input value={axes.xs} onChange={(e) => setAxes((a) => ({ ...a, xs: e.target.value }))} /></label>
-            <label>Y<select value={axes.y} onChange={(e) => setAxes((a) => ({ ...a, y: e.target.value, ys: AXIS_DEFAULTS[e.target.value] }))}>{Object.keys(AXIS_DEFAULTS).map((x) => <option key={x}>{x}</option>)}</select></label>
+            <label>Y<select value={axes.y} onChange={(e) => setAxes((a) => ({ ...a, y: e.target.value as SweepKey, ys: AXIS_DEFAULTS[e.target.value as SweepKey] }))}>{Object.keys(AXIS_DEFAULTS).map((x) => <option key={x}>{x}</option>)}</select></label>
             <label className="wide">Y values<input value={axes.ys} onChange={(e) => setAxes((a) => ({ ...a, ys: e.target.value }))} /></label>
           </div>
           {sweep && (

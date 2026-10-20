@@ -196,6 +196,7 @@ export function runTrendBacktest(k: Candle[], cfg: TrendConfig, tf: TF, o: Trend
       'Price impact uses CURRENT pool reserves re-centred at each historical price (approximation).',
       `Costs per swap: ${o.costs.feeBps / 100}% LP fee, impact, gas at the current gas price, ${o.costs.slippageBps} bps assumed slippage.`,
       'An open position at the end is closed at the last close (reason "end").',
+      ...(cfg.strategy === 'lines' ? ['Your lines were drawn today, knowing what the price did: a backtest of them looks better than they will do live. A trend line only trades after its later point; a level trades over the whole test.'] : []),
     ],
   };
 }
@@ -270,7 +271,7 @@ export function runGridBacktest(k: Candle[], g: GridBtConfig, tf: TF, costs: Cos
 
 export type SweepKey = 'fast' | 'slow' | 'macdFast' | 'macdSlow' | 'donchianEntry' | 'donchianExit' | 'stopAtr' | 'tpR' | 'trailAtr';
 export const SWEEP_AXES: Record<TrendConfig['strategy'], [SweepKey, SweepKey]> = {
-  ema: ['fast', 'slow'], ema_rsi: ['fast', 'slow'], macd: ['macdFast', 'macdSlow'], donchian: ['donchianEntry', 'donchianExit'],
+  ema: ['fast', 'slow'], ema_rsi: ['fast', 'slow'], macd: ['macdFast', 'macdSlow'], donchian: ['donchianEntry', 'donchianExit'], lines: ['stopAtr', 'tpR'],
 };
 export interface SweepRow { x: number; y: number; totalReturn: number; maxDrawdown: number; trades: number; profitFactor: number | null; sharpe: number | null; winRate: number | null }
 export interface SweepResult { xKey: SweepKey; yKey: SweepKey; xs: number[]; ys: number[]; rows: SweepRow[]; best: SweepRow | null; notes: string[] }

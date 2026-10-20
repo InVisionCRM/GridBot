@@ -16,7 +16,7 @@ import { TF_SEC, bucketStart, closedOnly, fillGaps, isTF, type Candle, type TF }
 import { DEFAULT_COSTS, type CostModel } from '../../market/costs';
 import {
   computeIndicators, costGate, expectedMovePct, htfAllows, openRisk, positionSize, priceExit, signalAt, trail,
-  validateTrendConfig, warmup, DEFAULT_TREND, type ExitReason, type RiskState, type TrendConfig,
+  validateTrendConfig, warmup, DEFAULT_TREND, type DrawnLine, type ExitReason, type RiskState, type TrendConfig,
 } from '../../market/strategy';
 import { tradeStats, pushCapped, drawdown } from '../../market/stats';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type ChainReader, type Executor, type Fill, type MarketSnapshot, type Quote, type TxSender } from './chain';
@@ -296,6 +296,16 @@ export class TrendEngine {
     if (errs.length) throw new Error(errs.join('; '));
     this.state.limits = next;
     this.save();
+  }
+  /** Replace the drawn lines of a bot that trades on them (takes effect at the next closed candle). */
+  setLines(lines: DrawnLine[]) {
+    if (this.state.cfg.strategy !== 'lines') throw new Error("This bot doesn't trade on drawn lines.");
+    const cfg = { ...this.state.cfg, lines };
+    const errs = validateTrendConfig(cfg);
+    if (errs.length) throw new Error(errs.join('; '));
+    this.state.cfg = cfg;
+    this.save();
+    this.emit('info', `${this.state.name}: ${lines.length} line${lines.length === 1 ? '' : 's'} in effect from the next ${this.state.tf} candle`);
   }
 
   private enqueue(j: Omit<TrendJob, 'id' | 'createdAt'>) {

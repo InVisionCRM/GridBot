@@ -31,7 +31,7 @@ import { CandleStore } from '../market/candleStore';
 import { closedOnly, fillGaps, isTF, replayCandles, sliceRange, type Candle, type TF } from '../../market/candles';
 import { atr, ema, efficiencyRatio, rsi } from '../../market/indicators';
 import { simBuy, simSell, type CostModel, DEFAULT_COSTS } from '../../market/costs';
-import { DEFAULT_TREND, type TrendConfig } from '../../market/strategy';
+import { DEFAULT_TREND, type DrawnLine, type TrendConfig } from '../../market/strategy';
 import { runGridBacktest, runTrendBacktest, sweepTrend, SWEEP_AXES, type BtResult, type SweepKey } from '../../market/backtest';
 import { drawdown, pushCapped, tradeStats } from '../../market/stats';
 
@@ -309,6 +309,7 @@ export class MultiBot {
   stopTrend(id: string) { this.trend(id).stop(); }
   closeTrend(id: string) { this.trend(id).closePosition(); }
   setTrendLimits(id: string, l: Partial<SafetyLimits>) { this.trend(id).setLimits(l); }
+  setTrendLines(id: string, lines: DrawnLine[]) { this.trend(id).setLines(lines); }
   removeTrend(id: string, force = false) {
     const eng = this.trendEngines.get(id);
     if (eng && eng.state.status === 'running') eng.stop();

@@ -205,6 +205,7 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/trends/:id/stop', wrap((req) => bot.stopTrend(req.params.id)));
   app.post('/api/bot/trends/:id/close', wrap((req) => { bot.closeTrend(req.params.id); void bot.tickAll(); }));
   app.put('/api/bot/trends/:id/limits', wrap((req) => bot.setTrendLimits(req.params.id, limitsBody(req.body ?? {}))));
+  app.put('/api/bot/trends/:id/lines', wrap((req) => bot.setTrendLines(req.params.id, req.body?.lines)));
   app.delete('/api/bot/trends/:id', wrap((req) => bot.removeTrend(req.params.id)));
 
   // ── Liquidity bots (V3 positions) ────────────────────────────────────

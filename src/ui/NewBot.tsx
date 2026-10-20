@@ -14,6 +14,7 @@ import { botApi } from './api';
 import { pct, px } from './fmt';
 import { ChainBadge, Orientation, PairPicker, chainOf, feeLabel, marketsOf, mk, unflipKey, useChainFilter } from './chains';
 import { TrendConfigEditor, strategyRule } from './TrendConfig';
+import { LinesEditor } from './LinesEditor';
 import { coinFunds, errMsg, floorSig, spendFunds, type AnyObj, type BotKind, type Funds, type GridPrefill, type LpPrefill, type Nav, type TrendPrefill } from './model';
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -328,6 +329,7 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
   const m = mk(s, pair);
   const rt = 1 - (1 - m.feeBps / 10_000) ** 2;
   const funds = spendFunds(s, pair, +amount || 0, parseGasRes(limits.gasRes) ?? DEFAULT_GAS_RESERVE);
+  const noBuyLine = cfg.strategy === 'lines' && !cfg.lines.some((l) => l.rule.startsWith('buy')) ? 'Draw at least one line that buys.' : null;
   const start = () => act(async () => {
     if (mode === 'live' && !confirm(`Start a LIVE trend bot on ${m.label} (${tf})? It signs real swaps from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
     const r = await botApi('trends', 'POST', { mode, quote: pair, tf, cfg, capital: +amount, name: name || undefined, limits: limitsBody(limits, !!m.quoteNative) });
@@ -343,9 +345,10 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
         <AmountField label={`Amount (${m.quote})`} value={amount} f={funds} onChange={setAmount} />
       </div>
       <div className="verdict">
-        <span>Buys {m.base} with {m.quote} when {strategyRule(cfg)} on a closed {tf} candle. Sells at the stop-loss ({cfg.stopAtr}× ATR below entry){cfg.tpR > 0 ? `, the take-profit (${cfg.tpR}× the stop distance above)` : ''}{cfg.trailAtr > 0 ? `, the trailing stop` : ''} or the exit signal.</span>
+        <span>Buys {m.base} with {m.quote} when {strategyRule(cfg)} on a closed {tf} candle. Sells at the stop-loss ({cfg.stopAtr}× ATR below entry){cfg.tpR > 0 ? `, the take-profit (${cfg.tpR}× the stop distance above)` : ''}{cfg.trailAtr > 0 ? `, the trailing stop` : ''} or {cfg.strategy === 'lines' ? 'one of your sell lines' : 'the exit signal'}.</span>
         <span className="detail">A trade only starts if the expected move beats the {pct(rt, 3)} round-trip pool fee ({feeLabel(m)} each way) plus impact, gas and a {pct(cfg.minEdgePct, 2)} margin. Longer candles mean fewer trades, so fees take a smaller share.</span>
       </div>
+      {cfg.strategy === 'lines' && <LinesEditor s={s} pair={pair} tf={tf} lines={cfg.lines} onChange={(lines) => setCfg({ ...cfg, lines })} />}
       <details className="more">
         <summary>Advanced</summary>
         <div className="stack">
@@ -357,7 +360,7 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
       <div className="actions">
         <button type="button" className="btn" onClick={() => nav({ v: 'tools', tab: 'backtest', btPrefill: { pair, tf, cfg, nonce: Date.now() } })}>Backtest these settings first</button>
       </div>
-      <StartRow s={s} pairKey={pair} mode={mode} setMode={setMode} busy={busy} disabled={!(+amount > 0)} problem={fundsProblem(funds, +amount || 0, mode)}
+      <StartRow s={s} pairKey={pair} mode={mode} setMode={setMode} busy={busy} disabled={!(+amount > 0) || !!noBuyLine} problem={noBuyLine ?? fundsProblem(funds, +amount || 0, mode)}
         label={mode === 'live' ? 'Start live trend bot' : 'Start paper trend bot'} onStart={start} />
     </div>
   );

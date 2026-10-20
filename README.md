@@ -321,7 +321,20 @@ New bot → **Liquidity**, or **Start LP** on a row of Today's picks' *Grid vs l
 
 Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the amount is entered in the coin it spends). They share the server, signing key, tx queue and nonce.
 
-- **Strategies.** EMA cross, EMA+RSI, MACD, Donchian breakout, plus an optional higher-timeframe EMA filter. Signals are evaluated once per newly closed candle, never on the forming one, so they don't repaint.
+- **Strategies.** EMA cross, EMA+RSI, MACD, Donchian breakout and **my drawn lines**, plus an optional higher-timeframe EMA filter. Signals are evaluated once per newly closed candle, never on the forming one, so they don't repaint.
+- **My drawn lines** (`strategy: 'lines'`, `cfg.lines`).
+  - **Drawing:** click **Trend line** and two candles, or **Level** and one price, on the chart in New bot, Backtest or a running bot's page. A channel is two trend lines; a zone is two levels.
+  - **Rules:** each line gets one, chosen from where it's drawn and changeable in one click.
+    - Buy when a candle closes above it (`buy_break`).
+    - Buy when the price dips to it and closes back above (`buy_bounce`).
+    - Sell when a candle closes below it (`sell_break`).
+    - Sell when the price reaches it (`sell_reach`).
+    - "Dips to" and "reaches" allow a touch distance, 0.2% by default.
+  - **Look on the chart:** green lines buy, red lines sell; dashed lines need a touch, solid ones a close through.
+  - **Shared rails:** the stop-loss, take-profit, trailing stop, sizing and cost check still apply.
+  - **Running bots:** `PUT /api/bot/trends/:id/lines` replaces the lines, from the next closed candle.
+  - **Backtests:** a trend line only trades from its later point (it couldn't have been drawn sooner); a level trades over the whole test. The result says that lines drawn today with hindsight look better in a backtest than they will live.
+  - **Drawing clicks:** they come from the browser, not the chart's click event. Measured in Chromium, the chart drops a click that follows another within about half a second, which lost a trend line's second point.
 - **Exits.** ATR stop and TP at an R multiple, both checked on every poll price; trailing ATR stop (ratchets on closed highs); max hold; signal exit; cooldown; manual Close.
 - **Sizing.** % of the bot's capital, or risk % (equity × risk ÷ stop distance).
 - **Cost gate.** The expected move (TP distance, or k×ATR) must clear the 0.579% round-trip fee + impact both ways from live reserves + gas + slippage allowance + min edge. Blocked signals are logged with the numbers.
