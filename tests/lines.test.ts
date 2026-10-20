@@ -10,6 +10,7 @@ import { MemoryStore } from '../src/server/bot/store';
 import { ActivityBus } from '../src/server/bot/activity';
 import { CandleStore } from '../src/server/market/candleStore';
 import { MockChain, NET } from './helpers/mockChain';
+import { logicalAt, timeAt } from '../src/ui/lines';
 
 const H = 3600;
 const T0 = Math.floor(1_791_000_000 / H) * H;
@@ -167,5 +168,29 @@ describe('drawn lines: live trend bot', () => {
     await expect(s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: LIVE([]), capital: 100 })).rejects.toThrow('Draw at least one line that buys.');
     const ema = await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: { strategy: 'ema', fast: 2, slow: 3, atrPeriod: 2 }, capital: 100 });
     expect(() => s.bot.setTrendLines(ema, [line()])).toThrow("This bot doesn't trade on drawn lines.");
+  });
+});
+
+describe('chart position of a drawn point', () => {
+  // three hourly candles, a missing hour, then two more: index 3 is two hours after index 2
+  const k = [0, 1, 2, 4, 5].map((h) => ({ t: T0 + h * H }));
+
+  it('a candle time is its bar, and a time between candles is the same fraction between their bars', () => {
+    expect(logicalAt(k, H, T0 + 2 * H)).toBe(2);
+    expect(logicalAt(k, H, T0 + 1.25 * H)).toBeCloseTo(1.25, 12);
+    expect(logicalAt(k, H, T0 + 3 * H)).toBeCloseTo(2.5, 12); // halfway across the missing hour
+    expect(timeAt(k, H, 2.5)).toBe(T0 + 3 * H);
+  });
+
+  it('runs on at one bar per timeframe before the first and after the last candle', () => {
+    expect(logicalAt(k, H, T0 - 2 * H)).toBe(-2);
+    expect(logicalAt(k, H, T0 + 7.5 * H)).toBeCloseTo(6.5, 12);
+    expect(timeAt(k, H, 6.5)).toBe(T0 + 7.5 * H);
+    expect(timeAt(k, H, -0.5)).toBe(T0 - 0.5 * H);
+  });
+
+  it('time → position → time comes back to the same second everywhere, so a point stays where it was clicked', () => {
+    for (let t = T0 - 3 * H; t <= T0 + 9 * H; t += 397) expect(Math.round(timeAt(k, H, logicalAt(k, H, t)))).toBe(t);
+    for (let l = -3; l <= 9; l += 0.0137) expect(logicalAt(k, H, timeAt(k, H, l))).toBeCloseTo(l, 9);
   });
 });

@@ -609,6 +609,10 @@ label.wide input { min-width: 180px; }
 .lines-ed { display: flex; flex-direction: column; gap: 10px; }
 .lines-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
 .lines-bar > strong { font-weight: 500; }
+.lines-act { display: inline-grid; }
+.lines-act > span { grid-area: 1 / 1; }
+.lines-act > .off { visibility: hidden; }
+.lines-msg { flex: 1 0 100%; line-height: 1.5; min-height: 1.5em; }
 .chart-wrap { position: relative; }
 .chart.drawing, .chart.drawing canvas { cursor: crosshair !important; }
 .draw-hint { position: absolute; z-index: 3; left: 50%; transform: translateX(-50%); margin-top: 6px; max-width: calc(100% - 24px);
