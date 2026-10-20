@@ -9,6 +9,7 @@ import { STRATEGIES } from '../market/strategy';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
 import { strategyRule } from './TrendConfig';
+import { LinesEditor } from './LinesEditor';
 import { T } from './theme';
 import { quoteSym, trendPnlUsd, type AnyObj, type Nav } from './model';
 
@@ -81,9 +82,12 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <div className="split wide-left">
         <div className="card">
-          <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact height={400}
-            emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />
-          <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.</p>
+          {t.cfg.strategy === 'lines'
+            ? <LinesEditor s={s} ticks={ticks} pair={t.quote} tf={t.tf} lines={t.cfg.lines} busy={busy} height={400}
+                onChange={(lines) => act(() => botApi(`trends/${t.id}/lines`, 'PUT', { lines }))} />
+            : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact height={400}
+                emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
+          <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
         </div>
         <div className="stack">
           <div className="card">
@@ -93,7 +97,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
               <StopGauge pos={pos} price={t.price} />
               <p className="muted small">Stop {px(pos.risk.stop)}{pos.risk.stop > pos.risk.initialStop ? ' (trailing)' : ''} · entry {px(pos.risk.entry)}{pos.risk.tp ? ` · take-profit ${px(pos.risk.tp)}` : ''} · price {px(t.price)}</p>
             </> : (
-              <p className="small">{stratLabel}: buys when {strategyRule(t.cfg)}. Next {t.tf} candle closes in {dur(Math.max(0, t.nextCloseAt - Date.now()))}.{t.warm?.need ? ` Warming up: ${t.warm.have}/${t.warm.need} candles.` : ''}</p>
+              <p className="small">{stratLabel}: buys when {strategyRule(t.cfg)}. Next {t.tf} candle closes in {dur(Math.max(0, t.nextCloseAt - Date.now()))}.{t.warm && t.warm.have < t.warm.need ? ` Warming up: ${t.warm.have}/${t.warm.need} candles.` : ''}</p>
             )}
             <p className="muted small mono">{t.lastNote || ''}</p>
           </div>

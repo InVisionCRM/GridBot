@@ -79,6 +79,45 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(value(lp) - v0).toBeCloseTo(each * PRICE + each, 9);
   });
 
+  // A real pool's fee counters have grown since it was created (the user's ETH/USDG pool: ~3.5e-7 × 2^128 per unit of
+  // liquidity). A paper position's range ticks don't exist in the pool: they read 0 and never flip.
+  const HISTORY = Q128 / 10n ** 4n;
+
+  it('below its range on a pool with fee history: no fees and a sane value, not the ~2^128 × L wrap (the 10^48 USDG chart)', async () => {
+    const { lp, m, pool } = world();
+    m.addFees(pool, HISTORY, HISTORY);
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.tick();
+    const v0 = value(lp);
+    m.movePrice(pool, 0.8); // PLS −20%: below the ±10% range
+    await lp.tick();
+    expect(lp.status().inRange).toBe(false);
+    expect(lp.status().owed).toEqual({ base: 0, quote: 0 });
+    expect(value(lp)).toBeLessThan(v0);
+    expect(value(lp)).toBeGreaterThan(v0 * 0.8);
+    expect(Math.max(...lp.status().equity.map(([, v]: [number, number]) => v))).toBeLessThan(v0 * 1.01);
+  });
+
+  it("earns the pool's fees only while the price is inside the range", async () => {
+    const { lp, m, pool } = world();
+    m.addFees(pool, HISTORY, HISTORY);
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.tick();
+    const L = BigInt(lp.status().position!.liquidity), poolL = BigInt(Math.round(Math.sqrt(1e10 * 1e18 * 3e5 * 1e18)));
+    const each = Number((L / 10n ** 6n) * poolL / (poolL + L)) / 1e18;
+    const fees = () => lp.status().owed!.quote;
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n); await lp.tick();
+    expect(fees()).toBeCloseTo(each, 9);
+    m.movePrice(pool, 0.8); await lp.tick(); // out
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n); await lp.tick(); // earned by others while it was out
+    expect(fees()).toBeCloseTo(each, 9);
+    m.movePrice(pool, 1 / 0.8); await lp.tick(); // back in
+    expect(lp.status().inRange).toBe(true);
+    expect(fees()).toBeCloseTo(each, 9);
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n); await lp.tick();
+    expect(fees()).toBeCloseTo(2 * each, 9);
+  });
+
   it(`re-ranges both ways after ${RECENTER_AFTER_MS / 3600_000}h out of range, at most every ${RECENTER_COOLDOWN_MS / 3600_000}h`, async () => {
     const { lp, m, pool, at } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
@@ -337,6 +376,39 @@ describe('LP bot in the app: API, status, restart, money split', () => {
     });
     return { ...w, bot, store, call, close: () => new Promise((r) => server.close(r)) };
   }
+
+  it('a paper bot saved before the fee fix drops its old fee checkpoint and value history (the 10^48 spike); a live bot keeps its history', async () => {
+    const first = await serve();
+    let saved: MultiState;
+    try {
+      await first.call('POST', '/api/bot/lps', { mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      await first.bot.tickAll();
+      saved = JSON.parse(JSON.stringify(first.store.load()));
+    } finally { await first.close(); }
+    // as version 1 saved them
+    const paper = saved.lps[0] as unknown as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    Object.assign(paper, { version: 1, equity: [[1, 1000], [2, 1.5e48], [3, 999]] });
+    paper.position.paper = { in0: '123', in1: '456', owed0: '0', owed1: '0' };
+    const live = JSON.parse(JSON.stringify(paper));
+    Object.assign(live, { id: 'lp-live', mode: 'live', equity: [[1, 2000], [2, 2001]] });
+    live.position = { ...live.position, id: '1472740' };
+    delete live.position.paper;
+    saved.lps.push(live);
+    const store = new MemoryStore<MultiState>();
+    store.save(saved);
+    const again = await serve(store);
+    try {
+      const st = (id: string) => again.bot.status().lps.find((x: { id: string }) => x.id === id)!;
+      expect(st(paper.id).position!.paper).toEqual({ g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0' });
+      expect(st(paper.id).equity).toEqual([]);
+      expect(st('lp-live').equity).toEqual([[1, 2000], [2, 2001]]);
+      await again.bot.tickAll(); // first reading: starts earning from here
+      expect(st(paper.id).owed).toEqual({ base: 0, quote: 0 });
+      expect(st(paper.id).equity).toHaveLength(1);
+      expect(st(paper.id).equity[0][1]).toBeGreaterThan(990);
+      expect(st(paper.id).equity[0][1]).toBeLessThan(1000);
+    } finally { await again.close(); }
+  });
 
   it('starts from the API, opens on the next poll, and every control works; a position blocks Remove until closed', async () => {
     const a = await serve();

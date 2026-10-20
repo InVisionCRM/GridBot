@@ -27,8 +27,23 @@ export interface BtMetrics {
   maxDrawdown: number; winRate: number | null; profitFactor: number | null;
   avgWin: number | null; avgLoss: number | null; expectancy: number | null; expectancyPct: number | null;
   sharpe: number | null; sortino: number | null; exposure: number; trades: number;
-  fees: number; gas: number; days: number;
+  /** Paid on every swap of the run (also the buys of coins still held at the end), in the quote coin */
+  fees: number; impact: number; slippage: number; gas: number;
+  /** What price moves did: profit + everything paid (profit = price − fees − impact − slippage − gas) */
+  priceEffect: number;
+  days: number;
   bhReturn: number; bhMaxDrawdown: number; blockedByCost: number;
+  /** How far one trade of the backtest's size moves the pool price at the start, and the one buy "holding" makes */
+  tradeImpactPct: number; bhEntryImpactPct: number;
+  /** One trade's size (grid: a level; trend: the whole amount) and the quote coin the pool holds near the price (null = impact off) */
+  tradeSize: number; poolDepth: number | null;
+}
+
+/** Everything the swaps of a run paid, in the quote coin. */
+export interface Spent { fees: number; impact: number; slippage: number; gas: number }
+const newSpent = (): Spent => ({ fees: 0, impact: 0, slippage: 0, gas: 0 });
+function pay(s: Spent, r: { fee: number; impactQuote: number; slipQuote: number; gasQuote: number }) {
+  s.fees += r.fee; s.impact += r.impactQuote; s.slippage += r.slipQuote; s.gas += r.gasQuote;
 }
 
 export interface BtResult {
@@ -46,11 +61,13 @@ export function maxDrawdown(v: number[]): number {
   return dd;
 }
 
-function metrics(eq: { t: number; v: number; bh: number }[], trades: BtTrade[], tf: TF, capital: number, inPosBars: number, blocked: number): BtMetrics {
+function metrics(eq: { t: number; v: number; bh: number }[], trades: BtTrade[], tf: TF, capital: number, inPosBars: number, blocked: number, spent: Spent, size: { trade: number; impact: number; bhEntry: number; pool: number | null }): BtMetrics {
   const end = eq.length ? eq[eq.length - 1].v : capital;
   const days = eq.length > 1 ? (eq[eq.length - 1].t - eq[0].t) / 86_400 : 0;
+  // Measured from the amount put in: a costly start (a start-up buy's price impact) is a drop and a loss like any other
+  const vals = [capital, ...eq.map((e) => e.v)];
   const rets: number[] = [];
-  for (let i = 1; i < eq.length; i++) rets.push(eq[i].v / eq[i - 1].v - 1);
+  for (let i = 1; i < vals.length; i++) rets.push(vals[i] / vals[i - 1] - 1);
   const mean = rets.reduce((a, b) => a + b, 0) / (rets.length || 1);
   const sd = Math.sqrt(rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length || 1));
   const dsd = Math.sqrt(rets.reduce((a, b) => a + Math.min(b, 0) ** 2, 0) / (rets.length || 1));
@@ -61,7 +78,7 @@ function metrics(eq: { t: number; v: number; bh: number }[], trades: BtTrade[], 
   return {
     startEquity: capital, endEquity: end, totalReturn: end / capital - 1,
     cagr: days >= 30 ? (end / capital) ** (365 / days) - 1 : null,
-    maxDrawdown: maxDrawdown(eq.map((e) => e.v)),
+    maxDrawdown: maxDrawdown(vals),
     winRate: trades.length ? wins.length / trades.length : null,
     profitFactor: trades.length ? (gl > 0 ? gw / gl : null) : null,
     avgWin: wins.length ? gw / wins.length : null,
@@ -72,19 +89,20 @@ function metrics(eq: { t: number; v: number; bh: number }[], trades: BtTrade[], 
     sortino: dsd > 0 ? (mean / dsd) * Math.sqrt(perYear) : null,
     exposure: eq.length ? inPosBars / eq.length : 0,
     trades: trades.length,
-    fees: trades.reduce((a, t) => a + t.fees, 0),
-    gas: trades.reduce((a, t) => a + t.gas, 0),
+    ...spent,
+    priceEffect: end - capital + spent.fees + spent.impact + spent.slippage + spent.gas,
     days,
     bhReturn: bh.length ? bh[bh.length - 1] / capital - 1 : 0,
-    bhMaxDrawdown: maxDrawdown(bh),
+    bhMaxDrawdown: maxDrawdown([capital, ...bh]),
     blockedByCost: blocked,
+    tradeImpactPct: size.impact, bhEntryImpactPct: size.bhEntry, tradeSize: size.trade, poolDepth: size.pool,
   };
 }
 
 /** Buy & hold PLS from the first tradable open, same cost model. */
 export function buyHold(k: Candle[], start: number, capital: number, m: CostModel) {
   const b = simBuy(capital, k[start].o, m);
-  return { pls: b.pls, cashLeft: -b.gasQuote };
+  return { pls: b.pls, cashLeft: -b.gasQuote, impactPct: b.impactPct };
 }
 
 export interface TrendBtOpts { capital: number; costs: CostModel; htf?: Candle[] }
@@ -98,6 +116,7 @@ export function runTrendBacktest(k: Candle[], cfg: TrendConfig, tf: TF, o: Trend
   const s = TF_SEC[tf];
   const start = need - 1;
   const bh = buyHold(k, start, o.capital, o.costs);
+  const spent = newSpent();
   let cash = o.capital;
   let pos: { pls: number; cost: number; entryT: number; fees: number; gas: number; risk: RiskState; bars: number } | null = null;
   let pending: { kind: 'enter'; atr: number } | { kind: 'exit'; reason: ExitReason } | null = null;
@@ -109,6 +128,7 @@ export function runTrendBacktest(k: Candle[], cfg: TrendConfig, tf: TF, o: Trend
   const exit = (t: number, price: number, reason: ExitReason, i: number) => {
     const p = pos!;
     const sres = simSell(p.pls, price, o.costs);
+    pay(spent, sres);
     const proceeds = sres.quote - sres.gasQuote;
     cash += proceeds;
     const pnl = proceeds - p.cost;
@@ -131,6 +151,7 @@ export function runTrendBacktest(k: Candle[], cfg: TrendConfig, tf: TF, o: Trend
       if (!gate.ok) blocked++;
       else {
         const b = simBuy(size, bar.o, o.costs);
+        pay(spent, b);
         cash -= size + b.gasQuote;
         pos = { pls: b.pls, cost: size + b.gasQuote, entryT: bar.t, fees: b.fee, gas: b.gasQuote, risk, bars: 0 };
       }
@@ -169,12 +190,13 @@ export function runTrendBacktest(k: Candle[], cfg: TrendConfig, tf: TF, o: Trend
     eq[eq.length - 1].v = cash;
   }
   return {
-    kind: 'trend', tf, metrics: metrics(eq, trades, tf, o.capital, inPos, blocked), equity: eq, trades,
+    kind: 'trend', tf, metrics: metrics(eq, trades, tf, o.capital, inPos, blocked, spent, { trade: o.capital, impact: simBuy(o.capital, k[start].o, o.costs).impactPct, bhEntry: bh.impactPct, pool: o.costs.pool?.quoteReserve ?? null }), equity: eq, trades,
     notes: [
       'Signals on candle close, filled at the next open; stops/TP intrabar (stop first if both hit in one candle).',
       'Price impact uses CURRENT pool reserves re-centred at each historical price (approximation).',
       `Costs per swap: ${o.costs.feeBps / 100}% LP fee, impact, gas at the current gas price, ${o.costs.slippageBps} bps assumed slippage.`,
       'An open position at the end is closed at the last close (reason "end").',
+      ...(cfg.strategy === 'lines' ? ['Your lines were drawn today, knowing what the price did: a backtest of them looks better than they will do live. A trend line only trades after its later point; a level trades over the whole test.'] : []),
     ],
   };
 }
@@ -198,10 +220,12 @@ export function runGridBacktest(k: Candle[], g: GridBtConfig, tf: TF, costs: Cos
   const iv = levels.slice(0, -1).map((b, i) => ({ buy: b, sell: levels[i + 1], state: (b < p0 ? 'wait' : 'hold') as 'wait' | 'hold', pls: 0, cost: 0, t: 0, fee: 0, gas: 0, size: per, entry: b }));
   if (!iv.some((x) => x.state === 'wait')) throw new Error('the first price is below the range');
   const bh = buyHold(k, 0, g.capital, costs);
+  const spent = newSpent();
   let cash = g.capital, inPos = 0;
   const up = iv.filter((x) => x.state === 'hold');
   if (up.length) {
     const amt = per * up.length, b = simBuy(amt, p0, costs), n = up.length;
+    pay(spent, b);
     cash -= amt + b.gasQuote;
     for (const x of up) Object.assign(x, { pls: b.pls / n, cost: (amt + b.gasQuote) / n, t: k[0].t, fee: b.fee / n, gas: b.gasQuote / n, entry: p0 });
   }
@@ -211,12 +235,14 @@ export function runGridBacktest(k: Candle[], g: GridBtConfig, tf: TF, costs: Cos
     if (to < from) { // falling: buys from high to low
       for (const x of [...iv].reverse()) if (x.state === 'wait' && x.buy <= from && x.buy >= to && cash >= x.size) {
         const b = simBuy(x.size, x.buy, costs);
+        pay(spent, b);
         cash -= x.size + b.gasQuote;
         Object.assign(x, { state: 'hold', pls: b.pls, cost: x.size + b.gasQuote, t, fee: b.fee, gas: b.gasQuote, entry: x.buy });
       }
     } else {
       for (const x of iv) if (x.state === 'hold' && x.sell >= from && x.sell <= to) {
         const s = simSell(x.pls, x.sell, costs);
+        pay(spent, s);
         const proceeds = s.quote - s.gasQuote;
         cash += proceeds;
         trades.push({ entryT: x.t, exitT: t, entryPrice: x.entry, exitPrice: x.sell, pls: x.pls, cost: x.cost, proceeds, pnl: proceeds - x.cost, pnlPct: (proceeds - x.cost) / x.cost, fees: x.fee + s.fee, gas: x.gas + s.gasQuote, bars: 0, reason: 'grid' });
@@ -233,7 +259,7 @@ export function runGridBacktest(k: Candle[], g: GridBtConfig, tf: TF, costs: Cos
     eq.push({ t: bar.t, v: cash + held * bar.c, bh: bh.pls * bar.c + bh.cashLeft });
   }
   return {
-    kind: 'grid', tf, metrics: metrics(eq, trades, tf, g.capital, inPos, 0), equity: eq, trades,
+    kind: 'grid', tf, metrics: metrics(eq, trades, tf, g.capital, inPos, 0, spent, { trade: per, impact: simBuy(per, p0, costs).impactPct, bhEntry: bh.impactPct, pool: costs.pool?.quoteReserve ?? null }), equity: eq, trades,
     notes: [
       'Grid fills assumed exactly at level prices (live fills happen at the polled price past the level).',
       'Candle path assumed o→l→h→c for up candles, o→h→l→c for down candles.',
@@ -245,7 +271,7 @@ export function runGridBacktest(k: Candle[], g: GridBtConfig, tf: TF, costs: Cos
 
 export type SweepKey = 'fast' | 'slow' | 'macdFast' | 'macdSlow' | 'donchianEntry' | 'donchianExit' | 'stopAtr' | 'tpR' | 'trailAtr';
 export const SWEEP_AXES: Record<TrendConfig['strategy'], [SweepKey, SweepKey]> = {
-  ema: ['fast', 'slow'], ema_rsi: ['fast', 'slow'], macd: ['macdFast', 'macdSlow'], donchian: ['donchianEntry', 'donchianExit'],
+  ema: ['fast', 'slow'], ema_rsi: ['fast', 'slow'], macd: ['macdFast', 'macdSlow'], donchian: ['donchianEntry', 'donchianExit'], lines: ['stopAtr', 'tpR'],
 };
 export interface SweepRow { x: number; y: number; totalReturn: number; maxDrawdown: number; trades: number; profitFactor: number | null; sharpe: number | null; winRate: number | null }
 export interface SweepResult { xKey: SweepKey; yKey: SweepKey; xs: number[]; ys: number[]; rows: SweepRow[]; best: SweepRow | null; notes: string[] }

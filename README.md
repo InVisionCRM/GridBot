@@ -92,7 +92,7 @@ Sources:
    - over ranges ±5/8/12/18/25% × 6/10/14/20/30/40 levels.
    - Markets already in the app reuse their saved hourly candles (kept by the candle sync) when they cover the week up to the last 2 hours, so they cost no GeckoTerminal request.
 
-   The best setup per pair is kept if it made money **and** sold in at least 3 different hours. One spike is not a pattern: the first real scan ranked USDG/USDC first at +1.99% from a single stablecoin wick, and one wick through several levels completes several round trips inside the same candle.
+   The best setup per pair is kept if it made money **and** sold in at least 3 different hours. One spike is not a pattern: the first real scan ranked USDG/USDC first at +1.99% from a single stablecoin wick, and one wick through several levels completes several round trips inside the same candle. One-off price spikes are clipped before the test (see Backtester).
 5. **Picks.** The 3 best pairs per chain, with the week's result, trades, buy-and-hold for comparison and the worst dip. **Why other pools were left out** lists every skip with its reason.
 6. **Grid vs liquidity position vs holding** (`src/market/lp.ts`), for every tested pair, same week and test size. A liquidity position (LP) is opened at the first hour (swap part of the money into the coin, approve both, add liquidity) and held; it earns `volume × pool fee × LP share × your share of the pool's active liquidity` for the part of each hour the price is inside its range, and closing gas is charged at the end. V3 tries ±5/8/12/18/25% and full range; V2 is always full range. The pool's liquidity is today's, held constant over the week (the same approximation the grid's depth uses). Each row also shows the price impact of putting the whole test amount in at once: at $25,000 the PulseChain PLS/USDT pool (≈$28k) showed "hold −96%" in a week PLS fell ≈38%.
 
@@ -313,13 +313,28 @@ New bot → **Liquidity**, or **Start LP** on a row of Today's picks' *Grid vs l
 - **Money view.** *Fees earned* (collected + waiting), *Gas paid*, *Price change and swaps*, and *Overall* = fees − gas ± price, in the spend coin and ≈USD. On Home, fees − gas count as *Earned by trading* and the price part counts with *Bought, not sold yet*.
 - **Pause / Close / Remove.** Pause keeps the position open (still measured and earning, but not moved and no fees sent). Close takes everything out to the wallet. Remove only works once the position is closed.
 - **Restarts.** Every on-chain step is saved with its tx hash before waiting for it. A restart settles that step by its receipt and never sends it twice. A step that reverts 3 times stops the bot, and nothing is lost: the coins are in the wallet or the position.
-- **Paper.** Paper runs the same steps on a simulated position. Its fees come from the pool's real fee counters, scaled by the share of the pool it would have been.
+- **Paper.** Paper runs the same steps on a simulated position. It earns the pool's real global fee growth between two readings when the earlier one was in range, scaled by the share of the pool it would have been. That matches what a real position earns: on Oct 20 2026 the live ETH/USDG position earned 0.00854 USDG in two minutes in range, and the pool's global growth × its liquidity gave the same 0.00854.
+  - Why not the pool's fee-inside counters: a paper position's range ticks usually don't exist in the pool, so they read 0 and never flip. Out of range, Uniswap's fee-inside formula then wraps to about 2^128 × liquidity. A paper ETH/USDG bot showed a value of about 10^48 USDG for the 8 minutes the price was below its range (Oct 20 2026, 01:10–01:18 UTC). Live positions mint their ticks and keep using the pool's own counters.
+  - Paper bots saved before this fix start earning again from their next reading, and their value history starts over.
 
 ## Trend bot (long-only)
 
 Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the amount is entered in the coin it spends). They share the server, signing key, tx queue and nonce.
 
-- **Strategies.** EMA cross, EMA+RSI, MACD, Donchian breakout, plus an optional higher-timeframe EMA filter. Signals are evaluated once per newly closed candle, never on the forming one, so they don't repaint.
+- **Strategies.** EMA cross, EMA+RSI, MACD, Donchian breakout and **my drawn lines**, plus an optional higher-timeframe EMA filter. Signals are evaluated once per newly closed candle, never on the forming one, so they don't repaint.
+- **My drawn lines** (`strategy: 'lines'`, `cfg.lines`).
+  - **Drawing:** click **Trend line** and two candles, or **Level** and one price, on the chart in New bot, Backtest or a running bot's page. A channel is two trend lines; a zone is two levels.
+  - **Rules:** each line gets one, chosen from where it's drawn and changeable in one click.
+    - Buy when a candle closes above it (`buy_break`).
+    - Buy when the price dips to it and closes back above (`buy_bounce`).
+    - Sell when a candle closes below it (`sell_break`).
+    - Sell when the price reaches it (`sell_reach`).
+    - "Dips to" and "reaches" allow a touch distance, 0.2% by default.
+  - **Look on the chart:** green lines buy, red lines sell; dashed lines need a touch, solid ones a close through.
+  - **Shared rails:** the stop-loss, take-profit, trailing stop, sizing and cost check still apply.
+  - **Running bots:** `PUT /api/bot/trends/:id/lines` replaces the lines, from the next closed candle.
+  - **Backtests:** a trend line only trades from its later point (it couldn't have been drawn sooner); a level trades over the whole test. The result says that lines drawn today with hindsight look better in a backtest than they will live.
+  - **Drawing clicks:** they come from the browser, not the chart's click event. Measured in Chromium, the chart drops a click that follows another within about half a second, which lost a trend line's second point.
 - **Exits.** ATR stop and TP at an R multiple, both checked on every poll price; trailing ATR stop (ratchets on closed highs); max hold; signal exit; cooldown; manual Close.
 - **Sizing.** % of the bot's capital, or risk % (equity × risk ÷ stop distance).
 - **Cost gate.** The expected move (TP distance, or k×ATR) must clear the 0.579% round-trip fee + impact both ways from live reserves + gas + slippage allowance + min edge. Blocked signals are logged with the numbers.
@@ -350,8 +365,14 @@ Tools → Charts also has backfill buttons when a pair has no data.
 ## Backtester
 
 - **No look-ahead.** A signal at close *i* fills at the open of *i+1*. Stop/TP are intrabar; a gap through the stop fills at the open; stop and TP in the same candle → stop.
-- **Costs.** 0.29% fee per swap, impact from the **current** reserves re-centred at each historical price (an approximation), gas at today's gas price, 10 bps slippage.
-- **Metrics.** Return vs buy & hold PLS (same costs), CAGR, max DD, win rate, PF, expectancy, Sharpe/Sortino, exposure, fees/gas, entries blocked by the gate, plus the trade list.
+- **Costs.** The pool's fee on every swap, plus price impact from the coins the pool holds near **today's** price, re-centred at each historical price. That's an approximation: for a trade bigger than the liquidity near the price, a V3 pool's real cost is higher than shown. Plus gas at today's gas price and 10 bps slippage.
+- **Metrics.** Return vs holding the coin (same costs), per-year return, worst drop, win rate, profit factor, average result per trade, Sharpe/Sortino, time holding, one trade's price impact, entries blocked by the gate, and the trade list. Every input and number has an ⓘ explaining it.
+- **Where the result came from.** Price moves, pool fees, price impact, slippage and gas, in the coin. These are totalled over every swap, including buys of coins still held, and they add up to the result exactly.
+- **Too big for this pool.** When one trade moves the price more than 2%, or is over a quarter of the coins the pool holds near the price, the result says so. It gives the size that keeps impact under 1%. Example (Oct 20 2026): 10,000 ETH (≈ $24M) in the WBTC/ETH 0.01% pool. That pool holds ≈ 2,600 ETH near the price, so holding alone "lost" 79% to its one buy. The real Uniswap quoter showed the pool runs dry after about 92 ETH's worth.
+- **One-off price spikes are clipped** (`trimSpikes` in `src/market/candles.ts`, used by every backtest and the daily scan). One big trade in a thin pool prints a price far from the real one, and arbitrage puts the pool straight back within the block. A replay that fills there books trades no bot could have made. Each close is checked against its two neighbours: a jump that comes straight back is a print, a move that stays is real. The candle is then held within 20× the pair's usual hourly move (median close-to-close change) of that path. The result says how many candles were clipped, and the chart still shows them as printed.
+  - Evidence (Oct 20 2026): the WBTC/ETH 0.01% pool's 2026-10-18 03:00 UTC candle printed a high of 42.67, +26% over the real market (Crypto.com ETH/BTC moved 0.2% that hour). 16 of that week's 169 hourly candles reached far outside the real range.
+  - Every round trip the grid backtest showed was in one of those hours. The 10,000 ETH test went from −68.58% (20 phantom trades, each paying huge impact) to −32.63% with 0 trades: what's left is the start-up buy's impact. 1 ETH went from +18.96% to +0.83%.
+  - The 20× limit comes from 44 real exchange series (BTC, ETH, SOL, DOGE, PEPE, LINK vs USDT, ETH/BTC and USDT/USD, 1m to 1D, 13,200 candles). They never reached past 17.7×, so no real candle is touched.
 - **Sweep.** Two-parameter heatmap with an in-sample/overfitting warning. "Use these settings" starts a paper bot.
 - **Grid configs.** Can be backtested too; fills at exact level prices are optimistic.
 

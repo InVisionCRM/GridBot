@@ -13,6 +13,7 @@ import { botView, earnedByCoin, errMsg, gridName, gridPnlUsd, quoteSym, rangeSta
 import { buildFeed, LiveFeed, LiveLevels, LivePrice, livePrice, LiveRange } from './live';
 import { nextLevels } from '../live/liveGrid';
 import type { ActivityEvent, Ticks } from './useStream';
+import { L } from './Tip';
 
 interface Props { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 interface HomeProps extends Props { events: ActivityEvent[]; ticks: Ticks | null; ver: AnyObj | null }
@@ -213,7 +214,7 @@ function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | '
         <h3>Today's picks</h3>
         <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `scanned ${ago(p.at)} · next scan ${time(p.nextAt)}` : 'not scanned yet'}</span>
         <span className="grow" />
-        <label className="small muted test-usd" title="The amount every setup is tested with. Use what you plan to put in: price impact and your share of a pool depend on it.">Test with $<input value={testUsd} inputMode="decimal" onChange={(e) => setUsd(e.target.value.replace(/[$,\s]/g, ''))} /></label>
+        <label className="small muted test-usd"><L tip="The amount every setup is tested with, in dollars. Use what you plan to put in: price impact and your share of a pool depend on it.">Test with $</L><input value={testUsd} inputMode="decimal" onChange={(e) => setUsd(e.target.value.replace(/[$,\s]/g, ''))} /></label>
         <button type="button" className="btn small-btn" disabled={busy || p.running} onClick={scan}>{p.running ? 'Scanning…' : 'Scan now'}</button>
       </div>
       <p className="small muted picks-note">Each chain's busiest pools are checked for real trading and safety, then the grid is replayed on the last 7 days of hourly prices with the pool's fee, price impact and gas, using about ${p.testUsd.toLocaleString('en-US')} of the coin it spends. These are the setups that made the most. A good week doesn't promise the next one, so start in paper first.</p>
@@ -323,7 +324,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
     <main className="stack">
       <section className="hero" aria-label="Earned by trading">
         <div className="hero-earn">
-          <span className="k">Earned by trading</span>
+          <span className="k"><L tip="Profit from completed buy → sell trades (and liquidity fees after gas), counted in each coin. A falling price doesn't lower it; only a losing trade does.">Earned by trading</L></span>
           <div className="coins-earned">
             {earn.length ? earn.map((e) => (
               <span key={e.symbol} className={`ce ${cls(e.amount)}`}>
@@ -337,14 +338,14 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
           </span>
         </div>
         <div className="hero-now">
-          <span className="k">Right now</span>
+          <span className="k"><L tip="Bots running, the last trade, and the closest level any grid is waiting for: the trade most likely to happen next.">Right now</L></span>
           <div className="now-line"><span className={`pulse ${running ? '' : 'off'}`} key={ticks?.t ?? 0} />{running} of {bots.length} bot{bots.length === 1 ? '' : 's'} running</div>
           <div className="small">{lastTrade ? <>Last trade <b>{ago(lastTrade)}</b></> : 'No trades yet'}</div>
           {next && <div className="small">Next likely trade: <b>{next.bot}</b> {next.side === 'buy' ? 'buys' : 'sells'} at <b>{px(next.at)}</b>, {pct(next.dist, 2)} away</div>}
         </div>
       </section>
-      <p className="hero-foot muted small" title="The bots' coins valued at today's prices. It moves with the market every day, whether or not the bots trade.">
-        Holdings at today's prices: <b>{value != null ? usd(value) : '—'}</b>{unsold != null && unsold !== 0 ? <> (coins not sold yet: <span className={cls(unsold)}>{usd(unsold, true)}</span>)</> : null}. This moves with the market every day; it isn't a trading result.
+      <p className="hero-foot muted small">
+        <L tip="The bots' coins valued at today's prices. It moves with the market every day, whether or not the bots trade.">Holdings at today's prices:</L> <b>{value != null ? usd(value) : '—'}</b>{unsold != null && unsold !== 0 ? <> (coins not sold yet: <span className={cls(unsold)}>{usd(unsold, true)}</span>)</> : null}. This moves with the market every day; it isn't a trading result.
       </p>
 
       {notices.length > 0 && (
@@ -375,7 +376,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
           )}
         </section>
         <section className="card live-card" aria-label="Live">
-          <div className="card-head"><h3><span className="pulse" key={ticks?.t ?? 0} />Live</h3><span className="muted small">every buy, sell and transaction as it happens</span></div>
+          <div className="card-head"><h3><span className="pulse" key={ticks?.t ?? 0} /><L tip="Every buy, sell and transaction the moment it happens. Each sell shows what that one trade made or lost after fees and gas; a buy shows the level it will sell at. Tap a row to open its bot.">Live</L></h3><span className="muted small">every buy, sell and transaction as it happens</span></div>
           <LiveFeed s={s} items={feed} nav={nav} />
         </section>
       </div>

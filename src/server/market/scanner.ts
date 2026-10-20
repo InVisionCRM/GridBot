@@ -13,7 +13,7 @@ import { bestSetup, checkTestUsd, pickTokens, PICKS_PER_CHAIN, SCAN_CANDLES, SCA
 import { bestLp, lpShareFromFeeProtocol, type LpSetup } from '../../market/lp';
 import { buyHold } from '../../market/backtest';
 import { simBuy } from '../../market/costs';
-import { closedOnly, fillGaps, type Candle, type TF } from '../../market/candles';
+import { replayCandles, trimSpikes, type Candle, type TF } from '../../market/candles';
 import type { CandleStore } from './candleStore';
 import type { MarketSnapshot } from '../bot/chain';
 import { costModelOf } from '../bot/econ';
@@ -85,7 +85,7 @@ export interface ScanDeps {
   /** New token → draft market that passed the safety check; throws the reason otherwise */
   inspect(chainId: number, token: string, spend: string): Promise<MarketDef>;
   snapshot(def: MarketDef): Promise<MarketSnapshot>;
-  /** Saved closed hourly candles of a market in the app (gap-filled, oldest first); [] for a new token */
+  /** Saved closed hourly candles of a market in the app (one-off prints clipped, gap-filled, oldest first); [] for a new token */
   storedHourly(def: MarketDef): Candle[];
   /** Share of the swap fee liquidity providers keep in this market's pool; throws when it isn't verified */
   lpShare(def: MarketDef): Promise<number>;
@@ -219,7 +219,7 @@ export class DailyScanner {
     const saved = this.d.storedHourly(d);
     const fresh = saved.length >= SCAN_CANDLES && saved[saved.length - 1].t >= this.now() / 1000 - 2 * 3600;
     const token = d.base.native ? c.wrapped : d.base.address;
-    const k = fresh ? saved : await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
+    const k = fresh ? saved : trimSpikes(await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps })));
     const week = k.slice(-SCAN_CANDLES);
     const costs = costModelOf(snap, d.pool.feeBps, this.d.approval);
     const s = bestSetup(week, costs, capital);
@@ -273,7 +273,7 @@ export function scanDepsFromHub(hub: Hub, candles: CandleStore, rest: Pick<ScanD
     storedHourly: (d) => {
       if (!hub.has(d.key)) return [];
       const nowSec = Math.floor((rest.now ?? Date.now)() / 1000);
-      return fillGaps(closedOnly(candles.get(d.key, '1h'), '1h', nowSec), '1h');
+      return replayCandles(candles.get(d.key, '1h'), '1h', nowSec);
     },
     lpShare: async (d) => {
       const dex = hub.chain(d.chainId).dexes.find((x) => x.id === d.pool.dex);

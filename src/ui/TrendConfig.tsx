@@ -1,6 +1,7 @@
 /** Trend strategy settings editor (New bot + Backtest) and plain-language strategy descriptions. */
 import { STRATEGIES, type StrategyKind, type TrendConfig } from '../market/strategy';
 import { TFS } from '../market/candles';
+import { L } from './Tip';
 
 export function strategyRule(c: TrendConfig): string {
   const rules: Record<StrategyKind, string> = {
@@ -8,12 +9,13 @@ export function strategyRule(c: TrendConfig): string {
     ema_rsi: `the ${c.fast}/${c.slow} averages cross up while RSI is between ${c.rsiMin} and ${c.rsiMax}`,
     macd: `MACD (${c.macdFast}/${c.macdSlow}) crosses above its ${c.macdSignal}-candle signal line`,
     donchian: `the close beats the highest high of the previous ${c.donchianEntry} candles`,
+    lines: (() => { const n = c.lines.filter((l) => l.rule.startsWith('buy')).length; return n ? `one of your ${n} buy line${n === 1 ? '' : 's'} fires` : 'a buy line you draw fires (none drawn yet)'; })(),
   };
   return rules[c.strategy];
 }
 
 const F = ({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) => (
-  <label title={hint}>{label}{children}</label>
+  <label>{hint ? <L tip={hint}>{label}</L> : label}{children}</label>
 );
 
 /** Strategy parameters, exits and sizing. `showStrategy` = include the strategy picker. */
@@ -31,6 +33,7 @@ export function TrendConfigEditor({ cfg, onChange, showStrategy = true }: { cfg:
         {cfg.strategy === 'ema_rsi' && <>{n('rsiPeriod', 'RSI length', '', '1')}{n('rsiMin', 'RSI min', 'enter only if RSI ≥ min')}{n('rsiMax', 'RSI max', 'and ≤ max (skips overbought)')}</>}
         {cfg.strategy === 'macd' && <>{n('macdFast', 'MACD fast', '', '1')}{n('macdSlow', 'MACD slow', '', '1')}{n('macdSignal', 'Signal', '', '1')}</>}
         {cfg.strategy === 'donchian' && <>{n('donchianEntry', 'Breakout candles', 'buy when the close beats the prior N-candle high', '1')}{n('donchianExit', 'Exit candles', 'sell when the close drops below the prior N-candle low', '1')}</>}
+        {cfg.strategy === 'lines' && n('lineTouchPct', 'Touch distance', 'how close a candle must come to a line to count as touching it, as a fraction of the price (0.002 = 0.2%); for the dip-and-hold and reached rules')}
       </div>
       <div className="form-row">
         {n('stopAtr', 'Stop (× ATR)', 'stop-loss = entry − k × ATR')}

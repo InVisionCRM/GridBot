@@ -6,12 +6,13 @@ import { EquityChart } from './Chart';
 import { cls, num, pct, px, time, usd } from './fmt';
 import { ChainBadge, chainOf, explorerTx, feeLabel, lbl, MarketOptions, mk, RiskBadge, useChainFilter } from './chains';
 import { IND, T } from './theme';
+import { L } from './Tip';
 
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 const COLORS = [T.text, IND.slow, T.warn, IND.band, T.muted, IND.fast, T.line2];
 
-function Kpi({ label, children, sub }: { label: string; children: React.ReactNode; sub?: React.ReactNode }) {
-  return <div className="kpi"><span>{label}</span><div className="kpi-v">{children}</div>{sub && <small className="muted">{sub}</small>}</div>;
+function Kpi({ label, children, sub, tip }: { label: string; children: React.ReactNode; sub?: React.ReactNode; tip: string }) {
+  return <div className="kpi"><span><L tip={tip}>{label}</L></span><div className="kpi-v">{children}</div>{sub && <small className="muted">{sub}</small>}</div>;
 }
 
 export function MarketPanels({ panels }: { panels: AnyObj[] }) {
@@ -76,15 +77,15 @@ export function Analytics({ status: s }: { status: AnyObj }) {
       <div className="card">
         <h3>Portfolio <span className="muted small">all bots on all chains · ≈USD (stables $1; other quotes via each chain's native/stable market)</span></h3>
         <div className="kpi-row">
-          <Kpi label="Total equity ≈$"><AnimatedNumber value={tot?.equityUsd} format={(x) => usd(x)} className="big" /></Kpi>
-          <Kpi label="Allocated" sub={`${ov?.bots?.length ?? 0} bots`}>{usd(tot?.capitalUsd)}</Kpi>
-          <Kpi label="Realized"><AnimatedNumber value={tot?.realizedUsd} format={(x) => usd(x, true)} className={cls(tot?.realizedUsd)} /></Kpi>
-          <Kpi label="Unrealized"><AnimatedNumber value={tot?.unrealizedUsd} format={(x) => usd(x, true)} className={cls(tot?.unrealizedUsd)} /></Kpi>
-          <Kpi label="Today"><P k="today" /></Kpi>
-          <Kpi label="7 days"><P k="d7" /></Kpi>
-          <Kpi label="All-time"><P k="all" /></Kpi>
-          <Kpi label="Fees / gas">{usd(tot?.feesUsd)} / {usd(tot?.gasUsd)}</Kpi>
-          <Kpi label="vs HODL base" sub={tot?.hodlUsd ? `HODL ${usd(tot.hodlUsd)}` : undefined}><b className={cls(tot?.vsHodlPct)}>{pct(tot?.vsHodlPct, 2, true)}</b></Kpi>
+          <Kpi label="Total value ≈$" tip="Everything the bots hold (their coins at today's prices plus the coin they spend), in dollars. It moves with the market every day."><AnimatedNumber value={tot?.equityUsd} format={(x) => usd(x)} className="big" /></Kpi>
+          <Kpi label="Allocated" tip="The amounts you gave the bots, in dollars at today's prices." sub={`${ov?.bots?.length ?? 0} bots`}>{usd(tot?.capitalUsd)}</Kpi>
+          <Kpi label="Realized" tip="Banked from completed trades and liquidity fees after gas, in dollars at today's prices. Price moves don't change it."><AnimatedNumber value={tot?.realizedUsd} format={(x) => usd(x, true)} className={cls(tot?.realizedUsd)} /></Kpi>
+          <Kpi label="Unrealized" tip="The change on coins bought and not sold yet, at today's price. It moves with the market until they sell."><AnimatedNumber value={tot?.unrealizedUsd} format={(x) => usd(x, true)} className={cls(tot?.unrealizedUsd)} /></Kpi>
+          <Kpi label="Today" tip="How much the bots' value changed since midnight (realized from trades shown below it)."><P k="today" /></Kpi>
+          <Kpi label="7 days" tip="How much the bots' value changed over the last 7 days (realized from trades shown below it)."><P k="d7" /></Kpi>
+          <Kpi label="All-time" tip="How much the bots' value changed since they started (realized from trades shown below it)."><P k="all" /></Kpi>
+          <Kpi label="Fees / gas" tip="Pool fees and network gas paid by all bots, in dollars.">{usd(tot?.feesUsd)} / {usd(tot?.gasUsd)}</Kpi>
+          <Kpi label="vs holding" tip="The bots' value compared with putting the same amounts into the coins they stack at their start and just holding." sub={tot?.hodlUsd ? `holding: ${usd(tot.hodlUsd)}` : undefined}><b className={cls(tot?.vsHodlPct)}>{pct(tot?.vsHodlPct, 2, true)}</b></Kpi>
         </div>
         {allocTotal > 0 && (
           <div className="alloc">

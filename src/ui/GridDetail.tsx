@@ -14,6 +14,7 @@ import { reserveCfg } from '../live/gasReserve';
 import { humanAmount } from '../live/amount';
 import { recenterAt } from '../live/recenter';
 import { LiveLevels, livePrice } from './live';
+import { L, Tip } from './Tip';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -126,9 +127,9 @@ function Limits({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean 
   const apply = () => act(() => botApi(`grids/${g.id}/limits`, 'PUT', { maxPriceImpact: +impact / 100, slippageBps: Math.round(+slip * 100), deadlineMinutes: +deadline }));
   return (
     <div className="form-row">
-      <label title="Skip a trade if it would move the pool price more than this">Max price impact %<input value={impact} onChange={(e) => setImpact(e.target.value)} /></label>
-      <label title="If the price moves more than this before the swap is mined, it reverts and only gas is lost">Slippage %<input value={slip} onChange={(e) => setSlip(e.target.value)} /></label>
-      <label title="Minutes a swap stays valid on-chain">Deadline (min)<input value={deadline} onChange={(e) => setDeadline(e.target.value)} /></label>
+      <label><L tip="A trade is skipped if it would move the pool's price more than this against you. Default 3%.">Max price impact %</L><input value={impact} onChange={(e) => setImpact(e.target.value)} /></label>
+      <label><L tip="If the price moves more than this between the quote and the swap landing, the swap cancels itself and only gas is lost. Default 1%.">Slippage %</L><input value={slip} onChange={(e) => setSlip(e.target.value)} /></label>
+      <label><L tip="Minutes a sent swap stays valid. If it hasn't landed by then it cancels itself.">Deadline (min)</L><input value={deadline} onChange={(e) => setDeadline(e.target.value)} /></label>
       <div className="actions"><button type="button" className="btn" disabled={busy} onClick={apply}>Apply now</button></div>
     </div>
   );
@@ -149,7 +150,7 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
       </div>
       <div className="table-wrap"><table>
         <thead>{all
-          ? <tr><th>Time</th><th>Side</th><th>Level</th><th>{base}</th><th>{q}</th><th title="price when the level was crossed">Trigger</th><th title="router quote after known tax">Quote</th><th title="from the receipt / balance change">Executed</th><th title="+ = worse than quote">Slip</th><th>Tax</th><th>Gas ({q})</th><th title="proceeds − sell gas − the matched buy's cost">Trade profit</th><th>DEX</th><th>Tx</th></tr>
+          ? <tr><th>Time</th><th>Side</th><th>Level</th><th>{base}</th><th>{q}</th><th>Trigger <Tip>Price when the level was crossed.</Tip></th><th>Quote <Tip>Router quote after known tax.</Tip></th><th>Executed <Tip>From the receipt / balance change.</Tip></th><th>Slip <Tip>+ = worse than quote.</Tip></th><th>Tax</th><th>Gas ({q})</th><th>Trade profit <Tip>Proceeds − sell gas − the matched buy's cost.</Tip></th><th>DEX</th><th>Tx</th></tr>
           : <tr><th>Time</th><th>Side</th><th>{base}</th><th>Price</th><th>Trade profit</th><th>Tx</th></tr>}
         </thead>
         <tbody>
@@ -223,23 +224,23 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       {running && <div className="card live-strip"><LiveLevels g={g} price={livePrice(ticks, g.stable, g.price)} /></div>}
 
       <div className="kpi-row">
-        <div className="kpi" title="Every completed buy then sell: what the sell brought in minus what that buy cost, after pool fees and gas. This is money the grid has made, and the coin's price no longer changes it.">
-          <span>Earned by trading</span>
+        <div className="kpi">
+          <span><L tip="Every completed buy then sell: what the sell brought in minus what that buy cost, after pool fees and gas. This is money the grid has made; the coin's price no longer changes it.">Earned by trading</L></span>
           <div className={`kpi-v ${cls(earned)}`}><AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} /></div>
           <span className="sub">from {g.stats.roundTrips} completed buy → sell trade{g.stats.roundTrips === 1 ? '' : 's'}, after fees and gas{inUsd(earned)}</span>
         </div>
-        <div className="kpi" title="Coins the grid bought that haven't sold yet. Their value goes up and down with the price until they sell at the next level up.">
-          <span>Bought, not sold yet</span>
+        <div className="kpi">
+          <span><L tip="Coins the grid bought that haven't sold yet, compared with what they cost. This goes up and down with the price until they sell one level up; it isn't a loss unless they're sold below cost.">Bought, not sold yet</L></span>
           <div className={`kpi-v ${cls(open)}`}>{held > 0 ? qty(open, q, 5) : '—'}</div>
           <span className="sub">{held > 0 ? `${num(held, held < 10 ? 6 : 2)} ${g.base} bought for ${qty(g.pnl.costUsd, q, 5, false)}, worth ${qty(held * (g.price ?? 0), q, 5, false)} now` : 'nothing waiting to sell'}</span>
         </div>
-        <div className="kpi" title="Earned by trading plus the change on the coins not sold yet, in the coin this grid spends">
-          <span>Overall, in {q}</span>
+        <div className="kpi">
+          <span><L tip={`Earned by trading plus the change on the coins not sold yet, in ${q}.`}>Overall, in {q}</L></span>
           <div className={`kpi-v ${cls(earned + open)}`}>{qty(earned + open, q, 5)}</div>
           <span className="sub">{k ? `≈ ${usd((earned + open) * k, true)} at today's ${q} price` : 'no dollar price for this coin'}</span>
         </div>
-        <div className="kpi"><span>Completed trades</span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg {money(g.stats.avgNet)} each · {g.stats.wins} profitable</span></div>
-        <div className="kpi"><span>Price</span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>
+        <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg {money(g.stats.avgNet)} each · {g.stats.wins} profitable</span></div>
+        <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>
       </div>
 
       <div className="card">

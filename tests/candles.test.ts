@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AbiCoder, zeroPadValue } from 'ethers';
 import { describe, expect, it } from 'vitest';
-import { aggregate, applyTick, bucketStart, closedOnly, fillGaps, mergeCandles, type Candle } from '../src/market/candles';
+import { aggregate, applyTick, bucketStart, closedOnly, fillGaps, mergeCandles, replayCandles, SPIKE_MOVES, trimSpikes, type Candle } from '../src/market/candles';
+import { runGridBacktest } from '../src/market/backtest';
+import { candlesFromCloses } from './helpers/candles';
+import fx from './fixtures/wbtc-eth-1h.json';
 import { CandleStore } from '../src/server/market/candleStore';
 import { GeckoSource, MAX_GAP_MS, RateLimited, SPEEDUP_AFTER } from '../src/server/market/gecko';
 import { SWAP_TOPIC, SYNC_TOPIC, rebuildFromChain } from '../src/server/market/onchain';
@@ -162,5 +165,88 @@ describe('on-chain candle rebuild', () => {
     expect(st.tick('DAI', 1.32e-5, t0 + 50)).toBe(true);
     expect(st.get('DAI', '1h').at(-1)!.h).toBe(1.32e-5);
     expect(st.tick('DAI', NaN, t0 + 60)).toBe(false);
+  });
+});
+
+describe(`one-off prints: clipped past ${SPIKE_MOVES} usual moves (trimSpikes)`, () => {
+  const dex: Candle[] = fx.dex.map((r) => ({ t: r[0], o: r[1], h: r[2], l: r[3], c: r[4], v: r[5] }));
+  // The real market in the same units: ETH per WBTC = 1 / (BTC per ETH), so the high and low swap.
+  const real: Candle[] = fx.real.map((r) => ({ t: r[0], o: 1 / r[1], h: 1 / r[3], l: 1 / r[2], c: 1 / r[4], v: 0 }));
+  const hour = (k: Candle[], iso: string) => k.find((x) => x.t === Date.parse(iso) / 1000)!;
+
+  it('the WBTC/ETH hours that printed +26% and +17% over the real market are clipped to within 3% of it; no open or close moves', () => {
+    const out = trimSpikes(dex);
+    for (const [iso, printed] of [['2026-10-18T03:00:00Z', 1.26], ['2026-10-19T18:00:00Z', 1.17]] as const) {
+      expect(hour(dex, iso).h / hour(real, iso).h).toBeCloseTo(printed, 2);
+      expect(hour(out, iso).s).toBe(1);
+      expect(hour(out, iso).h / hour(real, iso).h).toBeLessThan(1.03);
+    }
+    expect(out.filter((k) => k.s)).toHaveLength(16);
+    out.forEach((k, i) => { expect(k.o).toBe(dex[i].o); expect(k.c).toBe(dex[i].c); });
+  });
+
+  it('real exchange candles (ETH/BTC, the same hours) are never touched', () => {
+    const out = trimSpikes(real);
+    out.forEach((k, i) => expect(k).toBe(real[i]));
+  });
+
+  it('the user\'s WBTC/ETH grid: every trade it showed was in a spike hour; without the spikes it makes none', () => {
+    // Uniswap V3 0.01% pool read from the chain 2026-10-20: 2,618.5 ETH + 76.88 WBTC near the price
+    const costs = { feeBps: 1, pool: { quoteReserve: 2618.5, plsReserve: 76.88 }, gasPricePls: 0, approval: 'exact' as const, slippageBps: 10 };
+    const g = { lowerPrice: 28.91, upperPrice: 39.113, gridCount: 6 };
+    const clipped = new Set(trimSpikes(dex).filter((k) => k.s).map((k) => k.t));
+    // 10,000 ETH: the screenshot's −68.58%; the phantom round trips each paid huge impact on top of the start-up buy
+    const big = runGridBacktest(dex, { ...g, capital: 10_000 }, '1h', costs);
+    expect(big.metrics.totalReturn).toBeCloseTo(-0.6858, 4);
+    expect(big.trades.every((t) => clipped.has(t.entryT) || clipped.has(t.exitT))).toBe(true);
+    const bigClean = runGridBacktest(trimSpikes(dex), { ...g, capital: 10_000 }, '1h', costs);
+    expect(bigClean.trades).toHaveLength(0);
+    expect(bigClean.metrics.totalReturn).toBeCloseTo(-0.3263, 4);
+    // 1 ETH: a +19% week from phantom fills; really the price stayed between two levels
+    const small = runGridBacktest(dex, { ...g, capital: 1 }, '1h', costs);
+    expect(small.trades.length).toBeGreaterThan(20);
+    expect(small.metrics.totalReturn).toBeGreaterThan(0.18);
+    const smallClean = runGridBacktest(trimSpikes(dex), { ...g, capital: 1 }, '1h', costs);
+    expect(smallClean.trades).toHaveLength(0);
+    expect(smallClean.metrics.totalReturn).toBeLessThan(0.01);
+  });
+
+  // ±0.1% hourly wiggle: the usual move is 0.0685%, so 20 usual moves is 1.38%
+  const calm = Array.from({ length: 60 }, (_, i) => 100 * (1 + 0.001 * Math.sin(i)));
+
+  it('a move that stays is real and kept, however big', () => {
+    const k = candlesFromCloses(calm.map((c, i) => (i >= 30 ? c * 1.1 : c)), undefined, undefined, 0.0005);
+    trimSpikes(k).forEach((x, i) => expect(x).toBe(k[i]));
+  });
+
+  it('a jump that comes straight back is clipped, in the wick and in the close', () => {
+    const k = candlesFromCloses(calm.map((c, i) => (i === 30 ? c * 1.1 : c)), undefined, undefined, 0.0005);
+    k[45] = { ...k[45], h: k[45].h * 1.25 };
+    const out = trimSpikes(k);
+    expect(out.flatMap((x, i) => (x.s ? [i] : []))).toEqual([30, 31, 45]);
+    expect(out[30].c).toBeLessThan(calm[30] * 1.02); // the close printed +10% and the next hour opened there
+    expect(out[31].o).toBeLessThan(calm[30] * 1.02);
+    expect(out[45].h).toBeLessThan(Math.max(out[45].o, out[45].c) * 1.02); // printed +25%
+    expect(out[45].c).toBe(k[45].c);
+  });
+
+  it('nothing to measure against (no close ever moved, or under 3 candles): returned as it is', () => {
+    const flat = Array.from({ length: 50 }, (_, i) => ({ t: T0 + i * 3600, o: 1, h: 1.0005, l: i === 20 ? 0.9 : 0.9995, c: 1, v: 1 }));
+    expect(trimSpikes(flat)).toBe(flat);
+    const two = candlesFromCloses([1, 2]);
+    expect(trimSpikes(two)).toBe(two);
+  });
+
+  it('replays clip before filling gaps (a gap after a spiked close repeats the clipped price) and skip the open candle', () => {
+    const k = candlesFromCloses(calm, T0, 3600, 0.0005);
+    k[15] = { ...k[15], c: calm[15] * 1.1, h: calm[15] * 1.1 };
+    const raw = [...k.slice(0, 16), { ...k[18], o: calm[17] }, ...k.slice(19)]; // hours 16 and 17 had no trades
+    const nowSec = k[59].t + 1800; // hour 59 is still open
+    const out = replayCandles(raw, '1h', nowSec);
+    expect(out).toHaveLength(59);
+    expect(out[15].s).toBe(1);
+    expect(out[15].c).toBeLessThan(calm[15] * 1.02);
+    expect(out[16]).toMatchObject({ f: 1, c: out[15].c });
+    expect(out[17]).toMatchObject({ f: 1, c: out[15].c });
   });
 });

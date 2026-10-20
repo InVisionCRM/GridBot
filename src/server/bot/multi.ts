@@ -14,7 +14,7 @@ import { totals, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
 import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
-import { LpEngine, freshLp, type LpStartParams, type LpState } from './lpEngine';
+import { LpEngine, freshLp, upgradeLp, type LpStartParams, type LpState } from './lpEngine';
 import { TaxWatch } from './taxWatch';
 import type { Logger } from './logger';
 import type { Store } from './store';
@@ -28,10 +28,10 @@ import { sameAddr } from '../dex/types';
 import { costModelOf, gridEconomics, type EconCfg, type EconSummary } from './econ';
 import { ActivityBus } from './activity';
 import { CandleStore } from '../market/candleStore';
-import { closedOnly, fillGaps, isTF, sliceRange, type Candle, type TF } from '../../market/candles';
+import { closedOnly, fillGaps, isTF, replayCandles, sliceRange, type Candle, type TF } from '../../market/candles';
 import { atr, ema, efficiencyRatio, rsi } from '../../market/indicators';
 import { simBuy, simSell, type CostModel, DEFAULT_COSTS } from '../../market/costs';
-import { DEFAULT_TREND, type TrendConfig } from '../../market/strategy';
+import { DEFAULT_TREND, type DrawnLine, type TrendConfig } from '../../market/strategy';
 import { runGridBacktest, runTrendBacktest, sweepTrend, SWEEP_AXES, type BtResult, type SweepKey } from '../../market/backtest';
 import { drawdown, pushCapped, tradeStats } from '../../market/stats';
 
@@ -104,7 +104,7 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
       grids: (o.grids as BotState[]).map((g) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
       trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
       // config.baseAmount arrived with funding from wallet coins: earlier bots put in none
-      lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => ({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],
+      lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => upgradeLp({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],
       alerts: Array.isArray(o.alerts) ? (o.alerts as Alert[]) : [],
       portfolio: Array.isArray(o.portfolio) ? (o.portfolio as MultiState['portfolio']) : [],
     };
@@ -137,6 +137,7 @@ export interface JournalRow {
 }
 
 const usdFmt = (x: number) => Math.round(x * 100) / 100;
+const spikeNote = (n: number) => (n ? `${n} candle${n === 1 ? '' : 's'} had a one-off price spike clipped: a single trade in a thin pool printed a price far outside this pair's usual moves and the pool was put straight back, so no bot could have traded there.` : '');
 
 export class MultiBot {
   readonly hub: Hub;
@@ -308,6 +309,7 @@ export class MultiBot {
   stopTrend(id: string) { this.trend(id).stop(); }
   closeTrend(id: string) { this.trend(id).closePosition(); }
   setTrendLimits(id: string, l: Partial<SafetyLimits>) { this.trend(id).setLimits(l); }
+  setTrendLines(id: string, lines: DrawnLine[]) { this.trend(id).setLines(lines); }
   removeTrend(id: string, force = false) {
     const eng = this.trendEngines.get(id);
     if (eng && eng.state.status === 'running') eng.stop();
@@ -920,10 +922,13 @@ export class MultiBot {
     return { model, note };
   }
 
+  private btSeries(pair: string, tf: TF) {
+    return replayCandles(this.candles.get(pair, tf), tf, Math.floor(this.now() / 1000));
+  }
+
   private btCandles(pair: string, tf: TF, from?: number, to?: number) {
-    const raw = this.candles.get(pair, tf);
-    const k = sliceRange(fillGaps(closedOnly(raw, tf, Math.floor(this.now() / 1000)), tf), from, to);
-    return { k, meta: this.candles.getMeta(pair, tf), gaps: k.filter((x) => x.f).length };
+    const k = sliceRange(this.btSeries(pair, tf), from, to);
+    return { k, meta: this.candles.getMeta(pair, tf), gaps: k.filter((x) => x.f).length, spikes: k.filter((x) => x.s).length };
   }
 
   /** Backtest capital in the market's spend (quote) coin. */
@@ -941,21 +946,21 @@ export class MultiBot {
   async backtest(p: { pair: string; tf: string; from?: number; to?: number; capital?: number; cfg?: Partial<TrendConfig>; costs?: { useImpact?: boolean; useGas?: boolean; slippageBps?: number } }) {
     if (!isTF(p.tf)) throw new Error('unknown timeframe');
     const cfg = { ...DEFAULT_TREND, ...(p.cfg ?? {}) };
-    const { k, meta, gaps } = this.btCandles(p.pair, p.tf, p.from, p.to);
+    const { k, meta, gaps, spikes } = this.btCandles(p.pair, p.tf, p.from, p.to);
     const capital = this.capitalQuote(p.pair, p.capital);
     const { model, note } = await this.costModel(p.pair, p.costs);
-    const htf = cfg.htfEnabled ? fillGaps(closedOnly(this.candles.get(p.pair, cfg.htfTf), cfg.htfTf, Math.floor(this.now() / 1000)), cfg.htfTf) : undefined;
+    const htf = cfg.htfEnabled ? this.btSeries(p.pair, cfg.htfTf) : undefined;
     const r = runTrendBacktest(k, cfg, p.tf, { capital, costs: model, htf });
-    return { ...this.thin(r), pair: p.pair, cfg, capital, usdPerQuote: this.usdPerQuote(p.pair), costs: model, candles: k.length, gaps, from: k[0]?.t, to: k[k.length - 1]?.t, source: meta?.source ?? null, notes: [...r.notes, note, gaps ? `${gaps} empty candles gap-filled flat (no trades in those periods).` : ''].filter(Boolean) };
+    return { ...this.thin(r), pair: p.pair, cfg, capital, usdPerQuote: this.usdPerQuote(p.pair), costs: model, candles: k.length, gaps, spikes, from: k[0]?.t, to: k[k.length - 1]?.t, source: meta?.source ?? null, notes: [...r.notes, note, spikeNote(spikes), gaps ? `${gaps} empty candles gap-filled flat (no trades in those periods).` : ''].filter(Boolean) };
   }
 
   async backtestGrid(p: { pair: string; tf: string; from?: number; to?: number; lowerPrice: number; upperPrice: number; gridCount: number; capital?: number; costs?: { useImpact?: boolean; useGas?: boolean; slippageBps?: number } }) {
     if (!isTF(p.tf)) throw new Error('unknown timeframe');
-    const { k, meta, gaps } = this.btCandles(p.pair, p.tf, p.from, p.to);
+    const { k, meta, gaps, spikes } = this.btCandles(p.pair, p.tf, p.from, p.to);
     const capital = this.capitalQuote(p.pair, p.capital);
     const { model, note } = await this.costModel(p.pair, p.costs);
     const r = runGridBacktest(k, { lowerPrice: p.lowerPrice, upperPrice: p.upperPrice, gridCount: p.gridCount, capital }, p.tf, model);
-    return { ...this.thin(r), pair: p.pair, capital, usdPerQuote: this.usdPerQuote(p.pair), costs: model, candles: k.length, gaps, from: k[0]?.t, to: k[k.length - 1]?.t, source: meta?.source ?? null, notes: [...r.notes, note] };
+    return { ...this.thin(r), pair: p.pair, capital, usdPerQuote: this.usdPerQuote(p.pair), costs: model, candles: k.length, gaps, spikes, from: k[0]?.t, to: k[k.length - 1]?.t, source: meta?.source ?? null, notes: [...r.notes, note, spikeNote(spikes)].filter(Boolean) };
   }
 
   async sweep(p: { pair: string; tf: string; from?: number; to?: number; capital?: number; cfg?: Partial<TrendConfig>; xKey?: SweepKey; xs?: number[]; yKey?: SweepKey; ys?: number[]; costs?: { useImpact?: boolean; useGas?: boolean; slippageBps?: number } }) {
@@ -970,7 +975,7 @@ export class MultiBot {
     const { k } = this.btCandles(p.pair, p.tf, p.from, p.to);
     const capital = this.capitalQuote(p.pair, p.capital);
     const { model } = await this.costModel(p.pair, p.costs);
-    const htf = cfg.htfEnabled ? fillGaps(closedOnly(this.candles.get(p.pair, cfg.htfTf), cfg.htfTf, Math.floor(this.now() / 1000)), cfg.htfTf) : undefined;
+    const htf = cfg.htfEnabled ? this.btSeries(p.pair, cfg.htfTf) : undefined;
     return { ...sweepTrend(k, cfg, p.tf, xKey, p.xs ?? defaults[xKey], yKey, p.ys ?? defaults[yKey], { capital, costs: model, htf }), candles: k.length, pair: p.pair, tf: p.tf };
   }
 

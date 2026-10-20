@@ -58,7 +58,8 @@ export function compareVersions(i: VersionInput): VersionVerdict {
       steps: [RESTART], notes,
     };
   }
-  return { state: 'current', title: 'Up to date', detail: `Running ${short(i.running)}${i.remote ? ', the same as GitHub main' : ''}.`, steps: [], notes };
+  const vsMain = i.remote == null ? '' : i.remote === i.running ? ', the same as GitHub main' : `, which already includes GitHub main (${short(i.remote)})`;
+  return { state: 'current', title: 'Up to date', detail: `Running ${short(i.running)}${vsMain}.`, steps: [], notes };
 }
 
 export interface VersionReport extends VersionVerdict {

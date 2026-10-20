@@ -9,6 +9,7 @@ import { ChainBadge, chainOf } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { botView, gridName, quoteSym, type AnyObj, type Nav, type View } from './model';
 import { humanAmount } from '../live/amount';
+import { Tip } from './Tip';
 
 /** Live price of a bot's market: the newest poll tick, else its last read. */
 export function livePrice(ticks: Ticks | null, key: string, fallbackFromStatus: number | null): number | null {
@@ -51,8 +52,8 @@ export function LiveLevels({ g, price }: { g: AnyObj; price: number | null }) {
   const lo = buy ?? price * 0.995, hi = sell ?? price * 1.005;
   const at = Math.max(0, Math.min(100, ((price - lo) / (hi - lo || 1)) * 100));
   return (
-    <div className="levels" title="Where the price is between this grid's next buy and next sell">
-      <span className={`state ${st.busy ? 'busy' : ''}`}>{st.label}</span>
+    <div className="levels">
+      <span className={`state ${st.busy ? 'busy' : ''}`}>{st.label}<Tip>The dot is the live price. The grid buys when it falls to BUY on the left and sells the coins it holds when it rises to SELL on the right. The % is how far away each one is.</Tip></span>
       <div className="lv-row">
         <span className="lv-end buy">{buy != null ? <>BUY {px(buy)} <i>{((1 - buy / price) * 100).toFixed(2)}%↓</i></> : <i>no buy armed</i>}</span>
         <div className="lv-track"><span className="lv-fill" style={{ width: `${at}%` }} /><span className="lv-dot" style={{ left: `${at}%` }} /></div>
@@ -70,8 +71,8 @@ export function LiveRange({ b, price }: { b: AnyObj; price: number | null }) {
   const at = (v: number) => Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
   const inside = price >= p.lower && price < p.upper;
   return (
-    <div className="levels" title="The position earns fees while the price is inside its range">
-      <span className={`state ${b.step ? 'busy' : inside ? '' : 'out'}`}>{b.step ? 'transaction…' : inside ? 'in range, earning' : 'out of range'}</span>
+    <div className="levels">
+      <span className={`state ${b.step ? 'busy' : inside ? '' : 'out'}`}>{b.step ? 'transaction…' : inside ? 'in range, earning' : 'out of range'}<Tip>The amber band is the position's range and the dot is the live price. It earns a share of every trade's fee while the dot is inside the band.</Tip></span>
       <div className="lv-row">
         <span className="lv-end">{px(p.lower)}</span>
         <div className="lv-track"><span className="lv-band" style={{ left: `${at(p.lower)}%`, width: `${at(p.upper) - at(p.lower)}%` }} /><span className={`lv-dot ${inside ? '' : 'out'}`} style={{ left: `${at(price)}%` }} /></div>

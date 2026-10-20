@@ -9,6 +9,8 @@ import {
   type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type SeriesMarker, type Time, type UTCTimestamp,
 } from 'lightweight-charts';
 import { bollinger, donchian, ema, macd, rsi } from '../market/indicators';
+import { lineValue, type DrawnLine } from '../market/strategy';
+import { lineColor, lineDashed, lineTitle } from './lines';
 import { TFS, TF_SEC, type Candle, type TF } from '../market/candles';
 import { http } from './api';
 import { px, num, ago } from './fmt';
@@ -35,7 +37,15 @@ export interface ChartProps {
   emaSlow?: number;
   /** Backtest trades to mark (entry ▲ / exit ▼ with reason and %) */
   btTrades?: { entryT: number; exitT: number; pnlPct: number; reason: string }[];
+  /** Lines drawn for a trend bot, shown on the chart */
+  drawn?: DrawnLine[];
+  /** Drawing: the next click(s) on the chart make a level (one click) or a trend line (two clicks, two candles) */
+  drawMode?: 'level' | 'trend' | null;
+  /** A finished drawing (points snap to candle starts), with the latest candle for context */
+  onDraw?: (g: Pick<DrawnLine, 'kind' | 'a' | 'b'>, last: Candle) => void;
 }
+
+type Pt = { t: number; p: number };
 
 export function Chart(p: ChartProps) {
   const [pair, setPair] = useState(p.pair ?? p.pairs[0] ?? 'DAI');
@@ -53,6 +63,15 @@ export function Chart(p: ChartProps) {
   const markers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const lines = useRef<IPriceLine[]>([]);
   const fast = p.emaFast ?? 9, slow = p.emaSlow ?? 21;
+  // Drawing: the click handler is bound once per chart build, so it reads the current mode and callback from a ref.
+  const draw = useRef({ mode: p.drawMode ?? null, onDraw: p.onDraw });
+  draw.current = { mode: p.drawMode ?? null, onDraw: p.onDraw };
+  const firstPt = useRef<Pt | null>(null);
+  const [pending, setPending] = useState<Pt | null>(null);
+  const drawnSeries = useRef<ISeriesApi<'Line'>[]>([]);
+  const drawnLevels = useRef<IPriceLine[]>([]);
+  const [built, setBuilt] = useState(0);
+  useEffect(() => { firstPt.current = null; setPending(null); }, [p.drawMode]);
 
   useEffect(() => { if (p.pair) setPair(p.pair); }, [p.pair]);
   useEffect(() => { if (p.tf) setTf(p.tf); }, [p.tf]);
@@ -123,9 +142,45 @@ export function Chart(p: ChartProps) {
       const d = e.seriesData.get(c) as AnyObj | undefined;
       setLegend(d ? { t: e.time as number, o: d.open, h: d.high, l: d.low, c: d.close, v: 0 } : null);
     });
+    // Drawing reads the browser's own clicks: the chart's click event drops a click that follows another within about
+    // half a second (measured in Chromium), which loses a trend line's second point when placed quickly.
+    const host = el.current;
+    const drawClick = (ev: MouseEvent) => {
+      const { mode, onDraw } = draw.current;
+      if (!mode || !onDraw) return;
+      const r = host.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+      if (x > ch.timeScale().width() || y > ch.panes()[0].getHeight()) return; // the price axis or a lower pane
+      const logical = ch.timeScale().coordinateToLogical(x), price = c.coordinateToPrice(y);
+      if (logical == null || price == null || !(price > 0)) return;
+      const pt = { t: k[Math.max(0, Math.min(k.length - 1, Math.round(logical)))].t, p: price };
+      if (mode === 'level') { onDraw({ kind: 'level', a: pt }, k[k.length - 1]); return; }
+      const a = firstPt.current;
+      if (!a || a.t === pt.t) { firstPt.current = pt; setPending(pt); return; }
+      firstPt.current = null; setPending(null);
+      onDraw({ kind: 'trend', a: a.t < pt.t ? a : pt, b: a.t < pt.t ? pt : a }, k[k.length - 1]);
+    };
+    host.addEventListener('click', drawClick);
     ch.timeScale().setVisibleLogicalRange({ from: Math.max(0, k.length - (p.compact ? 120 : 200)), to: k.length + 3 });
-    return () => { ch.remove(); chart.current = null; cs.current = null; markers.current = null; lines.current = []; };
+    setBuilt((x) => x + 1);
+    return () => { host.removeEventListener('click', drawClick); ch.remove(); chart.current = null; cs.current = null; markers.current = null; lines.current = []; drawnSeries.current = []; drawnLevels.current = []; };
   }, [candles, ov.ema, ov.dc, ov.bb, ov.vol, ov.rsi, ov.macd, fast, slow, p.height, p.compact, tf]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // drawn lines: a level is a price line; a trend line runs from its first point to the latest candle
+  useEffect(() => {
+    const ch = chart.current, c = cs.current;
+    if (!ch || !c) return;
+    for (const x of drawnSeries.current) ch.removeSeries(x);
+    for (const x of drawnLevels.current) c.removePriceLine(x);
+    drawnSeries.current = []; drawnLevels.current = [];
+    (p.drawn ?? []).forEach((l, i) => {
+      const style = { color: lineColor(l.rule), lineWidth: 2 as const, lineStyle: lineDashed(l.rule) ? LineStyle.Dashed : LineStyle.Solid };
+      if (l.kind === 'level') { drawnLevels.current.push(c.createPriceLine({ ...style, price: l.a.p, axisLabelVisible: true, title: lineTitle(l, i) })); return; }
+      const from = Math.min(l.a.t, l.b!.t);
+      const s = ch.addSeries(LineSeries, { ...style, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, title: lineTitle(l, i), priceFormat: { type: 'custom', formatter: fmtPx, minMove: 1e-12 } }, 0);
+      s.setData(candles.filter((x) => x.t >= from).map((x) => ({ time: ts(x.t), value: lineValue(l, x.t) })));
+      drawnSeries.current.push(s);
+    });
+  }, [p.drawn, built]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live last candle from SSE ticks (mutates the loaded array in place: no chart rebuild, zoom kept)
   useEffect(() => {
@@ -141,15 +196,15 @@ export function Chart(p: ChartProps) {
     cs.current.update({ time: ts(last.t), open: last.o, high: last.h, low: last.l, close: last.c });
   }, [p.ticks]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // bot overlays: grid levels, fills, trend entries/exits, stop/TP
+  // bot overlays: grid levels, fills, trend entries/exits, stop/TP (a backtest chart shows only the backtest's trades)
   const botsHere = useMemo(() => {
     const s = p.status;
-    if (!s) return { grids: [] as AnyObj[], trends: [] as AnyObj[], lps: [] as AnyObj[] };
+    if (!s || p.btTrades) return { grids: [] as AnyObj[], trends: [] as AnyObj[], lps: [] as AnyObj[] };
     return {
       grids: (s.grids ?? []).filter((g: AnyObj) => g.stable === pair && g.config), trends: (s.trends ?? []).filter((t: AnyObj) => t.quote === pair),
       lps: (s.lps ?? []).filter((l: AnyObj) => l.market === pair && l.position),
     };
-  }, [p.status, pair]);
+  }, [p.status, p.btTrades, pair]);
   useEffect(() => {
     const c = cs.current;
     if (!c || !markers.current) return;
@@ -226,6 +281,12 @@ export function Chart(p: ChartProps) {
         <span className="muted small"> · {candles.length} candles · {meta?.source ?? 'no data'}{meta?.updatedAt ? ` · upd ${ago(meta.updatedAt * 1000)}` : ''} · units {pm.quote}/{pm.base} (sell-side, after {feeLabel(pm)} LP fee)</span>
       </div>
       {err && <div className="banner warn">{err}</div>}
+      {p.drawMode && candles.length > 0 && (
+        <div className="draw-hint" role="status">
+          {p.drawMode === 'level' ? 'Click the price for the level.'
+            : pending ? `First point ${px(pending.p)} — now click a second point on another candle.` : 'Click the first point of the trend line.'}
+        </div>
+      )}
       {!candles.length && !err && (
         <div className="empty-chart">
           <p>No stored candles for {pm.label} {tf} yet. Live polls build candles from now on; backfill history:</p>
@@ -236,7 +297,7 @@ export function Chart(p: ChartProps) {
           {backfill && <p className="muted small">{backfill}</p>}
         </div>
       )}
-      <div ref={el} className="chart" style={{ height: candles.length ? p.height ?? 460 : 0 }} />
+      <div ref={el} className={`chart ${p.drawMode ? 'drawing' : ''}`} style={{ height: candles.length ? p.height ?? 460 : 0 }} />
     </div>
   );
 }

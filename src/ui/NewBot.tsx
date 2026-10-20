@@ -9,10 +9,12 @@ import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from '../live/recenter';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
 import { LP_BAND, LP_MIN_SWAP_SHARE } from '../market/lp';
 import { rangeBaseShare } from '../live/v3Liquidity';
+import { L } from './Tip';
 import { botApi } from './api';
 import { pct, px } from './fmt';
 import { ChainBadge, Orientation, PairPicker, chainOf, feeLabel, marketsOf, mk, unflipKey, useChainFilter } from './chains';
 import { TrendConfigEditor, strategyRule } from './TrendConfig';
+import { LinesEditor } from './LinesEditor';
 import { coinFunds, errMsg, floorSig, spendFunds, type AnyObj, type BotKind, type Funds, type GridPrefill, type LpPrefill, type Nav, type TrendPrefill } from './model';
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -47,10 +49,10 @@ function LimitsFields({ l, set, quoteNative, quote }: { l: Limits; set: (l: Limi
   const f = (k: keyof Limits) => (e: { target: { value: string } }) => set({ ...l, [k]: e.target.value });
   return (
     <div className="form-row">
-      <label title="Skip a trade if it would move the pool price more than this">Max price impact %<input value={l.impact} onChange={f('impact')} /></label>
-      <label title="If the price moves more than this before the swap is mined, it reverts and only gas is lost">Slippage %<input value={l.slippage} onChange={f('slippage')} /></label>
-      <label title="Minutes a swap stays valid on-chain">Deadline (min)<input value={l.deadline} onChange={f('deadline')} /></label>
-      {quoteNative && <label title={`Kept aside for gas and never traded: "2%" of the amount or a fixed ${quote} amount such as "50000"`}>Gas set-aside<input value={l.gasRes} onChange={f('gasRes')} /></label>}
+      <label><L tip="A trade is skipped if it would move the pool's price more than this against you. Default 3%.">Max price impact %</L><input value={l.impact} onChange={f('impact')} /></label>
+      <label><L tip="If the price moves more than this between the quote and the swap landing, the swap cancels itself and only gas is lost. Default 1%.">Slippage %</L><input value={l.slippage} onChange={f('slippage')} /></label>
+      <label><L tip="Minutes a sent swap stays valid. If it hasn't landed by then it cancels itself.">Deadline (min)</L><input value={l.deadline} onChange={f('deadline')} /></label>
+      {quoteNative && <label><L tip={`Kept aside for gas and never traded: "2%" of the amount, or a fixed ${quote} amount such as "50000".`}>Gas set-aside</L><input value={l.gasRes} onChange={f('gasRes')} /></label>}
     </div>
   );
 }
@@ -58,7 +60,7 @@ function LimitsFields({ l, set, quoteNative, quote }: { l: Limits; set: (l: Limi
 /** "Amount (PLS)" input with the wallet balance and a Max button. */
 export function AmountField({ label, value, onChange, f }: { label: string; value: string; onChange: (v: string) => void; f: Funds }) {
   return (
-    <label>{label}
+    <label><L tip={`How much ${f.symbol} the bot gets, in ${f.symbol} (not dollars). Max = everything you can use after the gas set-aside and what your other live bots use.`}>{label}</L>
       <span className="pair-pick">
         <input value={value} inputMode="decimal" placeholder="0" onChange={(e) => onChange(e.target.value.replace(/,/g, ''))} />
         <button type="button" className="btn small-btn" disabled={f.max == null || f.max <= 0} title="Everything you can use after the gas set-aside and your other live bots"
@@ -280,9 +282,9 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
       </> : <>
         <div className="form-row">
           <PairPicker s={s} value={pair} onChange={setPair} />
-          <label>Lowest price<input value={lower} onChange={(e) => setLower(e.target.value)} /></label>
-          <label>Highest price<input value={upper} onChange={(e) => setUpper(e.target.value)} /></label>
-          <label>Levels<input value={count} onChange={(e) => setCount(e.target.value)} /></label>
+          <label><L tip="Lowest grid level. Below it every level has bought and the grid waits for the price to come back.">Lowest price</L><input value={lower} onChange={(e) => setLower(e.target.value)} /></label>
+          <label><L tip="Highest grid level. Above it everything is sold and the grid waits (or moves up, with Follow the price up).">Highest price</L><input value={upper} onChange={(e) => setUpper(e.target.value)} /></label>
+          <label><L tip="How many slices the range is cut into. The amount is split evenly over them: more levels means smaller trades, closer together, that happen more often.">Levels</L><input value={count} onChange={(e) => setCount(e.target.value)} /></label>
           <AmountField label={`Amount (${m.quote})`} value={amount} f={customFunds} onChange={setAmount} />
         </div>
         <div className="quick">
@@ -327,6 +329,7 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
   const m = mk(s, pair);
   const rt = 1 - (1 - m.feeBps / 10_000) ** 2;
   const funds = spendFunds(s, pair, +amount || 0, parseGasRes(limits.gasRes) ?? DEFAULT_GAS_RESERVE);
+  const noBuyLine = cfg.strategy === 'lines' && !cfg.lines.some((l) => l.rule.startsWith('buy')) ? 'Draw at least one line that buys.' : null;
   const start = () => act(async () => {
     if (mode === 'live' && !confirm(`Start a LIVE trend bot on ${m.label} (${tf})? It signs real swaps from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
     const r = await botApi('trends', 'POST', { mode, quote: pair, tf, cfg, capital: +amount, name: name || undefined, limits: limitsBody(limits, !!m.quoteNative) });
@@ -342,9 +345,10 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
         <AmountField label={`Amount (${m.quote})`} value={amount} f={funds} onChange={setAmount} />
       </div>
       <div className="verdict">
-        <span>Buys {m.base} with {m.quote} when {strategyRule(cfg)} on a closed {tf} candle. Sells at the stop-loss ({cfg.stopAtr}× ATR below entry){cfg.tpR > 0 ? `, the take-profit (${cfg.tpR}× the stop distance above)` : ''}{cfg.trailAtr > 0 ? `, the trailing stop` : ''} or the exit signal.</span>
+        <span>Buys {m.base} with {m.quote} when {strategyRule(cfg)} on a closed {tf} candle. Sells at the stop-loss ({cfg.stopAtr}× ATR below entry){cfg.tpR > 0 ? `, the take-profit (${cfg.tpR}× the stop distance above)` : ''}{cfg.trailAtr > 0 ? `, the trailing stop` : ''} or {cfg.strategy === 'lines' ? 'one of your sell lines' : 'the exit signal'}.</span>
         <span className="detail">A trade only starts if the expected move beats the {pct(rt, 3)} round-trip pool fee ({feeLabel(m)} each way) plus impact, gas and a {pct(cfg.minEdgePct, 2)} margin. Longer candles mean fewer trades, so fees take a smaller share.</span>
       </div>
+      {cfg.strategy === 'lines' && <LinesEditor s={s} pair={pair} tf={tf} lines={cfg.lines} onChange={(lines) => setCfg({ ...cfg, lines })} />}
       <details className="more">
         <summary>Advanced</summary>
         <div className="stack">
@@ -356,7 +360,7 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
       <div className="actions">
         <button type="button" className="btn" onClick={() => nav({ v: 'tools', tab: 'backtest', btPrefill: { pair, tf, cfg, nonce: Date.now() } })}>Backtest these settings first</button>
       </div>
-      <StartRow s={s} pairKey={pair} mode={mode} setMode={setMode} busy={busy} disabled={!(+amount > 0)} problem={fundsProblem(funds, +amount || 0, mode)}
+      <StartRow s={s} pairKey={pair} mode={mode} setMode={setMode} busy={busy} disabled={!(+amount > 0) || !!noBuyLine} problem={noBuyLine ?? fundsProblem(funds, +amount || 0, mode)}
         label={mode === 'live' ? 'Start live trend bot' : 'Start paper trend bot'} onStart={start} />
     </div>
   );
@@ -424,7 +428,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
     <div className="card">
       <div className="form-row">
         <PairPicker s={s} value={pair} onChange={setPair} only={(x) => !!x.lpOk} />
-        <label title="How far the range reaches each side of today's price. Narrower earns more fees per coin while the price is inside, and leaves the range sooner.">Range ± %<input value={band} inputMode="decimal" onChange={(e) => setBand(e.target.value.replace(/[%\s]/g, ''))} /></label>
+        <label><L tip="How far the range reaches each side of today's price. Narrower earns more fees per coin while the price is inside, and leaves the range sooner.">Range ± %</L><input value={band} inputMode="decimal" onChange={(e) => setBand(e.target.value.replace(/[%\s]/g, ''))} /></label>
         <AmountField label={`Amount (${m.quote})`} value={amount} f={funds} onChange={setAmount} />
         <AmountField label={`Also use ${m.base} you hold (optional)`} value={baseAmt} f={baseFunds} onChange={setBaseAmt} />
       </div>

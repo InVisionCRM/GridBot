@@ -200,7 +200,7 @@ export function Guide({ onClose }: { onClose: () => void }) {
             <h2>Trend bot</h2>
             <p>A trend bot is either holding nothing (waiting in the quote token) or holding the coin. It buys when its signal fires on a <b>closed</b> candle, so signals never repaint, and sells at the stop-loss, take-profit, trailing stop or exit signal.</p>
             <ul className="tight">
-              {STRATEGIES.map((x) => <li key={x.id}><b>{x.label}</b></li>)}
+              {STRATEGIES.map((x) => <li key={x.id}><b>{x.label}</b>{x.id === 'lines' ? ': draw trend lines (two clicks) and levels (one click) on the chart, and give each a rule: buy when a candle closes above it, buy when the price dips to it and closes back above, sell when a candle closes below it, or sell when the price reaches it. Lines can be changed on a running bot; a trend line only trades from its second point on.' : ''}</li>)}
               <li>Default exits: stop-loss {DEFAULT_TREND.stopAtr}× ATR below entry, take-profit at {DEFAULT_TREND.tpR}× that distance above. Stops are checked on every price read, not just at candle close.</li>
               <li><b>Cost check:</b> a buy only happens if the expected move beats the {p(rt, 3)} round-trip fee plus price impact, gas and a {p(DEFAULT_TREND.minEdgePct * 100)} margin. Skipped signals appear in the bot's log.</li>
               <li>Longer candles (4h, 1d) mean fewer trades, so fees take a smaller share. Try settings in <b>Tools → Backtest</b> first.</li>
