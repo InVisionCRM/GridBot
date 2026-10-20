@@ -120,10 +120,10 @@ function FollowUp({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolea
 }
 
 function Limits({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean }) {
-  const L = g.limits ?? {};
-  const [impact, setImpact] = useState(String((L.maxPriceImpact ?? 0.03) * 100));
-  const [slip, setSlip] = useState(String((L.slippageBps ?? 100) / 100));
-  const [deadline, setDeadline] = useState(String(L.deadlineMinutes ?? 10));
+  const lim = g.limits ?? {};
+  const [impact, setImpact] = useState(String((lim.maxPriceImpact ?? 0.03) * 100));
+  const [slip, setSlip] = useState(String((lim.slippageBps ?? 100) / 100));
+  const [deadline, setDeadline] = useState(String(lim.deadlineMinutes ?? 10));
   const apply = () => act(() => botApi(`grids/${g.id}/limits`, 'PUT', { maxPriceImpact: +impact / 100, slippageBps: Math.round(+slip * 100), deadlineMinutes: +deadline }));
   return (
     <div className="form-row">
