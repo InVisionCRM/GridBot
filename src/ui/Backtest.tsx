@@ -192,7 +192,7 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
             </div>
             <Breakdown m={m} sym={sym} />
             <h4 className="muted small">Price · {kind === 'trend' ? 'trade entries (▲) / exits (▼, reason, net %)' : 'grid round-trips'} · latest 1500 candles</h4>
-            <Chart status={null} ticks={null} pairs={[res.pair]} pair={res.pair} tf={(res.tf ?? tf) as TF} height={360} compact
+            <Chart status={s} ticks={null} pairs={[res.pair]} pair={res.pair} tf={(res.tf ?? tf) as TF} height={360} compact
               btTrades={res.trades} emaFast={kind === 'trend' && res.cfg?.strategy?.startsWith('ema') ? res.cfg.fast : undefined} emaSlow={kind === 'trend' && res.cfg?.strategy?.startsWith('ema') ? res.cfg.slow : undefined} />
             <h4 className="muted small"><L tip={`The bot's value over time (solid) and the same amount simply bought as ${pm.base} at the start and held (dashed).`}>Value vs holding {pm.base}</L></h4>
             <EquityChart series={series} height={300} format={(v) => num(v, 3)} />

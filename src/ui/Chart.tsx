@@ -141,15 +141,15 @@ export function Chart(p: ChartProps) {
     cs.current.update({ time: ts(last.t), open: last.o, high: last.h, low: last.l, close: last.c });
   }, [p.ticks]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // bot overlays: grid levels, fills, trend entries/exits, stop/TP
+  // bot overlays: grid levels, fills, trend entries/exits, stop/TP (a backtest chart shows only the backtest's trades)
   const botsHere = useMemo(() => {
     const s = p.status;
-    if (!s) return { grids: [] as AnyObj[], trends: [] as AnyObj[], lps: [] as AnyObj[] };
+    if (!s || p.btTrades) return { grids: [] as AnyObj[], trends: [] as AnyObj[], lps: [] as AnyObj[] };
     return {
       grids: (s.grids ?? []).filter((g: AnyObj) => g.stable === pair && g.config), trends: (s.trends ?? []).filter((t: AnyObj) => t.quote === pair),
       lps: (s.lps ?? []).filter((l: AnyObj) => l.market === pair && l.position),
     };
-  }, [p.status, pair]);
+  }, [p.status, p.btTrades, pair]);
   useEffect(() => {
     const c = cs.current;
     if (!c || !markers.current) return;
