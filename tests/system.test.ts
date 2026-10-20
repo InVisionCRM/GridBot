@@ -5,13 +5,16 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { compareVersions, VersionCheck, type VersionInput } from '../src/server/system/version';
 import { botChecks, chainChecks, dataChecks, staleAfter } from '../src/server/system/checks';
-import { nextLevels } from '../src/live/liveGrid';
+import { nextLevels, type IntervalStatus } from '../src/live/liveGrid';
 
 const base: VersionInput = { dev: false, running: 'aaa1111', built: 'aaa1111', local: 'aaa1111', branch: 'main', dirty: false, remote: 'aaa1111', remoteInLocal: true };
 
 describe('version: running vs built vs checkout vs GitHub', () => {
   it('names the first gap and its one fix', () => {
     expect(compareVersions(base)).toMatchObject({ state: 'current', steps: [] });
+    expect(compareVersions(base).detail).toBe('Running aaa1111, the same as GitHub main.');
+    // a branch ahead of main is current too, but it isn't "the same" as main
+    expect(compareVersions({ ...base, running: 'ddd4444', built: 'ddd4444', local: 'ddd4444' })).toMatchObject({ state: 'current', detail: 'Running ddd4444, which already includes GitHub main (aaa1111).' });
     expect(compareVersions({ ...base, remote: 'bbb2222', remoteInLocal: false })).toMatchObject({ state: 'update-available', steps: ['git pull', 'npm install', 'npm run build', expect.stringMatching(/Restart/)] });
     expect(compareVersions({ ...base, local: 'ccc3333', remote: 'ccc3333' })).toMatchObject({ state: 'not-built', steps: ['npm run build', expect.stringMatching(/Restart/)] });
     expect(compareVersions({ ...base, running: 'old0000' })).toMatchObject({ state: 'not-restarted' });
@@ -52,7 +55,7 @@ describe('version: running vs built vs checkout vs GitHub', () => {
 });
 
 const NOW = 1_800_000_000_000, POLL = 10_000;
-const iv = (i: number, buy: number, status: string, extra: Record<string, unknown> = {}) => ({ index: i, buyPrice: buy, sellPrice: buy + 10, status, needsRearm: false, plsAmount: 0, buyAmount: 50, ...extra });
+const iv = (i: number, buy: number, status: IntervalStatus, extra: Record<string, unknown> = {}) => ({ index: i, buyPrice: buy, sellPrice: buy + 10, status, needsRearm: false, plsAmount: 0, buyAmount: 50, ...extra });
 const grid = (o: Record<string, unknown> = {}) => ({
   id: 'g1', label: 'ETH/USDG·HOOD', status: 'running', price: 2395, priceAt: NOW - 5000, lastError: null, available: true, queue: [], inFlight: null,
   config: { lowerPrice: 2370, upperPrice: 2420, gridCount: 5 },

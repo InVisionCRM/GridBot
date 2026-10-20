@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Candle } from '../src/market/candles';
+import type { CostModel } from '../src/market/costs';
 import { maxDrawdown, runGridBacktest, runTrendBacktest, sweepTrend } from '../src/market/backtest';
 import { DEFAULT_TREND, computeIndicators, signalAt, type TrendConfig } from '../src/market/strategy';
 import { GAS_UNITS_RT } from '../src/live/economics';
 import { candlesFromCloses, wavePath } from './helpers/candles';
 
-const FREE = { feeBps: 0, pool: null, gasPricePls: 0, approval: 'exact' as const, slippageBps: 0 };
+const FREE: CostModel = { feeBps: 0, pool: null, gasPricePls: 0, approval: 'exact', slippageBps: 0 };
 const FEE_ONLY = { ...FREE, feeBps: 29 };
 const cfg = (o: Partial<TrendConfig> = {}): TrendConfig => ({ ...DEFAULT_TREND, ...o });
 

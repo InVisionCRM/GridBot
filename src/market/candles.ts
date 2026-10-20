@@ -8,7 +8,7 @@ export const TF_SEC: Record<TF, number> = { '1m': 60, '5m': 300, '15m': 900, '1h
 /** Max candles kept per series */
 export const TF_CAP: Record<TF, number> = { '1m': 3000, '5m': 4000, '15m': 4000, '1h': 5000, '4h': 3000, '1d': 1500 };
 
-export interface Candle { t: number; o: number; h: number; l: number; c: number; v: number; /** gap-filled */ f?: 1 }
+export interface Candle { t: number; o: number; h: number; l: number; c: number; v: number; /** gap-filled */ f?: 1; /** one-off print clipped (trimSpikes) */ s?: 1 }
 
 export const isTF = (x: unknown): x is TF => typeof x === 'string' && (TFS as string[]).includes(x);
 export const bucketStart = (tsSec: number, tf: TF) => Math.floor(tsSec / TF_SEC[tf]) * TF_SEC[tf];
@@ -57,6 +57,46 @@ export function fillGaps(candles: Candle[], tf: TF, until?: number): Candle[] {
     for (let t = prev.t + s; t <= end; t += s) { prev = { t, o: prev.c, h: prev.c, l: prev.c, c: prev.c, v: 0, f: 1 }; out.push(prev); }
   }
   return out;
+}
+
+/**
+ * How far a candle may reach past its own price path, in the pair's usual moves (median non-zero close-to-close change),
+ * before the excess is a one-off print. Measured 2026-10-20: 44 real exchange series (Crypto.com BTC, ETH, SOL, DOGE,
+ * PEPE, LINK vs USDT, ETH/BTC and USDT/USD; 1m to 1D; 13,200 candles) never passed 17.7. The stored Uniswap WBTC/ETH
+ * 0.01% candle of 2026-10-18 03:00 UTC printed +26% while the real market moved 0.2% that hour.
+ */
+export const SPIKE_MOVES = 20;
+
+const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+
+/**
+ * Clip one-off prints: one big trade in a thin pool prints a wick (or an open or close) far from where the price was,
+ * arbitrage puts the pool straight back, and a replay that fills there books trades no bot could have made. Each close
+ * is checked against the median of itself and its two neighbours (a jump that comes straight back is a print, a real
+ * move stays), then the candle is held within SPIKE_MOVES usual moves of that cleaned path. The first and last closes
+ * have one neighbour and are kept (their wicks are still clipped). Clipped candles are marked s: 1. Input must be sorted.
+ */
+export function trimSpikes(candles: Candle[]): Candle[] {
+  const moves: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const m = Math.abs(Math.log(candles[i].c / candles[i - 1].c));
+    if (m > 0) moves.push(m);
+  }
+  if (candles.length < 3 || !moves.length) return candles;
+  const reach = Math.exp(SPIKE_MOVES * median(moves)), last = candles.length - 1;
+  const path = candles.map((k, i) => (i === 0 || i === last ? k.c : median([candles[i - 1].c, k.c, candles[i + 1].c])));
+  return candles.map((k, i) => {
+    const from = i === 0 ? k.o : path[i - 1];
+    const lo = Math.min(from, path[i]) / reach, hi = Math.max(from, path[i]) * reach;
+    if (k.l >= lo && k.h <= hi) return k;
+    const clip = (v: number) => Math.min(hi, Math.max(lo, v));
+    return { ...k, o: clip(k.o), h: clip(k.h), l: clip(k.l), c: clip(k.c), s: 1 as const };
+  });
+}
+
+/** What every replay (backtests, the daily scan) runs on: closed candles, one-off prints clipped, gaps filled flat. */
+export function replayCandles(raw: Candle[], tf: TF, nowSec: number): Candle[] {
+  return fillGaps(trimSpikes(closedOnly(raw, tf, nowSec)), tf);
 }
 
 /** Merge incoming candles over existing by t (incoming wins, except the live open bucket keeps the wider range). */

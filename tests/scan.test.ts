@@ -181,6 +181,16 @@ describe('DailyScanner', () => {
     expect(c.skipped.find((x) => x.name === 'ETH/USDC')!.why).toMatch(/^no range made money over the last 7 days \(price [+-]\d+\.\d% this week\)$/);
   });
 
+  it('one-off prints in a thin pool are clipped before testing: four 25% wicks in a calm week make no pick', async () => {
+    const spiky = wave(168, 2, 0.001).map((k, i) => ([20, 60, 100, 140].includes(i) ? { ...k, l: k.l * 0.75 } : k));
+    // As printed, the wicks look like a pattern (sells in 4 different hours) and would rank
+    expect(bestSetup(spiky, COSTS, 1000)).not.toBeNull();
+    const { deps } = fakeDeps({ candles: { [WBTC]: spiky } });
+    const c = (await new DailyScanner(deps).run()).chains[0];
+    expect(c.picks).toEqual([]);
+    expect(c.skipped.find((x) => x.name === `${WBTC.slice(0, 6)}/USDT`)!.why).toMatch(/^no range made money/);
+  });
+
   it('a GeckoTerminal 5xx is retried once (the real scan lost ETH/USDC to one HTTP 500)', async () => {
     const { deps, calls } = fakeDeps({ http500Once: true, candles: { [WETH]: wave(168, 2, 0.03) } });
     const c = (await new DailyScanner(deps).run()).chains[0];

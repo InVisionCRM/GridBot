@@ -29,6 +29,7 @@ import { getPreset, listPresets, legKey } from '../src/live/presets';
 import { MultiDexMock, type Tok } from './helpers/multiDex';
 import { MockChain, NET } from './helpers/mockChain';
 import { candlesFromCloses, wavePath } from './helpers/candles';
+import fx from './fixtures/wbtc-eth-1h.json';
 
 const FEE = 0.0029;
 const ME = getAddress('0x' + 'd'.repeat(40));
@@ -435,6 +436,25 @@ describe('flipped backtest: inverted candles, no look-ahead', () => {
     for (const t of r.trades) expect(t.entryPrice).toBeGreaterThan(50);
     const g = await bot.backtestGrid({ pair: 'HEX~', tf: '1h', lowerPrice: 100, upperPrice: 170, gridCount: 10, capital: 100_000, costs: { useImpact: false, useGas: false, slippageBps: 0 } });
     expect(g.candles).toBe(r.candles);
+  });
+});
+
+describe('backtests replay candles with one-off prints clipped', () => {
+  it('the real WBTC/ETH week: 16 spikes clipped and said so in grid and trend backtests; the grid makes no phantom round trips', async () => {
+    const k: Candle[] = fx.dex.map((r) => ({ t: r[0], o: r[1], h: r[2], l: r[3], c: r[4], v: r[5] }));
+    const last = k[k.length - 1].t, H = 3600;
+    const candles = new CandleStore(null);
+    candles.merge('HEX', '1h', k, 'gecko', last + 2 * H);
+    const { bot } = make({ candles, clock: { ms: (last + 2 * H) * 1000 } });
+    const g = await bot.backtestGrid({ pair: 'HEX', tf: '1h', lowerPrice: 28.91, upperPrice: 39.113, gridCount: 6, capital: 1, costs: { useImpact: false, useGas: false, slippageBps: 0 } });
+    expect(g.candles).toBe(k.length);
+    expect(g.spikes).toBe(16);
+    expect(g.notes.some((n: string) => /^16 candles had a one-off price spike clipped/.test(n))).toBe(true);
+    expect(g.trades).toHaveLength(0);
+    // the chart shows the candles as they were printed
+    expect(Math.max(...bot.candleSeries('HEX', '1h').map((x) => x.h))).toBeGreaterThan(42);
+    const t = await bot.backtest({ pair: 'HEX', tf: '1h', capital: 1, cfg: { ...DEFAULT_TREND, htfEnabled: true, htfTf: '1h' }, costs: { useImpact: false, useGas: false, slippageBps: 0 } });
+    expect(t.spikes).toBe(16);
   });
 });
 
