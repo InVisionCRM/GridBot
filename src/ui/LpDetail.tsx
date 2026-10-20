@@ -9,6 +9,7 @@ import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
 import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { T } from './theme';
+import { L } from './Tip';
 import { lpPnlUsd, type AnyObj, type Nav } from './model';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -94,23 +95,23 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="kpi-row">
-        <div className="kpi" title="Your share of the pool's trading fees: collected so far plus what's waiting in the position. The coins' price doesn't change this.">
-          <span>Fees earned</span>
+        <div className="kpi">
+          <span><L tip="Your share of the pool's trading fees: collected so far plus what's waiting in the position. The coins' price doesn't change this.">Fees earned</L></span>
           <div className={`kpi-v ${cls(pnl?.fees)}`}>{pnl ? <AnimatedNumber value={pnl.fees} format={(x) => qty(x, q, 5)} /> : '—'}</div>
           <span className="sub">{pnl ? `${qty(b.totals.fees, q, 4, false)} collected · ${qty(owedQ, q, 4, false)} waiting${inUsd(pnl.fees)}` : 'measuring…'}</span>
         </div>
-        <div className="kpi" title="Gas for every open, move, swap, close and fee collect">
-          <span>Gas paid</span>
+        <div className="kpi">
+          <span><L tip="Network fees for every open, range move, swap, close and fee collect.">Gas paid</L></span>
           <div className="kpi-v">{pnl ? qty(-pnl.gas, q, 4) : '—'}</div>
           <span className="sub">{b.reranges} range move{b.reranges === 1 ? '' : 's'}</span>
         </div>
-        <div className="kpi" title="What price moves did to the coins (a position ends up with more of whichever coin fell) plus the swap costs when opening and moving the range">
-          <span>Price change and swaps</span>
+        <div className="kpi">
+          <span><L tip="What price moves did to the coins (a position ends up holding more of whichever coin fell), plus the swap costs of opening and moving the range.">Price change and swaps</L></span>
           <div className={`kpi-v ${cls(pnl?.price)}`}>{pnl ? qty(pnl.price, q, 5) : '—'}</div>
           <span className="sub">{hold != null ? `holding ${base} instead: ${qty(hold, q, 4)}` : 'moves with the price'}</span>
         </div>
-        <div className="kpi" title="Fees earned − gas ± price change, in the coin this bot started with">
-          <span>Overall, in {q}</span>
+        <div className="kpi">
+          <span><L tip="Fees earned − gas ± price change and swaps, in the coin this bot spends.">Overall, in {q}</L></span>
           <div className={`kpi-v ${cls(pnl?.profit)}`}>{pnl ? qty(pnl.profit, q, 5) : '—'}</div>
           <span className="sub">{pnl && b.startValue ? `${pct(pnl.profit / b.startValue, 2, true)} of ${qty(b.startValue, q, 5, false)} put in` : ''}{profitUsd != null ? ` · ${usd(profitUsd, true)}` : ''}</span>
         </div>

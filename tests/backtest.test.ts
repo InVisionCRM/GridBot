@@ -156,3 +156,39 @@ describe('grid backtester', () => {
   });
 });
 
+
+describe('backtest: where the money went (fees, price impact, slippage, gas, price)', () => {
+  // WBTC/ETH on Uniswap V3 0.01%, read from the chain 2026-10-20: mid 34.06 ETH per WBTC, 2,618.5 ETH + 76.88 WBTC near the price
+  const POOL = { feeBps: 1, pool: { quoteReserve: 2618.5, plsReserve: 76.88 }, gasPricePls: 0, approval: 'exact' as const, slippageBps: 10 };
+  const week = candlesFromCloses(Array.from({ length: 168 }, (_, i) => 34.06 * (1 + 0.01 * Math.sin(i / 6))));
+
+  it('10,000 ETH in a pool that holds ~2,600 ETH near the price: price impact, not the market, takes most of it', () => {
+    const r = runGridBacktest(week, { lowerPrice: 28.91, upperPrice: 39.113, gridCount: 6, capital: 10_000 }, '1h', POOL);
+    const m = r.metrics;
+    // the user's screenshot: holding WBTC −79.05% in a week the price barely moved
+    expect(m.bhReturn).toBeLessThan(-0.75);
+    expect(m.bhEntryImpactPct).toBeGreaterThan(0.75);
+    // one level is 1,667 ETH: ~39% impact on a single buy
+    expect(m.tradeSize).toBeCloseTo(10_000 / 6, 6);
+    expect(m.tradeImpactPct).toBeCloseTo((10_000 / 6) / (2618.5 + 10_000 / 6), 2);
+    expect(m.poolDepth).toBe(2618.5);
+    expect(m.impact).toBeGreaterThan(m.fees * 100);
+    // the breakdown adds up exactly: profit = price effect − fees − impact − slippage − gas
+    expect(m.endEquity - m.startEquity).toBeCloseTo(m.priceEffect - m.fees - m.impact - m.slippage - m.gas, 6);
+  });
+
+  it('the same grid with 1 ETH pays almost nothing to impact', () => {
+    const m = runGridBacktest(week, { lowerPrice: 28.91, upperPrice: 39.113, gridCount: 6, capital: 1 }, '1h', POOL).metrics;
+    expect(m.tradeImpactPct).toBeLessThan(0.0001);
+    expect(m.bhEntryImpactPct).toBeLessThan(0.001);
+    expect(m.endEquity - m.startEquity).toBeCloseTo(m.priceEffect - m.fees - m.impact - m.slippage - m.gas, 9);
+  });
+
+  it('trend backtests break their result down the same way', () => {
+    const r = run([bar(9, 1.1, 1.3, 1.1, 1.25), bar(10, 1.25, 1.4, 1.2, 1.3)], C, { ...FEE_ONLY, slippageBps: 10, pool: { quoteReserve: 1e6, plsReserve: 1e6 } });
+    expect(r.trades).toHaveLength(1);
+    const m = r.metrics;
+    expect(m.impact).toBeGreaterThan(0);
+    expect(m.endEquity - m.startEquity).toBeCloseTo(m.priceEffect - m.fees - m.impact - m.slippage - m.gas, 9);
+  });
+});

@@ -584,3 +584,23 @@ label.wide input { min-width: 180px; }
   .bot-hold { grid-column: 1 / -1; grid-row: 4; text-align: left; }
   .bot-live { grid-column: 1 / -1; grid-row: 5; }
 }
+
+/* Tips: ⓘ next to a label or number, hover or tap to read */
+@keyframes tip-in { from { opacity: 0; } to { opacity: 1; } }
+.with-tip { display: inline-flex; align-items: center; gap: 0; }
+.tip { appearance: none; width: 15px; height: 15px; padding: 0; margin-left: 5px; border-radius: 50%; border: 1px solid var(--line-2); background: transparent; color: var(--muted); font: 600 0.6rem/1 var(--mono); display: inline-grid; place-items: center; cursor: help; vertical-align: 1px; flex: none; text-transform: none; letter-spacing: 0; }
+.tip:hover, .tip.on, .tip:focus-visible { color: var(--on-profit); background: var(--profit); border-color: transparent; }
+.tip-box { position: fixed; z-index: 1000; width: min(300px, calc(100vw - 24px)); transform: translate(-50%, -100%); background: #1a2421; color: var(--text); border: 1px solid var(--line-2); border-radius: 9px; padding: 9px 11px; font: 400 0.8rem/1.45 var(--font); text-transform: none; letter-spacing: 0; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55); pointer-events: none; animation: tip-in 0.15s ease-out; }
+.tip-box.below { transform: translate(-50%, 0); }
+
+/* Backtest: where the result came from */
+.bd { display: flex; flex-direction: column; gap: 7px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); }
+.bd h4 { margin: 0 0 2px; font-size: 0.82rem; font-weight: 500; }
+.bd-row { display: grid; grid-template-columns: 140px minmax(0, 1fr) auto; gap: 10px; align-items: center; font-size: 0.84rem; }
+.bd-bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.bd-bar i { display: block; height: 100%; border-radius: 4px; transition: width 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.bd-bar i.pos { background: var(--profit); }
+.bd-bar i.neg { background: var(--loss); }
+.bd-row b { font-family: var(--mono); font-weight: 500; text-align: right; white-space: nowrap; }
+.bd-total { border-top: 1px solid var(--line); padding-top: 7px; font-weight: 500; }
+@media (max-width: 640px) { .bd-row { grid-template-columns: minmax(0, 1fr) auto; } .bd-bar { grid-column: 1 / -1; grid-row: 2; } }

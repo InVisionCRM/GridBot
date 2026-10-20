@@ -350,8 +350,10 @@ Tools → Charts also has backfill buttons when a pair has no data.
 ## Backtester
 
 - **No look-ahead.** A signal at close *i* fills at the open of *i+1*. Stop/TP are intrabar; a gap through the stop fills at the open; stop and TP in the same candle → stop.
-- **Costs.** 0.29% fee per swap, impact from the **current** reserves re-centred at each historical price (an approximation), gas at today's gas price, 10 bps slippage.
-- **Metrics.** Return vs buy & hold PLS (same costs), CAGR, max DD, win rate, PF, expectancy, Sharpe/Sortino, exposure, fees/gas, entries blocked by the gate, plus the trade list.
+- **Costs.** The pool's fee on every swap, plus price impact from the coins the pool holds near **today's** price, re-centred at each historical price. That's an approximation: for a trade bigger than the liquidity near the price, a V3 pool's real cost is higher than shown. Plus gas at today's gas price and 10 bps slippage.
+- **Metrics.** Return vs holding the coin (same costs), per-year return, worst drop, win rate, profit factor, average result per trade, Sharpe/Sortino, time holding, one trade's price impact, entries blocked by the gate, and the trade list. Every input and number has an ⓘ explaining it.
+- **Where the result came from.** Price moves, pool fees, price impact, slippage and gas, in the coin. These are totalled over every swap, including buys of coins still held, and they add up to the result exactly.
+- **Too big for this pool.** When one trade moves the price more than 2%, or is over a quarter of the coins the pool holds near the price, the result says so. It gives the size that keeps impact under 1%. Example (Oct 20 2026): 10,000 ETH (≈ $24M) in the WBTC/ETH 0.01% pool. That pool holds ≈ 2,600 ETH near the price, so holding alone "lost" 79% to its one buy. The real Uniswap quoter showed the pool runs dry after about 92 ETH's worth.
 - **Sweep.** Two-parameter heatmap with an in-sample/overfitting warning. "Use these settings" starts a paper bot.
 - **Grid configs.** Can be backtested too; fills at exact level prices are optimistic.
 

@@ -49,7 +49,7 @@ export function simBuy(quoteIn: number, price: number, m: CostModel) {
   const raw = out(quoteIn, rq, rp, f) ?? ideal;
   const pls = raw * (1 - slip) * (1 - tax);
   const gasPls = ((m.approval === 'exact' ? gu(m).approve : 0) + gu(m).swap) * m.gasPricePls + (m.extraPlsPerSwap ?? 0);
-  return { pls, fee: quoteIn * f, tax: raw * tax, impactPct: 1 - raw / ideal, slipQuote: raw * slip * mid, gasQuote: gasPls * price, execPrice: quoteIn / pls };
+  return { pls, fee: quoteIn * f, tax: raw * tax, impactPct: 1 - raw / ideal, impactQuote: (ideal - raw) * mid, slipQuote: raw * slip * mid, gasQuote: gasPls * price, execPrice: quoteIn / pls };
 }
 
 /** Sell pls at a market whose sell-side price is `price`. Tax reduces what the pool receives of the input. */
@@ -60,7 +60,7 @@ export function simSell(pls: number, price: number, m: CostModel) {
   const ideal = poolIn * (1 - f) * mid;
   const raw = out(poolIn, rp, rq, f) ?? ideal;
   const quote = raw * (1 - slip);
-  return { quote, fee: poolIn * f * mid, tax: pls * tax * mid, impactPct: 1 - raw / ideal, slipQuote: raw * slip, gasQuote: (gu(m).swap * m.gasPricePls + (m.extraPlsPerSwap ?? 0)) * price, execPrice: quote / pls };
+  return { quote, fee: poolIn * f * mid, tax: pls * tax * mid, impactPct: 1 - raw / ideal, impactQuote: ideal - raw, slipQuote: raw * slip, gasQuote: (gu(m).swap * m.gasPricePls + (m.extraPlsPerSwap ?? 0)) * price, execPrice: quote / pls };
 }
 
 /** Full round-trip cost at `price` for a position of sizeQuote, as fractions of size. */

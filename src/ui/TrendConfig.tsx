@@ -1,6 +1,7 @@
 /** Trend strategy settings editor (New bot + Backtest) and plain-language strategy descriptions. */
 import { STRATEGIES, type StrategyKind, type TrendConfig } from '../market/strategy';
 import { TFS } from '../market/candles';
+import { L } from './Tip';
 
 export function strategyRule(c: TrendConfig): string {
   const rules: Record<StrategyKind, string> = {
@@ -13,7 +14,7 @@ export function strategyRule(c: TrendConfig): string {
 }
 
 const F = ({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) => (
-  <label title={hint}>{label}{children}</label>
+  <label>{hint ? <L tip={hint}>{label}</L> : label}{children}</label>
 );
 
 /** Strategy parameters, exits and sizing. `showStrategy` = include the strategy picker. */
