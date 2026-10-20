@@ -29,6 +29,11 @@ Dev: `npm run dev` (UI :5173, API :3847).
 - **New bot**: choose a grid, a trend bot or a liquidity position. Grids start from a preset or a custom range. Every amount is entered in the coin the bot spends (PLS, DAI, HEX …), with your wallet balance and a **Max** button beside the box; live starts are checked against the wallet before you press Start. One sentence tells you what each completed buy-then-sell nets after fees, impact and gas. Paper / Live sits next to the Start button; live always asks first. Limits live under *Advanced*.
 - **Bot detail**: for grids, earned by trading (in the coin it spends), coins bought and not sold yet, and the two together; for trend bots, profit vs holding; the chart (grid levels and fills, or the trend bot's entry / stop / take-profit lines), the bot's own log, levels, fills (compact, or *All columns*), and for grids **Follow the price up** and **Change range**, which restarts a stopped grid on its own pair and mode.
 - **Tools**: Charts, Backtest, Analytics, Markets (custom tokens, pool picker, chain registry), Alerts and **System** (below).
+- **Paper and live are never added together.**
+  - **Analytics tabs:** **Live** (real money only), **Paper** (simulated, its own value history and journal, dashed and labelled) and **Market conditions**.
+  - **API:** `GET /api/analytics/overview` and `/journal(.csv)` require `?mode=live|paper`.
+  - **Home:** the headline totals ("Earned by live trading", "Live holdings") count live bots only. Paper bots get their own line, and paper rows in the live feed carry a PAPER tag.
+  - **History:** state version 4 keeps one value history per mode. The older single history summed both, so it can't be split, and both start over on upgrade.
 - **Top bar**: chain filter (All / PLS / HOOD / ETH, with a dot when gas is low), signing address or *Paper only*, the Activity feed, the Guide, and **Stop all** (or *Stop all on* the filtered chain). Stopping never sells holdings.
 - **Guide**: a short in-app explainer. Its numbers are imported from the code (fees, start-check thresholds, limits, preset params).
 
@@ -323,7 +328,8 @@ Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the
 
 - **Strategies.** EMA cross, EMA+RSI, MACD, Donchian breakout and **my drawn lines**, plus an optional higher-timeframe EMA filter. Signals are evaluated once per newly closed candle, never on the forming one, so they don't repaint.
 - **My drawn lines** (`strategy: 'lines'`, `cfg.lines`).
-  - **Drawing:** click **Trend line** and two candles, or **Level** and one price, on the chart in New bot, Backtest or a running bot's page. A channel is two trend lines; a zone is two levels.
+  - **Drawing:** click **Trend line** and two points, or **Level** and one price, on the chart in New bot, Backtest or a running bot's page. Each point lands exactly where you click or tap, between candles too (stored to the second), and the line follows the pointer while you draw. A channel is two trend lines; a zone is two levels.
+  - **Moving:** drag a line to move it, or either end of a trend line to change its angle; levels move up and down. The chart doesn't pan during the drag, and a running bot saves once per drop (if the save fails, the line goes back).
   - **Rules:** each line gets one, chosen from where it's drawn and changeable in one click.
     - Buy when a candle closes above it (`buy_break`).
     - Buy when the price dips to it and closes back above (`buy_bounce`).
@@ -334,7 +340,10 @@ Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the
   - **Shared rails:** the stop-loss, take-profit, trailing stop, sizing and cost check still apply.
   - **Running bots:** `PUT /api/bot/trends/:id/lines` replaces the lines, from the next closed candle.
   - **Backtests:** a trend line only trades from its later point (it couldn't have been drawn sooner); a level trades over the whole test. The result says that lines drawn today with hindsight look better in a backtest than they will live.
-  - **Drawing clicks:** they come from the browser, not the chart's click event. Measured in Chromium, the chart drops a click that follows another within about half a second, which lost a trend line's second point.
+  - **How the chart handles it:** the chart paints the lines itself (a series primitive, `src/ui/drawnLines.ts`), so they follow every pan and zoom.
+    - **Exact positions:** lightweight-charts only converts whole bars (`coordinateToLogical` rounds up to a bar; `logicalToCoordinate` returns 0 for a fraction). The position between two candles is worked out from the bar spacing (`logicalAt` / `timeAt` in `src/ui/lines.ts`).
+    - **Placing points:** a point goes down on a press-and-release that didn't move, not on the click event. The chart drops a click that follows another within about half a second (measured in Chromium). On touch the browser's click never comes, because the chart cancels the tap.
+    - **Minute refresh:** it updates the chart's data in place, so your zoom, pan and any drag survive it.
 - **Exits.** ATR stop and TP at an R multiple, both checked on every poll price; trailing ATR stop (ratchets on closed highs); max hold; signal exit; cooldown; manual Close.
 - **Sizing.** % of the bot's capital, or risk % (equity × risk ÷ stop distance).
 - **Cost gate.** The expected move (TP distance, or k×ATR) must clear the 0.579% round-trip fee + impact both ways from live reserves + gas + slippage allowance + min edge. Blocked signals are logged with the numbers.

@@ -26,12 +26,17 @@ export function mintTx(a: MintArgs): { data: string; value: bigint } {
   return value > 0n ? { data: V3_NPM.encodeFunctionData('multicall', [[mint, V3_NPM.encodeFunctionData('refundETH')]]), value } : { data: mint, value: 0n };
 }
 
+/** Collect every owed token of `tokenId` to `recipient`; as an eth_call from the owner it quotes the fees owed now. */
+export function collectAllData(tokenId: bigint, recipient: string): string {
+  return V3_NPM.encodeFunctionData('collect', [{ tokenId, recipient, amount0Max: U128_MAX, amount1Max: U128_MAX }]);
+}
+
 /** Pay out to `to`: direct for two ERC-20s; via the position manager + unwrap/sweep when one side is native. */
 function payout(tokenId: bigint, to: string, nativeOther: string | null): string[] {
   return nativeOther
-    ? [V3_NPM.encodeFunctionData('collect', [{ tokenId, recipient: ZERO, amount0Max: U128_MAX, amount1Max: U128_MAX }]),
+    ? [collectAllData(tokenId, ZERO),
       V3_NPM.encodeFunctionData('unwrapWETH9', [0n, to]), V3_NPM.encodeFunctionData('sweepToken', [nativeOther, 0n, to])]
-    : [V3_NPM.encodeFunctionData('collect', [{ tokenId, recipient: to, amount0Max: U128_MAX, amount1Max: U128_MAX }])];
+    : [collectAllData(tokenId, to)];
 }
 
 /** Remove all liquidity, collect principal + fees to `to`, burn the NFT — one multicall. `nativeOther` = the non-native token when one side is native. */

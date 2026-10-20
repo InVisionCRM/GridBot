@@ -59,7 +59,7 @@ describe('MultiBot', () => {
     await a.bot.add({ mode: 'paper', stable: 'USDC', ...base });
     chain.setPrice(P0 * 0.975);
     await a.bot.tickAll();
-    expect(store.data?.version).toBe(3);
+    expect(store.data?.version).toBe(4);
     expect(store.data?.grids).toHaveLength(2);
 
     const b = make(chain, store);

@@ -76,7 +76,7 @@ export class FallbackReader implements ChainReader, LogReader {
     throw lastErr;
   }
 
-  call(tx: { to: string; data: string }) { return this.run((p) => p.call(tx)); }
+  call(tx: { to: string; data: string; from?: string }) { return this.run((p) => p.call(tx)); }
   getBalance(a: string) { return this.run((p) => p.getBalance(a)); }
   getFeeData() { return this.run((p) => p.getFeeData()); }
   getTransactionCount(a: string, tag: 'pending') { return this.run((p) => p.getTransactionCount(a, tag)); }

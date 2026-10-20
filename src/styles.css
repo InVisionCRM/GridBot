@@ -609,6 +609,10 @@ label.wide input { min-width: 180px; }
 .lines-ed { display: flex; flex-direction: column; gap: 10px; }
 .lines-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
 .lines-bar > strong { font-weight: 500; }
+.lines-act { display: inline-grid; }
+.lines-act > span { grid-area: 1 / 1; }
+.lines-act > .off { visibility: hidden; }
+.lines-msg { flex: 1 0 100%; line-height: 1.5; min-height: 1.5em; }
 .chart-wrap { position: relative; }
 .chart.drawing, .chart.drawing canvas { cursor: crosshair !important; }
 .draw-hint { position: absolute; z-index: 3; left: 50%; transform: translateX(-50%); margin-top: 6px; max-width: calc(100% - 24px);
@@ -631,3 +635,14 @@ label.wide input { min-width: 180px; }
   .lines-list select { grid-column: 1 / -1; grid-row: 2; }
   .ln-what { white-space: normal; }
 }
+
+/* Paper vs live: paper is simulated and is shown apart, never added into live numbers */
+.an-tabs { margin-bottom: 4px; }
+.an-tabs button { padding: 6px 16px; font-size: 0.86rem; }
+.an-tabs button.paper-tab.on { background: var(--surface-2); color: var(--muted); }
+.paper-tag { margin-left: 6px; color: var(--muted); border-style: dashed; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.62rem; vertical-align: 1px; }
+.paper-banner { border-style: dashed; color: var(--muted); }
+.paper-view .card { border-style: dashed; }
+.paper-view .kpi-v, .paper-view .big { opacity: 0.85; }
+.paper-line { color: var(--muted); border: 1px dashed var(--line-2); border-radius: 8px; padding: 6px 10px; margin: 0; }
+.linklike { appearance: none; background: none; border: 0; padding: 0; font: inherit; color: var(--text); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }

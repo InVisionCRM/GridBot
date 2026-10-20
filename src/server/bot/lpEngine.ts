@@ -29,7 +29,7 @@ import { Hub } from '../chains/hub';
 import { ERC20, V3_NPM } from '../dex/abis';
 import { readCall, sameAddr } from '../dex/types';
 import { LpPool, type Coins, type PoolView } from '../lp/lpPool';
-import { collectData, exitData, mintTx } from '../lp/npmCalls';
+import { collectAllData, collectData, exitData, mintTx } from '../lp/npmCalls';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type ReceiptLike, type TxSender } from './chain';
 import { checkProfitMode, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
@@ -165,6 +165,8 @@ export class LpEngine {
   view: { v: PoolView; inRange: boolean; coins: Coins; owed: Coins; value: number } | null = null;
   private executor: Executor;
   private pool: LpPool | null = null;
+  /** Owner of the live position's NFT (the position manager only quotes collect to its owner) */
+  private npmOwner: { id: string; addr: string } | null = null;
   private ticking = false;
   private readonly now: () => number;
 
@@ -348,21 +350,23 @@ export class LpEngine {
   }
 
   /** Fees owed now (raw, token order): a paper position's earned fees, or a live one's from the pool's counters. */
-  private async owed(pool: LpPool, v: PoolView, p: LpPosition): Promise<{ raw0: bigint; raw1: bigint }> {
+  private async owed(pool: LpPool, p: LpPosition): Promise<{ raw0: bigint; raw1: bigint }> {
     if (p.paper) return { raw0: BigInt(p.paper.owed0), raw1: BigInt(p.paper.owed1) };
-    const { in0, in1 } = await pool.inside(p.tickLower, p.tickUpper, v);
-    type Pos = { liquidity: bigint; feeGrowthInside0LastX128: bigint; feeGrowthInside1LastX128: bigint; tokensOwed0: bigint; tokensOwed1: bigint };
-    const pos = await readCall<Pos>(pool.reader, pool.npm, V3_NPM, 'positions', [BigInt(p.id)]);
-    return {
-      raw0: pos.tokensOwed0 + feesOwed(in0, pos.feeGrowthInside0LastX128, pos.liquidity),
-      raw1: pos.tokensOwed1 + feesOwed(in1, pos.feeGrowthInside1LastX128, pos.liquidity),
-    };
+    // Live: the position manager's own quote of what collect would pay now, in one call from the owner. Rebuilt from
+    // the pool's counters it took several reads at different blocks, and a range-edge crossing between them gave wrong
+    // fees (≈ +3,400 USDG on a 2,180 USDG position). At one block both agree to the wei (#1472740, Robinhood, 2026-10-20).
+    const id = BigInt(p.id);
+    if (this.npmOwner?.id !== p.id) this.npmOwner = { id: p.id, addr: (await readCall<[string]>(pool.reader, pool.npm, V3_NPM, 'ownerOf', [id]))[0] };
+    const owner = this.npmOwner.addr;
+    const raw = await pool.reader.call({ to: pool.npm, from: owner, data: collectAllData(id, owner) });
+    const [raw0, raw1] = V3_NPM.decodeFunctionResult('collect', raw) as unknown as [bigint, bigint];
+    return { raw0, raw1 };
   }
 
   private async measure(pool: LpPool, v: PoolView) {
     const p = this.state.position;
     const coins = p ? pool.coinsFor(Number(p.liquidity), p.tickLower, p.tickUpper, v) : { base: 0, quote: 0 };
-    const o = p ? await this.owed(pool, v, p) : null;
+    const o = p ? await this.owed(pool, p) : null;
     const owedCoins = o ? pool.coinsFromRaw(o.raw0, o.raw1, v) : { base: 0, quote: 0 };
     const val = (c: Coins) => c.base * v.price + c.quote;
     const value = val(coins) + val(owedCoins) + val(this.state.idle);
@@ -456,7 +460,7 @@ export class LpEngine {
   private async exit(pool: LpPool, v: PoolView, s: LpStep) {
     const p = this.state.position!;
     if (this.state.mode === 'paper') {
-      const o = await this.owed(pool, v, p);
+      const o = await this.owed(pool, p);
       const coins = pool.coinsFor(Number(p.liquidity), p.tickLower, p.tickUpper, v), fees = pool.coinsFromRaw(o.raw0, o.raw1, v);
       const snap = await this.hub.quoter(this.state.market).market();
       this.addIdle({ base: coins.base + fees.base, quote: coins.quote + fees.quote });
@@ -615,7 +619,7 @@ export class LpEngine {
   /** Send mode: once owed fees are worth PAYOUT_MIN_GAS_MULTIPLE × the collect's gas, collect them to the payout address. */
   private async maybeSend(pool: LpPool, v: PoolView) {
     const p = this.state.position!;
-    const o = await this.owed(pool, v, p);
+    const o = await this.owed(pool, p);
     const fees = pool.coinsFromRaw(o.raw0, o.raw1, v);
     const snap = await this.hub.quoter(this.state.market).market();
     if (fees.base * v.price + fees.quote < PAYOUT_MIN_GAS_MULTIPLE * this.gasQuote(LP_GAS.v3.close, v, snap)) return;
@@ -625,7 +629,7 @@ export class LpEngine {
     const p = this.state.position!, to = (this.state.profits as { to: string }).to;
     if (this.state.profits.mode !== 'send') { this.state.step = null; return; }
     if (this.state.mode === 'paper') {
-      const o = await this.owed(pool, v, p);
+      const o = await this.owed(pool, p);
       const fees = pool.coinsFromRaw(o.raw0, o.raw1, v), worth = fees.base * v.price + fees.quote;
       p.paper = { ...p.paper!, owed0: '0', owed1: '0' };
       const snap = await this.hub.quoter(this.state.market).market();

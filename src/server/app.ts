@@ -4,7 +4,7 @@
  */
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { MultiBot } from './bot/multi';
-import type { ProfitMode } from './bot/engine';
+import type { Mode, ProfitMode } from './bot/engine';
 import type { ActivityEvent } from './bot/activity';
 import { analyzeSpacing, DENSE_PRESETS, MAX_GRID_COUNT } from '../live/spacing';
 import { listPresets } from '../live/presets';
@@ -270,19 +270,26 @@ export function createApp(o: AppOpts) {
   app.post('/api/backtest/sweep', wrap(async (req) => bot.sweep(req.body ?? {})));
 
   // ── Analytics / alerts ───────────────────────────────────────────────
-  app.get('/api/analytics/overview', wrap(() => bot.overview()));
+  // Analytics are for one mode at a time: live is real money, paper is simulated, and they are never added together.
+  const modeOf = (q: Request['query']): Mode => {
+    if (q.mode !== 'live' && q.mode !== 'paper') throw new Error('mode must be live or paper');
+    return q.mode;
+  };
+  app.get('/api/analytics/overview', wrap((req) => bot.overview(modeOf(req.query))));
   const jFilter = (q: Request['query']) => ({
-    botId: q.botId as string | undefined, kind: q.kind as string | undefined, pair: q.pair as string | undefined,
-    side: q.side as string | undefined, mode: q.mode as string | undefined, from: num(q.from), to: num(q.to),
+    mode: modeOf(q), botId: q.botId as string | undefined, kind: q.kind as string | undefined, pair: q.pair as string | undefined,
+    side: q.side as string | undefined, from: num(q.from), to: num(q.to),
   });
   app.get('/api/analytics/journal', wrap((req) => {
     const rows = bot.journal(jFilter(req.query));
     return { total: rows.length, rows: rows.slice(0, Math.min(2000, num(req.query.limit) ?? 500)) };
   }));
   app.get('/api/analytics/journal.csv', (req, res) => {
+    let rows;
+    try { rows = bot.journal(jFilter(req.query)); } catch (e) { res.status(400).json({ error: (e as Error).message }); return; }
     res.setHeader('content-type', 'text/csv; charset=utf-8');
-    res.setHeader('content-disposition', `attachment; filename="journal-${new Date().toISOString().slice(0, 10)}.csv"`);
-    res.send(MultiBot.journalCsv(bot.journal(jFilter(req.query))));
+    res.setHeader('content-disposition', `attachment; filename="journal-${req.query.mode}-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.send(MultiBot.journalCsv(rows));
   });
   app.get('/api/alerts', wrap(() => ({ alerts: bot.listAlerts() })));
   app.post('/api/alerts', wrap((req) => bot.addAlert(req.body ?? {})));

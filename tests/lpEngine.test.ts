@@ -255,6 +255,40 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(b.status().step).toBeNull();
   });
 
+  it("live fees are the position manager's own collect quote, asked once as the position's owner (not rebuilt from several reads)", async () => {
+    const w = live();
+    const a = w.make();
+    await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (a as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    await a.tick();
+    w.approve(); w.ok(w.sent[0].hash);
+    await a.tick();
+    w.ok(w.sent[1].hash, [w.ev('IncreaseLiquidity', [777n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await a.tick();
+    expect(a.status().position).toMatchObject({ id: '777' });
+    const asked: (string | undefined)[] = [];
+    const reads: string[] = [];
+    const prev = w.m.call.bind(w.m);
+    w.m.call = async (tx: { to: string; data: string; from?: string }) => {
+      if (tx.to.toLowerCase() !== NPM.toLowerCase()) return prev(tx);
+      const f = V3_NPM.parseTransaction({ data: tx.data })!;
+      reads.push(f.name);
+      if (f.name === 'ownerOf') return V3_NPM.encodeFunctionResult('ownerOf', [ME]);
+      if (f.name !== 'collect') throw new Error(`mock: ${f.name} not expected`);
+      asked.push(tx.from);
+      if (tx.from?.toLowerCase() !== ME.toLowerCase()) throw Object.assign(new Error('execution reverted: Not approved'), { code: 'CALL_EXCEPTION' });
+      // token0 = WPLS (base), token1 = DAI: 5 PLS + 0.02 DAI owed
+      return V3_NPM.encodeFunctionResult('collect', [5n * 10n ** 18n, 2n * 10n ** 16n]);
+    };
+    await a.tick();
+    await a.tick();
+    expect(a.status().lastError).toBeNull();
+    expect(a.status().owed!.base).toBeCloseTo(5, 12);
+    expect(a.status().owed!.quote).toBeCloseTo(0.02, 12);
+    expect(asked).toEqual([ME, ME]); // one quote per tick, from the owner
+    expect(reads.filter((x) => x === 'ownerOf')).toHaveLength(1); // the owner is looked up once
+  });
+
   it('close: one multicall (remove all, collect via the manager, unwrap PLS, sweep DAI, burn); fees = collected − principal', async () => {
     const w = live();
     const e = w.make();
@@ -482,7 +516,10 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       expect(p.gas).toBeGreaterThan(0);
       expect(p.profit).toBeCloseTo(p.fees - p.gas + p.price, 9);
       expect(p.equity).toBeCloseTo(st.value! + st.totals.sent - st.totals.gas, 9);
-      const row = a.bot.overview().bots.find((x) => x.kind === 'lp')!;
+      const row = a.bot.overview('paper').bots.find((x) => x.kind === 'lp')!;
+      expect(a.bot.overview('live').bots).toEqual([]); // a paper bot never shows up in live analytics
+      expect((await a.call('GET', '/api/analytics/overview')).status).toBe(400); // a mode is required
+      expect((await a.call('GET', '/api/analytics/overview?mode=paper')).body.bots).toHaveLength(1);
       expect(row.capital).toBe(1000);
       expect(row.equity).toBeCloseTo(p.equity, 9);
       expect(row.realized).toBeCloseTo(p.fees - p.gas, 9);

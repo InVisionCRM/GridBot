@@ -240,7 +240,7 @@ function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | '
 
 /** The trade most likely to happen next: the running grid whose next level is closest to its price. */
 function closestNext(grids: AnyObj[], priceOf: (g: AnyObj) => number | null) {
-  let best: { bot: string; side: 'buy' | 'sell'; at: number; dist: number } | null = null;
+  let best: { bot: string; paper: boolean; side: 'buy' | 'sell'; at: number; dist: number } | null = null;
   for (const g of grids) {
     const p = priceOf(g);
     if (g.status !== 'running' || p == null) continue;
@@ -248,7 +248,7 @@ function closestNext(grids: AnyObj[], priceOf: (g: AnyObj) => number | null) {
     for (const [side, at] of [['buy', n.buy], ['sell', n.sell]] as const) {
       if (at == null) continue;
       const dist = Math.abs(at / p - 1);
-      if (!best || dist < best.dist) best = { bot: gridName(g), side, at, dist };
+      if (!best || dist < best.dist) best = { bot: gridName(g), paper: g.mode === 'paper', side, at, dist };
     }
   }
   return best;
@@ -256,11 +256,13 @@ function closestNext(grids: AnyObj[], priceOf: (g: AnyObj) => number | null) {
 
 export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
   const { chain } = useChainFilter();
-  const [ov, setOv] = useState<AnyObj | null>(null);
+  // Totals here are live only (real money); paper bots get their own line and never add into them.
+  const [ov, setOv] = useState<{ live: AnyObj | null; paper: AnyObj | null }>({ live: null, paper: null });
   const sig = `${s.grids.length}:${(s.trends ?? []).length}:${s.aggregate?.roundTrips}`;
   useEffect(() => {
     let dead = false;
-    const load = () => http('/api/analytics/overview').then((o) => { if (!dead) setOv(o); }).catch(() => undefined);
+    const load = () => Promise.all([http('/api/analytics/overview?mode=live'), http('/api/analytics/overview?mode=paper')])
+      .then(([live, paper]) => { if (!dead) setOv({ live, paper }); }).catch(() => undefined);
     void load();
     const t = setInterval(load, 20_000);
     return () => { dead = true; clearInterval(t); };
@@ -270,24 +272,26 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
   const bots: AnyObj[] = [...s.grids.map((g: AnyObj) => ({ ...g, kind: 'grid' })), ...(s.trends ?? []).map((t: AnyObj) => ({ ...t, kind: 'trend' })), ...(s.lps ?? [])]
     .filter(here)
     .sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
-  const ovBots: AnyObj[] = (ov?.bots ?? []).filter(here);
+  const liveBots = bots.filter((b) => b.mode === 'live'), paperBots = bots.filter((b) => b.mode === 'paper');
+  const ovLive: AnyObj[] = (ov.live?.bots ?? []).filter(here);
   const holdOf = (id: string) => {
-    const o = ovBots.find((x) => x.id === id);
+    const o = [...ovLive, ...(ov.paper?.bots ?? [])].find((x) => x.id === id);
     return o && o.hodlUsd != null ? o.hodlUsd - o.capitalUsd : null;
   };
   // The change on coins not sold yet in ≈USD at today's prices (bots spend different coins, so dollars are the only way
   // to add them up); for a liquidity bot, what price moves did to its coins.
   const sumUsd = (part: (b: AnyObj) => number) => {
-    const xs = bots.filter((b) => b.usdPerQuote != null && (b.kind !== 'lp' || b.pnl)).map((b) => part(b) * b.usdPerQuote);
+    const xs = liveBots.filter((b) => b.usdPerQuote != null && (b.kind !== 'lp' || b.pnl)).map((b) => part(b) * b.usdPerQuote);
     return xs.length ? xs.reduce((a, x) => a + x, 0) : null;
   };
   const unsold = sumUsd((b) => (b.kind === 'grid' ? b.pnl.unrealized : b.kind === 'lp' ? b.pnl.price : b.pnl.equity - b.capital - b.pnl.realized));
-  const value = ovBots.length ? ovBots.reduce((a, o) => a + o.equityUsd, 0) : null;
+  const value = ovLive.length ? ovLive.reduce((a, o) => a + o.equityUsd, 0) : null;
   const running = bots.filter((b) => b.status === 'running').length;
   const priceOf = (b: AnyObj) => livePrice(ticks, b.kind === 'lp' ? b.market : b.kind === 'grid' ? b.stable : b.quote, b.price);
-  const earn = earnedByCoin(bots);
-  const tot = earn.reduce((a, e) => ({ trades: a.trades + e.trades, wins: a.wins + e.wins, losses: a.losses + e.losses, fees: a.fees + e.fees }), { trades: 0, wins: 0, losses: 0, fees: 0 });
-  const lastTrade = Math.max(0, ...bots.flatMap((b) => (b.trades ?? []).map((t: AnyObj) => t.timestamp as number)));
+  const earn = earnedByCoin(liveBots), paperEarn = earnedByCoin(paperBots);
+  const count = (es: typeof earn) => es.reduce((a, e) => ({ trades: a.trades + e.trades, wins: a.wins + e.wins, losses: a.losses + e.losses, fees: a.fees + e.fees }), { trades: 0, wins: 0, losses: 0, fees: 0 });
+  const tot = count(earn), paperTot = count(paperEarn);
+  const last = bots.flatMap((b) => (b.trades ?? []).map((t: AnyObj) => ({ t: t.timestamp as number, paper: b.mode === 'paper' }))).sort((a, b) => b.t - a.t)[0] ?? null;
   const next = closestNext(bots.filter((b) => b.kind === 'grid'), priceOf);
   const feed = useMemo(() => buildFeed(s, events).filter((it) => chain === 'all' || it.chainId == null || it.chainId === chain), [s, events, chain]);
 
@@ -324,13 +328,13 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
     <main className="stack">
       <section className="hero" aria-label="Earned by trading">
         <div className="hero-earn">
-          <span className="k"><L tip="Profit from completed buy → sell trades (and liquidity fees after gas), counted in each coin. A falling price doesn't lower it; only a losing trade does.">Earned by trading</L></span>
+          <span className="k"><L tip="Profit from your live bots' completed buy → sell trades (and liquidity fees after gas), counted in each coin. A falling price doesn't lower it; only a losing trade does. Paper bots are never counted here.">Earned by live trading</L></span>
           <div className="coins-earned">
             {earn.length ? earn.map((e) => (
               <span key={e.symbol} className={`ce ${cls(e.amount)}`}>
                 <AnimatedNumber value={e.amount} duration={900} format={(x) => `${x > 0 ? '+' : x < 0 ? '−' : ''}${humanAmount(Math.abs(x))}`} /><small>{e.symbol}</small>
               </span>
-            )) : <span className="muted">nothing yet</span>}
+            )) : <span className="muted">{liveBots.length ? 'nothing yet' : 'no live bots'}</span>}
           </div>
           <span className="sub">
             {tot.trades} completed trade{tot.trades === 1 ? '' : 's'} · <b className="pos">{tot.wins} won</b> · <b className={tot.losses ? 'neg' : ''}>{tot.losses} lost</b>{tot.fees > 0 ? ' · liquidity fees after gas included' : ''}.
@@ -340,13 +344,19 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
         <div className="hero-now">
           <span className="k"><L tip="Bots running, the last trade, and the closest level any grid is waiting for: the trade most likely to happen next.">Right now</L></span>
           <div className="now-line"><span className={`pulse ${running ? '' : 'off'}`} key={ticks?.t ?? 0} />{running} of {bots.length} bot{bots.length === 1 ? '' : 's'} running</div>
-          <div className="small">{lastTrade ? <>Last trade <b>{ago(lastTrade)}</b></> : 'No trades yet'}</div>
-          {next && <div className="small">Next likely trade: <b>{next.bot}</b> {next.side === 'buy' ? 'buys' : 'sells'} at <b>{px(next.at)}</b>, {pct(next.dist, 2)} away</div>}
+          <div className="small">{last ? <>Last trade <b>{ago(last.t)}</b>{last.paper ? <span className="tag paper-tag">paper</span> : null}</> : 'No trades yet'}</div>
+          {next && <div className="small">Next likely trade: <b>{next.bot}</b>{next.paper ? <span className="tag paper-tag">paper</span> : null} {next.side === 'buy' ? 'buys' : 'sells'} at <b>{px(next.at)}</b>, {pct(next.dist, 2)} away</div>}
         </div>
       </section>
       <p className="hero-foot muted small">
-        <L tip="The bots' coins valued at today's prices. It moves with the market every day, whether or not the bots trade.">Holdings at today's prices:</L> <b>{value != null ? usd(value) : '—'}</b>{unsold != null && unsold !== 0 ? <> (coins not sold yet: <span className={cls(unsold)}>{usd(unsold, true)}</span>)</> : null}. This moves with the market every day; it isn't a trading result.
+        <L tip="Your live bots' coins valued at today's prices. It moves with the market every day, whether or not the bots trade. Paper bots aren't included.">Live holdings at today's prices:</L> <b>{value != null ? usd(value) : '—'}</b>{unsold != null && unsold !== 0 ? <> (coins not sold yet: <span className={cls(unsold)}>{usd(unsold, true)}</span>)</> : null}. This moves with the market every day; it isn't a trading result.
       </p>
+      {paperBots.length > 0 && (
+        <p className="paper-line small">
+          <span className="tag paper-tag">paper</span> Simulated, not counted above: {paperEarn.length ? paperEarn.map((e) => `${e.amount > 0 ? '+' : e.amount < 0 ? '−' : ''}${humanAmount(Math.abs(e.amount))} ${e.symbol}`).join(' · ') : 'nothing yet'} from {paperTot.trades} trade{paperTot.trades === 1 ? '' : 's'} on {paperBots.length} paper bot{paperBots.length === 1 ? '' : 's'}.{' '}
+          <button type="button" className="linklike" onClick={() => nav({ v: 'tools', tab: 'analytics', analytics: 'paper' })}>Paper analytics</button>
+        </p>
+      )}
 
       {notices.length > 0 && (
         <div className="notices">

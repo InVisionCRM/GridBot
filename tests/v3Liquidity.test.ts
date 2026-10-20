@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { alignTick, amountsForLiquidity, feeGrowthInside, feesOwed, liquidityForAmounts, Q128, sqrtPriceAt, tickAtPrice } from '../src/live/v3Liquidity';
+import { alignTick, amountsForLiquidity, feesOwed, liquidityForAmounts, Q128, sqrtPriceAt, tickAtPrice } from '../src/live/v3Liquidity';
 
 describe('ticks ↔ prices', () => {
   it('matches the tick live pools report for their √price (read 2026-10-18)', () => {
@@ -32,15 +32,7 @@ describe('liquidity ↔ amounts', () => {
 });
 
 describe('fees (exact uint256 math, like the pool)', () => {
-  it('inside = global − below − above, wrapping mod 2^256', () => {
-    // price inside the range: below = lower's outside, above = upper's outside
-    expect(feeGrowthInside(1000n, 100n, 50n, 5, 0, 10)).toBe(850n);
-    // price above the range: above = global − upper's outside
-    expect(feeGrowthInside(1000n, 100n, 300n, 20, 0, 10)).toBe(200n);
-    // counters that wrapped still give a positive difference
-    expect(feeGrowthInside(5n, 2n ** 256n - 10n, 0n, 5, 0, 10)).toBe(15n);
-  });
-  it('owed = Δinside × L / 2^128', () => {
+  it('owed = Δcounter × L / 2^128', () => {
     expect(feesOwed(3n * Q128, Q128, 10n)).toBe(20n);
     expect(feesOwed(1n, 2n ** 256n - 1n, Q128)).toBe(2n); // wrapped Δ = 2
   });
