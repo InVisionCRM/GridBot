@@ -22,7 +22,7 @@ export type View =
   | { v: 'grid'; id: string }
   | { v: 'trend'; id: string }
   | { v: 'lp'; id: string }
-  | { v: 'tools'; tab: ToolTab; btPrefill?: BtPrefill };
+  | { v: 'tools'; tab: ToolTab; btPrefill?: BtPrefill; analytics?: 'live' | 'paper' };
 export type Nav = (v: View) => void;
 export type BotKind = 'grid' | 'trend' | 'lp';
 /** Detail view of a bot */

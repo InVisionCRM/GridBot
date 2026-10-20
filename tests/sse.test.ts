@@ -60,8 +60,9 @@ describe('SSE stream + API', () => {
       expect(c.status).toBe(200);
       expect(JSON.parse(c.body).candles.length).toBe(1);
       expect((await get('/api/market/candles?pair=DAI&tf=7m')).status).toBe(400);
-      const csv = await get('/api/analytics/journal.csv');
+      const csv = await get('/api/analytics/journal.csv?mode=live');
       expect(csv.body.startsWith('time,botId')).toBe(true);
+      expect((await get('/api/analytics/journal.csv')).status).toBe(400); // paper and live are never exported together
     } finally {
       server.close();
     }

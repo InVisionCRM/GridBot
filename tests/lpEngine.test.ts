@@ -516,7 +516,10 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       expect(p.gas).toBeGreaterThan(0);
       expect(p.profit).toBeCloseTo(p.fees - p.gas + p.price, 9);
       expect(p.equity).toBeCloseTo(st.value! + st.totals.sent - st.totals.gas, 9);
-      const row = a.bot.overview().bots.find((x) => x.kind === 'lp')!;
+      const row = a.bot.overview('paper').bots.find((x) => x.kind === 'lp')!;
+      expect(a.bot.overview('live').bots).toEqual([]); // a paper bot never shows up in live analytics
+      expect((await a.call('GET', '/api/analytics/overview')).status).toBe(400); // a mode is required
+      expect((await a.call('GET', '/api/analytics/overview?mode=paper')).body.bots).toHaveLength(1);
       expect(row.capital).toBe(1000);
       expect(row.equity).toBeCloseTo(p.equity, 9);
       expect(row.realized).toBeCloseTo(p.fees - p.gas, 9);

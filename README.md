@@ -29,6 +29,11 @@ Dev: `npm run dev` (UI :5173, API :3847).
 - **New bot**: choose a grid, a trend bot or a liquidity position. Grids start from a preset or a custom range. Every amount is entered in the coin the bot spends (PLS, DAI, HEX …), with your wallet balance and a **Max** button beside the box; live starts are checked against the wallet before you press Start. One sentence tells you what each completed buy-then-sell nets after fees, impact and gas. Paper / Live sits next to the Start button; live always asks first. Limits live under *Advanced*.
 - **Bot detail**: for grids, earned by trading (in the coin it spends), coins bought and not sold yet, and the two together; for trend bots, profit vs holding; the chart (grid levels and fills, or the trend bot's entry / stop / take-profit lines), the bot's own log, levels, fills (compact, or *All columns*), and for grids **Follow the price up** and **Change range**, which restarts a stopped grid on its own pair and mode.
 - **Tools**: Charts, Backtest, Analytics, Markets (custom tokens, pool picker, chain registry), Alerts and **System** (below).
+- **Paper and live are never added together.**
+  - **Analytics tabs:** **Live** (real money only), **Paper** (simulated, its own value history and journal, dashed and labelled) and **Market conditions**.
+  - **API:** `GET /api/analytics/overview` and `/journal(.csv)` require `?mode=live|paper`.
+  - **Home:** the headline totals ("Earned by live trading", "Live holdings") count live bots only. Paper bots get their own line, and paper rows in the live feed carry a PAPER tag.
+  - **History:** state version 4 keeps one value history per mode. The older single history summed both, so it can't be split, and both start over on upgrade.
 - **Top bar**: chain filter (All / PLS / HOOD / ETH, with a dot when gas is low), signing address or *Paper only*, the Activity feed, the Guide, and **Stop all** (or *Stop all on* the filtered chain). Stopping never sells holdings.
 - **Guide**: a short in-app explainer. Its numbers are imported from the code (fees, start-check thresholds, limits, preset params).
 

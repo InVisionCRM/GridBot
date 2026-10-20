@@ -52,17 +52,18 @@ export interface Alert {
 }
 
 export interface MultiState {
-  version: 3;
+  /** 4: the value history is kept per mode (paper and live never mixed) */
+  version: 4;
   defaults: SafetyLimits;
   grids: BotState[];
   trends: TrendState[];
   /** Liquidity-position bots */
   lps: LpState[];
   alerts: Alert[];
-  /** [ms, total equity USD, realized USD] every ≥60 s */
-  /** [t, equityUsd, realizedUsd, capitalUsd?] — capital lets period changes exclude bots added/removed */
-  portfolio: [number, number, number, number?][];
+  /** Per mode, every ≥60 s: [t, equityUsd, realizedUsd, capitalUsd] (capital lets period changes leave out bots added or removed) */
+  portfolio: Record<Mode, PortfolioSnap[]>;
 }
+type PortfolioSnap = [number, number, number, number];
 
 export interface MultiDeps {
   net: LiveNetwork;
@@ -94,19 +95,20 @@ export interface ChainWallet {
 }
 
 function migrate(raw: unknown, net: LiveNetwork): MultiState {
-  const empty = (): MultiState => ({ version: 3, defaults: { ...DEFAULT_LIMITS }, grids: [], trends: [], lps: [], alerts: [], portfolio: [] });
+  const empty = (): MultiState => ({ version: 4, defaults: { ...DEFAULT_LIMITS }, grids: [], trends: [], lps: [], alerts: [], portfolio: { live: [], paper: [] } });
   if (!raw || typeof raw !== 'object') return empty();
   const o = raw as Record<string, unknown>;
-  if ((o.version === 2 || o.version === 3) && Array.isArray(o.grids)) {
+  if ((o.version === 2 || o.version === 3 || o.version === 4) && Array.isArray(o.grids)) {
     return {
-      version: 3,
+      version: 4,
       defaults: { ...DEFAULT_LIMITS, ...((o.defaults as SafetyLimits) ?? {}) },
       grids: (o.grids as BotState[]).map((g) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
       trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
       // config.baseAmount arrived with funding from wallet coins: earlier bots put in none
       lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => upgradeLp({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],
       alerts: Array.isArray(o.alerts) ? (o.alerts as Alert[]) : [],
-      portfolio: Array.isArray(o.portfolio) ? (o.portfolio as MultiState['portfolio']) : [],
+      // Before version 4 one history summed paper and live bots; it can't be split, so both start over.
+      portfolio: o.version === 4 ? (o.portfolio as MultiState['portfolio']) : { live: [], paper: [] },
     };
   }
   const g = o as unknown as BotState; // v1 single grid
@@ -684,7 +686,8 @@ export class MultiBot {
   }
 
   // ── Portfolio / analytics ──────────────────────────────────────────────
-  private botRows() {
+  /** One mode's bots: analytics never add paper and live together. */
+  private botRows(mode: Mode) {
     const rows: {
       id: string; kind: 'grid' | 'trend' | 'lp'; name: string; pair: string; chainId: number; mode: Mode; status: string; usdPerQuote: number | null;
       capital: number; equity: number; realized: number; unrealized: number; fees: number; gas: number; hodl: number | null;
@@ -693,7 +696,7 @@ export class MultiBot {
     }[] = [];
     for (const e of this.engines.values()) {
       const s = e.state;
-      if (!s.config) continue;
+      if (!s.config || s.mode !== mode) continue;
       const tr = e.modeTrades();
       const t = totals(tr, s.lastPrice);
       const capital = s.config.totalCapitalUsd;
@@ -713,7 +716,7 @@ export class MultiBot {
     }
     for (const e of this.trendEngines.values()) {
       const st = e.status();
-      if (!st.capital) continue;
+      if (!st.capital || st.mode !== mode) continue;
       rows.push({
         id: st.id, kind: 'trend', name: st.name, pair: st.quote, chainId: e.chainId, mode: st.mode, status: st.status, usdPerQuote: this.usdPerQuote(st.quote),
         capital: st.capital, equity: st.pnl.equity, realized: st.pnl.realized, unrealized: st.pnl.unrealized, fees: st.pnl.fees, gas: st.pnl.gas,
@@ -724,7 +727,7 @@ export class MultiBot {
     }
     for (const e of this.lpEngines.values()) {
       const s = e.state, pnl = e.pnl(), vw = e.view;
-      if (!s.config || !pnl || !vw) continue;
+      if (!s.config || !pnl || !vw || s.mode !== mode) continue;
       rows.push({
         id: s.id, kind: 'lp', name: `Liquidity ${e.label}`, pair: s.market, chainId: e.chainId, mode: s.mode, status: s.status, usdPerQuote: this.usdPerQuote(s.market),
         // fees earned (net of gas) are the LP's "banked" side; the price side moves with the price like unsold coins
@@ -738,19 +741,24 @@ export class MultiBot {
   }
 
   private snapshotPortfolio() {
-    const p = this.multi.portfolio;
-    if (p.length && this.now() - p[p.length - 1][0] < 60_000) return;
-    const rows = this.botRows();
-    if (!rows.length) return;
-    const eq = rows.reduce((a, r) => a + (r.usdPerQuote ? r.equity * r.usdPerQuote : 0), 0);
-    const re = rows.reduce((a, r) => a + (r.usdPerQuote ? r.realized * r.usdPerQuote : 0), 0);
-    const cap = rows.reduce((a, r) => a + (r.usdPerQuote ? r.capital * r.usdPerQuote : 0), 0);
-    pushCapped(p, [this.now(), usdFmt(eq), usdFmt(re), usdFmt(cap)], 4000);
-    this.persist();
+    let changed = false;
+    for (const mode of ['live', 'paper'] as const) {
+      const p = this.multi.portfolio[mode];
+      if (p.length && this.now() - p[p.length - 1][0] < 60_000) continue;
+      const rows = this.botRows(mode);
+      if (!rows.length) continue;
+      const eq = rows.reduce((a, r) => a + (r.usdPerQuote ? r.equity * r.usdPerQuote : 0), 0);
+      const re = rows.reduce((a, r) => a + (r.usdPerQuote ? r.realized * r.usdPerQuote : 0), 0);
+      const cap = rows.reduce((a, r) => a + (r.usdPerQuote ? r.capital * r.usdPerQuote : 0), 0);
+      pushCapped(p, [this.now(), usdFmt(eq), usdFmt(re), usdFmt(cap)], 4000);
+      changed = true;
+    }
+    if (changed) this.persist();
   }
 
-  overview() {
-    const rows = this.botRows();
+  /** Analytics for one mode: live is real money, paper is simulated; never added together. */
+  overview(mode: Mode) {
+    const rows = this.botRows(mode);
     const now = this.now();
     const day = new Date(now); day.setHours(0, 0, 0, 0);
     const periods = { today: day.getTime(), d7: now - 7 * 86_400_000, all: 0 };
@@ -758,7 +766,7 @@ export class MultiBot {
     const realizedSince = (from: number) => rows.reduce((a, r) => a + usd(r, r.trades.filter((t) => t.timestamp >= from).reduce((s, t) => s + t.realizedPnlUsd, 0)), 0);
     // Only snapshots that carry the allocated capital can be compared: PnL = equity − capital, so starting,
     // adding or removing a bot is not counted as a gain or loss.
-    const ph = this.multi.portfolio.filter((x) => x[3] != null) as [number, number, number, number][];
+    const ph = this.multi.portfolio[mode];
     const eqNow = rows.reduce((a, r) => a + usd(r, r.equity), 0);
     const capNow = rows.reduce((a, r) => a + usd(r, r.capital), 0);
     const pnlNow = eqNow - capNow;
@@ -799,10 +807,11 @@ export class MultiBot {
       if (r.plsHeld > 0) addA(this.tokLabel(d.chainId, d.base.symbol), d.chainId, r.plsHeld * (this.hub.baseUsd(r.pair) ?? 0), r.plsHeld);
       addA(this.tokLabel(d.chainId, d.quote.symbol), d.chainId, usd(r, r.quoteFree), null);
     }
-    // Per-chain breakdown (aggregated ≈USD) + gas wallet per chain.
+    // Per-chain breakdown (aggregated ≈USD); live also shows each chain's gas wallet (paper spends no real gas).
     const chains = this.hub.runtimes().map((rt) => {
       const bs = bots.filter((b) => b.chainId === rt.cfg.id);
-      const w = this.wallets.get(rt.cfg.id);
+      const w = mode === 'live' ? this.wallets.get(rt.cfg.id) : undefined;
+      const native = mode === 'live' ? w?.native ?? rt.gas.native : null;
       const nat = this.hub.nativeUsd(rt.cfg.id);
       return {
         chainId: rt.cfg.id, key: rt.cfg.key, name: rt.cfg.name, short: rt.cfg.short, color: rt.cfg.color, status: rt.cfg.status,
@@ -810,13 +819,13 @@ export class MultiBot {
         equityUsd: bs.reduce((a, b) => a + b.equityUsd, 0), capitalUsd: bs.reduce((a, b) => a + b.capitalUsd, 0),
         realizedUsd: bs.reduce((a, b) => a + b.realizedUsd, 0), unrealizedUsd: bs.reduce((a, b) => a + b.unrealizedUsd, 0),
         gasUsd: bs.reduce((a, b) => a + b.gasUsd, 0),
-        gasNative: w?.native ?? rt.gas.native, gasNativeUsd: (w?.native ?? rt.gas.native) != null && nat ? (w?.native ?? rt.gas.native)! * nat : null,
-        lowGas: rt.gas.low, nativeSymbol: rt.cfg.nativeSymbol,
+        gasNative: native, gasNativeUsd: native != null && nat ? native * nat : null,
+        lowGas: mode === 'live' && rt.gas.low, nativeSymbol: rt.cfg.nativeSymbol,
       };
     }).filter((c) => c.bots > 0 || c.gasNative != null);
     const hodl = bots.reduce((a, b) => a + (b.hodlUsd ?? b.capitalUsd), 0);
     return {
-      t: now,
+      t: now, mode,
       totals: { equityUsd: sum('equityUsd'), capitalUsd: sum('capitalUsd'), realizedUsd: sum('realizedUsd'), unrealizedUsd: sum('unrealizedUsd'), feesUsd: sum('feesUsd'), gasUsd: sum('gasUsd'), hodlUsd: hodl, vsHodlPct: hodl ? sum('equityUsd') / hodl - 1 : null },
       periods: per,
       allocation: [...alloc.values()].filter((x) => x.usd > 0.005).sort((a, b) => b.usd - a.usd),
@@ -828,7 +837,7 @@ export class MultiBot {
     };
   }
 
-  journal(f: { botId?: string; kind?: string; pair?: string; side?: string; mode?: string; from?: number; to?: number } = {}): JournalRow[] {
+  journal(f: { mode: Mode; botId?: string; kind?: string; pair?: string; side?: string; from?: number; to?: number }): JournalRow[] {
     const rows: JournalRow[] = [];
     const push = (botId: string, kind: 'grid' | 'trend', bot: string, t: LiveTrade & { reason?: string }) => {
       const k = this.usdPerQuote(t.stable);
@@ -844,7 +853,7 @@ export class MultiBot {
     for (const s of this.multi.trends) for (const t of s.trades) push(s.id, 'trend', s.name, t);
     return rows
       .filter((r) => (!f.botId || r.botId === f.botId) && (!f.kind || r.kind === f.kind) && (!f.pair || r.pair === f.pair)
-        && (!f.side || r.side === f.side) && (!f.mode || r.mode === f.mode) && (!f.from || r.t >= f.from) && (!f.to || r.t <= f.to))
+        && (!f.side || r.side === f.side) && r.mode === f.mode && (!f.from || r.t >= f.from) && (!f.to || r.t <= f.to))
       .sort((a, b) => b.t - a.t);
   }
 

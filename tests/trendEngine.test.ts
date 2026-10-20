@@ -125,7 +125,7 @@ describe('TrendEngine', () => {
     setMid(s.chain, 1.1 * P);
     await s.bot.tickAll();
     const before = s.bot.status().trends[0].position!;
-    expect(s.store.data!.version).toBe(3);
+    expect(s.store.data!.version).toBe(4);
     // "restart": new orchestrator over the same state + candle files
     const r = setup({ store: s.store, chain: s.chain, candles: s.candles, clock: s.clock });
     const t = r.bot.status().trends.find((x) => x.id === id)!;
@@ -203,15 +203,52 @@ describe('TrendEngine', () => {
     await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: CFG, capital: 100 });
     s.closeBar(T0, { o: P, h: 1.1 * P, l: P, c: 1.1 * P });
     await s.bot.tickAll();
-    const rows = s.bot.journal({ kind: 'trend' });
+    const rows = s.bot.journal({ mode: 'paper', kind: 'trend' });
     expect(rows.length).toBe(1);
     const csv = MultiBot.journalCsv(rows);
     expect(csv.split('\n')[0]).toBe('time,botId,kind,bot,pair,mode,side,reason,pls,quote,price,fee,gas,pnl,pnlUsd,slippagePct,tx,failed');
     expect(csv).toContain(',trend,');
-    const ov = s.bot.overview();
+    const ov = s.bot.overview('paper');
     expect(ov.bots).toHaveLength(1);
     expect(ov.totals.capitalUsd).toBeGreaterThan(0);
     expect(ov.allocation.map((a) => a.asset)).toContain('PLS');
+  });
+
+  it('analytics never mix paper and live: each mode has its own bots, totals, value history and journal', async () => {
+    const s = setup({ signer: true });
+    const paper = await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: CFG, capital: 100 });
+    const live = await s.bot.addTrend({ mode: 'live', quote: 'DAI', tf: '1h', cfg: CFG, capital: 40 });
+    await s.bot.tickAll();
+    s.closeBar(T0, { o: P, h: 1.1 * P, l: P, c: 1.1 * P }); // both buy
+    setMid(s.chain, 1.1 * P);
+    await s.bot.tickAll();
+    await s.bot.tickAll();
+    const L = s.bot.overview('live'), Pp = s.bot.overview('paper');
+    expect(L.mode).toBe('live');
+    expect(L.bots.map((b) => b.id)).toEqual([live]);
+    expect(Pp.bots.map((b) => b.id)).toEqual([paper]);
+    expect(L.totals.capitalUsd).toBeCloseTo(40, 6);
+    expect(Pp.totals.capitalUsd).toBeCloseTo(100, 6);
+    expect(L.portfolio.length).toBeGreaterThan(0);
+    expect(Pp.portfolio.length).toBeGreaterThan(0);
+    const state = s.store.load()!;
+    expect(state.portfolio.live.every((x) => x[3] === 40)).toBe(true); // capital column: live only
+    expect(state.portfolio.paper.every((x) => x[3] === 100)).toBe(true);
+    const jl = s.bot.journal({ mode: 'live' }), jp = s.bot.journal({ mode: 'paper' });
+    expect(jl.length).toBeGreaterThan(0);
+    expect(jp.length).toBeGreaterThan(0);
+    expect(jl.every((r) => r.botId === live && r.mode === 'live')).toBe(true);
+    expect(jp.every((r) => r.botId === paper && r.mode === 'paper')).toBe(true);
+    // the live chain row carries the real gas wallet; the paper one never does
+    expect(Pp.chains.every((c) => c.gasNative == null && !c.lowGas)).toBe(true);
+  });
+
+  it('a saved history from before the split (paper and live summed together) is dropped, not shown as either', () => {
+    const store = new MemoryStore<MultiState>();
+    store.save({ version: 3, defaults: {}, grids: [], trends: [], lps: [], alerts: [], portfolio: [[1, 500, 0, 400], [2, 510, 0, 400]] } as unknown as MultiState);
+    const s = setup({ store });
+    expect(s.bot.overview('live').portfolio).toEqual([]);
+    expect(s.bot.overview('paper').portfolio).toEqual([]);
   });
 
   it('portfolio period change and drawdown exclude capital added by starting a new bot', async () => {
@@ -221,7 +258,7 @@ describe('TrendEngine', () => {
     s.clock.ms += 61_000;
     await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: CFG, capital: 200 });
     await s.bot.tickAll(); // snapshot 2: $300 allocated, no trades
-    const ov = s.bot.overview();
+    const ov = s.bot.overview('paper');
     expect(ov.totals.capitalUsd).toBeCloseTo(300, 6);
     expect(ov.periods.all.equityChange).toBeCloseTo(0, 2); // not +$200
     expect(ov.periods.today.equityChange).toBeCloseTo(0, 2);
