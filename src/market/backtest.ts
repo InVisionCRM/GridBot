@@ -64,8 +64,10 @@ export function maxDrawdown(v: number[]): number {
 function metrics(eq: { t: number; v: number; bh: number }[], trades: BtTrade[], tf: TF, capital: number, inPosBars: number, blocked: number, spent: Spent, size: { trade: number; impact: number; bhEntry: number; pool: number | null }): BtMetrics {
   const end = eq.length ? eq[eq.length - 1].v : capital;
   const days = eq.length > 1 ? (eq[eq.length - 1].t - eq[0].t) / 86_400 : 0;
+  // Measured from the amount put in: a costly start (a start-up buy's price impact) is a drop and a loss like any other
+  const vals = [capital, ...eq.map((e) => e.v)];
   const rets: number[] = [];
-  for (let i = 1; i < eq.length; i++) rets.push(eq[i].v / eq[i - 1].v - 1);
+  for (let i = 1; i < vals.length; i++) rets.push(vals[i] / vals[i - 1] - 1);
   const mean = rets.reduce((a, b) => a + b, 0) / (rets.length || 1);
   const sd = Math.sqrt(rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length || 1));
   const dsd = Math.sqrt(rets.reduce((a, b) => a + Math.min(b, 0) ** 2, 0) / (rets.length || 1));
@@ -76,7 +78,7 @@ function metrics(eq: { t: number; v: number; bh: number }[], trades: BtTrade[], 
   return {
     startEquity: capital, endEquity: end, totalReturn: end / capital - 1,
     cagr: days >= 30 ? (end / capital) ** (365 / days) - 1 : null,
-    maxDrawdown: maxDrawdown(eq.map((e) => e.v)),
+    maxDrawdown: maxDrawdown(vals),
     winRate: trades.length ? wins.length / trades.length : null,
     profitFactor: trades.length ? (gl > 0 ? gw / gl : null) : null,
     avgWin: wins.length ? gw / wins.length : null,
@@ -91,7 +93,7 @@ function metrics(eq: { t: number; v: number; bh: number }[], trades: BtTrade[], 
     priceEffect: end - capital + spent.fees + spent.impact + spent.slippage + spent.gas,
     days,
     bhReturn: bh.length ? bh[bh.length - 1] / capital - 1 : 0,
-    bhMaxDrawdown: maxDrawdown(bh),
+    bhMaxDrawdown: maxDrawdown([capital, ...bh]),
     blockedByCost: blocked,
     tradeImpactPct: size.impact, bhEntryImpactPct: size.bhEntry, tradeSize: size.trade, poolDepth: size.pool,
   };

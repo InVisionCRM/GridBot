@@ -109,7 +109,7 @@ describe('trend backtester: costs and look-ahead', () => {
     expect(r.metrics.trades).toBe(r.trades.length);
     expect(r.metrics.winRate).toBeCloseTo(w.length / r.trades.length, 12);
     if (l.length && w.length) expect(r.metrics.profitFactor).toBeCloseTo(w.reduce((a, t) => a + t.pnl, 0) / -l.reduce((a, t) => a + t.pnl, 0), 9);
-    expect(r.metrics.maxDrawdown).toBeCloseTo(maxDrawdown(r.equity.map((e) => e.v)), 12);
+    expect(r.metrics.maxDrawdown).toBeCloseTo(maxDrawdown([r.metrics.startEquity, ...r.equity.map((e) => e.v)]), 12);
     expect(r.metrics.exposure).toBeGreaterThan(0); expect(r.metrics.exposure).toBeLessThan(1);
     expect(r.equity[0].bh).toBeCloseTo(1000 * 0.9971 ** 2 * (r.equity[0].bh / 1000 / 0.9971 ** 2), 9);
     expect(maxDrawdown([100, 120, 90, 130, 65])).toBe(0.5);
@@ -176,6 +176,16 @@ describe('backtest: where the money went (fees, price impact, slippage, gas, pri
     expect(m.impact).toBeGreaterThan(m.fees * 100);
     // the breakdown adds up exactly: profit = price effect − fees − impact − slippage − gas
     expect(m.endEquity - m.startEquity).toBeCloseTo(m.priceEffect - m.fees - m.impact - m.slippage - m.gas, 6);
+  });
+
+  it('a costly start counts: worst drop and Sharpe are measured from the amount put in, not from after the start-up buy', () => {
+    const m = runGridBacktest(week, { lowerPrice: 28.91, upperPrice: 39.113, gridCount: 6, capital: 10_000 }, '1h', POOL).metrics;
+    // the screenshot showed worst drop 0.85% and Sharpe +4.94 next to a −32.54% return
+    expect(m.totalReturn).toBeCloseTo(-0.2506, 4); // the start-up buy's impact
+    expect(m.maxDrawdown).toBeGreaterThanOrEqual(-m.totalReturn);
+    expect(m.bhMaxDrawdown).toBeGreaterThanOrEqual(-m.bhReturn);
+    expect(m.sharpe!).toBeLessThan(0);
+    expect(m.sortino!).toBeLessThan(0);
   });
 
   it('the same grid with 1 ETH pays almost nothing to impact', () => {
