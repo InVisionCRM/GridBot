@@ -34,7 +34,8 @@ export interface LogLike { address: string; topics: readonly string[]; data: str
 export interface ReceiptLike { status: number | null; gasUsed: bigint; gasPrice?: bigint | null; logs: readonly LogLike[] }
 
 export interface ChainReader {
-  call(tx: { to: string; data: string }): Promise<string>;
+  /** `from`: the caller to simulate (e.g. a position's owner, for calls only the owner may make) */
+  call(tx: { to: string; data: string; from?: string }): Promise<string>;
   getBalance(address: string): Promise<bigint>;
   getFeeData(): Promise<{ gasPrice: bigint | null; maxFeePerGas: bigint | null }>;
   getTransactionCount(address: string, blockTag: 'pending'): Promise<number>;

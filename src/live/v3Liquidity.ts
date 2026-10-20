@@ -45,17 +45,7 @@ export function liquidityForAmounts(s: number, sa: number, sb: number, amount0: 
   return Math.min(L0, L1);
 }
 
-/**
- * Fee growth per unit of liquidity inside [tickLower, tickUpper] (Q128, wraps mod 2^256 exactly like the pool:
- * feeGrowthGlobal − below − above, where "outside" is measured relative to the current tick).
- */
-export function feeGrowthInside(global: bigint, lowerOutside: bigint, upperOutside: bigint, tickCurrent: number, tickLower: number, tickUpper: number): bigint {
-  const below = tickCurrent >= tickLower ? lowerOutside : global - lowerOutside;
-  const above = tickCurrent < tickUpper ? upperOutside : global - upperOutside;
-  return (((global - below - above) % U256) + U256) % U256;
-}
-
-/** Fees (raw) a position earned since its last snapshot: (inside now − inside then) × L / 2^128, wrap-safe. */
+/** Fees (raw) from a fee-growth counter since a snapshot: (counter now − counter then) × L / 2^128, wrap-safe. */
 export function feesOwed(insideNow: bigint, insideLast: bigint, liquidity: bigint): bigint {
   const d = (((insideNow - insideLast) % U256) + U256) % U256;
   return (d * liquidity) / Q128;

@@ -4,7 +4,7 @@
  */
 import type { DexConfig } from '../../live/chains';
 import type { MarketDef, MarketToken } from '../../live/markets';
-import { alignTick, amountsForLiquidity, feeGrowthInside, liquidityForAmounts, sqrtPriceAt, tickAtPrice } from '../../live/v3Liquidity';
+import { alignTick, amountsForLiquidity, liquidityForAmounts, sqrtPriceAt, tickAtPrice } from '../../live/v3Liquidity';
 import type { ChainReader } from '../bot/chain';
 import { V3_POOL, V3_POOL_LP } from '../dex/abis';
 import { readCall, sameAddr } from '../dex/types';
@@ -114,17 +114,4 @@ export class LpPool {
   /** Raw amounts in token order, for calldata. */
   rawAmounts(c: Coins, v: { baseIs0: boolean }) { return this.toRaw(c, v); }
   coinsFromRaw(a0: bigint, a1: bigint, v: { baseIs0: boolean }): Coins { return this.fromRaw(Number(a0), Number(a1), v); }
-
-  /** Fee growth inside a range right now (the pool's counters; exactly what the position manager pays out). */
-  async inside(tickLower: number, tickUpper: number, v: PoolView): Promise<{ in0: bigint; in1: bigint }> {
-    type T = { feeGrowthOutside0X128: bigint; feeGrowthOutside1X128: bigint };
-    const [lo, hi] = await Promise.all([
-      readCall<T>(this.reader, this.address, V3_POOL_LP, 'ticks', [tickLower]),
-      readCall<T>(this.reader, this.address, V3_POOL_LP, 'ticks', [tickUpper]),
-    ]);
-    return {
-      in0: feeGrowthInside(v.global0, lo.feeGrowthOutside0X128, hi.feeGrowthOutside0X128, v.tick, tickLower, tickUpper),
-      in1: feeGrowthInside(v.global1, lo.feeGrowthOutside1X128, hi.feeGrowthOutside1X128, v.tick, tickLower, tickUpper),
-    };
-  }
 }
