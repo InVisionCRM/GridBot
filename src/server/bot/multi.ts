@@ -14,7 +14,7 @@ import { totals, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
 import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
-import { LpEngine, freshLp, type LpStartParams, type LpState } from './lpEngine';
+import { LpEngine, freshLp, upgradeLp, type LpStartParams, type LpState } from './lpEngine';
 import { TaxWatch } from './taxWatch';
 import type { Logger } from './logger';
 import type { Store } from './store';
@@ -104,7 +104,7 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
       grids: (o.grids as BotState[]).map((g) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
       trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
       // config.baseAmount arrived with funding from wallet coins: earlier bots put in none
-      lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => ({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],
+      lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => upgradeLp({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],
       alerts: Array.isArray(o.alerts) ? (o.alerts as Alert[]) : [],
       portfolio: Array.isArray(o.portfolio) ? (o.portfolio as MultiState['portfolio']) : [],
     };

@@ -313,7 +313,9 @@ New bot → **Liquidity**, or **Start LP** on a row of Today's picks' *Grid vs l
 - **Money view.** *Fees earned* (collected + waiting), *Gas paid*, *Price change and swaps*, and *Overall* = fees − gas ± price, in the spend coin and ≈USD. On Home, fees − gas count as *Earned by trading* and the price part counts with *Bought, not sold yet*.
 - **Pause / Close / Remove.** Pause keeps the position open (still measured and earning, but not moved and no fees sent). Close takes everything out to the wallet. Remove only works once the position is closed.
 - **Restarts.** Every on-chain step is saved with its tx hash before waiting for it. A restart settles that step by its receipt and never sends it twice. A step that reverts 3 times stops the bot, and nothing is lost: the coins are in the wallet or the position.
-- **Paper.** Paper runs the same steps on a simulated position. Its fees come from the pool's real fee counters, scaled by the share of the pool it would have been.
+- **Paper.** Paper runs the same steps on a simulated position. It earns the pool's real global fee growth between two readings when the earlier one was in range, scaled by the share of the pool it would have been. That matches what a real position earns: on Oct 20 2026 the live ETH/USDG position earned 0.00854 USDG in two minutes in range, and the pool's global growth × its liquidity gave the same 0.00854.
+  - Why not the pool's fee-inside counters: a paper position's range ticks usually don't exist in the pool, so they read 0 and never flip. Out of range, Uniswap's fee-inside formula then wraps to about 2^128 × liquidity. A paper ETH/USDG bot showed a value of about 10^48 USDG for the 8 minutes the price was below its range (Oct 20 2026, 01:10–01:18 UTC). Live positions mint their ticks and keep using the pool's own counters.
+  - Paper bots saved before this fix start earning again from their next reading, and their value history starts over.
 
 ## Trend bot (long-only)
 

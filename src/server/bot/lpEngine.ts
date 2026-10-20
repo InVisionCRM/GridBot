@@ -48,8 +48,8 @@ export interface LpPosition {
   lower: number;
   upper: number;
   openedAt: number;
-  /** Paper: the pool's fee growth inside at the last snapshot and fees owed up to it (raw, token order) */
-  paper?: { in0: string; in1: string; owed0: string; owed1: string };
+  /** Paper: the pool's global fee growth and whether the price was in range at the last reading; fees earned (raw, token order) */
+  paper?: { g0: string; g1: string; inRange: boolean; owed0: string; owed1: string };
 }
 
 export type LpAction = 'open' | 'rerange' | 'close' | 'send';
@@ -69,7 +69,8 @@ export interface LpStep {
 
 export interface LpState {
   kind: 'lp';
-  version: 1;
+  /** 2: paper positions earn the pool's global fee growth (see upgradeLp) */
+  version: number;
   id: string;
   mode: Mode;
   network: string;
@@ -130,9 +131,24 @@ const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
   return {
-    kind: 'lp', version: 1, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
+    kind: 'lp', version: 2, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
     outSince: null, lastRerangeAt: null, reranges: 0, totals: { fees: 0, gas: 0, sent: 0 }, startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
+  };
+}
+
+/**
+ * Stored LP state → this version. 2: paper positions earn the pool's global fee growth (accruePaper). Before, their
+ * fees came from range-edge ticks that usually don't exist in the pool (out of range: ~2^128 × L), so a paper position
+ * earns again from its next reading and a paper bot's value history starts over.
+ */
+export function upgradeLp(s: LpState): LpState {
+  if (s.version >= 2) return s;
+  const p = s.position;
+  return {
+    ...s, version: 2,
+    position: p?.paper ? { ...p, paper: { g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0' } } : p,
+    equity: s.mode === 'paper' ? [] : s.equity,
   };
 }
 
@@ -274,6 +290,7 @@ export class LpEngine {
     try {
       const pool = this.lp();
       const v = await pool.view();
+      if (this.state.position?.paper) this.accruePaper(this.state.position, v);
       this.state.lastPrice = v.price;
       this.state.lastPriceAt = this.now();
       if (this.state.step) {
@@ -315,22 +332,30 @@ export class LpEngine {
     return Math.max(s.outSince + RECENTER_AFTER_MS, s.lastRerangeAt == null ? 0 : s.lastRerangeAt + RECENTER_COOLDOWN_MS);
   }
 
-  /** Fees owed now (coins), from the pool's counters. */
-  private async owed(pool: LpPool, v: PoolView, p: LpPosition): Promise<{ raw0: bigint; raw1: bigint; in0: bigint; in1: bigint }> {
+  /**
+   * Paper fees. A paper position isn't in the pool, so its range ticks usually don't exist there: their counters read 0
+   * and never flip, and the pool's fee-inside formula wraps to ~2^128 × L once the price leaves the range. Instead it
+   * earns the pool's global fee growth between two readings when the earlier one was in range, at L/(L + pool) of what
+   * L alone would get (it would be part of the pool).
+   */
+  private accruePaper(p: LpPosition, v: PoolView) {
+    const pp = p.paper!, L = BigInt(p.liquidity);
+    const earned = (now: bigint, last: string) => (pp.inRange ? (feesOwed(now, BigInt(last), L) * v.liquidity) / (v.liquidity + L) : 0n);
+    p.paper = {
+      g0: v.global0.toString(), g1: v.global1.toString(), inRange: v.tick >= p.tickLower && v.tick < p.tickUpper,
+      owed0: (BigInt(pp.owed0) + earned(v.global0, pp.g0)).toString(), owed1: (BigInt(pp.owed1) + earned(v.global1, pp.g1)).toString(),
+    };
+  }
+
+  /** Fees owed now (raw, token order): a paper position's earned fees, or a live one's from the pool's counters. */
+  private async owed(pool: LpPool, v: PoolView, p: LpPosition): Promise<{ raw0: bigint; raw1: bigint }> {
+    if (p.paper) return { raw0: BigInt(p.paper.owed0), raw1: BigInt(p.paper.owed1) };
     const { in0, in1 } = await pool.inside(p.tickLower, p.tickUpper, v);
-    if (p.paper) {
-      // A paper position isn't in the pool, so its share of each fee is L/(L + pool) of what L alone would get.
-      const L = BigInt(p.liquidity), share = (x: bigint) => (v.liquidity > 0n ? (x * v.liquidity) / (v.liquidity + L) : x);
-      return {
-        raw0: BigInt(p.paper.owed0) + share(feesOwed(in0, BigInt(p.paper.in0), L)),
-        raw1: BigInt(p.paper.owed1) + share(feesOwed(in1, BigInt(p.paper.in1), L)), in0, in1,
-      };
-    }
     type Pos = { liquidity: bigint; feeGrowthInside0LastX128: bigint; feeGrowthInside1LastX128: bigint; tokensOwed0: bigint; tokensOwed1: bigint };
     const pos = await readCall<Pos>(pool.reader, pool.npm, V3_NPM, 'positions', [BigInt(p.id)]);
     return {
       raw0: pos.tokensOwed0 + feesOwed(in0, pos.feeGrowthInside0LastX128, pos.liquidity),
-      raw1: pos.tokensOwed1 + feesOwed(in1, pos.feeGrowthInside1LastX128, pos.liquidity), in0, in1,
+      raw1: pos.tokensOwed1 + feesOwed(in1, pos.feeGrowthInside1LastX128, pos.liquidity),
     };
   }
 
@@ -544,10 +569,10 @@ export class LpEngine {
     if (this.state.mode === 'paper') {
       const { L, used } = pool.fund(this.state.idle, range.tickLower, range.tickUpper, v);
       if (!(L > 0)) throw new Error('nothing to put in the position');
-      const { in0, in1 } = await pool.inside(range.tickLower, range.tickUpper, v);
       const snap = await this.hub.quoter(this.state.market).market();
       this.state.totals.gas += this.gasQuote(LP_GAS.v3.open, v, snap);
-      return this.minted(s, `paper-${this.now().toString(36)}`, BigInt(Math.floor(L)), used, v, pool, { in0: in0.toString(), in1: in1.toString(), owed0: '0', owed1: '0' });
+      const inRange = v.tick >= range.tickLower && v.tick < range.tickUpper;
+      return this.minted(s, `paper-${this.now().toString(36)}`, BigInt(Math.floor(L)), used, v, pool, { g0: v.global0.toString(), g1: v.global1.toString(), inRange, owed0: '0', owed1: '0' });
     }
     if (s.hash) {
       const r = await this.settled(s, v);
@@ -602,7 +627,7 @@ export class LpEngine {
     if (this.state.mode === 'paper') {
       const o = await this.owed(pool, v, p);
       const fees = pool.coinsFromRaw(o.raw0, o.raw1, v), worth = fees.base * v.price + fees.quote;
-      p.paper = { in0: o.in0.toString(), in1: o.in1.toString(), owed0: '0', owed1: '0' };
+      p.paper = { ...p.paper!, owed0: '0', owed1: '0' };
       const snap = await this.hub.quoter(this.state.market).market();
       this.state.totals.gas += this.gasQuote(LP_GAS.v3.close, v, snap);
       return this.sent(worth, to);
