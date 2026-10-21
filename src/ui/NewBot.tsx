@@ -5,9 +5,8 @@ import { TFS, type TF } from '../market/candles';
 import { STRATEGY_PRESETS } from '../live/presets';
 import { DEFAULT_GAS_RESERVE, parseGasRes, type GasReserveCfg } from '../live/gasReserve';
 import { humanAmount } from '../live/amount';
-import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from '../live/recenter';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
-import { LP_BAND, LP_MIN_SWAP_SHARE } from '../market/lp';
+import { LP_BAND, LP_MAX_MOVES_PER_DAY, LP_MIN_SWAP_SHARE } from '../market/lp';
 import { rangeBaseShare } from '../live/v3Liquidity';
 import { L } from './Tip';
 import { botApi } from './api';
@@ -375,14 +374,12 @@ function swapPlan(spot: number, band: number, quote: number, base: number): { sh
   if (Math.abs(gap) <= value * LP_MIN_SWAP_SHARE) return { share, side: null, amount: 0 };
   return gap > 0 ? { share, side: 'buy', amount: gap } : { share, side: 'sell', amount: -gap / spot };
 }
-const hours = (ms: number) => `${ms / 3600_000} hours`;
-
 /** "Move the range" checkbox for a liquidity bot (re-range both ways), on by default. */
 function Rerange({ on, set }: { on: boolean; set: (v: boolean) => void }) {
   return (
     <label className="check follow">
       <input type="checkbox" checked={on} onChange={(e) => set(e.target.checked)} />
-      <span><b>Move the range with the price</b> <span className="muted">When the price stays outside the range for {hours(RECENTER_AFTER_MS)} (up or down), take the position out and open the same width around the price. At most once every {hours(RECENTER_COOLDOWN_MS)}. Each move costs a swap and gas, and locks in the coin mix it had.</span></span>
+      <span><b>Move the range with the price</b> <span className="muted">When the price leaves the range (up or down), take the position out and open the same width around the price as soon as the fees it's missing pass what the move costs (gas plus the swap back to the range's mix). A quick dip back into the range doesn't start the count over. At most {LP_MAX_MOVES_PER_DAY} moves in any 24 hours. Each move locks in the coin mix it had.</span></span>
     </label>
   );
 }
