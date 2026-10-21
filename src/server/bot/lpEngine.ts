@@ -69,7 +69,7 @@ export interface LpStep {
 
 export interface LpState {
   kind: 'lp';
-  /** 2: paper positions earn the pool's global fee growth (see upgradeLp) */
+  /** 3: paper fees skip stale counter readings (see upgradeLp) */
   version: number;
   id: string;
   mode: Mode;
@@ -131,25 +131,36 @@ const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
   return {
-    kind: 'lp', version: 2, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
+    kind: 'lp', version: 3, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
     outSince: null, lastRerangeAt: null, reranges: 0, totals: { fees: 0, gas: 0, sent: 0 }, startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
   };
 }
 
+/** A paper position's fee checkpoint as if just opened: its next reading earns nothing and only sets the counters. */
+const RESTART_PAPER = { g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0' };
+
 /**
- * Stored LP state → this version. 2: paper positions earn the pool's global fee growth (accruePaper). Before, their
- * fees came from range-edge ticks that usually don't exist in the pool (out of range: ~2^128 × L), so a paper position
- * earns again from its next reading and a paper bot's value history starts over.
+ * Stored LP state → this version.
+ * 2: paper positions earn the pool's global fee growth (accruePaper). Before, their fees came from range-edge ticks
+ *    that usually don't exist in the pool (out of range: ~2^128 × L), so a paper position earns again from its next
+ *    reading and a paper bot's value history starts over.
+ * 3: a stale (lower) fee-counter reading was taken as a wrap and left ~2^128 × L owed. Owed = counter change × L / 2^128,
+ *    and real counters are nowhere near 2^224 (the busiest pools are ~2^141), so owed ≥ 2^96 × L can only be that wrap:
+ *    such a position earns again from its next reading and its bot's value history starts over. Others are untouched.
  */
 export function upgradeLp(s: LpState): LpState {
-  if (s.version >= 2) return s;
-  const p = s.position;
-  return {
-    ...s, version: 2,
-    position: p?.paper ? { ...p, paper: { g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0' } } : p,
-    equity: s.mode === 'paper' ? [] : s.equity,
-  };
+  let t = s;
+  if (t.version < 2) {
+    const p = t.position;
+    t = { ...t, version: 2, position: p?.paper ? { ...p, paper: { ...RESTART_PAPER } } : p, equity: t.mode === 'paper' ? [] : t.equity };
+  }
+  if (t.version < 3) {
+    const p = t.position, pp = p?.paper, cap = p ? BigInt(p.liquidity) << 96n : 0n;
+    const wrapped = !!pp && (BigInt(pp.owed0) >= cap || BigInt(pp.owed1) >= cap);
+    t = { ...t, version: 3, ...(wrapped ? { position: { ...p!, paper: { ...RESTART_PAPER } }, equity: [] } : {}) };
+  }
+  return t;
 }
 
 /** Logs of `name` from the position manager in a receipt. */
@@ -342,6 +353,13 @@ export class LpEngine {
    */
   private accruePaper(p: LpPosition, v: PoolView) {
     const pp = p.paper!, L = BigInt(p.liquidity);
+    // A pool's fee counters only grow, so a lower reading is a stale answer from an RPC node behind the chain: it earns
+    // nothing and the checkpoint stays at the highest reading. Taken as a wrap it gave ~2^128 × L (a paper ETH/USDC
+    // bot showed 1.6e40 USDC in fees).
+    if (v.global0 < BigInt(pp.g0) || v.global1 < BigInt(pp.g1)) {
+      this.log('warn', `Skipped a stale pool reading: its fee counters were lower than the last reading (${pp.g0} → ${v.global0}, ${pp.g1} → ${v.global1}).`);
+      return;
+    }
     const earned = (now: bigint, last: string) => (pp.inRange ? (feesOwed(now, BigInt(last), L) * v.liquidity) / (v.liquidity + L) : 0n);
     p.paper = {
       g0: v.global0.toString(), g1: v.global1.toString(), inRange: v.tick >= p.tickLower && v.tick < p.tickUpper,
