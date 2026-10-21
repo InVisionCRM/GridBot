@@ -79,6 +79,26 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(value(lp) - v0).toBeCloseTo(each * PRICE + each, 9);
   });
 
+  it('a stale RPC answer with lower fee counters earns nothing, and fees resume from the highest reading (not ~2^128 × L)', async () => {
+    const { lp, m, pool } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.tick();
+    const d = Q128 / 10n ** 6n;
+    m.addFees(pool, d, d);
+    await lp.tick();
+    const owed = lp.status().owed!;
+    expect(owed.base).toBeGreaterThan(0);
+    // a node a few blocks behind answers: the counters read lower than last time (a real pool's never go down)
+    m.addFees(pool, -d / 2n, -d / 2n);
+    await lp.tick();
+    expect(lp.status().owed).toEqual(owed);
+    // a fresh node again, d/2 past the highest reading so far: only that part is new
+    m.addFees(pool, d, d);
+    await lp.tick();
+    expect(lp.status().owed!.base).toBeCloseTo(owed.base * 1.5, 12);
+    expect(lp.status().owed!.quote).toBeCloseTo(owed.quote * 1.5, 12);
+  });
+
   // A real pool's fee counters have grown since it was created (the user's ETH/USDG pool: ~3.5e-7 × 2^128 per unit of
   // liquidity). A paper position's range ticks don't exist in the pool: they read 0 and never flip.
   const HISTORY = Q128 / 10n ** 4n;
@@ -441,6 +461,40 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       expect(st(paper.id).equity).toHaveLength(1);
       expect(st(paper.id).equity[0][1]).toBeGreaterThan(990);
       expect(st(paper.id).equity[0][1]).toBeLessThan(1000);
+    } finally { await again.close(); }
+  });
+
+  it('a paper bot that saved a wrapped fee (~2^128 × L from a stale reading) earns again from scratch; normal paper and live bots keep theirs', async () => {
+    const first = await serve();
+    let saved: MultiState;
+    try {
+      await first.call('POST', '/api/bot/lps', { mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      await first.call('POST', '/api/bot/lps', { mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      await first.bot.tickAll();
+      saved = JSON.parse(JSON.stringify(first.store.load()));
+    } finally { await first.close(); }
+    // as version 2 saved them: one took a lower counter reading as a wrap (the 1.6e40 USDC bot), one earned normally
+    const [bad, good] = saved.lps as unknown as Record<string, any>[]; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const L = BigInt(bad.position.liquidity);
+    Object.assign(bad, { version: 2, equity: [[1, 1000], [2, 6.6e39]] });
+    bad.position.paper = { ...bad.position.paper, owed0: '17', owed1: ((L << 128n) - 12345n).toString() };
+    Object.assign(good, { version: 2, equity: [[1, 1000], [2, 1001]] });
+    good.position.paper = { ...good.position.paper, owed0: (L * 6000n).toString(), owed1: '99' };
+    const live = JSON.parse(JSON.stringify(bad));
+    Object.assign(live, { id: 'lp-live', mode: 'live', equity: [[1, 2000], [2, 2001]] });
+    live.position = { ...live.position, id: '1472740' };
+    delete live.position.paper;
+    saved.lps.push(live);
+    const store = new MemoryStore<MultiState>();
+    store.save(saved);
+    const again = await serve(store);
+    try {
+      const st = (id: string) => again.bot.status().lps.find((x: { id: string }) => x.id === id)!;
+      expect(st(bad.id).position!.paper).toEqual({ g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0' });
+      expect(st(bad.id).equity).toEqual([]);
+      expect(st(good.id).position!.paper).toEqual(good.position.paper);
+      expect(st(good.id).equity).toEqual([[1, 1000], [2, 1001]]);
+      expect(st('lp-live').equity).toEqual([[1, 2000], [2, 2001]]);
     } finally { await again.close(); }
   });
 
