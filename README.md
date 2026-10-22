@@ -134,6 +134,23 @@ Tools → Markets → *Add custom token*: pick a chain, paste an address, option
 
 Custom markets persist in `data/custom.json` and work in grids, trend bots, backtests (GeckoTerminal with on-chain V2/V3 rebuild fallback), charts, market panels, alerts and analytics. **Re-check** re-runs the safety probe. **Remove** works once no bot or alert uses the market.
 
+## Convert to one coin (Tools → Convert)
+
+Swaps everything the wallet holds on one chain into a single coin: the chain's own coin or any coin of the app's markets there (`src/server/convert`, `src/market/convertRoute.ts`). **Check my coins** builds a plan and sends nothing; **Convert** sends it after a confirm.
+
+- **Which coins.** The chain's own coin, its wrapped form (WPLS / WETH), every coin of the app's markets, and on PulseChain and Ethereum every ERC-20 the chain's Blockscout explorer lists for the wallet (`ChainConfig.tokenApi`). Robinhood's explorer blocks servers (Cloudflare challenge), so there only the app's market coins are listed. Every balance and every `decimals()` is read on-chain; the explorer only says where to look. A listed coin whose `balanceOf` or `decimals()` reverts is shown with the error and left alone; the rest of the plan goes ahead.
+- **What's left alone, and why (shown under each coin):**
+  - coins your **live bots** use (`MultiBot.allocations`: a grid's coins, a trend bot's cash and position, a liquidity bot's spare coins; a position's coins are in the pool, not the wallet);
+  - **gas**: of the chain's own coin, *Keep for gas* stays (default twice the low-gas warning: 100,000 PLS, 0.001 ETH on Robinhood, 0.02 ETH on Ethereum);
+  - coins **named like a website** (`https://…`, `www.`, `.com`, `.xyz`, `.gd` …): the scam-airdrop pattern that lures you to a wallet-draining site. Never quoted, never touched;
+  - a coin the app doesn't know that **fails the safety check** (the same honeypot/tax simulation as *Add custom token*), or has no pool on a DEX the app trades;
+  - a swap over **Max price impact** (default 3%);
+  - **dust**: worth less than twice the gas of converting it.
+- **Route.** Straight through one of the app's markets, else two swaps through a coin both sides trade against (the chain's own coin first): HEX → PLS → DAI. A coin the app doesn't know gets its best pool from the safety check. Wrapped native is unwrapped first (`withdraw`). Each route is quoted live for the plan: expected result, price impact and gas.
+- **Running.** One coin at a time. Every transaction goes through the chain's transaction queue and nonce, the same ones the bots use, so the two never collide. Before each coin its amount is checked again: the balance now, less what bots use now, less the gas keep. Each swap is quoted again, and refused if the impact has gone over the cap. A coin's second swap spends what its first one actually returned. **Stop** leaves the coins not started yet. A coin whose first transaction is already out is finished all the way to the target, never left halfway in the middle coin. A plan expires after 10 minutes.
+- **API.** `GET /api/convert/targets?chainId=` · `POST /api/convert/plan {chainId, target, keepNative?, maxImpact?}` · `POST /api/convert/run {planId, coins[]}` · `GET /api/convert/job` · `POST /api/convert/stop`.
+- **Checked.** `tests/convert.test.ts`: routes, scam names, bots' coins, the impact cap, dust; a full run on the mock chain (unwrap, approve, both swaps, nonces in order); explorer decimals that disagree with the chain; a listed coin that reverts; a bot that takes a coin after the plan; Stop between coins and in the middle of one (on an unwrap, on an approve). Read-only against the real PulseChain wallet: the plan listed 10 coins, 7 were convertible, the website-named airdrop was skipped and two dust coins were skipped; the check took about 50 s.
+
 ## Chains, DEXes & sources (verified 2026-10-08)
 
 Every address below was checked on-chain (code, `router.factory()`, `quoter.factory()`, token `symbol()`/`decimals()`, a live quote). `npm run check:onchain` re-runs all of it read-only. Nothing is guessed: chains or DEXes without an official deployment are left out or marked unavailable.

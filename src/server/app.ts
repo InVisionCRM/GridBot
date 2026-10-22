@@ -16,6 +16,7 @@ import type { LiveNetwork } from '../live/networks';
 import { fmtFeeTier } from '../live/chains';
 import type { VersionCheck } from './system/version';
 import { runChecks } from './system/checks';
+import type { Converter } from './convert/converter';
 
 export interface AppOpts {
   bot: MultiBot;
@@ -28,6 +29,8 @@ export interface AppOpts {
   viewCandles?: (pair: string) => void;
   /** Liquidity replay over a pool's real trades (server only: reads the chain) */
   lpReplay?: (q: { market: string; capital?: number; maxImpact?: number }) => Promise<unknown>;
+  /** Tools → Convert: a chain's holdings into one coin (server only: reads the explorer, signs swaps) */
+  convert?: Converter;
   heartbeatMs?: number;
   statusThrottleMs?: number;
   /** Version check + self-test (server only: needs the git checkout and the build stamp) */
@@ -234,6 +237,21 @@ export function createApp(o: AppOpts) {
     if (maxImpact != null && !(maxImpact > 0 && maxImpact < 1)) throw new Error('maxImpact must be between 0 and 1');
     return o.lpReplay({ market: String(req.query.market ?? ''), capital: capital ?? undefined, maxImpact: maxImpact ?? undefined });
   }));
+
+  // ── Convert: a chain's holdings into one coin ─────────────────────────
+  const cv = () => { if (!o.convert) throw new Error('converting is not available'); return o.convert; };
+  app.get('/api/convert/targets', wrap((req) => ({ targets: cv().targets(Number(req.query.chainId)) })));
+  app.post('/api/convert/plan', wrap((req) => {
+    const b = req.body ?? {};
+    return cv().plan({ chainId: Number(b.chainId), target: String(b.target ?? ''), keepNative: num(b.keepNative), maxImpact: num(b.maxImpact) });
+  }));
+  app.post('/api/convert/run', wrap((req) => {
+    const b = req.body ?? {};
+    if (!Array.isArray(b.coins)) throw new Error('coins required');
+    return { job: cv().run(String(b.planId ?? ''), b.coins.map(String)) };
+  }));
+  app.get('/api/convert/job', wrap(() => ({ job: cv().job() })));
+  app.post('/api/convert/stop', wrap(() => { cv().stop(); return { ok: true }; }));
 
   // ── System: version + self-test ───────────────────────────────────────
   if (o.system) {

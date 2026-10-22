@@ -14,6 +14,7 @@ import { VersionCheck } from './system/version';
 import { DailyScanner, scanDepsFromHub, type ScanFile } from './market/scanner';
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
+import { Converter } from './convert/converter';
 import { TFS } from '../market/candles';
 import { buildHub } from './chains/build';
 import type { CustomFile } from './chains/hub';
@@ -77,9 +78,17 @@ const scanner: DailyScanner | undefined = sync.enabled ? new DailyScanner(scanDe
 
 const version = await VersionCheck.start(process.cwd(), process.env.NODE_ENV !== 'production');
 const lpReplay = new LpReplay(hub, new PoolHistories(path.join(dataDir, 'pool-history'), (id) => readers.get(id)!), cfg.approval);
+const convert = new Converter({
+  hub, allocations: () => bot.allocations().rows, approval: cfg.approval, emit: activity.emitEvent,
+  fetchJson: async (url) => {
+    const r = await fetch(url, { headers: { 'user-agent': 'GridBot' }, signal: AbortSignal.timeout(20_000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status} from ${new URL(url).host}`);
+    return r.json();
+  },
+});
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
-  lpReplay: (q) => lpReplay.replay(q),
+  lpReplay: (q) => lpReplay.replay(q), convert,
 });
 if (isProd) {
   const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../client');

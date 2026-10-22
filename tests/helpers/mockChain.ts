@@ -9,6 +9,7 @@ import { NETWORKS, type QuoteToken } from '../../src/live/networks';
 import { getAmountOut } from '../../src/live/swapMath';
 import { PULSECHAIN_EXTRA_DEXES } from '../../src/live/chains';
 import { ERC20, FACTORY, PAIR, ROUTER, WPLS_EVENTS, type ChainReader, type ReceiptLike, type SentTx, type TxSender } from '../../src/server/bot/chain';
+import { WRAPPED } from '../../src/server/dex/abis';
 
 export const NET = NETWORKS.mainnet;
 export const DAI = NET.quotes.find((s) => s.symbol === 'DAI')!;
@@ -158,7 +159,7 @@ export class MockChain implements ChainReader, TxSender {
 
   async sendTransaction(tx: { to: string; data: string; value: bigint; nonce: number }): Promise<SentTx> {
     const tokenTo = this.poolByToken(tx.to);
-    const iface = tokenTo ? ERC20 : ROUTER;
+    const iface = tx.to.toLowerCase() === WPLS ? WRAPPED : tokenTo ? ERC20 : ROUTER;
     const parsed = iface.parseTransaction({ data: tx.data, value: tx.value })!;
     this.onSend?.(parsed.name);
     const fault = this.faults.shift();
@@ -218,6 +219,12 @@ export class MockChain implements ChainReader, TxSender {
         const ev = ERC20.getEvent('Transfer')!;
         receipt = { status: 1, ...gas, logs: [{ address: outTok, topics: [ev.topicHash, zeroPadValue(pool.pair, 32), zeroPadValue(to, 32)], data: zeroPadValue(toBeHex(out), 32) }] };
       }
+    } else if (parsed.name === 'withdraw') {
+      // WPLS → PLS, one for one
+      const [wad] = parsed.args as unknown as [bigint];
+      const have = this.balances.get(WPLS) ?? 0n;
+      if (have < wad) receipt = { status: 0, ...gas, logs: [] };
+      else { this.balances.set(WPLS, have - wad); this.pls += wad; receipt = { status: 1, ...gas, logs: [] }; }
     } else if (parsed.name === 'transfer') {
       const [to, amount] = parsed.args as unknown as [string, bigint];
       const tk = tx.to.toLowerCase();

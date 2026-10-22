@@ -1,4 +1,4 @@
-/** Tools: charts, backtest, analytics, markets (custom tokens, pools) and alerts. */
+/** Tools: charts, backtest, analytics, markets (custom tokens, pools), converting a chain's coins to one, and alerts. */
 import { useEffect, useState } from 'react';
 import { http } from './api';
 import { Chart } from './Chart';
@@ -10,6 +10,7 @@ import { lbl, marketsOf, useChainFilter } from './chains';
 import type { Ticks } from './useStream';
 import { TOOL_TABS, type AnyObj, type Nav, type View } from './model';
 import { SystemTab, type useVersion } from './System';
+import { Convert } from './Convert';
 
 function ChartTab({ s, ticks }: { s: AnyObj; ticks: Ticks | null }) {
   const { chain } = useChainFilter();
@@ -47,6 +48,7 @@ export function Tools({ s, view, ticks, nav, act, busy, prefs, setPrefs, ver }: 
         onUse={(p) => nav(p.created ? { v: 'trend', id: p.created } : { v: 'new', kind: 'trend', trendPrefill: { pair: p.pair, tf: p.tf, cfg: p.cfg, capital: p.capital, nonce: Date.now() } })} />}
       {tab === 'analytics' && <Analytics key={view.analytics ?? 'live'} status={s} initial={view.analytics ?? 'live'} />}
       {tab === 'markets' && <Markets status={s} act={act} busy={busy} />}
+      {tab === 'convert' && <Convert s={s} />}
       {tab === 'alerts' && <Alerts status={s} prefs={prefs} setPrefs={setPrefs} />}
       {tab === 'system' && <SystemTab ver={ver} />}
     </main>

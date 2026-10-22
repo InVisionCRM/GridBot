@@ -248,6 +248,16 @@ tr.pickable.selected:hover td { background: var(--sel); }
 .replay-sync { display: flex; flex-direction: column; gap: 6px; }
 .replay-bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
 .replay-bar span { display: block; height: 100%; background: var(--profit); transition: width 0.6s ease; }
+
+/* Tools → Convert */
+.convert { display: flex; flex-direction: column; gap: 10px; }
+.convert h3 { margin: 0; }
+tr.muted-row td { color: var(--muted); }
+.convert-go { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.convert-job { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+/* a long unbroken word (an address in an error, an airdrop's symbol) wraps instead of widening the table past a phone */
+.convert td.txt { overflow-wrap: anywhere; }
+@media (max-width: 560px) { .convert-table .narrow-hide { display: none; } }
 @media (max-width: 560px) { .replay-table .narrow-hide { display: none; } }
 tr.failed-row td { opacity: 0.5; }
 tr.subrow > td { background: var(--surface-2); }
