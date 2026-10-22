@@ -87,6 +87,11 @@ export interface ChainConfig {
   blockTimeSec: number;
   /** eth_getLogs chunk size for the on-chain candle fallback */
   logChunk: number;
+  /**
+   * Blockscout API (v2) that lists every ERC-20 a wallet holds, for Tools → Convert. Absent: only the coins of this
+   * app's markets are listed (Robinhood's explorer answers servers with a Cloudflare challenge page, 2026-10-22).
+   */
+  tokenApi?: string;
   sources: { label: string; url: string }[];
   note?: string;
 }
@@ -154,6 +159,8 @@ export function chainFromNetwork(net: LiveNetwork): ChainConfig {
     stables: net.quotes.filter((q) => q.kind === 'stable').map((q) => ({ symbol: q.symbol, name: q.name, address: q.address, decimals: q.decimals, kind: 'stable' as const })),
     rpcs: net.isTestnet ? [net.rpcUrl] : [net.rpcUrl, 'https://pulsechain-rpc.publicnode.com', 'https://rpc-pulsechain.g4mm4.io'],
     explorer: net.explorer, geckoSlug: net.isTestnet ? null : 'pulsechain', status: net.isTestnet ? 'testnet' : 'live',
+    // lists a wallet's ERC-20s with balances (checked 2026-10-22)
+    ...(net.isTestnet ? {} : { tokenApi: 'https://api.scan.pulsechain.com/api/v2' }),
     trading: { enabled: true },
     // PulseX V2 stays first (legacy markets + the legacy Quoter constructor use it); mainnet adds PulseX V1 and 9mm.
     dexes: [
@@ -211,6 +218,8 @@ export const CHAINS: ChainConfig[] = [
     ],
     rpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org', 'https://cloudflare-eth.com'],
     explorer: 'https://etherscan.io', geckoSlug: 'eth', status: 'live', trading: { enabled: true },
+    // lists a wallet's ERC-20s; an empty list for a wallet holding none (checked 2026-10-22)
+    tokenApi: 'https://eth.blockscout.com/api/v2',
     dexes: [
       uniV3('https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments', 'uniswap_v3'),
       { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap_v2', factory: '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f', router: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', feeBps: 30, lpShare: UNI_V2_LP_SHARE, source: UNI_V2_SRC },

@@ -35,6 +35,8 @@ export const ERC20 = new Interface([
 /** bytes32 symbol/name (MKR-style tokens) */
 export const ERC20_B32 = new Interface(['function symbol() view returns (bytes32)', 'function name() view returns (bytes32)']);
 export const WPLS_EVENTS = new Interface(['event Withdrawal(address indexed src, uint256 wad)']);
+/** The wrapped native coin (WPLS / WETH9): withdraw burns it for the same amount of the chain's own coin. */
+export const WRAPPED = new Interface(['function withdraw(uint256 wad)']);
 
 export const V3_FACTORY = new Interface(['function getPool(address, address, uint24) view returns (address)']);
 export const V3_POOL = new Interface([
