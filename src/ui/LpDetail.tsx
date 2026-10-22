@@ -125,6 +125,11 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <div className={`kpi-v ${cls(pnl?.profit)}`}>{pnl ? qty(pnl.profit, q, 5) : '—'}</div>
           <span className="sub">{pnl && b.startValue ? `${pct(pnl.profit / b.startValue, 2, true)} of ${qty(b.startValue, q, 5, false)} put in` : ''}{profitUsd != null ? ` · ${usd(profitUsd, true)}` : ''}</span>
         </div>
+        <div className="kpi">
+          <span><L tip={`What the bot has now (with fees, after gas since it opened) minus what the coins it held right after opening would be worth today. Positive: its fees beat what the range and its moves cost. Negative: just keeping those coins would have left you with more. The coin's own price move is in both, so it cancels out.`}>Result vs holding</L></span>
+          <div className={`kpi-v ${cls(pnl?.vsHold)}`}>{pnl?.vsHold != null ? qty(pnl.vsHold, q, 5) : '—'}</div>
+          <span className="sub">{b.opening && pnl?.hold != null ? `keeping the ${num(b.opening.base, 6)} ${base} + ${num(b.opening.quote, 2)} ${q} it opened with: ${qty(pnl.hold, q, 5, false)}${inUsd(pnl.vsHold)}` : 'once the position is open'}</span>
+        </div>
       </div>
 
       <div className="split wide-left">

@@ -26,6 +26,8 @@ export interface AppOpts {
   scanner?: { status(): unknown; run(testUsd?: number): Promise<unknown> };
   /** A chart was opened: the candle sync keeps every timeframe of that market for a while (server only) */
   viewCandles?: (pair: string) => void;
+  /** Liquidity replay over a pool's real trades (server only: reads the chain) */
+  lpReplay?: (q: { market: string; capital?: number; maxImpact?: number }) => Promise<unknown>;
   heartbeatMs?: number;
   statusThrottleMs?: number;
   /** Version check + self-test (server only: needs the git checkout and the build stamp) */
@@ -225,6 +227,13 @@ export function createApp(o: AppOpts) {
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
   app.put('/api/bot/lps/:id/profits', wrap((req) => bot.setLpProfits(req.params.id, profitsBody(req.body) ?? (() => { throw new Error('profits required'); })())));
   app.delete('/api/bot/lps/:id', wrap((req) => bot.removeLp(req.params.id)));
+  app.get('/api/lp/replay', wrap((req) => {
+    if (!o.lpReplay) throw new Error('replay not available');
+    const capital = num(req.query.capital), maxImpact = num(req.query.maxImpact);
+    if (capital != null && !(capital > 0)) throw new Error('capital must be > 0');
+    if (maxImpact != null && !(maxImpact > 0 && maxImpact < 1)) throw new Error('maxImpact must be between 0 and 1');
+    return o.lpReplay({ market: String(req.query.market ?? ''), capital: capital ?? undefined, maxImpact: maxImpact ?? undefined });
+  }));
 
   // ── System: version + self-test ───────────────────────────────────────
   if (o.system) {
