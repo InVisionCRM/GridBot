@@ -14,7 +14,7 @@ import { MAX_TAX } from './live/tax';
 import { DEFAULT_GAS_RESERVE } from './live/gasReserve';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from './live/recenter';
 import { PAYOUT_MIN_GAS_MULTIPLE } from './live/payout';
-import { LP_BAND } from './market/lp';
+import { LP_BAND, LP_MAX_MOVES_PER_DAY } from './market/lp';
 import { MIN_SELL_HOURS, PICKS_PER_CHAIN, SCAN_CANDLES, SCAN_RULES, SETUP_BANDS, SETUP_LEVELS, TEST_USD } from './market/scan';
 
 const PLS_DEXES = chainFromNetwork(NETWORKS.mainnet).dexes;
@@ -212,7 +212,7 @@ export function Guide({ onClose }: { onClose: () => void }) {
             <p>A liquidity bot puts both coins into a V3 pool (Uniswap V3 on Ethereum and Robinhood, 9mm V3 on PulseChain) between two prices around today's price. Every trade that happens inside that range pays it a share of the pool fee. It doesn't buy and sell on its own: the traders do, and as the price moves the position ends up holding more of whichever coin fell, much like a grid.</p>
             <ul className="tight">
               <li><b>Opening:</b> part of your amount is swapped to the other coin (about half; the exact mix depends on where the price sits in the range), then the position is opened. Ranges from ±{LP_BAND.min * 100}% to ±{LP_BAND.max * 100}%. Narrower earns more per coin while the price stays inside, and leaves the range sooner.</li>
-              <li><b>Moving the range:</b> if the price stays outside for {RECENTER_AFTER_MS / 3600_000} hours (up or down), the position is taken out and reopened around the price with the same width, at most once every {RECENTER_COOLDOWN_MS / 3600_000} hours. Each move costs a swap and gas and locks in the coin mix it had. You can turn this off per bot.</li>
+              <li><b>Moving the range:</b> when the price leaves the range (up or down), the bot counts the fees the position is missing. Once they pass what a move costs (gas plus the swap back to the range's mix), the position is taken out and reopened around the price with the same width. The wait scales with the cost: a cheap move (low gas, a deep pool) comes soon after the price leaves, a costly one waits longer. A quick dip back into the range doesn't start the count over. At most {LP_MAX_MOVES_PER_DAY} moves in any 24 hours. Each move locks in the coin mix it had. You can turn this off per bot.</li>
               <li><b>Fees:</b> <i>Reinvest</i> (default) rolls them into the next position when the range moves or you close. <i>Send to an address</i> collects them there once they're worth {PAYOUT_MIN_GAS_MULTIPLE}× the collect's gas.</li>
               <li><b>What the numbers mean:</b> <i>Fees earned</i> is what the position made from trading. <i>Price change and swaps</i> is what price moves did to the coins, plus swap costs. <i>Overall</i> is fees − gas ± price change, in the coin you started with.</li>
               <li><b>Pause</b> keeps the position open and earning but stops moving the range and sending fees. <b>Close position</b> takes everything out and the coins go back to your wallet.</li>

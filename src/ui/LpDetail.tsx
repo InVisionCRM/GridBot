@@ -17,6 +17,16 @@ interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks |
 const ACTION: Record<string, string> = { open: 'Opening', rerange: 'Moving the range', close: 'Closing', send: 'Sending fees' };
 const STAGE: Record<string, string> = { exit: 'taking the position out', swap: "swapping to the range's mix", approve: 'approving the position manager', mint: 'opening the position', collect: 'collecting the fees' };
 
+/** Out of range: when the range moves, or why it doesn't. */
+function moveNote(b: AnyObj): string {
+  const m = b.move, q = b.quote;
+  if (!b.config?.rerange) return 'Moving the range is off: it waits for the price to come back.';
+  if (m.block) return `It won't move the range now: ${m.block}.`;
+  if (m.cappedUntil) return `It already moved ${m.perDay} times in 24 hours; the next move can come in ${dur(m.cappedUntil - Date.now())}.`;
+  if (m.cost == null) return "It moves the range around the price once the fees it's missing pass what moving costs (working out the cost).";
+  return `It moves the range around the price once the fees it's missing pass what moving costs: ${qty(m.missed, q, 3, false)} missed so far, the move costs ≈${qty(m.cost, q, 3, false)}.`;
+}
+
 /** Range on a line: the band is the position, the marker is the price (the line reaches 25% of the width past each end). */
 function RangeGauge({ lower, upper, price }: { lower: number; upper: number; price: number | null }) {
   const pad = (upper - lower) * 0.25, lo = lower - pad, hi = upper + pad;
@@ -40,7 +50,7 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
       <h3>Settings</h3>
       <label className="check follow">
         <input type="checkbox" checked={!!b.config?.rerange} disabled={busy || b.status === 'closed'} onChange={(e) => act(() => botApi(`lps/${b.id}/rerange`, 'PUT', { enabled: e.target.checked }))} />
-        <span><b>Move the range with the price</b> <span className="muted">Moved {b.reranges} time{b.reranges === 1 ? '' : 's'}{b.lastRerangeAt ? `, last ${ago(b.lastRerangeAt)}` : ''}.</span></span>
+        <span><b>Move the range with the price</b> <span className="muted">Moved {b.reranges} time{b.reranges === 1 ? '' : 's'}{b.lastRerangeAt ? `, last ${ago(b.lastRerangeAt)}` : ''}. Outside the range it moves once the fees it's missing pass what the move costs (gas plus the swap back to the range's mix), at most {b.move.perDay} times in any 24 hours.</span></span>
       </label>
       <div className="follow-row">
         <ProfitsField p={p} set={setP} kind="lp" />
@@ -91,7 +101,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {b.lastError && <div className="banner error"><span className="grow">{b.lastError}</span></div>}
         {step && <div className="banner info"><span className="grow"><b>{ACTION[step.action]}:</b> {STAGE[step.stage]}{step.hash ? <> · <a href={explorerTx(s, b.chainId, step.hash)} target="_blank" rel="noreferrer">{step.hash.slice(0, 12)}…</a> waiting to confirm</> : '…'}</span></div>}
         {b.status === 'stopped' && pos && <div className="banner"><span className="grow"><b>Paused with the position open.</b> It keeps earning fees while the price is inside the range, but the range won't move and fees aren't sent until you resume.</span></div>}
-        {pos && b.inRange === false && !step && <div className="banner"><span className="grow"><b>The price is outside the range</b>, so the position isn't earning. {b.rerangeAt ? `The range moves around the price ${b.rerangeAt > Date.now() ? `in ${dur(b.rerangeAt - Date.now())}` : 'on the next check'} if it stays out.` : 'Moving the range is off: it waits for the price to come back.'}</span></div>}
+        {pos && b.inRange === false && !step && <div className="banner"><span className="grow"><b>The price is outside the range</b>, so the position isn't earning. {moveNote(b)}</span></div>}
       </div>
 
       <div className="kpi-row">
