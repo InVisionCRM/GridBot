@@ -426,7 +426,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   return (
     <div className="card">
       <div className="form-row">
-        <PairPicker s={s} value={pair} onChange={setPair} only={(x) => !!x.lpOk} />
+        <PairPicker s={s} value={pair} onChange={setPair} lp />
         <label><L tip="How far the range reaches each side of today's price. Narrower earns more fees per coin while the price is inside, and leaves the range sooner.">Range ± %</L><input value={band} inputMode="decimal" onChange={(e) => setBand(e.target.value.replace(/[%\s]/g, ''))} /></label>
         <AmountField label={`Amount (${m.quote})`} value={amount} f={funds} onChange={setAmount} />
         <AmountField label={`Also use ${m.base} you hold (optional)`} value={baseAmt} f={baseFunds} onChange={setBaseAmt} />

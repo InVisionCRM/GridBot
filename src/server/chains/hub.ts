@@ -399,10 +399,13 @@ export class Hub {
   }
 
   /** Persist a custom market (re-inspects server-side; the client's data is never trusted). */
-  async addMarket(req: InspectRequest): Promise<MarketDef> {
-    const r = await this.inspect(req);
-    if (!r.draft) throw new Error(`No usable pool for ${r.token.symbol}/${r.quote.symbol} on ${this.chain(req.chainId).name}`);
-    if (r.existing && this.def(r.existing).pool.address.toLowerCase() === r.draft.pool.address.toLowerCase()) throw new Error(`Already added as ${r.existing}`);
+  async addMarket(req: InspectRequest): Promise<MarketDef> { return this.addInspected(await this.inspect(req)); }
+
+  /** Persist the market an inspect() on this server made. */
+  addInspected(r: InspectResult): MarketDef {
+    if (!r.draft) throw new Error(`No usable pool for ${r.token.symbol}/${r.quote.symbol} on ${this.chain(r.chainId).name}`);
+    const d = r.draft, dup = this.marketOnPool(d.chainId, d.pool.dex, d.pool.address, d.base.address, d.quote.address);
+    if (dup) throw new Error(`Already added as ${dup}`);
     this.defs.set(r.draft.key, r.draft);
     if (!this.custom.tokens.some((t) => t.chainId === r.token.chainId && sameAddr(t.address, r.token.address))) this.custom.tokens.push(r.token);
     this.persist();
@@ -417,6 +420,17 @@ export class Hub {
     d.safety = r.safety ?? d.safety;
     this.persist();
     return d.safety!;
+  }
+
+  /**
+   * The market trading on a pool: a V3 pool by its address; a V2 pool by DEX and coin pair (a V2 DEX has one pool per
+   * pair, and the built-in markets find theirs through the factory, so they have no address). Coins by address (the
+   * chain's own coin as its wrapped token).
+   */
+  marketOnPool(chainId: number, dex: string, pool: string, a: string, b: string): string | null {
+    const pair = (x: string, y: string) => (sameAddr(x, a) && sameAddr(y, b)) || (sameAddr(x, b) && sameAddr(y, a));
+    return this.byChain(chainId).find((m) => m.pool.dex === dex
+      && (m.pool.kind === 'v3' ? sameAddr(m.pool.address, pool) : pair(m.base.address, m.quote.address)))?.key ?? null;
   }
 
   // ── Pool selection (PulseChain: PulseX V1 / PulseX V2 / 9mm V2 / 9mm V3; elsewhere every configured DEX) ──

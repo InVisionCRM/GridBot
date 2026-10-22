@@ -6,7 +6,7 @@ import { Activity } from './ui/Activity';
 import { loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs } from './ui/Alerts';
 import { botApi, http } from './ui/api';
 import { usd } from './ui/fmt';
-import { ChainFilterCtx, chainOf, chains, type ChainFilter } from './ui/chains';
+import { ChainFilterCtx, chainOf, chains, RefreshCtx, type ChainFilter } from './ui/chains';
 import { Home } from './ui/Home';
 import { NewBot } from './ui/NewBot';
 import { GridDetail } from './ui/GridDetail';
@@ -101,7 +101,7 @@ export default function App() {
   const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
   return (
-    <ChainFilterCtx.Provider value={chainCtx}>
+    <ChainFilterCtx.Provider value={chainCtx}><RefreshCtx.Provider value={refresh}>
       <div className="app">
         <header className="topbar">
           <span className="logo"><i />GridBot</span>
@@ -152,6 +152,6 @@ export default function App() {
         </>}
         {guide && <Guide onClose={closeGuide} />}
       </div>
-    </ChainFilterCtx.Provider>
+    </RefreshCtx.Provider></ChainFilterCtx.Provider>
   );
 }

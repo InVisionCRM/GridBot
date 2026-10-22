@@ -1,6 +1,8 @@
 /** Chain + market helpers for the UI: badges, grouped market pickers, explorer links, the global chain filter. */
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { flipKey, isFlipKey, orientedKey, unflipKey } from '../live/markets';
+import { http } from './api';
+import { Tip } from './Tip';
 
 export { flipKey, isFlipKey, orientedKey, unflipKey };
 
@@ -30,6 +32,8 @@ export interface ChainInfo {
 export type ChainFilter = 'all' | number;
 export const ChainFilterCtx = createContext<{ chain: ChainFilter; setChain: (c: ChainFilter) => void }>({ chain: 'all', setChain: () => undefined });
 export const useChainFilter = () => useContext(ChainFilterCtx);
+/** The app's status refresh: a picker that just added a pair selects it once the market list has it. */
+export const RefreshCtx = createContext<() => Promise<void>>(async () => undefined);
 
 export const chains = (s: AnyObj): ChainInfo[] => s?.chains ?? [];
 export const chainOf = (s: AnyObj, id: number | null | undefined): ChainInfo | null => chains(s).find((c) => c.id === id) ?? null;
@@ -79,10 +83,10 @@ export const feeLabel = (m: Pick<MarketInfo, 'feeBps' | 'feeTier' | 'kind'>) =>
  * Grouped <option>s for every tradable market (respects the global chain filter unless `all`). Values are the
  * ORIGINAL keys; `flipped` only changes the labels (HEX/PLS instead of PLS/HEX) — PairPicker adds the '~'.
  */
-export function MarketOptions({ s, all = false, includeKey, flipped = false, only }: { s: AnyObj; all?: boolean; includeKey?: string; flipped?: boolean; only?: (m: MarketInfo) => boolean }) {
+export function MarketOptions({ s, all = false, includeKey, flipped = false }: { s: AnyObj; all?: boolean; includeKey?: string; flipped?: boolean }) {
   const { chain } = useChainFilter();
   const inc = includeKey ? unflipKey(includeKey) : undefined;
-  const ms = marketsOf(s).filter((m) => (m.tradable && (!only || only(m)) && (all || chain === 'all' || m.chainId === chain)) || m.key === inc);
+  const ms = marketsOf(s).filter((m) => (m.tradable && (all || chain === 'all' || m.chainId === chain)) || m.key === inc);
   if (!ms.length) return <>{(s.quotes ?? []).map((q: string) => <option key={q} value={q}>PLS/{q}</option>)}</>;
   const groups = chains(s).map((c) => ({ c, list: ms.filter((m) => m.chainId === c.id) })).filter((g) => g.list.length);
   return (
@@ -152,23 +156,129 @@ export function DexTag({ name, feeBps, feeTier, title }: { name: string | null |
   return <span className="dex-tag" title={title ?? `DEX/pool version · LP fee`}>{name}{feeBps != null || feeTier != null ? ` ${feeTxt(feeBps, feeTier)}` : ''}</span>;
 }
 
+/** lookalike: a coin the app doesn't know that uses a known coin's name (that name) */
+interface FoundCoin { address: string; symbol: string; name: string; lookalike: string | null }
+/** A pool DexScreener knows on one of the app's DEXes (GET /api/pools/search). */
+interface FoundPool {
+  chainId: number; dex: string; dexName: string; kind: 'v2' | 'v3'; pool: string;
+  base: FoundCoin; quote: FoundCoin;
+  feeTier: number | null; feeBps: number | null; liquidityUsd: number | null; volume24hUsd: number | null; market: string | null; lpOk: boolean;
+}
+const usdShort = (x: number | null) => (x == null ? '—' : x >= 1e6 ? `$${(x / 1e6).toFixed(1)}M` : x >= 1e3 ? `$${Math.round(x / 1e3)}k` : `$${Math.round(x)}`);
+
 /**
- * Pair picker with the ⇄ orientation toggle. `value` is the market key in its orientation ('HEX' = PLS/HEX,
- * 'HEX~' = HEX/PLS); the select picks the pair, the button flips base ↔ quote.
+ * Pair picker with search and the ⇄ orientation toggle. `value` is the market key in its orientation ('HEX' = PLS/HEX,
+ * 'HEX~' = HEX/PLS). Typing filters your pairs; from 2 letters (or an address) it also lists the pools DexScreener knows
+ * on the app's DEXes. Picking one of those runs the safety check and adds it as a pair if it passes. `lp`: only pairs a
+ * liquidity bot can use (V3 with a verified position manager).
  */
-export function PairPicker({ s, value, onChange, all = false, label = 'Pair', disabled = false, only }: { s: AnyObj; value: string; onChange: (key: string) => void; all?: boolean; label?: string; disabled?: boolean; only?: (m: MarketInfo) => boolean }) {
+export function PairPicker({ s, value, onChange, label = 'Pair', disabled = false, lp = false }: { s: AnyObj; value: string; onChange: (key: string) => void; label?: string; disabled?: boolean; lp?: boolean }) {
+  const { chain } = useChainFilter();
+  const refresh = useContext(RefreshCtx);
   const fl = isFlipKey(value), m = mk(s, value);
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const [found, setFound] = useState<{ q: string; pools: FoundPool[]; error: string | null } | null>(null);
+  const [adding, setAdding] = useState<{ pool: string; error: string | null } | null>(null);
+  const [active, setActive] = useState(0);
+  const box = useRef<HTMLDivElement>(null);
+  const term = q.trim(), lq = term.toLowerCase();
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => { if (!box.current?.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', away);
+    return () => document.removeEventListener('mousedown', away);
+  }, [open]);
+  // DexScreener, 350 ms after the last key
+  useEffect(() => {
+    setActive(0);
+    if (!open || term.length < 2) { setFound(null); return; }
+    let alive = true;
+    const t = setTimeout(() => {
+      http<{ pools: FoundPool[] }>(`/api/pools/search?q=${encodeURIComponent(term)}&chain=${chain}`)
+        .then((r) => { if (alive) setFound({ q: term, pools: r.pools, error: null }); })
+        .catch((e) => { if (alive) setFound({ q: term, pools: [], error: (e as Error).message }); });
+    }, 350);
+    return () => { alive = false; clearTimeout(t); };
+  }, [open, term, chain]);
+
+  const mine = marketsOf(s).filter((x) => x.tradable && (!lp || x.lpOk) && (chain === 'all' || x.chainId === chain)
+    && (!lq || [x.label, x.base, x.quote, x.baseAddress, x.quoteAddress, x.dexName].some((v) => v?.toLowerCase().includes(lq))));
+  // only the answer for what's typed now (Enter mustn't pick a pool from the last search)
+  const fresh = found?.q === term ? found : null;
+  const more = (fresh?.pools ?? []).filter((p) => (!lp || p.lpOk) && !(p.market && mine.some((x) => x.key === p.market)));
+
+  const choose = (key: string) => { onChange(key); setOpen(false); setQ(''); setAdding(null); };
+  // a found pool is picked the way round its row shows it
+  const pick = async (p: FoundPool) => {
+    if (p.market) return choose(mk(s, p.market).baseAddress === p.base.address.toLowerCase() ? p.market : flipKey(p.market));
+    setAdding({ pool: p.pool, error: null });
+    try {
+      const r = await http<{ key: string }>('/api/markets/pool', 'POST', { chainId: p.chainId, pool: p.pool, base: p.base.address, quote: p.quote.address });
+      await refresh();
+      choose(r.key);
+    } catch (e) { setAdding({ pool: p.pool, error: (e as Error).message }); }
+  };
+  const rows = [...mine.map((x) => () => choose(orientedKey(x.key, fl))), ...more.map((p) => () => void pick(p))];
+  const keys = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); setOpen(false); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); setActive((i) => Math.min(rows.length - 1, i + 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((i) => Math.max(0, i - 1)); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (!adding) rows[active]?.(); }
+  };
+
   return (
-    <label>{label}
+    <div className="pair-field" ref={box}>
+      <span>{label}</span>
       <span className="pair-pick">
-        <select value={unflipKey(value)} disabled={disabled} onChange={(e) => onChange(orientedKey(e.target.value, fl))} aria-label={`${label} (${m.label})`}>
-          <MarketOptions s={s} all={all} includeKey={value} flipped={fl} only={only} />
-        </select>
+        <button type="button" className="pair-current" disabled={disabled} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+          <ChainBadge c={chainOf(s, m.chainId)} testnet={false} />
+          <b>{m.base}/{m.quote}</b>
+          {m.dexName && <DexTag name={m.dexName} feeBps={m.kind === 'v2' ? m.feeBps : null} feeTier={m.feeTier} />}
+          <i className="pair-caret" aria-hidden />
+        </button>
         <button type="button" className={`flip-btn ${fl ? 'on' : ''}`} disabled={disabled} aria-pressed={fl} aria-label="flip base and quote"
           title={`Flip orientation → ${mk(s, flipKey(value)).label} (spend ${mk(s, flipKey(value)).quote}, stack ${mk(s, flipKey(value)).base})`}
           onClick={() => onChange(flipKey(value))}>⇄</button>
       </span>
-    </label>
+      {open && (
+        <div className="pair-pop">
+          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={keys} placeholder="Search a coin, or paste a coin or pool address" aria-label={`search ${label.toLowerCase()}s`} />
+          <div className="pair-list" role="listbox">
+            <div className="pair-group">Your pairs{lp ? ' a liquidity bot can use' : ''}</div>
+            {mine.map((x, i) => (
+              <button type="button" role="option" key={x.key} aria-selected={unflipKey(value) === x.key} className={`pair-row ${active === i ? 'active' : ''}`} onMouseEnter={() => setActive(i)} onClick={() => choose(orientedKey(x.key, fl))}>
+                <span className="pair-main"><ChainBadge c={chainOf(s, x.chainId)} testnet={false} /><b>{fl ? `${x.quote}/${x.base}` : `${x.base}/${x.quote}`}</b>{x.dexName && <DexTag name={x.dexName} feeBps={x.kind === 'v2' ? x.feeBps : null} feeTier={x.feeTier} />}{x.risk && <RiskBadge risk={x.risk} />}</span>
+              </button>
+            ))}
+            {!mine.length && <div className="pair-note">{lq ? `None of your pairs match “${term}”.` : 'No pairs yet.'}</div>}
+            <div className="pair-group">
+              More pools <span className="muted">· DexScreener</span>
+              <Tip>Pools on the DEXes this app trades (PulseX and 9mm on PulseChain, Uniswap and PancakeSwap on Robinhood, Uniswap on Ethereum){lp ? ', only V3 pools a liquidity bot can hold a position in' : ''}. Picking one runs the safety check: a simulated buy, transfer and sell. If it passes, it's added as a pair; a honeypot, a tax over 10% or a coin that can't be checked is not added.</Tip>
+            </div>
+            {term.length < 2 && <div className="pair-note">Type 2 letters to search every pool.</div>}
+            {term.length >= 2 && !fresh && <div className="pair-note">Searching…</div>}
+            {fresh?.error && <div className="pair-note neg">{fresh.error}</div>}
+            {fresh && !fresh.error && !more.length && <div className="pair-note">No {lp ? 'V3 ' : ''}pools for “{term}” on the app's DEXes.</div>}
+            {more.map((p, j) => {
+              const i = mine.length + j, busy = adding?.pool === p.pool;
+              return (
+                <button type="button" role="option" key={`${p.chainId}:${p.pool}`} aria-selected={false} className={`pair-row ${active === i ? 'active' : ''}`} disabled={!!adding && !busy} onMouseEnter={() => setActive(i)} onClick={() => { if (!adding) void pick(p); }}>
+                  <span className="pair-main"><ChainBadge c={chainOf(s, p.chainId)} testnet={false} /><b>{p.base.symbol}/{p.quote.symbol}</b><DexTag name={p.dexName} feeBps={p.feeBps} feeTier={p.feeTier} /></span>
+                  <span className="pair-meta">
+                    {p.base.address.slice(0, 6)}…{p.base.address.slice(-4)} · {usdShort(p.liquidityUsd)} in the pool · {usdShort(p.volume24hUsd)} traded today
+                    {p.base.lookalike && <span className="pair-warn"> · same name as {p.base.lookalike}, a different coin</span>}
+                  </span>
+                  <span className={`pair-act ${busy && !adding?.error ? 'busy' : ''}`}>{p.market ? 'added' : busy && !adding?.error ? 'checking safety…' : 'add'}</span>
+                  {busy && adding?.error && <span className="pair-err">{adding.error}</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

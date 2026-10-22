@@ -17,6 +17,7 @@ import { fmtFeeTier } from '../live/chains';
 import type { VersionCheck } from './system/version';
 import { runChecks } from './system/checks';
 import type { Converter } from './convert/converter';
+import type { PoolSearch } from './market/poolSearch';
 
 export interface AppOpts {
   bot: MultiBot;
@@ -31,6 +32,8 @@ export interface AppOpts {
   lpReplay?: (q: { market: string; capital?: number; maxImpact?: number }) => Promise<unknown>;
   /** Tools → Convert: a chain's holdings into one coin (server only: reads the explorer, signs swaps) */
   convert?: Converter;
+  /** Pair search in the pair pickers (server only: asks DexScreener) */
+  poolSearch?: PoolSearch;
   heartbeatMs?: number;
   statusThrottleMs?: number;
   /** Version check + self-test (server only: needs the git checkout and the build stamp) */
@@ -176,6 +179,19 @@ export function createApp(o: AppOpts) {
     return { ok: true, key };
   }));
   app.post('/api/markets', wrap(async (req) => { const d = await bot.addMarket(marketReq(req.body ?? {})); void bot.tickAll(); return plain({ ok: true, market: d }); }));
+  // Pair search: pools on the app's DEXes for what was typed (chain = a chain id, or all); picking one adds it once it passes the safety check
+  app.get('/api/pools/search', wrap(async (req) => {
+    if (!o.poolSearch) throw new Error('pair search is not available');
+    const chain = String(req.query.chain ?? 'all');
+    const ids = chain === 'all' ? bot.hub.runtimes().map((r) => r.cfg.id) : [Number(chain)];
+    return plain({ pools: await o.poolSearch.search(String(req.query.q ?? ''), ids) });
+  }));
+  app.post('/api/markets/pool', wrap(async (req) => {
+    const b = req.body ?? {};
+    const key = await bot.addPoolMarket({ chainId: Number(b.chainId), pool: String(b.pool ?? ''), base: String(b.base ?? ''), quote: String(b.quote ?? '') });
+    void bot.tickAll();
+    return { ok: true, key };
+  }));
   app.post('/api/markets/:key/recheck', wrap(async (req) => plain({ ok: true, safety: await bot.recheckMarket(req.params.key) })));
   app.delete('/api/markets/:key', wrap((req) => { bot.removeMarket(req.params.key); return { ok: true }; }));
   // Pool selection: every pool for the pair across the chain's DEXes (PulseChain: PulseX V1/V2 + 9mm V2/V3), ranked by quote

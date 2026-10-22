@@ -173,6 +173,15 @@ describe('Pool discovery + best-pool selection across PulseX V1 / V2 / 9mm', () 
     expect(hub.def('HEX~').quote).toMatchObject({ address: hub.def('HEX~').quote.address, native: true });
     expect(r.draft!.quote.address.toLowerCase()).toBe(hub.def('HEX~').quote.address.toLowerCase());
   });
+
+  it('a pool already added is refused as a duplicate, even when its coin also trades on another pool', async () => {
+    const { hub, pools } = world();
+    const a = await hub.addMarket({ chainId: 369, address: MEME.address, quote: WPLS.address, pool: pools.memeV1 });
+    const b = await hub.addMarket({ chainId: 369, address: MEME.address, quote: WPLS.address, pool: pools.meme9 });
+    expect(a.key).not.toBe(b.key);
+    await expect(hub.addMarket({ chainId: 369, address: MEME.address, quote: WPLS.address, pool: pools.meme9 })).rejects.toThrow(`Already added as ${b.key}`);
+    expect(hub.byChain(369).filter((m) => m.custom).map((m) => m.pool.address)).toEqual([pools.memeV1, pools.meme9]);
+  });
 });
 
 describe('DEX/version on fills, grids and pool switches (MultiBot)', () => {
@@ -208,5 +217,35 @@ describe('DEX/version on fills, grids and pool switches (MultiBot)', () => {
     st.inFlight = null;
     await bot.setMarketPool('DAI', { pool: pools.mm3 });
     expect(bot.status().grids.find((g) => g.id === id)).toMatchObject({ dex: '9mm-v3', dexName: '9mm V3', feeTier: 2500 });
+  });
+
+  it('a pool holding a liquidity bot\'s position is never switched away from under it (by hand or by a preset)', async () => {
+    const { m, pools } = world({ v3Deep: true });
+    const hub = new Hub({ runtimes: [new ChainRuntime(CH, m, null)], markets: legacyMarkets(NET), legacyNet: NET });
+    const bot = new MultiBot({ net: NET, reader: new MockChain(P0), signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub });
+    await bot.setMarketPool('DAI', { pool: pools.mm3 });
+    const id = await bot.addLp({ mode: 'paper', market: 'DAI', bandPct: 0.1, capital: 30 });
+    await bot.tickAll();
+    expect(bot.status().lps.find((l) => l.id === id)!.position).not.toBeNull();
+    await expect(bot.setMarketPool('DAI', { pool: pools.v1 })).rejects.toThrow(/liquidity bot .* close it/);
+    await expect(bot.setMarketPool('DAI', { auto: true })).rejects.toThrow(/liquidity bot/);
+    expect(hub.def('DAI').pool.address).toBe(pools.mm3);
+    // closed: the pool can move again
+    bot.closeLp(id);
+    await bot.tickAll();
+    expect(bot.status().lps.find((l) => l.id === id)!.position).toBeNull();
+    expect((await bot.setMarketPool('DAI', { pool: pools.v1 })).pool.dex).toBe('pulsex-v1');
+  });
+
+  it('a market a liquidity bot uses can\'t be removed (its position could no longer be closed)', async () => {
+    const { m, pools } = world();
+    const hub = new Hub({ runtimes: [new ChainRuntime(CH, m, null)], markets: legacyMarkets(NET), legacyNet: NET });
+    const bot = new MultiBot({ net: NET, reader: new MockChain(P0), signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub });
+    const d = await bot.addMarket({ chainId: 369, address: MEME.address, quote: WPLS.address, pool: pools.meme9 });
+    const id = await bot.addLp({ mode: 'paper', market: d.key, bandPct: 0.1, capital: 1000 });
+    await bot.tickAll();
+    expect(bot.status().lps.find((l) => l.id === id)!.position).not.toBeNull();
+    expect(() => bot.removeMarket(d.key)).toThrow(/used by a bot/);
+    expect(hub.def(d.key).key).toBe(d.key);
   });
 });

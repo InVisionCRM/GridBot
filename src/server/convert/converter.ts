@@ -22,7 +22,8 @@ import type { ChainRuntime } from '../chains/runtime';
 import { LiveExecutor, type Quoter } from '../bot/chain';
 import type { Emit } from '../bot/activity';
 import { WRAPPED } from '../dex/abis';
-import { holdings, type Coin, type FetchJson, type Unreadable } from './holdings';
+import type { FetchJson } from '../fetchJson';
+import { holdings, type Coin, type Unreadable } from './holdings';
 
 /** A plan older than this must be made again before it runs (prices and balances move). */
 export const PLAN_TTL_MS = 10 * 60_000;

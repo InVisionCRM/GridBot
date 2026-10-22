@@ -28,6 +28,13 @@ class Limiter {
 }
 
 const FINAL = new Set(['CALL_EXCEPTION', 'INVALID_ARGUMENT', 'NUMERIC_FAULT', 'INSUFFICIENT_FUNDS', 'NONCE_EXPIRED', 'REPLACEMENT_UNDERPRICED']);
+/**
+ * Waits before each retry of a request a single-RPC chain refused with 429. Robinhood's RPC refuses for seconds while
+ * eth_getLogs runs (the liquidity replay's swap history); with 0.4 s + 0.8 s, 47 of ~3,100 bot reads failed in six
+ * 3–4-minute runs under that load, with these 3 (2026-10-22).
+ */
+const RATE_LIMIT_WAITS_MS = [1000, 2000, 4000];
+const isRateLimited = (e: unknown) => /\b429\b|too many requests/i.test(String((e as Error)?.message ?? e));
 
 export function isTransportError(e: unknown): boolean {
   const code = (e as { code?: string })?.code;
@@ -56,11 +63,10 @@ export class FallbackReader implements ChainReader, LogReader {
   }
 
   private async attempt<T>(fn: (p: JsonRpcProvider) => Promise<T>): Promise<T> {
-    let lastErr: unknown;
-    // Single-RPC chains get a short backoff instead of rotation (public endpoints 429 on bursts).
-    const tries = Math.max(3, this.providers.length);
-    for (let n = 0; n < tries; n++) {
-      if (n >= this.providers.length || (n > 0 && this.providers.length === 1)) await new Promise((r) => setTimeout(r, 400 * n));
+    // Several RPCs: the next one at once, then short pauses. One RPC: a 429 is waited out for seconds, anything else
+    // gets short pauses.
+    const single = this.providers.length === 1, tries = Math.max(3, this.providers.length);
+    for (let n = 0; ; n++) {
       const t0 = Date.now();
       try {
         const out = await fn(this.current);
@@ -68,12 +74,14 @@ export class FallbackReader implements ChainReader, LogReader {
         return out;
       } catch (e) {
         if (!isTransportError(e)) throw e;
-        lastErr = e;
         Object.assign(this.status, { ok: false, lastError: String((e as Error)?.message ?? e).slice(0, 160), at: Date.now() });
-        if (this.providers.length > 1) { this.i = (this.i + 1) % this.providers.length; this.status.switches++; this.status.url = this.currentUrl; }
+        if (!single) { this.i = (this.i + 1) % this.providers.length; this.status.switches++; this.status.url = this.currentUrl; }
+        const limited = single && isRateLimited(e);
+        if (limited ? n >= RATE_LIMIT_WAITS_MS.length : n + 1 >= tries) throw e;
+        const wait = limited ? RATE_LIMIT_WAITS_MS[n] : single || n + 1 >= this.providers.length ? 400 * (n + 1) : 0;
+        if (wait) await new Promise((r) => setTimeout(r, wait));
       }
     }
-    throw lastErr;
   }
 
   call(tx: { to: string; data: string; from?: string }) { return this.run((p) => p.call(tx)); }
