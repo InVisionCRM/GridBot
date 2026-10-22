@@ -7,6 +7,7 @@ import { readDecimals } from '../../live/decimals';
 import { fromUnits, NATIVE } from '../../live/swapMath';
 import type { CoinId } from '../../market/convertRoute';
 import type { Hub } from '../chains/hub';
+import type { FetchJson } from '../fetchJson';
 
 export interface Coin {
   id: CoinId;
@@ -23,8 +24,6 @@ export interface Holding extends Coin { balance: number }
 export interface Listed { address: string; symbol: string; name: string }
 /** A listed coin whose balanceOf() or decimals() the chain wouldn't answer: never converted */
 export interface Unreadable extends Listed { why: string }
-
-export type FetchJson = (url: string) => Promise<unknown>;
 
 interface ExplorerPage {
   items?: { token?: { address?: string; address_hash?: string; symbol?: string | null; name?: string | null; type?: string } }[];

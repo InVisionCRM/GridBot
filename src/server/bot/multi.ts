@@ -1068,11 +1068,27 @@ export class MultiBot {
   }
 
   // ── Custom markets ─────────────────────────────────────────────────────
-  async addMarket(req: { chainId: number; address: string; quote?: string; pool?: string }) {
-    const d = await this.hub.addMarket(req);
+  async addMarket(req: { chainId: number; address: string; quote?: string; pool?: string }) { return this.added(await this.hub.addMarket(req)); }
+  private added(d: MarketDef) {
     this.activity.emitEvent({ type: 'info', kind: 'system', level: d.safety?.liveAllowed ? 'success' : 'warn', chainId: d.chainId, pair: d.key,
       msg: `Added ${this.hub.label(d.key)} (${this.hub.dexName(d.chainId, d.pool.dex)} ${d.pool.feeTier != null ? `${d.pool.feeTier / 10000}%` : `${d.pool.feeBps / 100}%`}) — safety ${d.safety?.risk ?? 'unknown'}${d.safety?.liveAllowed ? '' : ' · paper only'}` });
     return d;
+  }
+  /**
+   * Pair search → market key: the market already on this pool, or a new one on exactly this pool once its coin passes
+   * the safety check. One that fails it (honeypot, tax over the cap, can't be verified) is not added.
+   */
+  async addPoolMarket(req: { chainId: number; pool: string; base: string; quote: string }): Promise<string> {
+    const r = await this.hub.inspect({ chainId: req.chainId, address: req.base, quote: req.quote, pool: req.pool });
+    if (!r.draft) throw new Error(`${r.token.symbol}/${r.quote.symbol}: this pool can't be priced right now`);
+    const have = this.hub.marketOnPool(r.chainId, r.draft.pool.dex, r.draft.pool.address, r.draft.base.address, r.draft.quote.address);
+    if (have) return have;
+    const s = r.safety!;
+    if (!s.liveAllowed) throw new Error(`Not added: ${r.token.symbol} failed the safety check (${s.risk} risk). ${s.reasons.join(' ')}`.trim());
+    const d = this.added(this.hub.addInspected(r));
+    // Priced now, not on the next all-markets poll (~30 s): New bot centres its range on this price right away.
+    await this.hub.ensureSpot(d.key);
+    return d.key;
   }
   /** Daily pick → market key: the market already added for this token, quote and pool, or a new one (safety re-checked). */
   async addPickMarket(req: { chainId: number; address: string; quote: string; pool: string }): Promise<string> {
@@ -1085,7 +1101,8 @@ export class MultiBot {
   removeMarket(key: string) {
     key = unflipKey(key);
     const same = (k: string) => unflipKey(k) === key; // either orientation counts as "used"
-    const used = this.multi.grids.some((g) => same(g.stable)) || this.multi.trends.some((t) => same(t.quote)) || this.multi.alerts.some((a) => same(a.pair));
+    const used = this.multi.grids.some((g) => same(g.stable)) || this.multi.trends.some((t) => same(t.quote)) || this.multi.alerts.some((a) => same(a.pair))
+      || this.multi.lps.some((l) => same(this.lp(l.id).state.market));
     if (used) throw new Error('Market is used by a bot or alert — remove those first.');
     this.hub.removeMarket(key);
     this.marketCache.delete(key);
@@ -1093,12 +1110,17 @@ export class MultiBot {
   }
   /** Pools for a market across every DEX on its chain (PulseChain: PulseX V1, PulseX V2, 9mm V2, 9mm V3). */
   poolOptions(key: string) { return this.hub.poolOptions(key); }
-  /** Switch a market's trading pool (manual / auto best-quote / reset). Refused while a tx on that market is in flight. */
+  /**
+   * Switch a market's trading pool (manual / auto best-quote / reset). Refused while a tx on that market is in flight,
+   * and while a liquidity bot on it holds a position: the position lives in this pool, and the bot reads the market's pool.
+   */
   async setMarketPool(key: string, req: { pool?: string; auto?: boolean; reset?: boolean }) {
     key = unflipKey(key);
     const busy = [...this.engines.values()].some((e) => unflipKey(e.state.stable) === key && e.state.inFlight)
       || [...this.trendEngines.values()].some((e) => unflipKey(e.state.quote) === key && e.state.inFlight);
     if (busy) throw new Error('A transaction on this market is in flight — wait for it to settle before switching pools.');
+    const lp = [...this.lpEngines.values()].find((e) => unflipKey(e.state.market) === key && (e.state.position || e.state.step));
+    if (lp) throw new Error(`A liquidity bot on this pair (${lp.state.id}) has its position in this pool: close it before switching pools.`);
     const before = this.hub.def(key).pool;
     const { def: d } = await this.hub.setPool(key, req);
     this.marketCache.delete(key);

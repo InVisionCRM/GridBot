@@ -306,8 +306,33 @@ tr.subrow > td { background: var(--surface-2); }
 .chart, .eq-chart { width: 100%; }
 .empty-chart, .empty-eq { padding: 16px; border: 1px dashed var(--line-2); border-radius: 9px; text-align: center; color: var(--muted); display: flex; flex-direction: column; gap: 10px; align-items: center; }
 .pair-select { max-width: 260px; }
+.pair-field { position: relative; display: flex; flex-direction: column; gap: 4px; font-size: 0.78rem; color: var(--muted); min-width: 0; }
 .pair-pick { display: flex; gap: 4px; }
-.pair-pick select { flex: 1; min-width: 0; }
+.pair-current { appearance: none; flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; font: inherit; font-size: 0.9rem; color: var(--text); text-align: left; background: var(--bg); border: 1px solid var(--line-2); border-radius: 7px; padding: 7px 9px; cursor: pointer; white-space: nowrap; overflow: hidden; }
+.pair-current b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.pair-current:hover { border-color: var(--muted); }
+.pair-current[aria-expanded='true'] { border-color: var(--profit); }
+.pair-current:disabled { opacity: 0.55; cursor: not-allowed; }
+.pair-caret { margin-left: auto; flex: none; width: 7px; height: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: translateY(-2px) rotate(45deg); }
+/* the search: your pairs, then pools DexScreener knows (a phone keeps it inside the screen) */
+.pair-pop { position: absolute; top: 100%; left: 0; z-index: 40; margin-top: 4px; width: max(100%, 380px); max-width: calc(100vw - 32px); display: flex; flex-direction: column; gap: 6px; padding: 8px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: var(--radius); box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55); animation: pair-pop 0.14s ease-out; }
+@keyframes pair-pop { from { opacity: 0; transform: translateY(-4px); } }
+@media (max-width: 560px) { .pair-pop { width: 100%; } }
+.pair-pop input { width: 100%; }
+.pair-list { display: flex; flex-direction: column; max-height: 340px; overflow-y: auto; }
+.pair-group { display: flex; align-items: center; gap: 4px; padding: 8px 6px 4px; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.pair-row { appearance: none; font: inherit; color: var(--text); text-align: left; background: none; border: 0; border-radius: 6px; padding: 6px 8px; cursor: pointer; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 10px; }
+.pair-row.active { background: var(--sel); }
+.pair-row:disabled { opacity: 0.4; cursor: wait; }
+.pair-main { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 0.86rem; white-space: nowrap; }
+.pair-main b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.pair-meta { grid-column: 1; font-size: 0.72rem; color: var(--muted); }
+.pair-act { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: 0.72rem; color: var(--profit); }
+.pair-act.busy { color: var(--warn); }
+.pair-warn { color: var(--warn); }
+.pair-err { grid-column: 1 / -1; font-size: 0.74rem; color: var(--loss); white-space: normal; overflow-wrap: anywhere; }
+.pair-note { padding: 4px 8px 6px; font-size: 0.78rem; color: var(--muted); }
+.pair-note.neg { color: var(--loss); overflow-wrap: anywhere; }
 .flip-btn { appearance: none; font: inherit; color: var(--muted); background: var(--bg); border: 1px solid var(--line-2); border-radius: 7px; padding: 0 9px; cursor: pointer; }
 .flip-btn:hover { color: var(--text); }
 .flip-btn.on { color: var(--text); border-color: var(--muted); }
