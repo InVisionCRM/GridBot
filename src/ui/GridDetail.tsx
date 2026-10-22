@@ -239,6 +239,11 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <div className={`kpi-v ${cls(earned + open)}`}>{qty(earned + open, q, 5)}</div>
           <span className="sub">{k ? `≈ ${usd((earned + open) * k, true)} at today's ${q} price` : 'no dollar price for this coin'}</span>
         </div>
+        <div className="kpi">
+          <span><L tip={`What the grid has now (${q} and ${g.base ?? 'PLS'} at today's price) minus what the coins it held right after its setup would be worth today. Positive: its buying and selling beat simply keeping those coins. Negative: just keeping them would have left you with more. The coin's own price move is in both, so it cancels out.`}>Result vs holding</L></span>
+          <div className={`kpi-v ${cls(g.pnl.vsHold)}`}>{g.pnl.vsHold != null ? qty(g.pnl.vsHold, q, 5) : '—'}</div>
+          <span className="sub">{g.opening && g.pnl.hold != null ? `keeping the ${num(g.opening.base, g.opening.base < 10 ? 6 : 2)} ${g.base} + ${num(g.opening.quote, 2)} ${q} it started with: ${qty(g.pnl.hold, q, 5, false)}${inUsd(g.pnl.vsHold)}` : 'once its start-up buy is done'}</span>
+        </div>
         <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg {money(g.stats.avgNet)} each · {g.stats.wins} profitable</span></div>
         <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>
       </div>

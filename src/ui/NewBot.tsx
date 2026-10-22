@@ -14,6 +14,7 @@ import { pct, px } from './fmt';
 import { ChainBadge, Orientation, PairPicker, chainOf, feeLabel, marketsOf, mk, unflipKey, useChainFilter } from './chains';
 import { TrendConfigEditor, strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
+import { LpReplay } from './LpReplay';
 import { coinFunds, errMsg, floorSig, spendFunds, type AnyObj, type BotKind, type Funds, type GridPrefill, type LpPrefill, type Nav, type TrendPrefill } from './model';
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -413,6 +414,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const q = +amount || 0, a = +baseAmt || 0;
   const funds = spendFunds(s, pair, q, gasCfg), baseFunds = coinFunds(s, pair, 'base', a, gasCfg);
   const plan = spot && bandOk && q + a > 0 ? swapPlan(spot, b, q, a) : null;
+  const impact = Number(limits.impact) / 100, impactOk = impact > 0 && impact < 1;
   const start = () => act(async () => {
     if (mode === 'live' && !confirm(`Start a LIVE liquidity position on ${m.label}? It signs real transactions from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
     const r = await botApi('lps', 'POST', {
@@ -442,6 +444,8 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
         <span className="detail">It earns its share of the {feeLabel(m)} fee on every trade while the price is inside the range. Like a grid, it ends up holding more of whichever coin fell. Outside the range it earns nothing until the price comes back or the range moves. Gas: opening is a swap plus about 480k; moving the range is a take-out (about 250k), a swap and a new open; closing is about 250k.</span>
       </div>
       <Rerange on={rerange} set={setRerange} />
+      <LpReplay pair={pair} capital={spot ? q + a * spot : q} maxImpact={impactOk ? impact : null} band={b} rerange={rerange}
+        onPick={(nb, nr) => { setBand(String(+(nb * 100).toFixed(4))); setRerange(nr); }} />
       <ProfitsField p={profits} set={setProfits} kind="lp" />
       <details className="more">
         <summary>Advanced</summary>

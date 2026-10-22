@@ -237,6 +237,18 @@ th { font-size: 0.7rem; font-weight: 500; text-transform: uppercase; letter-spac
 td { font-family: var(--mono); font-size: 0.8rem; }
 td.txt, td .txt { font-family: var(--font); }
 tr.selected td { background: var(--sel); }
+tr.pickable { cursor: pointer; }
+tr.pickable:hover td { background: var(--surface-2); }
+tr.pickable.selected:hover td { background: var(--sel); }
+
+/* New bot → Liquidity: replay over the pool's real trades */
+.replay { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+.replay h3 { margin: 0; }
+.replay .best-mark { color: var(--profit); }
+.replay-sync { display: flex; flex-direction: column; gap: 6px; }
+.replay-bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.replay-bar span { display: block; height: 100%; background: var(--profit); transition: width 0.6s ease; }
+@media (max-width: 560px) { .replay-table .narrow-hide { display: none; } }
 tr.failed-row td { opacity: 0.5; }
 tr.subrow > td { background: var(--surface-2); }
 .side { text-transform: uppercase; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; }

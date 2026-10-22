@@ -12,6 +12,8 @@ import { GeckoSource } from './market/gecko';
 import { CandleSync, geckoBackfill, onchainBackfill } from './market/backfill';
 import { VersionCheck } from './system/version';
 import { DailyScanner, scanDepsFromHub, type ScanFile } from './market/scanner';
+import { PoolHistories } from './lp/poolHistory';
+import { LpReplay } from './lp/replay';
 import { TFS } from '../market/candles';
 import { buildHub } from './chains/build';
 import type { CustomFile } from './chains/hub';
@@ -74,7 +76,11 @@ const scanner: DailyScanner | undefined = sync.enabled ? new DailyScanner(scanDe
 })) : undefined;
 
 const version = await VersionCheck.start(process.cwd(), process.env.NODE_ENV !== 'production');
-const app = createApp({ bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs } });
+const lpReplay = new LpReplay(hub, new PoolHistories(path.join(dataDir, 'pool-history'), (id) => readers.get(id)!), cfg.approval);
+const app = createApp({
+  bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
+  lpReplay: (q) => lpReplay.replay(q),
+});
 if (isProd) {
   const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../client');
   app.use(express.static(clientDir));

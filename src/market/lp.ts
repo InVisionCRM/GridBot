@@ -32,6 +32,11 @@ export const LP_MAX_MOVES_PER_DAY = 8;
 export const LP_BAND = { min: 0.01, max: 0.5 };
 export const LP_GAS = { v3: { open: 480_000, close: 250_000 }, v2: { open: 170_000, close: 215_000 } } as const;
 
+/** Gas for `units` in the base coin: `gasPricePls` is per gas unit in base units, `extraPlsPerSwap` an L2's L1 part per transaction. */
+export function gasInBase(units: number, m: { gasPricePls: number; extraPlsPerSwap?: number }): number {
+  return units * m.gasPricePls + (m.extraPlsPerSwap ?? 0);
+}
+
 /** Ranges tried for a V3 position (± around the start price); null = full range (the only option on V2). */
 export const LP_BANDS: (number | null)[] = [...SETUP_BANDS, null];
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GridEngine, type BotState } from '../src/server/bot/engine';
+import { GridEngine, openingFromTrades, type BotState } from '../src/server/bot/engine';
 import { Logger } from '../src/server/bot/logger';
 import { MemoryStore } from '../src/server/bot/store';
 import { NET, MockChain, DAI } from './helpers/mockChain';
@@ -241,6 +241,44 @@ describe('Levels above the start price get coins at the start (#5)', () => {
     await engine.start({ mode: 'live', ...mid });
     await engine.tick();
     expect(engine.state.intervals.filter((i) => i.index >= 5).every((i) => i.status === 'waitingBuy' && i.needsRearm)).toBe(true);
+  });
+  it('keeps the coins it held after the start-up buy; "vs holding" is 0 until it trades, then what its trading did', async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'live', ...mid });
+    expect(engine.state.opening).toBeNull(); // the start-up buy hasn't filled yet
+    await engine.tick();
+    const [seed] = engine.state.trades;
+    expect(engine.state.opening!.base).toBeCloseTo(seed.plsAmount, 12);
+    expect(engine.state.opening!.quote).toBeCloseTo(50 - seed.lotCost!, 12);
+    expect(engine.status().pnl.vsHold).toBeCloseTo(0, 9); // holding exactly the opening coins
+    chain.setPrice(P0 * 1.025); await engine.tick(); // level 5 sells
+    const st = engine.status(), o = engine.state.opening!, p = engine.state.lastPrice!;
+    expect(st.pnl.hold).toBeCloseTo(o.base * p + o.quote, 12);
+    expect(st.pnl.vsHold).toBeCloseTo(50 + st.pnl.realized + st.pnl.unrealized - st.pnl.hold!, 12);
+    expect(engine.state.opening).toEqual(o); // trades after the setup don't change it
+  });
+
+  it('nothing above the price, or a start-up buy that can\'t happen: it opened with the spend coin only', async () => {
+    const top = make();
+    await top.engine.start({ mode: 'live', ...grid });
+    expect(top.engine.state.opening).toEqual({ base: 0, quote: 50 });
+    const failed = make();
+    failed.chain.faults = ['sendThrow', 'sendThrow'];
+    await failed.engine.start({ mode: 'live', ...mid });
+    await failed.engine.tick();
+    expect(failed.engine.state.opening).toEqual({ base: 0, quote: 50 });
+  });
+
+  it('a grid saved before this keeps track gets its opening from its trades: a start-up buy in the first hour, else the spend coin', async () => {
+    const { engine } = make();
+    await engine.start({ mode: 'live', ...mid });
+    await engine.tick();
+    const g = JSON.parse(JSON.stringify(engine.state)) as BotState;
+    const [seed] = g.trades;
+    expect(openingFromTrades(g)).toEqual({ base: seed.plsAmount, quote: 50 - seed.lotCost! });
+    // the only start-up buy came 3 hours in: that's the range following the price up, not the start
+    expect(openingFromTrades({ ...g, trades: [{ ...seed, timestamp: g.startedAt! + 3 * 3_600_000 }] })).toEqual({ base: 0, quote: 50 });
+    expect(openingFromTrades({ ...g, config: null })).toBeNull();
   });
 });
 

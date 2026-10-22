@@ -162,7 +162,7 @@ function CompareList({ s, c, testUsd, nav }: { s: AnyObj; c: AnyObj; testUsd: nu
   return (
     <details className="more">
       <summary>Grid vs liquidity position vs holding ({c.compare.length} pairs)</summary>
-      <p className="small muted picks-note">Same 7 days, about ${testUsd.toLocaleString('en-US')} each. A liquidity position (LP) earns its share of the pool's trading fees, after the DEX's own cut, while the price stays inside its range, and like a grid it ends up holding more of whichever coin fell. Holding means putting all of it in the coin.</p>
+      <p className="small muted picks-note">Same 7 days, about ${testUsd.toLocaleString('en-US')} each. A liquidity position (LP) earns its share of the pool's trading fees, after the DEX's own cut, while the price stays inside its range, and like a grid it ends up holding more of whichever coin fell. The LP here is a range that stays where it opened; New bot → Liquidity replays the pool's real trades with and without moving the range. Holding means putting all of it in the coin.</p>
       <div className="cmp">
         <div className="cmp-row cmp-head"><span>Pair</span><span className="n">Hold</span><span className="n">Grid</span><span className="n">LP</span></div>
         {c.compare.map((r: AnyObj, i: number) => {

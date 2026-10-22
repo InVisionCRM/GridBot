@@ -71,6 +71,8 @@ export interface BotState {
   econ?: EconSummary | null;
   startedAt?: number | null;
   startPrice?: number | null;
+  /** The coins it held right after its setup (the start-up buy filled or skipped): "vs holding" compares with these */
+  opening: { base: number; quote: number } | null;
   /** [ms, equity in quote] sampled every ≥60 s */
   equity?: [number, number][];
   /** Follow the price up: when it stays above the range, move the range up around it */
@@ -147,8 +149,27 @@ export function freshState(net: LiveNetwork, id?: string): BotState {
     version: 1, id: id ?? newId(), mode: 'paper', network: net.key, stable: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, levels: [], intervals: [], usdPerBuy: 0, queue: [], inFlight: null,
     trades: [], paperStartStable: 0, lastPrice: null, lastPriceAt: null, spacingWarn: null,
-    profits: { mode: 'reinvest' }, payoutPending: 0, payoutInFlight: null, payouts: [],
+    profits: { mode: 'reinvest' }, payoutPending: 0, payoutInFlight: null, payouts: [], opening: null,
   };
+}
+
+/** A grid's coins after its setup: what its levels hold, and the quote not spent on them. */
+export function gridOpening(intervals: LiveInterval[], capital: number): { base: number; quote: number } {
+  const held = intervals.filter((i) => i.status === 'holding');
+  if (held.some((i) => i.lotCost == null)) throw new Error('a level holds coins with no recorded cost');
+  return { base: held.reduce((a, i) => a + i.plsAmount, 0), quote: capital - held.reduce((a, i) => a + i.lotCost!, 0) };
+}
+
+/**
+ * A grid saved before its opening coins were kept: its start-up buy is the first one filled within an hour of the start
+ * (a range moving up comes 2 hours or more later); none means it opened with the quote coin only.
+ */
+export function openingFromTrades(g: BotState): BotState['opening'] {
+  const c = g.config, t0 = g.startedAt;
+  if (!c || t0 == null) return null;
+  const paper = g.mode === 'paper';
+  const seed = g.trades.find((t) => !!t.paper === paper && t.seed && !t.failed && t.timestamp >= t0 && t.timestamp - t0 <= 3_600_000);
+  return seed ? { base: seed.plsAmount, quote: c.totalCapitalUsd - (seed.lotCost ?? seed.stableAmount + seed.gasUsd) } : { base: 0, quote: c.totalCapitalUsd };
 }
 
 export class GridEngine {
@@ -298,12 +319,13 @@ export class GridEngine {
       paperStartStable: paperReset ? p.totalCapitalUsd : this.state.paperStartStable,
       lastPrice: price, lastPriceAt: this.now(),
       spacingWarn: warn, econ,
-      startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalUsd]],
+      startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalUsd]], opening: null,
       recenter: { enabled: p.recenter ?? this.state.recenter?.enabled ?? false, aboveSince: null, lastAt: this.state.recenter?.lastAt ?? null, count: this.state.recenter?.count ?? 0 },
       profits,
       ...(paperReset ? { payoutPending: 0, payoutInFlight: null, payouts: this.state.payouts.filter((x) => !x.paper) } : {}),
     };
     this.seedUpper(price);
+    if (!this.state.queue.some((j) => j.seed)) this.state.opening = gridOpening(this.state.intervals, p.totalCapitalUsd);
     this.lastError = null;
     this.save();
     this.tag('info', `Started ${p.mode.toUpperCase()} ${this.label} ${p.lowerPrice}–${p.upperPrice} ×${p.gridCount}, ${usdPerBuy.toPrecision(5)} ${stable}/buy, spacing ${(econ.spacingPct * 100).toFixed(3)}%, impact ${(econ.impactPct * 100).toFixed(3)}%, gas ${econ.gasQuote.toPrecision(3)} ${stable}/RT, net ${econ.netPerRoundTrip.toPrecision(4)} ${stable} (${(econ.netPct * 100).toFixed(3)}%)/RT worst, price ${price}`);
@@ -560,6 +582,7 @@ export class GridEngine {
 
   private skip(job: QueuedTrade, why: string) {
     this.state.intervals = onTradeSkipped(this.state.intervals, job);
+    if (job.seed && this.state.opening == null && this.state.config) this.state.opening = gridOpening(this.state.intervals, this.state.config.totalCapitalUsd);
     this.tag('warn', `Skipped ${job.side}@${job.levelPrice}: ${why}`);
     this.ev('skipped', `Grid ${this.label}: skipped ${job.side} @ ${job.levelPrice.toPrecision(5)} — ${why}`, { level: 'warn' });
   }
@@ -619,6 +642,7 @@ export class GridEngine {
       else if (realized > 0) this.state.payoutPending += realized;
     }
     this.state.intervals = onTradeFilled(this.state.intervals, job, job.side === 'buy' ? plsAmount : 0, job.side === 'buy' ? lotCost : undefined, nextBuy);
+    if (job.seed && this.state.opening == null && this.state.config) this.state.opening = gridOpening(this.state.intervals, this.state.config.totalCapitalUsd);
     const sym = this.def?.quote.symbol ?? this.state.stable, bs = this.baseSym;
     this.ev('filled', `Grid ${this.label}: ${job.side === 'buy' ? 'BOUGHT' : 'SOLD'} ${plsAmount.toPrecision(6)} ${bs} @ ${execPrice.toPrecision(6)}${job.seed ? ` for the ${job.seed.length} levels above the price` : ''}${roundTripNet != null ? ` — RT net ${roundTripNet >= 0 ? '+' : ''}${roundTripNet.toPrecision(4)} ${sym}` : ''}`, {
       level: job.side === 'sell' ? (realized >= 0 ? 'success' : 'warn') : 'success', notify: true,
@@ -764,6 +788,14 @@ export class GridEngine {
     this.save();
   }
 
+  /** What the grid has now (capital + realized + unrealized) against keeping the coins it held after its setup, at today's price. */
+  private vsHold(t: ReturnType<typeof totals>): { hold: number | null; vsHold: number | null } {
+    const o = this.state.opening, c = this.state.config, p = this.state.lastPrice;
+    if (!o || !c || p == null) return { hold: null, vsHold: null };
+    const hold = o.base * p + o.quote;
+    return { hold, vsHold: c.totalCapitalUsd + t.realized + t.unrealized - hold };
+  }
+
   status() {
     const trades = this.modeTrades();
     const t = totals(trades, this.state.lastPrice);
@@ -784,7 +816,8 @@ export class GridEngine {
       price: this.state.lastPrice, priceAt: this.state.lastPriceAt, balances: this.balances, walletBalances: this.walletBalances,
       intervals: this.state.intervals, usdPerBuy: this.state.usdPerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
       trades: trades.slice(-100).reverse(),
-      pnl: { realized: t.realized, unrealized: t.unrealized, gasUsd: t.gasUsd, plsHeld: t.pos.plsHeld, costUsd: t.pos.costUsd },
+      pnl: { realized: t.realized, unrealized: t.unrealized, gasUsd: t.gasUsd, plsHeld: t.pos.plsHeld, costUsd: t.pos.costUsd, ...this.vsHold(t) },
+      opening: this.state.opening,
       profits: this.state.profits,
       payout: (() => {
         const mine = this.state.payouts.filter((x) => x.paper === (this.state.mode === 'paper'));

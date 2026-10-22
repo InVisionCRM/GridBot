@@ -12,7 +12,7 @@ import { checkGasReserve, reserveCfg } from '../../live/gasReserve';
 import { humanAmount } from '../../live/amount';
 import { totals, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
-import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
+import { GridEngine, freshState, openingFromTrades, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
 import { LpEngine, freshLp, upgradeLp, type LpStartParams, type LpState } from './lpEngine';
 import { TaxWatch } from './taxWatch';
@@ -102,7 +102,11 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
     return {
       version: 4,
       defaults: { ...DEFAULT_LIMITS, ...((o.defaults as SafetyLimits) ?? {}) },
-      grids: (o.grids as BotState[]).map((g) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
+      // grids saved before the opening coins were kept get them from their trades, once
+      grids: (o.grids as BotState[]).map((g) => {
+        const x = { ...freshState(net, g.id), ...g, id: g.id || freshState(net).id };
+        return 'opening' in g ? x : { ...x, opening: openingFromTrades(x) };
+      }),
       trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
       // config.baseAmount arrived with funding from wallet coins: earlier bots put in none
       lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => upgradeLp({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],

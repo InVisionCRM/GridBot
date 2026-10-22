@@ -18,8 +18,8 @@ import { MaxUint256 } from 'ethers';
 import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
-import { feesOwed } from '../../live/v3Liquidity';
-import { LP_BAND, LP_GAS, LP_MAX_MOVES_PER_DAY, LP_MIN_SWAP_SHARE } from '../../market/lp';
+import { feesOwed, rangeBaseShare } from '../../live/v3Liquidity';
+import { gasInBase, LP_BAND, LP_GAS, LP_MAX_MOVES_PER_DAY, LP_MIN_SWAP_SHARE } from '../../market/lp';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
 import { fromUnits } from '../../live/swapMath';
@@ -68,7 +68,7 @@ export interface LpStep {
 
 export interface LpState {
   kind: 'lp';
-  /** 3: paper fees skip stale counter readings (see upgradeLp) */
+  /** 4: the coins it opened with are kept (see upgradeLp) */
   version: number;
   id: string;
   mode: Mode;
@@ -98,6 +98,8 @@ export interface LpState {
   startedAt: number | null;
   /** Price when the bot started (for "if you'd held") */
   startPrice: number | null;
+  /** The coins it held right after the first open (position + leftovers) and the gas paid up to then: "vs holding" compares with these */
+  opening: { base: number; quote: number; gas: number } | null;
   lastPrice: number | null;
   lastPriceAt: number | null;
   /** [ms, value in quote] */
@@ -136,9 +138,9 @@ const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
   return {
-    kind: 'lp', version: 3, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
+    kind: 'lp', version: 4, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
-    outSince: null, lastRerangeAt: null, reranges: 0, missed: 0, seen: null, moves: [], totals: { fees: 0, gas: 0, sent: 0 }, startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
+    outSince: null, lastRerangeAt: null, reranges: 0, missed: 0, seen: null, moves: [], totals: { fees: 0, gas: 0, sent: 0 }, startedAt: null, startPrice: null, opening: null, lastPrice: null, lastPriceAt: null, equity: [],
   };
 }
 
@@ -157,6 +159,9 @@ const RESTART_PAPER = { g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0'
  * 3: a stale (lower) fee-counter reading was taken as a wrap and left ~2^128 × L owed. Owed = counter change × L / 2^128,
  *    and real counters are nowhere near 2^224 (the busiest pools are ~2^141), so owed ≥ 2^96 × L can only be that wrap:
  *    such a position earns again from its next reading and its bot's value history starts over. Others are untouched.
+ * 4: the coins it opened with are kept for "vs holding". A bot that opened before has them worked out once: what it was
+ *    given at the start price, split in the mix of its first range there (the opening swap's fee and gas, a few cents
+ *    on $2,000 at Robinhood's gas, aren't taken off).
  */
 export function upgradeLp(s: LpState): LpState {
   let t = s;
@@ -168,6 +173,15 @@ export function upgradeLp(s: LpState): LpState {
     const p = t.position, pp = p?.paper, cap = p ? BigInt(p.liquidity) << 96n : 0n;
     const wrapped = !!pp && (BigInt(pp.owed0) >= cap || BigInt(pp.owed1) >= cap);
     t = { ...t, version: 3, ...(wrapped ? { position: { ...p!, paper: { ...RESTART_PAPER } }, equity: [] } : {}) };
+  }
+  if (t.version < 4) {
+    const c = t.config, p0 = t.startPrice, opened = !!t.position || t.reranges > 0 || t.status === 'closed';
+    let opening: LpState['opening'] = null;
+    if (c && p0 != null && t.startedAt != null && opened) {
+      const value = c.capital + c.baseAmount * p0, share = rangeBaseShare(p0, p0 * (1 - c.bandPct), p0 * (1 + c.bandPct));
+      opening = { base: (share * value) / p0, quote: (1 - share) * value, gas: 0 };
+    }
+    t = { ...t, version: 4, opening };
   }
   return t;
 }
@@ -265,7 +279,7 @@ export class LpEngine {
       ...this.state, status: 'running', config: { bandPct: p.bandPct, capital: p.capital, baseAmount, rerange: p.rerange ?? true },
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },
       step: { action: 'open', stage: 'swap', tries: 0 }, outSince: null, lastRerangeAt: null, reranges: 0, missed: 0, seen: null, moves: [],
-      totals: { fees: 0, gas: 0, sent: 0 }, startedAt: this.now(), startPrice: v.price, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital + baseAmount * v.price]],
+      totals: { fees: 0, gas: 0, sent: 0 }, startedAt: this.now(), startPrice: v.price, opening: null, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital + baseAmount * v.price]],
     };
     this.lastError = null;
     this.save();
@@ -477,14 +491,17 @@ export class LpEngine {
    * Where the money stands, in the quote coin at today's price (null until the first reading):
    *  equity = the bot's coins (position + fees owed + idle) + fees sent out − gas paid
    *  profit = equity − start value = fees − gas + price, where price is what price moves and swap costs did to the coins
+   *  hold = the coins it opened with at today's price; vsHold = equity, with the gas paid before opening added back, − hold
+   *  (what everything after the open did, the same measure as the replay in market/lpReplay)
    */
-  pnl(): { equity: number; profit: number; fees: number; gas: number; price: number } | null {
+  pnl(): { equity: number; profit: number; fees: number; gas: number; price: number; hold: number | null; vsHold: number | null } | null {
     const c = this.state.config, vw = this.view, start = this.startValue();
     if (!c || !vw || start == null) return null;
-    const t = this.state.totals;
+    const t = this.state.totals, o = this.state.opening;
     const equity = vw.value + t.sent - t.gas;
     const fees = t.fees + vw.owed.base * vw.v.price + vw.owed.quote;
-    return { equity, profit: equity - start, fees, gas: t.gas, price: equity - start - fees + t.gas };
+    const hold = o ? o.base * vw.v.price + o.quote : null;
+    return { equity, profit: equity - start, fees, gas: t.gas, price: equity - start - fees + t.gas, hold, vsHold: o && hold != null ? equity + o.gas - hold : null };
   }
   /** What the bot was given, in the quote coin at the start price (the amount + its base coins). */
   startValue(): number | null {
@@ -511,12 +528,8 @@ export class LpEngine {
     return this.collect(pool, v, s);
   }
 
-  /** Gas for `units` in base units (gasPricePls is per gas unit in base units; extraPlsPerSwap is the L2's L1 part). */
-  private gasBase(units: number, snap: { gasPricePls: number; extraPlsPerSwap?: number }) {
-    return units * snap.gasPricePls + (snap.extraPlsPerSwap ?? 0);
-  }
   private gasQuote(units: number, v: PoolView, snap: { gasPricePls: number; extraPlsPerSwap?: number }) {
-    return this.gasBase(units, snap) * v.price;
+    return gasInBase(units, snap) * v.price;
   }
   /**
    * Native coin kept out of the position, in native units. Spending the native coin (its amount is native): the gas
@@ -524,7 +537,7 @@ export class LpEngine {
    */
   private async nativeKeep(pool: LpPool): Promise<number> {
     if (pool.def.quote.native) return gasReserve(this.state.config!.capital, reserveCfg(this.state.limits));
-    return OPEN_GAS_HEADROOM * this.gasBase(LP_GAS.v3.open, await this.hub.quoter(this.state.market).market());
+    return OPEN_GAS_HEADROOM * gasInBase(LP_GAS.v3.open, await this.hub.quoter(this.state.market).market());
   }
   private async receiptGas(r: ReceiptLike, v: PoolView) {
     return fromUnits(r.gasUsed * (r.gasPrice ?? 0n), 18) * (await this.hub.quoter(this.state.market).basePerNative()) * v.price;
@@ -716,6 +729,7 @@ export class LpEngine {
     const { lower, upper } = pool.rangePrices(range.tickLower, range.tickUpper, v);
     this.state.position = { id, tickLower: range.tickLower, tickUpper: range.tickUpper, liquidity: L.toString(), lower, upper, openedAt: this.now(), ...(paper ? { paper } : {}) };
     this.state.idle = { base: Math.max(0, this.state.idle.base - used.base), quote: Math.max(0, this.state.idle.quote - used.quote) };
+    if (s.action === 'open') this.state.opening = { base: used.base + this.state.idle.base, quote: used.quote + this.state.idle.quote, gas: this.state.totals.gas };
     if (s.action === 'rerange') { this.state.lastRerangeAt = this.now(); this.state.reranges++; this.state.moves.push(this.now()); }
     this.state.step = null;
     this.state.outSince = null;
@@ -779,7 +793,7 @@ export class LpEngine {
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
       status: s.status, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, move: this.moveStatus(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
+      outSince: s.outSince, move: this.moveStatus(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, opening: s.opening, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }

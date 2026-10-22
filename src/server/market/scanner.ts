@@ -10,7 +10,7 @@
  */
 import type { MarketDef, MarketToken, SafetyReport } from '../../live/markets';
 import { bestSetup, checkTestUsd, pickTokens, PICKS_PER_CHAIN, SCAN_CANDLES, SCAN_EVERY_MS, TEST_USD, type Setup, type Skipped, type TopPool } from '../../market/scan';
-import { bestLp, lpShareFromFeeProtocol, type LpSetup } from '../../market/lp';
+import { bestLp, type LpSetup } from '../../market/lp';
 import { buyHold } from '../../market/backtest';
 import { simBuy } from '../../market/costs';
 import { replayCandles, trimSpikes, type Candle, type TF } from '../../market/candles';
@@ -20,8 +20,8 @@ import { costModelOf } from '../bot/econ';
 import type { Store } from '../bot/store';
 import type { Emit } from '../bot/activity';
 import type { Hub } from '../chains/hub';
-import { readCall, sameAddr } from '../dex/types';
-import { V3_POOL_FEES } from '../dex/abis';
+import { sameAddr } from '../dex/types';
+import { lpShareOf } from '../lp/lpShare';
 import { RateLimited } from './gecko';
 
 
@@ -275,17 +275,7 @@ export function scanDepsFromHub(hub: Hub, candles: CandleStore, rest: Pick<ScanD
       const nowSec = Math.floor((rest.now ?? Date.now)() / 1000);
       return replayCandles(candles.get(d.key, '1h'), '1h', nowSec);
     },
-    lpShare: async (d) => {
-      const dex = hub.chain(d.chainId).dexes.find((x) => x.id === d.pool.dex);
-      if (!dex) throw new Error(`unknown DEX ${d.pool.dex}`);
-      if (dex.kind === 'v2') {
-        if (dex.lpShare == null) throw new Error(`${dex.name}: the share of fees paid to liquidity providers isn't verified`);
-        return dex.lpShare;
-      }
-      if (!dex.protocolFee) throw new Error(`${dex.name}: protocol fee encoding isn't verified`);
-      const r = await readCall<unknown[]>(hub.rt(d.chainId).reader, d.pool.address, V3_POOL_FEES, 'slot0');
-      return lpShareFromFeeProtocol(Number(r[5]), dex.protocolFee);
-    },
+    lpShare: (d) => lpShareOf(hub, d),
     usdPerSpend: async (d) => {
       if (hub.isStable(d.chainId, d.quote.address)) return 1;
       if (!spends(d.chainId, d.quote)) throw new Error(`${d.quote.symbol} is not the native coin or a stablecoin`);
