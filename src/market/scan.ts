@@ -167,14 +167,24 @@ export function dailySwing(k: Candle[]): number {
 }
 
 /**
- * Grid ranking: pools where a grid earned from its trades last week, by how much the price swings. Walk-forward over
- * 90 pools × 4 weeks (Oct 2026, README): the swing predicted next week's grid earnings best (rank correlation 0.53;
- * last week's own grid earnings 0.36, last week's total return −0.08), and came out ahead on each half of the pools
- * separately (0.50 / 0.54 against 0.34 / 0.37).
+ * What a pool is expected to earn next week, as a share of the money put in: the one number Opportunities shows and
+ * sorts by. Fitted on the walk-forward (Oct 2026, 92 pools × 4 weeks; `scripts/walkForward.ts analyze` prints it),
+ * among pools where the strategy earned last week:
+ *  grid       GRID_PER_SWING × the daily swing: rank correlation 0.43 with next week; the top tenth was expected to
+ *             earn 7.2% and earned 7.4%. Last week's own grid earnings ranked worse (0.20) and over-promised (9.7% for 6.0%).
+ *  liquidity  LP_REPEAT × last week's earnings after costs: 0.73; the top tenth was expected to earn 14.1% and earned 12.5%.
+ * null = no estimate: the strategy didn't earn at this size last week (or wasn't tested).
  */
-export const gridRank = (o: Pick<Opportunity, 'grid' | 'swingPct'>): number | null => (o.grid ? o.swingPct : null);
-/** Liquidity ranking: what the position earned after costs last week (walk-forward: rank correlation 0.85 with the next week). */
-export const lpRank = (o: Pick<Opportunity, 'lp'>): number | null => o.lp?.earnedPct ?? null;
+export const GRID_PER_SWING = 0.0686;
+export const LP_REPEAT = 0.77;
+export const expectedGrid = (o: Pick<Opportunity, 'grid' | 'swingPct'>): number | null => (o.grid ? GRID_PER_SWING * o.swingPct : null);
+export const expectedLp = (o: Pick<Opportunity, 'lp'>): number | null => (o.lp && o.lp.earnedPct > 0 ? LP_REPEAT * o.lp.earnedPct : null);
+/** The better way to use a pool next week, or null when neither has an estimate. */
+export function bestWay(o: Pick<Opportunity, 'grid' | 'swingPct' | 'lp'>): { how: 'grid' | 'lp'; expected: number } | null {
+  const g = expectedGrid(o), l = expectedLp(o);
+  if (g == null && l == null) return null;
+  return l != null && (g == null || l > g) ? { how: 'lp', expected: l } : { how: 'grid', expected: g! };
+}
 
 /** Ranges (± around the start price) and level counts tried for every pair. */
 export const SETUP_BANDS = [0.05, 0.08, 0.12, 0.18, 0.25];

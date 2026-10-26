@@ -36,6 +36,7 @@ import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
 import type { Logger } from './logger';
 import type { Store } from './store';
+import { noKey } from '../words';
 
 export interface LpPosition {
   /** NFT id (live) or a paper id */
@@ -50,6 +51,8 @@ export interface LpPosition {
   openedAt: number;
   /** The coins it went in with (null: opened before version 5, set at its next reading) */
   putIn: Coins | null;
+  /** The bot's fees in each coin (collected) when this position opened: what came before it */
+  feesBefore: Coins;
   /** Paper: the pool's global fee growth and whether the price was in range at the last reading; fees earned (raw, token order) */
   paper?: { g0: string; g1: string; inRange: boolean; owed0: string; owed1: string };
 }
@@ -67,6 +70,8 @@ export interface LpStep {
   /** A swap that was broadcast but not confirmed when the executor gave up waiting */
   swap?: { hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number };
   tries: number;
+  /** close: after taking the position out, sell the base coin back to the quote coin ("close to cash") */
+  toCash?: boolean;
 }
 
 export interface LpState {
@@ -139,7 +144,7 @@ const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
   return {
-    kind: 'lp', version: 5, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
+    kind: 'lp', version: 6, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
     outSince: null, lastRerangeAt: null, reranges: 0, seen: null, totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
   };
@@ -182,6 +187,11 @@ export function upgradeLp(s: LpState): LpState {
       ...rest, version: 5, totals: { ...t.totals, feeCoins: { base: 0, quote: t.totals.fees }, swapCost: 0, moveLoss: 0 },
       position: t.position ? { ...t.position, putIn: null } : null, seen: t.seen ? { g0: t.seen.g0, g1: t.seen.g1 } : null,
     };
+  }
+  if (t.version < 6) {
+    // A position open at the upgrade: what was collected until now came before it. Exact when fees are reinvested
+    // (they stay in the position until it is taken out); with Send, fees it sent before the upgrade aren't counted as its.
+    t = { ...t, version: 6, position: t.position ? { ...t.position, feesBefore: { ...t.totals.feeCoins } } : null };
   }
   return t;
 }
@@ -239,7 +249,7 @@ export class LpEngine {
       const q = this.hub.quoter(this.state.market);
       if (this.state.mode === 'live') {
         const rt = this.hub.chainOf(this.state.market);
-        if (!rt.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
+        if (!rt.signer) throw new Error(noKey());
         return new LiveExecutor(q, rt.signer, { approval: this.d.approval ?? 'exact', receiptTimeoutMs: this.d.receiptTimeoutMs ?? 180_000, sharedNonce: rt.nonce });
       }
       return new PaperExecutor(q, () => ({ pls: this.state.idle.base, stable: this.state.idle.quote }), this.d.approval ?? 'exact');
@@ -301,12 +311,14 @@ export class LpEngine {
     this.ev('started', `Liquidity ${this.label} resumed`);
   }
   /** Take everything out: the coins go back to the wallet and the bot ends. */
-  close() {
+  /** Take the position out; with toCash, then sell its base coin back to the quote coin. */
+  close(toCash = false) {
     if (this.state.status === 'closed') return;
     if (this.state.step?.hash || this.state.step?.swap) throw new Error('A transaction is still being confirmed. Try again in a minute.');
-    if (!this.state.position) { this.state.status = 'closed'; this.state.step = null; this.save(); this.ev('stopped', `Liquidity ${this.label} closed`); return; }
+    const sell = toCash && this.state.idle.base > 0;
+    if (!this.state.position && !sell) { this.state.status = 'closed'; this.state.step = null; this.save(); this.ev('stopped', `Liquidity ${this.label} closed`); return; }
     this.state.status = 'running';
-    this.state.step = { action: 'close', stage: 'exit', tries: 0 };
+    this.state.step = { action: 'close', stage: this.state.position ? 'exit' : 'swap', tries: 0, ...(toCash ? { toCash } : {}) };
     this.save();
   }
   setRerange(enabled: boolean) {
@@ -490,6 +502,12 @@ export class LpEngine {
       gas: t.gas, swapCost: t.swapCost, moveLoss: t.moveLoss, net, price: equity - start - net,
     };
   }
+  /** What the open position has earned in fees since it opened (collected + waiting), per coin: its own history. */
+  positionFees(): { coins: Coins; since: number } | null {
+    const p = this.state.position, pnl = this.pnl();
+    if (!p || !pnl) return null;
+    return { coins: { base: pnl.feeCoins.base - p.feesBefore.base, quote: pnl.feeCoins.quote - p.feesBefore.quote }, since: p.openedAt };
+  }
   /**
    * The position's share of the liquidity trading at the price, which is its share of each trade's fee; 0 out of range.
    * A live position is part of the pool's active liquidity; a paper one isn't, so it is added (as paper fees are).
@@ -520,7 +538,7 @@ export class LpEngine {
   private async advanceOnce(pool: LpPool, v: PoolView) {
     const s = this.state.step!;
     if (s.stage === 'exit') return this.exit(pool, v, s);
-    if (s.stage === 'swap') return this.swap(pool, v, s);
+    if (s.stage === 'swap') return s.action === 'close' ? this.sellToCash(v, s) : this.swap(pool, v, s);
     if (s.stage === 'approve') return this.approve(pool, s);
     if (s.stage === 'mint') return this.mint(pool, v, s);
     return this.collect(pool, v, s);
@@ -618,10 +636,11 @@ export class LpEngine {
     this.state.outSince = null;
     this.blockMemo = null;
     const f = `${(fees.base * v.price + fees.quote).toPrecision(5)} ${this.quoteSym} in fees`;
-    if (s.action === 'close') {
-      this.state.step = null;
-      this.state.status = 'closed';
-      this.ev('stopped', `Liquidity ${this.label}: closed (${f}); ${this.state.idle.base.toPrecision(6)} ${this.baseSym} + ${this.state.idle.quote.toPrecision(6)} ${this.quoteSym} back in the wallet`, { level: 'success', notify: true });
+    if (s.action === 'close' && s.toCash) {
+      s.stage = 'swap'; s.tries = 0;
+      this.ev('filled', `Liquidity ${this.label}: took the position out (${f}); selling the ${this.baseSym} back to ${this.quoteSym}`, { level: 'success' });
+    } else if (s.action === 'close') {
+      this.closed();
     } else {
       s.stage = 'swap'; s.tries = 0; s.range = undefined;
       this.ev('filled', `Liquidity ${this.label}: took out ${p.lower.toPrecision(6)}–${p.upper.toPrecision(6)} (${f})`, { level: 'success' });
@@ -664,6 +683,50 @@ export class LpEngine {
     }
     s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
   }
+  private closed() {
+    this.state.step = null;
+    this.state.status = 'closed';
+    this.ev('stopped', `Liquidity ${this.label}: closed; ${this.state.idle.base.toPrecision(6)} ${this.baseSym} + ${this.state.idle.quote.toPrecision(6)} ${this.quoteSym} back in the wallet`, { level: 'success', notify: true });
+  }
+
+  /**
+   * Close to cash: sell the idle base coin back to the quote coin, in pieces when all of it would go over the
+   * price-impact cap (halved down to 1/64); then closed. A broadcast sell is settled by hash like the range swap.
+   * Dust is left: base worth under twice the sale's gas, or under 0.01% of what the bot holds.
+   */
+  private async sellToCash(v: PoolView, s: LpStep) {
+    if (s.swap) {
+      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut);
+      if (!r) return;
+      this.state.totals.gas += r.gasPls * v.price;
+      if (r.ok) this.applySwap('sell', s.swap.amountIn, r.amountOutHuman, v.price);
+      s.swap = undefined;
+      return;
+    }
+    const idle = this.state.idle;
+    // What is left is dust: under 0.01% of what the bot holds (checked first: a quote for a few wei of a coin fails
+    // with "rounds to zero"), or worth under twice the sale's gas.
+    if (!(idle.base * v.price >= (idle.base * v.price + idle.quote) * 1e-4)) return this.closed();
+    let amount = idle.base, q = await this.executor.quote('sell', amount, this.state.limits);
+    if (idle.base * v.price < 2 * q.gasPlsEstimate * v.price) return this.closed();
+    while (q.priceImpact > this.state.limits.maxPriceImpact && amount > idle.base / 64) {
+      amount /= 2;
+      q = await this.executor.quote('sell', amount, this.state.limits);
+    }
+    if (!q.balanceOk) throw new Error(`can't sell the ${this.baseSym} back: ${q.balanceNote}`);
+    if (q.priceImpact > this.state.limits.maxPriceImpact) throw new Error(`selling the ${this.baseSym} back would move the price ${(q.priceImpact * 100).toFixed(2)}% even in 1/64 pieces (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%); trying again on the next check`);
+    try {
+      const f = await this.executor.execute(q, { canSend: () => true, onSent: (_stage, hash) => this.log('info', `sent sell ${hash}`) });
+      this.state.totals.gas += f.gasPls * v.price;
+      this.applySwap('sell', f.amountInHuman, f.amountOutHuman, v.price);
+    } catch (e) {
+      const o = e instanceof ExecError ? e.opts : {};
+      if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
+      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price }; return; }
+      throw e;
+    }
+  }
+
   /** A swap to the range's mix landed; its cost is what went in less what came out, at the mid price. */
   private applySwap(side: 'buy' | 'sell', amountIn: number, amountOut: number, price: number) {
     this.state.totals.swapCost += side === 'buy' ? amountIn - amountOut * price : amountIn * price - amountOut;
@@ -730,7 +793,7 @@ export class LpEngine {
   private minted(s: LpStep, id: string, L: bigint, used: Coins, v: PoolView, pool: LpPool, paper?: LpPosition['paper']) {
     const range = s.range!;
     const { lower, upper } = pool.rangePrices(range.tickLower, range.tickUpper, v);
-    this.state.position = { id, tickLower: range.tickLower, tickUpper: range.tickUpper, liquidity: L.toString(), lower, upper, openedAt: this.now(), putIn: used, ...(paper ? { paper } : {}) };
+    this.state.position = { id, tickLower: range.tickLower, tickUpper: range.tickUpper, liquidity: L.toString(), lower, upper, openedAt: this.now(), putIn: used, feesBefore: { ...this.state.totals.feeCoins }, ...(paper ? { paper } : {}) };
     this.state.idle = { base: Math.max(0, this.state.idle.base - used.base), quote: Math.max(0, this.state.idle.quote - used.quote) };
     if (s.action === 'rerange') { this.state.lastRerangeAt = this.now(); this.state.reranges++; }
     this.state.step = null;
@@ -788,7 +851,7 @@ export class LpEngine {
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
       status: s.status, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, move: this.moveStatus(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
+      outSince: s.outSince, move: this.moveStatus(), positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }

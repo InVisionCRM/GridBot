@@ -224,6 +224,17 @@ function analyze(file: string) {
     }
     console.log(`  next ÷ last week's figure: ${(mean(S.map((s) => s.next)) / mean(S.map((s) => s.scores.earned))).toFixed(2)} · chosen by earned ${pct(mean(S.map((s) => s.next)))} vs by total return ${pct(mean(S.map((s) => s.nextByRet)))} the next week · next week's total return ${pct(mean(S.map((s) => s.nextRet)))}`);
   }
+  // The one number the Opportunities page shows (market/scan.ts GRID_PER_SWING, LP_REPEAT), among pools that earned
+  // last week: a grid's next week from the daily swing (least squares through 0), a liquidity range's from last week.
+  const calib = (name: string, S: Sample[], x: (s: Sample) => number, fit: (E: Sample[]) => number) => {
+    const E = S.filter((s) => s.scores.earned > 0), k = fit(E), pred = (s: Sample) => k * x(s);
+    const top = [...E].sort((a, b) => pred(b) - pred(a)).slice(0, Math.max(1, Math.floor(E.length / 10)));
+    console.log(`  ${name}: k = ${k.toFixed(4)} · rank correlation ${spearman(E.map(pred), E.map((s) => s.next)).toFixed(2)} · top 10% predicted ${pct(mean(top.map(pred)))}, got ${pct(mean(top.map((t) => t.next)))} (${E.length} pool-weeks)`);
+  };
+  console.log('\nExpected next week (shown on Opportunities):');
+  const swingDay = (s: Sample) => s.scores.swing / 7;
+  calib('grid = k × daily swing', G, swingDay, (E) => E.reduce((a, s) => a + swingDay(s) * s.next, 0) / E.reduce((a, s) => a + swingDay(s) ** 2, 0));
+  calib('liquidity = k × last week earned', LP, (s) => s.scores.earned, (E) => mean(E.map((s) => s.next)) / mean(E.map((s) => s.scores.earned)));
   // the same comparison on each half of the pools separately (names in sorted order, every other one)
   const names = [...new Set(G.map((s) => s.pool))].sort(), half = new Set(names.filter((_, i) => i % 2 === 0));
   for (const inHalf of [true, false]) {

@@ -216,6 +216,8 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(p1.feeCoins.base).toBeGreaterThan(0);
     expect(p1.feeCoins.quote).toBeGreaterThan(0);
     expect(p1.fees).toBeCloseTo(p1.feeCoins.base * s1.price! + p1.feeCoins.quote, 9); // all still waiting: valued now
+    expect(s1.positionFees!.coins).toEqual(p1.feeCoins); // the first position: every fee is its own
+    expect(s1.positionFees!.since).toBe(s1.position!.openedAt);
     m.movePrice(pool, 1.2);
     await tradeUntilMoved(lp, m, pool);
     const s2 = lp.status(), p2 = s2.pnl!;
@@ -226,8 +228,45 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     // the fees collected at the move are counted per coin
     expect(s2.totals.feeCoins.base).toBeGreaterThan(0);
     expect(s2.totals.feeCoins.quote).toBeGreaterThan(0);
-    // the new position remembers what it went in with
+    // the new position remembers what it went in with, and starts its own fee history from the fees before it
     expect(s2.position!.putIn!.base).toBeCloseTo(s2.coins!.base, 6);
+    expect(s2.position!.feesBefore).toEqual(s2.totals.feeCoins);
+    expect(s2.positionFees!.coins.base).toBeCloseTo(p2.feeCoins.base - s2.totals.feeCoins.base, 12);
+    expect(s2.positionFees!.coins.quote).toBeCloseTo(p2.feeCoins.quote - s2.totals.feeCoins.quote, 12);
+  });
+
+  it('close to cash: takes the position out, sells the base coin back to the quote coin, then closed', async () => {
+    const { lp, m, pool } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
+    await lp.tick();
+    m.movePrice(pool, 0.95); // in range, holding more PLS now
+    await lp.tick();
+    expect(lp.status().coins!.base).toBeGreaterThan(0);
+    lp.close(true);
+    for (let i = 0; i < 4 && lp.status().status !== 'closed'; i++) await lp.tick();
+    const st = lp.status();
+    expect(st.status).toBe('closed');
+    expect(st.position).toBeNull();
+    expect(st.idle.base * st.price!).toBeLessThan(st.idle.quote * 1e-4); // at most dust left
+    expect(st.idle.quote).toBeGreaterThan(900);
+    // plain Close keeps both coins
+    const other = world();
+    await other.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
+    await other.lp.tick();
+    other.lp.close();
+    for (let i = 0; i < 4 && other.lp.status().status !== 'closed'; i++) await other.lp.tick();
+    expect(other.lp.status().idle.base).toBeGreaterThan(0);
+    // a few wei of the base coin left (float rounding) is dust: closed without asking for a quote that would fail
+    const third = world();
+    await third.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
+    await third.lp.tick();
+    third.lp.close(true);
+    await third.lp.tick();
+    third.lp.state.idle.base = 1e-17; // 10 wei: its output rounds to zero, so a quote for it throws
+    third.lp.state.status = 'running';
+    third.lp.state.step = { action: 'close', stage: 'swap', tries: 0, toCash: true };
+    await third.lp.tick();
+    expect(third.lp.status()).toMatchObject({ status: 'closed', lastError: null });
   });
 
   it("doesn't start a move whose swap would go over the price-impact cap (it would stop halfway, out of the position)", async () => {
@@ -625,6 +664,8 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       const st = again.bot.status().lps.find((x: { id: string }) => x.id === old.id)!;
       expect(st.totals).toEqual({ fees: 12.5, gas: expect.any(Number), sent: 0, feeCoins: { base: 0, quote: 12.5 }, swapCost: 0, moveLoss: 0 });
       expect(st.position!.putIn!.base).toBeCloseTo(st.coins!.base, 9);
+      // version 6: fees collected before the upgrade came before the open position
+      expect(st.position!.feesBefore).toEqual({ base: 0, quote: 12.5 });
       expect('opening' in st).toBe(false);
       // the earlier move rule's tally and moves-per-day list are dropped
       const kept = again.store.load()!.lps.find((x) => x.id === old.id) as unknown as Record<string, unknown>;

@@ -15,6 +15,7 @@ import { LpDetail } from './ui/LpDetail';
 import { ViewError } from './ui/ViewError';
 import { Tools } from './ui/Tools';
 import { Opportunities } from './ui/Opportunities';
+import { SmartTrader } from './ui/SmartTrader';
 import { useVersion, VersionPill } from './ui/System';
 import { TOOL_TABS, type View } from './ui/model';
 import { loadShowUsd, saveShowUsd, ShowUsdCtx } from './ui/money';
@@ -22,7 +23,7 @@ import { loadShowUsd, saveShowUsd, ShowUsdCtx } from './ui/money';
 function loadView(): View {
   try {
     const v = JSON.parse(localStorage.getItem('view') ?? 'null') as View | null;
-    if (v && ['home', 'opps', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
+    if (v && ['home', 'opps', 'auto', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
   } catch { /* storage unavailable */ }
   return { v: 'home' };
 }
@@ -112,6 +113,7 @@ export default function App() {
           <nav className="nav" aria-label="main">
             <button type="button" className={view.v === 'home' || view.v === 'grid' || view.v === 'trend' || view.v === 'lp' ? 'on' : ''} onClick={() => nav({ v: 'home' })}>Home</button>
             <button type="button" className={view.v === 'opps' ? 'on' : ''} onClick={() => nav({ v: 'opps' })}>Opportunities</button>
+            <button type="button" className={view.v === 'auto' ? 'on' : ''} onClick={() => nav({ v: 'auto' })}>Smart trader</button>
             <button type="button" className={view.v === 'new' ? 'on' : ''} onClick={() => nav({ v: 'new', kind: 'grid' })}>New bot</button>
             <button type="button" className={view.v === 'tools' ? 'on' : ''} onClick={() => nav({ v: 'tools', tab: view.v === 'tools' ? view.tab : TOOL_TABS[0][0] })}>Tools</button>
           </nav>
@@ -129,11 +131,13 @@ export default function App() {
             title={showUsd ? 'Dollar values are shown beside coin amounts. Tap to show coins only.' : 'Results are shown in coins. Tap to also show their dollar value at today\'s price.'}>$ {showUsd ? 'on' : 'off'}</button>
           {s.address
             ? <span className="pill" title={s.address}>Address {short(s.address)}</span>
-            : <span className="pill warn" title="No signing key in .env: every bot runs in paper mode">Paper only</span>}
+            : <span className="pill warn" title={s.copy ? 'No key added: every bot runs in paper mode. Add one under Account.' : 'No signing key in .env: every bot runs in paper mode'}>Paper only</span>}
           {connected ? <span className="pill live-pill" title="Live: prices and trades stream in as they happen"><i />Live</span> : <span className="pill warn" title="Live stream lost; polling every 3 s">Reconnecting</span>}
-          <VersionPill v={ver.v} nav={nav} />
+          {!s.copy && <VersionPill v={ver.v} nav={nav} />}
           <button type="button" className="btn ghost small-btn" onClick={() => setDrawer(true)}>Activity</button>
           <button type="button" className="btn ghost small-btn" onClick={() => setGuide(true)}>Guide</button>
+          {s.copy && <a className="btn ghost small-btn" href="/account" title={`Logged in as ${s.copy.friend}: your key, password and log out`}>Account</a>}
+          {!s.copy && typeof window !== 'undefined' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname) && <a className="btn ghost small-btn" href="/account" title="Your phone login. Log out of this device. Bots keep running.">Account</a>}
           <button type="button" className="btn kill small-btn" disabled={busy || running === 0}
             title={sel ? `Stop every bot on ${sel.name}. Holdings are kept.` : 'Stop every bot on every chain. Holdings are kept.'}
             onClick={stopAll}>{sel ? `Stop all on ${sel.short}` : 'Stop all'}</button>
@@ -144,6 +148,7 @@ export default function App() {
         <ViewError key={`${view.v}:${'id' in view ? view.id : ''}:${'tab' in view ? view.tab : ''}`} onHome={() => nav({ v: 'home' })}>
           {view.v === 'home' && <Home s={s} events={events} ticks={ticks} ver={ver.v} nav={nav} act={act} busy={busy} />}
           {view.v === 'opps' && <Opportunities s={s} nav={nav} act={act} busy={busy} />}
+          {view.v === 'auto' && <SmartTrader s={s} nav={nav} />}
           {view.v === 'new' && <NewBot s={s} kind={view.kind} trendPrefill={view.trendPrefill} gridPrefill={view.gridPrefill} lpPrefill={view.lpPrefill} nav={nav} act={act} busy={busy} />}
           {view.v === 'grid' && <GridDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'trend' && <TrendDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}

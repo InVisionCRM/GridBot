@@ -23,6 +23,7 @@ import type { Emit } from './activity';
 import { pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, type RecenterState } from '../../live/recenter';
+import { noKey } from '../words';
 
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
@@ -81,6 +82,13 @@ export interface BotState {
   /** A transfer that was sent and isn't settled yet: never resend while this is set */
   payoutInFlight: { hash: string; amount: number; to: string; at: number } | null;
   payouts: Payout[];
+  /**
+   * Selling everything back to the spend coin (closeToCash). size = the next sell (null = all it holds), halved when a
+   * sell would go over the price-impact cap; waitUntil = paused 10 min once even the smallest piece is over the cap.
+   */
+  cashOut?: { at: number; size: number | null; waitUntil: number | null; why: string | null } | null;
+  /** When the last close to cash finished (everything sold, stopped) */
+  cashedOutAt?: number | null;
 }
 
 
@@ -137,6 +145,12 @@ function econWarning(e: EconSummary): string | null {
   if (e.ok) return null;
   return `${e.netPerRoundTrip <= 0 ? 'Each completed trade is expected to lose money at this size' : 'Each completed trade is expected to make very little at this size'}: ${e.reasons.join(' ')}`;
 }
+
+/** Close to cash: job id prefix; held coins worth under this share of the capital count as sold; smallest piece; pause */
+const CASH_JOB = 'cash-';
+const CASH_DUST = 1e-4;
+const CASH_MIN_PARTS = 64;
+const CASH_WAIT_MS = 10 * 60_000;
 
 function newId() {
   return `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -223,7 +237,7 @@ export class GridEngine {
     }
     if (mode === 'live') {
       const rt = this.hub.chainOf(key);
-      if (!rt.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
+      if (!rt.signer) throw new Error(noKey());
       return new LiveExecutor(quoter, rt.signer, {
         approval: this.d.approval ?? 'exact',
         receiptTimeoutMs: this.d.receiptTimeoutMs ?? 180_000,
@@ -262,7 +276,7 @@ export class GridEngine {
     const stable = p.stable ?? this.state.stable;
     if (this.state.config && stable !== this.state.stable) throw new Error(`This grid trades ${this.hub.label(this.state.stable)}; its pair can't change. Add a new grid for ${this.hub.label(stable)}.`);
     const def = this.hub.def(stable);
-    if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push('Live mode needs PRIVATE_KEY in .env');
+    if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push(noKey());
     if (errs.length) throw new Error(errs.join('; '));
     if (p.mode === 'live' && def.safety) await this.requireLiveSafety(stable);
 
@@ -324,7 +338,7 @@ export class GridEngine {
     if (this.state.status === 'running') return;
     if (!this.state.config) throw new Error('No grid to resume.');
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
-    if (this.state.mode === 'live' && !this.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
+    if (this.state.mode === 'live' && !this.signer) throw new Error(noKey());
     if (this.state.mode === 'live' && this.def?.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
     this.state.status = 'running';
     this.save();
@@ -333,6 +347,7 @@ export class GridEngine {
   }
 
   stop(why?: string) {
+    if (this.state.cashOut) { this.state.cashOut = null; this.ev('info', `Grid ${this.label}: stopped selling back to ${this.quoteSym}`, { level: 'warn' }); }
     const dropped = this.state.queue;
     this.state.intervals = dropped.reduce((iv, q) => onTradeSkipped(iv, q), this.state.intervals);
     this.state.queue = [];
@@ -340,6 +355,43 @@ export class GridEngine {
     this.save();
     this.ev('stopped', `Grid ${this.label} ${why ? `paused — ${why}` : 'stopped'}`, { level: why ? 'error' : 'warn', notify: true });
     this.tag('warn', `${why ? `PAUSED (${why})` : 'STOPPED'}. ${dropped.length} queued dropped.${this.state.inFlight?.swapTxHash ? ` Swap ${this.state.inFlight.swapTxHash} already broadcast; will reconcile.` : ''}`);
+  }
+
+  /**
+   * Sell everything this grid holds back to its spend coin, then stop (paper and live). Each sell goes through the
+   * normal checks (quote, units guard, price-impact cap); one too big for the cap is halved on the next check.
+   */
+  closeToCash() {
+    if (!this.state.config) throw new Error('No grid to close.');
+    if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
+    if (this.state.mode === 'live' && !this.signer) throw new Error(noKey());
+    if (this.state.cashOut) return;
+    this.state.intervals = this.state.queue.reduce((iv, q) => onTradeSkipped(iv, q), this.state.intervals);
+    this.state.queue = [];
+    this.state.cashOut = { at: this.now(), size: null, waitUntil: null, why: null };
+    this.state.cashedOutAt = null;
+    this.state.status = 'running';
+    this.save();
+    this.ev('info', `Grid ${this.label}: selling everything back to ${this.quoteSym}`);
+  }
+  private get quoteSym() { return this.def?.quote.symbol ?? this.state.stable; }
+
+  /** One piece of the close to cash, or the end of it once nothing worth selling is left. */
+  private queueCashOut(price: number) {
+    const c = this.state.cashOut!;
+    const held = replay(this.modeTrades()).plsHeld;
+    if (!(held * price > this.state.config!.totalCapitalUsd * CASH_DUST)) {
+      this.state.cashOut = null;
+      this.state.cashedOutAt = this.now();
+      this.state.status = 'stopped';
+      // The levels' coins are sold: each waits to buy again if the grid is ever resumed.
+      this.state.intervals = this.state.intervals.map((iv) => (iv.status === 'holding' ? { ...iv, status: 'waitingBuy', plsAmount: 0, lotCost: undefined, needsRearm: true } : iv));
+      this.ev('stopped', `Grid ${this.label}: sold everything back to ${this.quoteSym}; stopped`, { level: 'success', notify: true });
+      return;
+    }
+    if (this.state.queue.length || (c.waitUntil != null && c.waitUntil > this.now())) return;
+    const amount = Math.min(held, c.size ?? held);
+    this.state.queue.push({ id: `${CASH_JOB}${this.now()}`, intervalIndex: -1, side: 'sell', triggerPrice: price, levelPrice: price, amount, createdAt: this.now(), manual: true });
   }
 
   setLimits(l: Partial<SafetyLimits>) {
@@ -508,7 +560,8 @@ export class GridEngine {
           }
         } catch { /* keep last */ }
       }
-      if (this.state.status === 'running' && !this.state.inFlight) {
+      if (this.state.status === 'running' && !this.state.inFlight && this.state.cashOut) this.queueCashOut(price);
+      else if (this.state.status === 'running' && !this.state.inFlight) {
         const { intervals, queued } = evaluateTick(this.state.intervals, price, this.now());
         this.state.intervals = intervals;
         if (queued.length) {
@@ -559,6 +612,18 @@ export class GridEngine {
   }
 
   private skip(job: QueuedTrade, why: string) {
+    const c = this.state.cashOut;
+    if (c && job.id.startsWith(CASH_JOB)) {
+      // Too big for the price-impact cap: half as much next time; the smallest piece too big waits 10 minutes.
+      const held = replay(this.modeTrades()).plsHeld, min = held / CASH_MIN_PARTS;
+      const impact = /price impact/.test(why);
+      c.size = impact ? Math.max(min, job.amount / 2) : c.size;
+      c.waitUntil = impact && job.amount <= min * 1.000001 ? this.now() + CASH_WAIT_MS : null;
+      c.why = why;
+      this.tag('warn', `selling back: ${why}`);
+      this.save();
+      return;
+    }
     this.state.intervals = onTradeSkipped(this.state.intervals, job);
     this.tag('warn', `Skipped ${job.side}@${job.levelPrice}: ${why}`);
     this.ev('skipped', `Grid ${this.label}: skipped ${job.side} @ ${job.levelPrice.toPrecision(5)} — ${why}`, { level: 'warn' });
@@ -781,6 +846,7 @@ export class GridEngine {
       dex: m?.pool.dex ?? null, dexName: m ? (c?.dexes.find((x) => x.id === m.pool.dex)?.name ?? m.pool.dex) : null, feeTier: m?.pool.feeTier ?? null, poolMode: m?.poolMode ?? null, custom: !!m?.custom, risk: m?.safety?.risk ?? null, available: !(this.executor instanceof UnavailableExecutor),
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol), stable: this.state.stable,
       hasSigner: this.hasSigner, status: this.state.status, config: this.state.config, limits: this.state.limits,
+      cashOut: this.state.cashOut ?? null, cashedOutAt: this.state.cashedOutAt ?? null,
       price: this.state.lastPrice, priceAt: this.state.lastPriceAt, balances: this.balances, walletBalances: this.walletBalances,
       intervals: this.state.intervals, usdPerBuy: this.state.usdPerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
       trades: trades.slice(-100).reverse(),

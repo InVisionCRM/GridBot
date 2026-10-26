@@ -81,7 +81,7 @@ export function fundsProblem(f: Funds, amount: number, mode: Mode): string | nul
 /** Paper/Live switch + start button. Live is disabled with the reason when it isn't allowed. */
 function StartRow({ s, pairKey, mode, setMode, label, disabled, problem, onStart, busy }: { s: AnyObj; pairKey: string; mode: Mode; setMode: (m: Mode) => void; label: string; disabled: boolean; problem: string | null; onStart: () => void; busy: boolean }) {
   const m = mk(s, pairKey), c = chainOf(s, m.chainId);
-  const why = !(c?.hasSigner ?? s.hasSigner) ? 'Live needs a signing key in .env' : !m.liveAllowed ? 'Live blocked: this token failed the safety check' : null;
+  const why = !(c?.hasSigner ?? s.hasSigner) ? (s.copy ? 'Live needs your key: add it under Account' : 'Live needs a signing key in .env') : !m.liveAllowed ? 'Live blocked: this token failed the safety check' : null;
   useEffect(() => { if (why && mode === 'live') setMode('paper'); }, [why, mode, setMode]);
   return (
     <div className="start-row">
