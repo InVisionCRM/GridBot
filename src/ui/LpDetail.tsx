@@ -161,21 +161,24 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
     <main className="stack">
       <button type="button" className="back" onClick={() => nav({ v: 'home' })}>← Home</button>
       <div className="detail-head">
-        <StatusDot beat={b.priceAt} state={closing ? 'closing' : b.lastError ? 'error' : b.status} />
-        <ChainBadge c={chainOf(s, b.chainId)} testnet={false} />
-        <h2>{b.label}</h2>
-        <span className="tag">Liquidity</span>
-        {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
-        <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
-        <span className={`st ${closing ? 'closing' : b.status}`}>{closing ? 'Closing…' : closed ? 'Closed' : running ? 'Running' : 'Paused'}{step && !closing ? ` · ${ACTION[step.action].toLowerCase()}` : ''}</span>
-        {showHalt(b, closing) && <span className="bot-why">{showHalt(b, closing)}</span>}
-        {prices.base != null && <span className="pill mono" title={`Today's prices in dollars${prices.quote != null ? ` (${q} at ${usd(prices.quote)})` : ''}`}>{base} {usd(prices.base)}{prices.quote != null && Math.abs(prices.quote - 1) > 0.02 ? ` · ${q} ${usd(prices.quote)}` : ''}</span>}
-        <span className="grow" />
-        {running && <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST', undefined, 'row-pause'))}>Pause</button>}
-        {b.status === 'stopped' && <button type="button" className="btn primary" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
-        {!closed && <button type="button" className="btn danger" disabled={busy || closing || b.available === false} title={step?.hash ? 'A transaction is still being confirmed' : 'Take everything out and end the bot'} onClick={close}>{closing ? 'Closing…' : 'Close'}</button>}
-        <button type="button" className="btn danger" disabled={busy || !!pos || !!step} title={pos || step ? 'Close the position first' : ''} onClick={remove}>Remove</button>
+        <div className="detail-id">
+          <StatusDot beat={b.priceAt} state={closing ? 'closing' : b.lastError ? 'error' : b.status} />
+          <h2>{b.label}</h2>
+          <ChainBadge c={chainOf(s, b.chainId)} testnet={false} />
+          <span className="tag">Liquidity</span>
+          {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
+          <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
+          <span className={`st ${closing ? 'closing' : b.status}`}>{closing ? 'Closing…' : closed ? 'Closed' : running ? 'Running' : 'Paused'}{step && !closing ? ` · ${ACTION[step.action].toLowerCase()}` : ''}</span>
+          {prices.base != null && <span className="pill mono" title={`Today's prices in dollars${prices.quote != null ? ` (${q} at ${usd(prices.quote)})` : ''}`}>{base} {usd(prices.base)}{prices.quote != null && Math.abs(prices.quote - 1) > 0.02 ? ` · ${q} ${usd(prices.quote)}` : ''}</span>}
+        </div>
+        <div className="detail-actions">
+          {running && <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST', undefined, 'row-pause'))}>Pause</button>}
+          {b.status === 'stopped' && <button type="button" className="btn primary" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
+          {!closed && <button type="button" className="btn danger" disabled={busy || closing || b.available === false} title={step?.hash ? 'A transaction is still being confirmed' : 'Take everything out and end the bot'} onClick={close}>{closing ? 'Closing…' : 'Close'}</button>}
+          <button type="button" className="btn danger" disabled={busy || !!pos || !!step} title={pos || step ? 'Close the position first' : ''} onClick={remove}>Remove</button>
+        </div>
       </div>
+      {showHalt(b, closing) && <p className="bot-why">{showHalt(b, closing)}</p>}
 
       <div className="notices">
         {b.lastError && <div className="banner error"><span className="grow">{b.lastError}</span></div>}
@@ -184,7 +187,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {pos && b.inRange === false && !step && <div className="banner"><span className="grow"><b>The price is outside the range</b>, so the position isn't earning. {moveNote(b)}</span></div>}
       </div>
 
-      <div className="kpi-row">
+      <div className="kpi-row detail-stats">
         <div className="kpi">
           <span><L tip={`Your share of the pool's trading fees, in the coins they were paid in: collected so far plus what's waiting in the position. A trade selling ${base} pays its fee in ${base}; one buying it pays in ${q}. The coins' price doesn't change these amounts.`}>Fees earned</L></span>
           <div className="kpi-v coins2">{pnl ? <><b className={cls(pnl.feeCoins.base)}>{qty(pnl.feeCoins.base, base, 5)}</b><b className={cls(pnl.feeCoins.quote)}>{qty(pnl.feeCoins.quote, q, 5)}</b></> : '—'}</div>
@@ -216,7 +219,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <div className="split wide-left">
         <div className="card">
-          <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact desk height={400} />
+          <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact desk height={480} />
           <p className="muted small">The amber lines are the position's range. It earns fees while the price is between them.</p>
         </div>
         <div className="stack">

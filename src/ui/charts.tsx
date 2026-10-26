@@ -1,5 +1,6 @@
 /** Small charts. Strokes and tracks come from --chart-* so the desk palette restyles them. */
 import { useId } from 'react';
+import { usd } from './fmt';
 import { rangeTone } from './series';
 
 function lineOf(points: number[], w: number, h: number) {
@@ -45,6 +46,10 @@ export function AreaChart({ points }: { points: number[] }) {
           <stop offset="100%" stopColor={tone} stopOpacity="0" />
         </linearGradient>
       </defs>
+      <g stroke="var(--line)" strokeWidth="1" vectorEffect="non-scaling-stroke">
+        {[0.25, 0.5, 0.75].map((p) => <line key={`h${p}`} x1="0" x2={w} y1={h * p} y2={h * p} />)}
+        {[0.25, 0.5, 0.75].map((p) => <line key={`v${p}`} y1="0" y2={h} x1={w * p} x2={w * p} />)}
+      </g>
       <path d={area} fill={`url(#${id})`} />
       <path d={d} fill="none" stroke={tone} strokeWidth="2" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
     </svg>
@@ -58,31 +63,29 @@ export function Donut({ slices }: { slices: { key: string; label: string; usd: n
   let off = 0;
   return (
     <div className="donut">
-      <svg viewBox="0 0 120 120" aria-hidden="true">
-        <circle cx="60" cy="60" r={r} fill="none" stroke="var(--line)" strokeWidth="12" />
-        {total > 0 && slices.map((s) => {
-          const len = (s.usd / total) * c;
-          const el = (
-            <circle key={s.key} cx="60" cy="60" r={r} fill="none" stroke={s.color} strokeWidth="12"
-              strokeDasharray={`${len.toFixed(2)} ${(c - len).toFixed(2)}`} strokeDashoffset={(-off).toFixed(2)} transform="rotate(-90 60 60)" />
-          );
-          off += len;
-          return el;
-        })}
-      </svg>
+      <div className="donut-ring">
+        <svg viewBox="0 0 120 120" aria-hidden="true">
+          <circle cx="60" cy="60" r={r} fill="none" stroke="var(--line)" strokeWidth="12" />
+          {total > 0 && slices.map((s) => {
+            const len = (s.usd / total) * c;
+            const el = (
+              <circle key={s.key} cx="60" cy="60" r={r} fill="none" stroke={s.color} strokeWidth="12"
+                strokeDasharray={`${len.toFixed(2)} ${(c - len).toFixed(2)}`} strokeDashoffset={(-off).toFixed(2)} transform="rotate(-90 60 60)" />
+            );
+            off += len;
+            return el;
+          })}
+        </svg>
+        <span className="donut-total">{usd(total)}</span>
+      </div>
       <ul>
         {slices.map((s) => (
-          <li key={s.key}><i style={{ background: s.color }} />{s.label}<b>{share(s.usd, total)}</b></li>
+          <li key={s.key}><i style={{ background: s.color }} />{s.label}<b>{usd(s.usd)}</b></li>
         ))}
         {!slices.length && <li className="muted">No balances yet</li>}
       </ul>
     </div>
   );
-}
-
-function share(v: number, total: number) {
-  if (!(total > 0)) return '—';
-  return `${Math.round((v / total) * 100)}%`;
 }
 
 /** Price sitting in (or outside) a liquidity or grid range. Ticks mark the band; the dot glows. */

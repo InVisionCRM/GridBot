@@ -205,21 +205,24 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
     <main className="stack">
       <button type="button" className="back" onClick={() => nav({ v: 'home' })}>← Home</button>
       <div className="detail-head">
-        <StatusDot beat={g.priceAt} state={closing ? 'closing' : g.lastError ? 'error' : g.status} />
-        <ChainBadge c={chainOf(s, g.chainId ?? s.legacyChainId)} testnet={false} />
-        <h2>{gridName(g)}</h2>
-        <span className="tag">Grid</span>
-        {g.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
-        <DexTag name={g.dexName} feeBps={g.feeBps} feeTier={g.feeTier} />
-        <span className={`st ${closing ? 'closing' : g.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{g.inFlight ? ' · swap in flight' : ''}</span>
-        {showHalt(g, closing) && <span className="bot-why">{showHalt(g, closing)}</span>}
-        <span className="grow" />
-        {running
-          ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
-          : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => botApi(`grids/${g.id}/resume`, 'POST'))}>Resume</button>}
-        <button type="button" className="btn danger" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
-        <button type="button" className="btn danger" disabled={busy || running || !!g.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
+        <div className="detail-id">
+          <StatusDot beat={g.priceAt} state={closing ? 'closing' : g.lastError ? 'error' : g.status} />
+          <h2>{gridName(g)}</h2>
+          <ChainBadge c={chainOf(s, g.chainId ?? s.legacyChainId)} testnet={false} />
+          <span className="tag">Grid</span>
+          {g.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
+          <DexTag name={g.dexName} feeBps={g.feeBps} feeTier={g.feeTier} />
+          <span className={`st ${closing ? 'closing' : g.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{g.inFlight ? ' · swap in flight' : ''}</span>
+        </div>
+        <div className="detail-actions">
+          {running
+            ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
+            : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => botApi(`grids/${g.id}/resume`, 'POST'))}>Resume</button>}
+          <button type="button" className="btn danger" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
+          <button type="button" className="btn danger" disabled={busy || running || !!g.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
+        </div>
       </div>
+      {showHalt(g, closing) && <p className="bot-why">{showHalt(g, closing)}</p>}
 
       <div className="notices">
         {g.available === false && <div className="banner error"><span className="grow">This market isn't available on the running server (its chain may be turned off {s.copy ? `by ${s.copy.host}` : 'in .env'}).</span></div>}
@@ -230,7 +233,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="card">
-        <Chart status={s} ticks={ticks} pairs={[g.stable]} pair={g.stable} compact desk height={340} />
+        <Chart status={s} ticks={ticks} pairs={[g.stable]} pair={g.stable} compact desk height={480} />
         {g.config && (
           <div className="detail-range">
             <span className="k">Range</span>

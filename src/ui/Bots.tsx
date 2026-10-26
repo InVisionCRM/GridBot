@@ -60,13 +60,15 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
       {low.map((c) => <p key={c.id} className="note">Low gas on {c.name}.</p>)}
       {(err || rowErr) && <p className="note bad">{err || rowErr}</p>}
       {!!bots.length && (
-        <div className="desk-head" aria-hidden="true">
-          <span>Pair</span><span>Type</span><span>Status</span><span /><span>Range</span><span>Value</span><span>P&amp;L</span><span />
+        <div className="desk">
+          <div className="desk-head" aria-hidden="true">
+            <span>Pair</span><span /><span>Range</span><span>Value</span><span>P&amp;L</span><span />
+          </div>
+          {bots.map((b) => (
+            <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} columns expandable open={open === b.id} onToggle={() => setOpen((id) => id === b.id ? null : b.id)} />
+          ))}
         </div>
       )}
-      {bots.map((b) => (
-        <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} columns expandable open={open === b.id} onToggle={() => setOpen((id) => id === b.id ? null : b.id)} />
-      ))}
       {!bots.length && <p className="muted home-empty">No bots{chain !== 'all' ? ' on this chain' : ''}. Start a grid above, in paper, to watch it with live prices.</p>}
       <p className="foot-links">
         <button type="button" className="text-stop" disabled={busy || running === 0} onClick={onStopAll}>Stop all</button>

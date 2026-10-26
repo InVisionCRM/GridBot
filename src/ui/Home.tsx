@@ -102,28 +102,32 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
 
   return (
     <main className="home">
-      <section className="home-hero" aria-label="Net worth">
-        <div>
-          <p className="home-k">Net worth</p>
-          <HeroWorth value={shownWorth} />
-          <p className="home-sub">
-            {holdings == null && 'Reading…'}
-            {paper && 'Paper'}
-            {holdings && (
-              <span className={`chip ${cls(chg.delta)}`}>{usd(chg.delta, true)} {chg.pct == null ? '' : pct(chg.pct, 2, true)}</span>
-            )}
-          </p>
-        </div>
-        <div className="seg" role="tablist" aria-label="Range">
-          {RANGES.map((r) => (
-            <button key={r} type="button" className={range === r ? 'on' : ''} aria-pressed={range === r} onClick={() => setRange(r)}>{r}</button>
-          ))}
-        </div>
-      </section>
-
-      <div className="home-charts">
-        <AreaChart points={series} />
-        <Donut slices={slices} />
+      <div className="hero-grid">
+        <section className="card hero-card" aria-label="Net worth">
+          <div className="home-hero">
+            <div>
+              <p className="home-k">Net worth</p>
+              <HeroWorth value={shownWorth} />
+              <p className="home-sub">
+                {holdings == null && 'Reading…'}
+                {paper && 'Paper'}
+                {holdings && (
+                  <span className={`chip ${cls(chg.delta)}`}>{usd(chg.delta, true)} {chg.pct == null ? '' : pct(chg.pct, 2, true)}</span>
+                )}
+              </p>
+            </div>
+            <div className="seg" role="tablist" aria-label="Range">
+              {RANGES.map((r) => (
+                <button key={r} type="button" className={range === r ? 'on' : ''} aria-pressed={range === r} onClick={() => setRange(r)}>{r}</button>
+              ))}
+            </div>
+          </div>
+          <AreaChart points={series} />
+        </section>
+        <section className="card alloc-card" aria-label="Allocation">
+          <p className="home-k">Allocation</p>
+          <Donut slices={slices} />
+        </section>
       </div>
 
       <section className="join" aria-label="Summary">
@@ -150,8 +154,13 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
       </section>
 
       {err && <p className="note bad">{err}</p>}
-      <section aria-label="Bots">
-        {bots.map((b) => <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} />)}
+      <section className="desk" aria-label="Bots">
+        {!!bots.length && (
+          <div className="desk-head" aria-hidden="true">
+            <span>Pair</span><span /><span>Range</span><span>Value</span><span>P&amp;L</span><span />
+          </div>
+        )}
+        {bots.map((b) => <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} columns />)}
         {!bots.length && <p className="muted home-empty">No bots{chain !== 'all' ? ' on this chain' : ''}. <button type="button" className="text-link" onClick={() => nav({ v: 'bots' })}>Start one</button></p>}
       </section>
 

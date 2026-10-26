@@ -202,11 +202,11 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
   );
 }
 
-function BotRange({ b }: { b: AnyObj }) {
+function BotRange({ b, fills }: { b: AnyObj; fills: number | null }) {
   if (b.kind === 'lp' && b.position) return <RangeBar wide lower={b.position.lower} upper={b.position.upper} price={b.price} inRange={b.inRange} />;
-  if (b.kind === 'grid' && b.config) {
-    const rs = rangeState(b);
-    return <RangeBar wide lower={b.config.lowerPrice} upper={b.config.upperPrice} price={b.price} inRange={rs == null ? null : rs === 'in'} />;
+  if (b.kind === 'grid') {
+    const n = fills ?? 0;
+    return <span className="desk-fills">{n} fill{n === 1 ? '' : 's'}</span>;
   }
   return <span className="muted">—</span>;
 }
@@ -242,12 +242,16 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
               <TokenMark symbol={pair.quote} size={22} />
               {chain && <span className="chain-coin"><ChainMark short={chain.short} color={chain.color} size={14} /></span>}
             </span>
-            <span className="bot-title">{pair.title}</span>
+            <span className="desk-id">
+              <span className="bot-title">{pair.title}</span>
+              <span className="bot-meta">
+                <i className={`status-dot${on ? ' on' : ''}${bad ? ' bad' : ''}`} />
+                {[chain?.short, kindWord(b), statusWord(b), b.mode === 'paper' ? 'paper' : ''].filter(Boolean).join(' · ')}
+              </span>
+            </span>
           </button>
-          <span className="kind-tag">{kindWord(b)}</span>
-          <span className="desk-status"><i className={`status-dot${on ? ' on' : ''}${bad ? ' bad' : ''}`} />{statusWord(b)}</span>
-          <span className="desk-spark"><Sparkline points={botSpark(b)} width={84} height={28} /></span>
-          <span className="desk-range"><BotRange b={b} /></span>
+          <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
+          <span className="desk-range"><BotRange b={b} fills={fills} /></span>
           <span className="desk-val">{value == null ? '—' : usd(value)}</span>
           <span className="desk-pnl">
             <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
