@@ -876,7 +876,7 @@ label.wide input { min-width: 180px; }
 .home-fig { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 36px; }
 .home-num { font-size: 44px; line-height: 1; letter-spacing: -0.035em; font-weight: 500; font-variant-numeric: tabular-nums; }
 .home-day { margin-top: 10px; font-size: 15px; font-variant-numeric: tabular-nums; }
-.sparkline { display: block; flex: none; }
+.sparkline { display: block; flex: none; width: 132px; height: 44px; }
 .plain-h {
   display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
   margin: 8px 0 4px; font-size: 13px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted);
@@ -1029,4 +1029,8 @@ label.wide input { min-width: 180px; }
   .strip { grid-template-columns: 1fr 1fr; }
   .home-num { font-size: 36px; }
   .chart.meter { display: none; }
+  .home-fig { flex-wrap: wrap; }
+  .bot-meta { flex-wrap: wrap; }
+  .pick { grid-template-columns: minmax(0, 1fr) auto; }
+  .home, .bot-block, .glance, .more-sec { max-width: 100%; }
 }

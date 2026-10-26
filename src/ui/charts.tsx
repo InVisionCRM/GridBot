@@ -4,9 +4,10 @@ export function Sparkline({ points, width = 132, height = 44 }: { points: number
   const w = width, h = height;
   const p = points.length > 1 ? points : [0, 0];
   const min = Math.min(...p), max = Math.max(...p), span = max - min || 1;
+  const flat = max - min === 0;
   const d = p.map((y, i) => {
     const x = (i / (p.length - 1)) * (w - 2) + 1;
-    const yy = h - 4 - ((y - min) / span) * (h - 8);
+    const yy = flat ? h / 2 : h - 4 - ((y - min) / span) * (h - 8);
     return `${i ? 'L' : 'M'}${x.toFixed(1)} ${yy.toFixed(1)}`;
   }).join(' ');
   const last = p[p.length - 1] ?? 0;
