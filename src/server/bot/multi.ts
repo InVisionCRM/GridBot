@@ -286,6 +286,8 @@ export class MultiBot {
   }
   resume(id: string) { this.engine(id).resume(); }
   stop(id: string) { this.engine(id).stop(); }
+  /** Sell everything the grid holds back to its spend coin, then stop. */
+  gridToCash(id: string) { this.engine(id).closeToCash(); }
   setLimits(id: string, l: Partial<SafetyLimits>) { this.engine(id).setLimits(l); }
   setRecenter(id: string, enabled: boolean) { this.engine(id).setRecenter(enabled); }
   setProfits(id: string, p: ProfitMode) { return this.engine(id).setProfits(p); }
@@ -341,7 +343,7 @@ export class MultiBot {
   }
   stopLp(id: string) { this.lp(id).stop(); }
   resumeLp(id: string) { this.lp(id).resume(); }
-  closeLp(id: string) { this.lp(id).close(); }
+  closeLp(id: string, toCash = false) { this.lp(id).close(toCash); }
   setLpRerange(id: string, enabled: boolean) { this.lp(id).setRerange(enabled); }
   /** Move a liquidity bot's range to the price now, at a new width or the same one; it starts on the next tick. */
   moveLp(id: string, bandPct?: number) { return this.lp(id).move(bandPct); }
@@ -353,6 +355,31 @@ export class MultiBot {
     this.lpEngines.delete(id);
     this.multi.lps = this.multi.lps.filter((g) => g.id !== id);
     this.persist();
+  }
+
+  // ── For the smart trader (autopilot.ts) ─────────────────────────────
+  /** The default safety limits (price-impact cap, slippage, deadline) */
+  get limits(): SafetyLimits { return { ...this.multi.defaults }; }
+  hasBot(kind: 'grid' | 'lp', id: string): boolean {
+    return kind === 'grid' ? this.multi.grids.some((g) => g.id === id) : this.multi.lps.some((g) => g.id === id);
+  }
+  /**
+   * What a bot is worth in its spend coin, gas counted: a grid's capital + realized + unrealized (at its last price), a
+   * liquidity bot's equity (coins at today's price + fees sent − gas). null until it has a reading.
+   */
+  botValue(kind: 'grid' | 'lp', id: string): number | null {
+    if (kind === 'grid') {
+      const e = this.engine(id), c = e.state.config;
+      if (!c || e.state.lastPrice == null) return null;
+      const t = totals(e.modeTrades(), e.state.lastPrice);
+      return c.totalCapitalUsd + t.realized + t.unrealized;
+    }
+    return this.lp(id).pnl()?.equity ?? null;
+  }
+  /** Its close to cash is done: a grid sold everything and stopped, a liquidity bot is closed. */
+  botCashedOut(kind: 'grid' | 'lp', id: string): boolean {
+    if (kind === 'grid') { const s = this.engine(id).state; return s.status === 'stopped' && !s.cashOut && s.cashedOutAt != null; }
+    return this.lp(id).state.status === 'closed';
   }
 
   /** KILL ALL: stop every grid and trend bot; queued jobs dropped, nothing new is sent. */

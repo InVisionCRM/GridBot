@@ -169,6 +169,44 @@ Swaps everything the wallet holds on one chain into a single coin: the chain's o
 - **API.** `GET /api/convert/targets?chainId=` · `POST /api/convert/plan {chainId, target, keepNative?, maxImpact?}` · `POST /api/convert/run {planId, coins[]}` · `GET /api/convert/job` · `POST /api/convert/stop`.
 - **Checked.** `tests/convert.test.ts`: routes, scam names, bots' coins, the impact cap, dust; a full run on the mock chain (unwrap, approve, both swaps, nonces in order); explorer decimals that disagree with the chain; a listed coin that reverts; a bot that takes a coin after the plan; Stop between coins and in the middle of one (on an unwrap, on an approve). Read-only against the real PulseChain wallet: the plan listed 10 coins, 7 were convertible, the website-named airdrop was skipped and two dust coins were skipped; the check took about 50 s.
 
+## Smart trader (its own tab)
+
+Give it an amount on a chain and turn it on; it runs that money as grid and liquidity bots, in paper or live (`src/server/bot/autopilot.ts`, decisions in `src/market/autopilot.ts`, state in `data/autopilot.json`).
+
+- **Setup.** One budget per chain: an amount of a coin there (e.g. 1,000 USDG on Robinhood, 50M PLS on PulseChain).
+  - What it may use: grids, liquidity, and new tokens from the scan.
+  - Risk: safe / up to medium / anything the safety check lets trade live.
+  - Bots per budget: 1–6, default 3.
+  - Loss limit: default 20%.
+- **What it picks from: every pool the daily scan found on the chain.**
+  - A pool that trades against another coin than the budget's (an ETH pool for a USDG budget) is reached by swapping into that coin over the app's markets. Routes are `findRoute`: one swap, or two through the chain's own coin. When the bot closes, the coins are swapped back.
+  - Those swaps' pool fees, twice (in and out), are taken off the pool's estimate, so a USDG pool beats an equally good ETH pool.
+  - **One bot per coin pair:** PLS/DAI on PulseX V1 and DAI/PLS on V2 are the same bet on one price.
+- **Decisions** (`planBudget`), at turn-on, after each daily scan, and when money comes back from a bot:
+  - The best pools by expected week after swap costs (the Opportunities estimate), up to the bots per budget. Free money is split evenly over the bots it opens; a piece under a quarter of an even share waits.
+  - **A week's hold:** a bot keeps its first 7 days, because the estimates are about a week and switching costs money.
+  - **After that:** a bot whose pool is still among the best stays. Otherwise it is replaced when a pool it doesn't run is expected to earn more than it by more than switching costs (the two pools' fees), or when its pool no longer has an estimate.
+  - Every decision is in *What it did, and why*, with its numbers.
+- **Closing a bot ("close to cash", also on the API):**
+  - A grid sells everything it holds through its normal checks, then stops. A sell over the price-impact cap is halved each check down to 1/64, then waits 10 min. `POST /api/bot/grids/:id/cash`.
+  - A liquidity bot takes its position out and sells the base coin the same way. `POST /api/bot/lps/:id/close {toCash: true}`.
+  - Dust (under 0.01% of the bot, or worth under twice the sale's gas) is left.
+  - The bot is then removed and what it was worth goes back to the budget.
+- **Loss limit:** when a budget is worth that much less than it started with, its bots are closed to cash and the budget stops.
+- **Values:** in the budget's coin at today's prices, gas counted (`MultiBot.botValue`: a grid's capital + realized + unrealized, a liquidity bot's equity).
+- **Swaps:** every swap goes through the chain's transaction queue and nonce. One still unconfirmed when the wait ends is settled by its hash later, and refunded if it reverted.
+- **Turning it off:** *keep its bots* (they run on their own) or *close its bots* (all back to the budget's coin). Mode and budgets change only once it runs nothing; the other settings change any time.
+- **API:**
+  - `GET /api/autopilot`
+  - `PUT /api/autopilot {mode, options, budgets}` · `PUT /api/autopilot/options`
+  - `POST /api/autopilot/on` · `POST /api/autopilot/off {sell}` · `POST /api/autopilot/review`
+- **Checked:**
+  - `tests/autopilot.test.ts` (the planner) and `tests/autopilotEngine.test.ts`: on the mock chain with the real MultiBot. Covered: opening, the week's hold, retiring to cash, a pool in another coin (swapped in, valued, swapped back), the loss limit, and turning off.
+  - In a sandbox, in paper, on a copy of a real scan (179 pools), budgets of 1,000 USDG on Robinhood and 500 DAI on PulseChain:
+    - It opened 3 liquidity ranges (one USDG pool, two ETH pools swapped into) and 3 grids (two in PLS, swapped into).
+    - Turned off with *close*, all six came back and the PLS and ETH were swapped back: 992.79 USDG and 495.89 DAI, after ~10 minutes of opening and closing costs.
+    - That run found a bug: a few wei of a coin left after a liquidity close made the sale's quote fail ("rounds to zero"), so the close never finished. Dust is now checked before quoting (test reproduces it).
+
 ## Friends' copies (Tools → Friends)
 
 Friends get their own copy of the app on your computer and open it on their phone: their own bots, key, history and log-in (`src/server/friends`). Your app and your key are unchanged and stay on 127.0.0.1; friends only ever reach the friends' gateway.

@@ -19,6 +19,7 @@ export type ToolTab = (typeof TOOL_TABS)[number][0];
 export type View =
   | { v: 'home' }
   | { v: 'opps' }
+  | { v: 'auto' }
   | { v: 'new'; kind: BotKind; trendPrefill?: TrendPrefill; gridPrefill?: GridPrefill; lpPrefill?: LpPrefill }
   | { v: 'grid'; id: string }
   | { v: 'trend'; id: string }

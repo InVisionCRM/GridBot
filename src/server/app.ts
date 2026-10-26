@@ -20,6 +20,7 @@ import type { Converter } from './convert/converter';
 import type { PoolSearch } from './market/poolSearch';
 import type { FriendsHost } from './friends/host';
 import type { GeckoRelay } from './friends/relay';
+import type { Autopilot, AutoOptions, Budget } from './bot/autopilot';
 import { noKey } from './words';
 
 export interface AppOpts {
@@ -33,6 +34,8 @@ export interface AppOpts {
   relay?: GeckoRelay;
   /** Friends' copies (host only): on, or why they are off */
   friends?: FriendsHost | { off: string };
+  /** The smart trader (server only) */
+  autopilot?: Autopilot;
   /** A chart was opened: the candle sync keeps every timeframe of that market for a while (server only) */
   viewCandles?: (pair: string) => void;
   /** Liquidity replay over a pool's real trades (server only: reads the chain) */
@@ -149,6 +152,7 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/grids/:id/start', wrap(async (req) => { await bot.start(req.params.id, startBody(req.body ?? {})); void bot.tickAll(); }));
   app.post('/api/bot/grids/:id/resume', wrap((req) => { bot.resume(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/grids/:id/stop', wrap((req) => bot.stop(req.params.id)));
+  app.post('/api/bot/grids/:id/cash', wrap((req) => { bot.gridToCash(req.params.id); void bot.tickAll(); }));
   app.put('/api/bot/grids/:id/limits', wrap((req) => bot.setLimits(req.params.id, limitsBody(req.body ?? {}))));
   app.put('/api/bot/grids/:id/recenter', wrap((req) => bot.setRecenter(req.params.id, req.body?.enabled === true)));
   app.put('/api/bot/grids/:id/profits', wrap((req) => bot.setProfits(req.params.id, profitsBody(req.body) ?? (() => { throw new Error('profits required'); })())));
@@ -249,7 +253,8 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/bot/lps/:id/resume', wrap((req) => { bot.resumeLp(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
-  app.post('/api/bot/lps/:id/close', wrap((req) => { bot.closeLp(req.params.id); void bot.tickAll(); }));
+  // { toCash: true }: also sell the base coin back to the quote coin
+  app.post('/api/bot/lps/:id/close', wrap((req) => { bot.closeLp(req.params.id, req.body?.toCash === true); void bot.tickAll(); }));
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
   // { bandPct? }: move the range to the price now (a new width, or the same one)
   app.post('/api/bot/lps/:id/move', wrap(async (req) => {
@@ -282,6 +287,22 @@ export function createApp(o: AppOpts) {
   }));
   app.get('/api/convert/job', wrap(() => ({ job: cv().job() })));
   app.post('/api/convert/stop', wrap(() => { cv().stop(); return { ok: true }; }));
+
+  // ── Smart trader ────────────────────────────────────────────────────
+  const ap = () => { if (!o.autopilot) throw new Error('The smart trader is not available.'); return o.autopilot; };
+  app.get('/api/autopilot', wrap(() => plain(ap().status())));
+  // { mode, options, budgets: [{ chainId, coin, amount }] } (while it is off)
+  app.put('/api/autopilot', wrap((req) => {
+    const b = req.body ?? {};
+    if (!Array.isArray(b.budgets)) throw new Error('budgets required');
+    ap().configure({ mode: b.mode, options: b.options as AutoOptions, budgets: b.budgets as Budget[] });
+    return plain(ap().status());
+  }));
+  app.put('/api/autopilot/options', wrap((req) => { ap().setOptions(req.body ?? {}); return plain(ap().status()); }));
+  app.post('/api/autopilot/on', wrap(async () => { await ap().turnOn(); void bot.tickAll(); return plain(ap().status()); }));
+  // { sell: true } closes every bot it runs to cash; false leaves them running unmanaged
+  app.post('/api/autopilot/off', wrap((req) => { ap().turnOff(req.body?.sell === true); void ap().tick(); return plain(ap().status()); }));
+  app.post('/api/autopilot/review', wrap(async () => { await ap().review(true); void bot.tickAll(); return plain(ap().status()); }));
 
   // ── Friends' copies: the host's Tools → Friends, and the relay the copies fetch candles through ─────
   app.get('/api/host/gecko', wrap(async (req, res) => {

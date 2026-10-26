@@ -22,6 +22,7 @@ import { buildHub } from './chains/build';
 import type { CustomFile } from './chains/hub';
 import { FriendsHost } from './friends/host';
 import { GeckoRelay, hostScan, relayFetch } from './friends/relay';
+import { Autopilot, type AutopilotState, type ScanView } from './bot/autopilot';
 
 loadEnv();
 const friendsSecret = takeFriendsSecret();
@@ -101,11 +102,16 @@ const friends = copy ? undefined
       });
 const lpReplay = new LpReplay(hub, new PoolHistories(path.join(dataDir, 'pool-history'), (id) => readers.get(id)!), cfg.approval);
 const convert = new Converter({ hub, allocations: () => bot.allocations().rows, approval: cfg.approval, emit: activity.emitEvent, fetchJson });
+// The smart trader: budgets per chain, run as grid and liquidity bots picked from the opportunity scan.
+const autopilot = new Autopilot({
+  bot, store: new JsonStore<AutopilotState>(path.join(dataDir, 'autopilot.json')), emit: activity.emitEvent,
+  scan: async () => (scanner ? (await scanner.status()) as ScanView : null),
+});
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
   lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends,
+  friends, autopilot,
 });
 if (isProd) {
   app.use(express.static(clientDir));
@@ -123,6 +129,7 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   bot.startLoop(cfg.pollMs);
   sync.start();
   dailyScan?.start();
+  autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   if (friends instanceof FriendsHost) {
     for (const rt of hub.runtimes()) if (rt.signer) hostAddresses.push(await rt.signer.getAddress());
     await friends.start().catch((e: Error) => { log.error(e.message); process.exit(1); });
@@ -133,7 +140,9 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   log.error(err.code === 'EADDRINUSE' ? `Port ${cfg.port} in use. Set PORT=…` : err.message);
   process.exit(1);
 });
+let autopilotTimer: ReturnType<typeof setInterval> | null = null;
 const shutdown = () => {
+  if (autopilotTimer) clearInterval(autopilotTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
   if (friends instanceof FriendsHost) friends.stop();
   process.exit(0);

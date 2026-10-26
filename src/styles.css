@@ -748,3 +748,28 @@ label.wide input { min-width: 180px; }
 .pace-row b { font-family: var(--mono); font-weight: 500; font-size: 1.1rem; }
 @media (max-width: 560px) { .pace-rows { grid-template-columns: 1fr; } }
 .opp2-try { justify-content: center; }
+
+/* Smart trader */
+.smart-field { display: flex; flex-direction: column; gap: 6px; }
+.smart-field .k { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.budget-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.budget-row:first-of-type { border-top: 0; }
+.budget-row input { width: 130px; font-family: var(--mono); }
+.smart-pct { width: 60px; font-family: var(--mono); }
+.smart-go { align-self: flex-start; min-height: 40px; }
+.smart-value { display: flex; flex-direction: column; align-items: flex-end; }
+.smart-value b { font-family: var(--mono); font-weight: 500; font-size: 1.15rem; }
+.smart-bots { display: flex; flex-direction: column; gap: 8px; }
+.smart-bot { appearance: none; font: inherit; color: inherit; text-align: left; cursor: pointer; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); }
+.smart-bot:hover { border-color: var(--line-2); }
+.smart-bot-name { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.smart-bot .small { grid-column: 1; }
+.smart-bot-v { grid-column: 2; grid-row: 1 / span 2; display: flex; flex-direction: column; align-items: flex-end; }
+.smart-bot-v b { font-family: var(--mono); font-weight: 500; }
+.smart-log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 420px; overflow: auto; }
+.smart-log li { display: flex; gap: 8px; align-items: baseline; font-size: 0.86rem; padding: 4px 0; border-top: 1px solid var(--line); }
+.smart-log li:first-child { border-top: 0; }
+.smart-log li.success > span:last-child { color: var(--profit); }
+.smart-log li.warn > span:last-child { color: var(--warn); }
+@media (max-width: 560px) { .smart-bot { grid-template-columns: 1fr; } .smart-bot-v { grid-column: 1; grid-row: auto; flex-direction: row; gap: 8px; align-items: baseline; } .smart-log li { flex-wrap: wrap; } }
+.smart-field .seg, .smart-field .actions { align-self: flex-start; }

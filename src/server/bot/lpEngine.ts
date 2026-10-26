@@ -70,6 +70,8 @@ export interface LpStep {
   /** A swap that was broadcast but not confirmed when the executor gave up waiting */
   swap?: { hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number };
   tries: number;
+  /** close: after taking the position out, sell the base coin back to the quote coin ("close to cash") */
+  toCash?: boolean;
 }
 
 export interface LpState {
@@ -309,12 +311,14 @@ export class LpEngine {
     this.ev('started', `Liquidity ${this.label} resumed`);
   }
   /** Take everything out: the coins go back to the wallet and the bot ends. */
-  close() {
+  /** Take the position out; with toCash, then sell its base coin back to the quote coin. */
+  close(toCash = false) {
     if (this.state.status === 'closed') return;
     if (this.state.step?.hash || this.state.step?.swap) throw new Error('A transaction is still being confirmed. Try again in a minute.');
-    if (!this.state.position) { this.state.status = 'closed'; this.state.step = null; this.save(); this.ev('stopped', `Liquidity ${this.label} closed`); return; }
+    const sell = toCash && this.state.idle.base > 0;
+    if (!this.state.position && !sell) { this.state.status = 'closed'; this.state.step = null; this.save(); this.ev('stopped', `Liquidity ${this.label} closed`); return; }
     this.state.status = 'running';
-    this.state.step = { action: 'close', stage: 'exit', tries: 0 };
+    this.state.step = { action: 'close', stage: this.state.position ? 'exit' : 'swap', tries: 0, ...(toCash ? { toCash } : {}) };
     this.save();
   }
   setRerange(enabled: boolean) {
@@ -534,7 +538,7 @@ export class LpEngine {
   private async advanceOnce(pool: LpPool, v: PoolView) {
     const s = this.state.step!;
     if (s.stage === 'exit') return this.exit(pool, v, s);
-    if (s.stage === 'swap') return this.swap(pool, v, s);
+    if (s.stage === 'swap') return s.action === 'close' ? this.sellToCash(v, s) : this.swap(pool, v, s);
     if (s.stage === 'approve') return this.approve(pool, s);
     if (s.stage === 'mint') return this.mint(pool, v, s);
     return this.collect(pool, v, s);
@@ -632,10 +636,11 @@ export class LpEngine {
     this.state.outSince = null;
     this.blockMemo = null;
     const f = `${(fees.base * v.price + fees.quote).toPrecision(5)} ${this.quoteSym} in fees`;
-    if (s.action === 'close') {
-      this.state.step = null;
-      this.state.status = 'closed';
-      this.ev('stopped', `Liquidity ${this.label}: closed (${f}); ${this.state.idle.base.toPrecision(6)} ${this.baseSym} + ${this.state.idle.quote.toPrecision(6)} ${this.quoteSym} back in the wallet`, { level: 'success', notify: true });
+    if (s.action === 'close' && s.toCash) {
+      s.stage = 'swap'; s.tries = 0;
+      this.ev('filled', `Liquidity ${this.label}: took the position out (${f}); selling the ${this.baseSym} back to ${this.quoteSym}`, { level: 'success' });
+    } else if (s.action === 'close') {
+      this.closed();
     } else {
       s.stage = 'swap'; s.tries = 0; s.range = undefined;
       this.ev('filled', `Liquidity ${this.label}: took out ${p.lower.toPrecision(6)}–${p.upper.toPrecision(6)} (${f})`, { level: 'success' });
@@ -678,6 +683,50 @@ export class LpEngine {
     }
     s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
   }
+  private closed() {
+    this.state.step = null;
+    this.state.status = 'closed';
+    this.ev('stopped', `Liquidity ${this.label}: closed; ${this.state.idle.base.toPrecision(6)} ${this.baseSym} + ${this.state.idle.quote.toPrecision(6)} ${this.quoteSym} back in the wallet`, { level: 'success', notify: true });
+  }
+
+  /**
+   * Close to cash: sell the idle base coin back to the quote coin, in pieces when all of it would go over the
+   * price-impact cap (halved down to 1/64); then closed. A broadcast sell is settled by hash like the range swap.
+   * Dust is left: base worth under twice the sale's gas, or under 0.01% of what the bot holds.
+   */
+  private async sellToCash(v: PoolView, s: LpStep) {
+    if (s.swap) {
+      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut);
+      if (!r) return;
+      this.state.totals.gas += r.gasPls * v.price;
+      if (r.ok) this.applySwap('sell', s.swap.amountIn, r.amountOutHuman, v.price);
+      s.swap = undefined;
+      return;
+    }
+    const idle = this.state.idle;
+    // What is left is dust: under 0.01% of what the bot holds (checked first: a quote for a few wei of a coin fails
+    // with "rounds to zero"), or worth under twice the sale's gas.
+    if (!(idle.base * v.price >= (idle.base * v.price + idle.quote) * 1e-4)) return this.closed();
+    let amount = idle.base, q = await this.executor.quote('sell', amount, this.state.limits);
+    if (idle.base * v.price < 2 * q.gasPlsEstimate * v.price) return this.closed();
+    while (q.priceImpact > this.state.limits.maxPriceImpact && amount > idle.base / 64) {
+      amount /= 2;
+      q = await this.executor.quote('sell', amount, this.state.limits);
+    }
+    if (!q.balanceOk) throw new Error(`can't sell the ${this.baseSym} back: ${q.balanceNote}`);
+    if (q.priceImpact > this.state.limits.maxPriceImpact) throw new Error(`selling the ${this.baseSym} back would move the price ${(q.priceImpact * 100).toFixed(2)}% even in 1/64 pieces (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%); trying again on the next check`);
+    try {
+      const f = await this.executor.execute(q, { canSend: () => true, onSent: (_stage, hash) => this.log('info', `sent sell ${hash}`) });
+      this.state.totals.gas += f.gasPls * v.price;
+      this.applySwap('sell', f.amountInHuman, f.amountOutHuman, v.price);
+    } catch (e) {
+      const o = e instanceof ExecError ? e.opts : {};
+      if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
+      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price }; return; }
+      throw e;
+    }
+  }
+
   /** A swap to the range's mix landed; its cost is what went in less what came out, at the mid price. */
   private applySwap(side: 'buy' | 'sell', amountIn: number, amountOut: number, price: number) {
     this.state.totals.swapCost += side === 'buy' ? amountIn - amountOut * price : amountIn * price - amountOut;
