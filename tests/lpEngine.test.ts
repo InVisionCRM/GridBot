@@ -292,8 +292,8 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
     await lp.tick();
     m.addFees(pool, Q128 / 10n ** 6n, 0n);
+    await lp.tick(); // fees land in the cached reading; close then settles from that, with no further tick
     lp.close();
-    await lp.tick();
     const s = lp.status();
     expect(s).toMatchObject({ status: 'closed', position: null, step: null });
     expect(s.totals.fees).toBeGreaterThan(0);

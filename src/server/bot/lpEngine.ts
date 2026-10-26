@@ -105,6 +105,10 @@ export interface LpState {
   lastPriceAt: number | null;
   /** [ms, value in quote] */
   equity: [number, number][];
+  /** Live unwind in progress. Absent on older state. */
+  closing?: boolean;
+  /** Hidden from the active list; fees and PnL stay for analytics. Absent on older state. */
+  archivedAt?: number | null;
 }
 
 export interface LpStartParams {
@@ -142,6 +146,7 @@ export function freshLp(net: LiveNetwork, id?: string): LpState {
     kind: 'lp', version: 5, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
     outSince: null, lastRerangeAt: null, reranges: 0, seen: null, totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
+    closing: false, archivedAt: null,
   };
 }
 
@@ -280,6 +285,7 @@ export class LpEngine {
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },
       step: { action: 'open', stage: 'swap', tries: 0 }, outSince: null, lastRerangeAt: null, reranges: 0, seen: null,
       totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: this.now(), startPrice: v.price, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital + baseAmount * v.price]],
+      closing: false, archivedAt: null,
     };
     this.lastError = null;
     this.save();
@@ -290,6 +296,9 @@ export class LpEngine {
   stop(why?: string) {
     if (this.state.status !== 'running') return;
     this.state.status = 'stopped';
+    this.state.closing = false;
+    // A close that has not been sent yet is dropped. A tx already broadcast is still settled.
+    if (this.state.step?.action === 'close' && !this.state.step.hash && !this.state.step.swap) this.state.step = null;
     this.save();
     this.ev('stopped', `Liquidity ${this.label} ${why ? `paused — ${why}` : 'stopped'}${this.state.position ? '; the position stays open' : ''}`, { level: 'warn', notify: true });
   }
@@ -297,17 +306,75 @@ export class LpEngine {
     if (this.state.status !== 'stopped') return;
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
     this.state.status = 'running';
+    this.state.closing = false;
+    this.state.archivedAt = null;
     this.save();
     this.ev('started', `Liquidity ${this.label} resumed`);
   }
-  /** Take everything out: the coins go back to the wallet and the bot ends. */
-  close() {
-    if (this.state.status === 'closed') return;
-    if (this.state.step?.hash || this.state.step?.swap) throw new Error('A transaction is still being confirmed. Try again in a minute.');
-    if (!this.state.position) { this.state.status = 'closed'; this.state.step = null; this.save(); this.ev('stopped', `Liquidity ${this.label} closed`); return; }
+  /**
+   * Take everything out and end the bot.
+   * Paper settles from the last reading already in memory (no pool read, no gas quote) and leaves the list now.
+   * Live only marks closing and sets the exit step. The withdrawal itself — slippage minimums included — still
+   * runs on tick. @returns true when that on-chain unwind still has to run.
+   */
+  close(): boolean {
+    if (this.state.archivedAt) return false;
+    if (this.state.mode !== 'live') {
+      this.finishPaper();
+      return false;
+    }
+    if (this.state.closing) return false;
+    const busy = !!(this.state.step?.hash || this.state.step?.swap);
+    if (!this.state.position && !busy) {
+      this.markArchived();
+      return false;
+    }
+    if (!busy && this.executor instanceof UnavailableExecutor && this.state.position) {
+      this.lastError = this.lastError ?? 'market unavailable';
+      this.state.status = 'stopped';
+      this.state.closing = false;
+      this.save();
+      return false;
+    }
+    this.state.closing = true;
     this.state.status = 'running';
-    this.state.step = { action: 'close', stage: 'exit', tries: 0 };
+    if (!busy) this.state.step = this.state.position ? { action: 'close', stage: 'exit', tries: 0 } : null;
     this.save();
+    this.ev('info', `Liquidity ${this.label}: closing…`, { level: 'warn' });
+    return true;
+  }
+  /** Hide a stopped liquidity bot that has nothing left in the pool and nothing in flight. */
+  archiveIfSettled(): boolean {
+    if (this.state.archivedAt || this.state.closing || this.state.status === 'running') return false;
+    if (this.state.position || this.state.step) return false;
+    this.markArchived();
+    return true;
+  }
+  /** Paper close from the cached reading. Does not call the pool or the quoter. */
+  private finishPaper() {
+    const vw = this.view, p = this.state.position;
+    if (p && vw) {
+      const coins = vw.coins, fees = vw.owed;
+      this.addIdle({ base: coins.base + fees.base, quote: coins.quote + fees.quote });
+      this.addFees(fees, vw.v.price);
+      if (p.putIn) this.state.totals.moveLoss += (p.putIn.base - coins.base) * vw.v.price + (p.putIn.quote - coins.quote);
+    } else if (p?.putIn) this.addIdle(p.putIn);
+    this.state.position = null;
+    this.state.step = null;
+    this.state.outSince = null;
+    if (vw) {
+      const price = vw.v.price;
+      this.view = { ...vw, inRange: false, coins: { base: 0, quote: 0 }, owed: { base: 0, quote: 0 }, value: this.state.idle.base * price + this.state.idle.quote };
+    }
+    this.markArchived();
+  }
+  private markArchived(quiet = false) {
+    this.state.step = null;
+    this.state.status = 'closed';
+    this.state.closing = false;
+    this.state.archivedAt = this.now();
+    this.save();
+    if (!quiet) this.ev('stopped', `Liquidity ${this.label} closed`, { level: 'success', notify: true });
   }
   setRerange(enabled: boolean) {
     if (!this.state.config) throw new Error('Start it first.');
@@ -344,7 +411,7 @@ export class LpEngine {
 
   // ── Tick ───────────────────────────────────────────────────────────────
   async tick(): Promise<void> {
-    if (this.ticking || this.state.status === 'idle' || this.state.status === 'closed') return;
+    if (this.ticking || this.state.status === 'idle' || this.state.status === 'closed' || this.state.archivedAt) return;
     this.ticking = true;
     try {
       const pool = this.lp();
@@ -356,13 +423,27 @@ export class LpEngine {
       this.state.seen = { g0: v.global0.toString(), g1: v.global1.toString() };
       this.state.lastPrice = v.price;
       this.state.lastPriceAt = this.now();
+      if (this.state.closing) {
+        const step = this.state.step;
+        const busy = !!(step?.hash || step?.swap);
+        // Don't replace a tx already sent. Otherwise the next work is the exit, not a new range.
+        if (!busy && this.state.position && step?.action !== 'close') this.state.step = { action: 'close', stage: 'exit', tries: 0 };
+      }
       if (this.state.step) {
         // a sent tx is always settled, even while stopped; new work only while running
         if (this.state.status === 'running' || this.state.step.hash || this.state.step.swap) await this.advance(pool, v);
-      } else if (this.state.status === 'running' && this.state.position) {
+      } else if (this.state.status === 'running' && this.state.position && !this.state.closing) {
         await this.watchRange(pool, v);
         if (!this.state.step && this.state.profits.mode === 'send') await this.maybeSend(pool, v);
         if (this.state.step) await this.advance(pool, v); // a re-range or send that just became due starts now
+      }
+      if (this.state.closing && this.state.position && !this.state.step) {
+        this.state.step = { action: 'close', stage: 'exit', tries: 0 };
+        await this.advance(pool, v);
+      }
+      if (this.state.closing && !this.state.position && !this.state.step?.hash && !this.state.step?.swap) {
+        this.state.step = null;
+        this.markArchived();
       }
       await this.measure(pool, v);
       this.save();
@@ -618,9 +699,8 @@ export class LpEngine {
     this.state.outSince = null;
     this.blockMemo = null;
     const f = `${(fees.base * v.price + fees.quote).toPrecision(5)} ${this.quoteSym} in fees`;
-    if (s.action === 'close') {
-      this.state.step = null;
-      this.state.status = 'closed';
+    if (s.action === 'close' || this.state.closing) {
+      this.markArchived(true);
       this.ev('stopped', `Liquidity ${this.label}: closed (${f}); ${this.state.idle.base.toPrecision(6)} ${this.baseSym} + ${this.state.idle.quote.toPrecision(6)} ${this.quoteSym} back in the wallet`, { level: 'success', notify: true });
     } else {
       s.stage = 'swap'; s.tries = 0; s.range = undefined;
@@ -786,7 +866,7 @@ export class LpEngine {
     return {
       kind: 'lp' as const, id: s.id, mode: s.mode, market: s.market, label: this.label, chainId: this.chainId, base: this.baseSym, quote: this.quoteSym,
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
-      status: s.status, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
+      status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
       outSince: s.outSince, move: this.moveStatus(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),

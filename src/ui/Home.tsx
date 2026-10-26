@@ -3,12 +3,12 @@
  * doing right now (each grid's price gliding between its next buy and sell), a live feed where every trade shows its
  * own result, and what needs attention.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useContext, useEffect, useMemo, useState } from 'react';
 import { http, botApi } from './api';
 import { AnimatedNumber, StatusDot, useFlash } from './motion';
 import { ago, cls, num, pct, px, qty, usd } from './fmt';
 import { Usd, useShowUsd } from './money';
-import { ChainBadge, DexTag, chainOf, chains, useChainFilter } from './chains';
+import { ChainBadge, DexTag, RefreshCtx, chainOf, chains, useChainFilter } from './chains';
 import { humanAmount } from '../live/amount';
 import { botView, earnedByCoin, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { buildFeed, LiveFeed, LiveLevels, LivePrice, livePrice, LiveRange } from './live';
@@ -21,13 +21,13 @@ import { gridRank, lpRank, type Opportunity } from '../market/scan';
 interface Props { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 interface HomeProps extends Props { events: ActivityEvent[]; ticks: Ticks | null; ver: AnyObj | null }
 
-function BotRow({ s, b, price, nav, act, busy }: { s: AnyObj; b: AnyObj; price: number | null; nav: Nav; act: Props['act']; busy: boolean }) {
+function BotRow({ s, b, price, nav, act, busy, closing, onClose }: { s: AnyObj; b: AnyObj; price: number | null; nav: Nav; act: Props['act']; busy: boolean; closing: boolean; onClose: () => void }) {
   const grid = b.kind === 'grid';
   const flash = useFlash(b.trades.length);
   const q = quoteSym(b), k: number | null = b.usdPerQuote ?? null;
   const rs = grid ? rangeState(b) : null;
-  const state = b.lastError ? 'error' : b.status;
-  const meta = grid
+  const state = closing ? 'closing' : b.lastError ? 'error' : b.status;
+  const meta = closing ? ['Closing…'] : grid
     ? [b.status === 'running' ? 'Running' : 'Stopped', `${b.stats.roundTrips} completed trades${b.stats.roundTrips ? ` (${b.stats.wins} won${b.stats.roundTrips - b.stats.wins ? `, ${b.stats.roundTrips - b.stats.wins} lost` : ''})` : ''}`, rs === 'in' ? null : rs ? `price ${rs} range` : null]
     : [b.status === 'running' ? (b.position ? `Holding ${b.base}` : 'Waiting for a signal') : 'Stopped', `${b.tf} candles`, `${b.stats.count} trades`];
   const path = grid ? `grids/${b.id}` : `trends/${b.id}`;
@@ -55,17 +55,18 @@ function BotRow({ s, b, price, nav, act, busy }: { s: AnyObj; b: AnyObj; price: 
         {b.status === 'running'
           ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`${path}/stop`, 'POST'))}>Stop</button>
           : (grid ? b.config : true) && <button type="button" className="btn small-btn" disabled={busy || b.available === false} onClick={() => act(() => botApi(`${path}/resume`, 'POST'))}>Resume</button>}
+        <button type="button" className="btn small-btn" disabled={closing || b.available === false} onClick={onClose}>{closing ? 'Closing…' : 'Close'}</button>
       </div>
     </div>
   );
 }
 
 /** A liquidity bot: fees earned after costs is what it makes; the fees themselves come in both coins. */
-function LpRow({ s, b, price, nav, act, busy }: { s: AnyObj; b: AnyObj; price: number | null; nav: Nav; act: Props['act']; busy: boolean }) {
+function LpRow({ s, b, price, nav, act, busy, closing, onClose }: { s: AnyObj; b: AnyObj; price: number | null; nav: Nav; act: Props['act']; busy: boolean; closing: boolean; onClose: () => void }) {
   const flash = useFlash(b.reranges);
   const q = quoteSym(b), pnl: AnyObj | null = b.pnl;
-  const state = b.lastError ? 'error' : b.status === 'closed' ? 'stopped' : b.status;
-  const meta = [
+  const state = closing ? 'closing' : b.lastError ? 'error' : b.status === 'closed' ? 'stopped' : b.status;
+  const meta = closing ? ['Closing…'] : [
     b.status === 'closed' ? 'Closed' : b.status === 'running' ? 'Running' : 'Paused',
     b.position ? (b.inRange == null ? null : b.inRange ? 'in range' : 'out of range') : b.step ? 'opening' : null,
     `${b.reranges} range move${b.reranges === 1 ? '' : 's'}`,
@@ -92,6 +93,7 @@ function LpRow({ s, b, price, nav, act, busy }: { s: AnyObj; b: AnyObj; price: n
         {b.status === 'running'
           ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST'))}>Pause</button>
           : b.status === 'stopped' && <button type="button" className="btn small-btn" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
+        <button type="button" className="btn small-btn" disabled={closing || b.available === false} onClick={onClose}>{closing ? 'Closing…' : 'Close'}</button>
       </div>
     </div>
   );
@@ -171,6 +173,11 @@ function closestNext(grids: AnyObj[], priceOf: (g: AnyObj) => number | null) {
 
 export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
   const { chain } = useChainFilter();
+  const refresh = useContext(RefreshCtx);
+  // Paper closes leave the list before the status round-trip. Live closes show "Closing…" until the unwind finishes.
+  const [hide, setHide] = useState<Set<string>>(new Set());
+  const [pend, setPend] = useState<Set<string>>(new Set());
+  const [rowErr, setRowErr] = useState<string | null>(null);
   // Totals here are live only (real money); paper bots get their own line and never add into them.
   const [ov, setOv] = useState<{ live: AnyObj | null; paper: AnyObj | null }>({ live: null, paper: null });
   const sig = `${s.grids.length}:${(s.trends ?? []).length}:${s.aggregate?.roundTrips}`;
@@ -184,11 +191,12 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
   }, [sig]);
 
   const here = (b: AnyObj) => chain === 'all' || (b.chainId ?? s.legacyChainId) === chain;
-  const bots: AnyObj[] = [...s.grids.map((g: AnyObj) => ({ ...g, kind: 'grid' })), ...(s.trends ?? []).map((t: AnyObj) => ({ ...t, kind: 'trend' })), ...(s.lps ?? [])]
-    .filter(here)
-    .sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
+  const hereBots: AnyObj[] = [...s.grids.map((g: AnyObj) => ({ ...g, kind: 'grid' })), ...(s.trends ?? []).map((t: AnyObj) => ({ ...t, kind: 'trend' })), ...(s.lps ?? [])].filter(here);
+  const kept = hereBots.filter((b) => b.archivedAt);
+  const bots = hereBots.filter((b) => !b.archivedAt && !hide.has(b.id)).sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
+  const isClosing = (b: AnyObj) => !!b.closing || pend.has(b.id) || b.step?.action === 'close';
   const liveBots = bots.filter((b) => b.mode === 'live'), paperBots = bots.filter((b) => b.mode === 'paper');
-  const ovLive: AnyObj[] = (ov.live?.bots ?? []).filter(here);
+  const ovLive: AnyObj[] = (ov.live?.bots ?? []).filter((b: AnyObj) => here(b) && !kept.some((k) => k.id === b.id));
   const { on: showUsd } = useShowUsd();
   // The change on coins not sold yet in ≈USD at today's prices (bots spend different coins, so dollars are the only way
   // to add them up); for a liquidity bot, what price moves did to its coins.
@@ -206,6 +214,36 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
   const last = bots.flatMap((b) => (b.trades ?? []).map((t: AnyObj) => ({ t: t.timestamp as number, paper: b.mode === 'paper' }))).sort((a, b) => b.t - a.t)[0] ?? null;
   const next = closestNext(bots.filter((b) => b.kind === 'grid'), priceOf);
   const feed = useMemo(() => buildFeed(s, events).filter((it) => chain === 'all' || it.chainId == null || it.chainId === chain), [s, events, chain]);
+
+  const botName = (b: AnyObj) => (b.kind === 'grid' ? gridName(b) : b.kind === 'lp' ? `Liquidity ${b.label}` : b.name);
+  const closePath = (b: AnyObj) => (b.kind === 'grid' ? `grids/${b.id}/close` : b.kind === 'trend' ? `trends/${b.id}/close` : `lps/${b.id}/close`);
+  const forget = (id: string) => {
+    setHide((cur) => { const n = new Set(cur); n.delete(id); return n; });
+    setPend((cur) => { const n = new Set(cur); n.delete(id); return n; });
+  };
+  const closeBot = (b: AnyObj) => {
+    if (b.mode === 'live' && !confirm(`Close ${botName(b)}? It sells or withdraws on-chain. The same price-impact and slippage limits still apply.`)) return;
+    if (b.mode === 'live') setPend((cur) => new Set(cur).add(b.id));
+    else setHide((cur) => new Set(cur).add(b.id));
+    setRowErr(null);
+    void botApi(closePath(b), 'POST').then(() => refresh()).catch((e: Error) => { forget(b.id); setRowErr(e.message); });
+  };
+  const closable = bots.filter((b) => !isClosing(b));
+  const canClear = bots.some((b) => b.status !== 'running' && !isClosing(b));
+  const closeAll = () => {
+    if (!closable.length) return;
+    if (!confirm(`Close ${closable.length} bot${closable.length === 1 ? '' : 's'}? Paper bots leave now. Live bots sell or withdraw on-chain, with the same safety limits.`)) return;
+    setHide((cur) => { const n = new Set(cur); for (const b of closable) if (b.mode !== 'live') n.add(b.id); return n; });
+    setPend((cur) => { const n = new Set(cur); for (const b of closable) if (b.mode === 'live') n.add(b.id); return n; });
+    setRowErr(null);
+    void botApi('close-all', 'POST', chain === 'all' ? {} : { chainId: chain }).then(() => refresh()).catch((e: Error) => {
+      setHide(new Set()); setPend(new Set()); setRowErr(e.message);
+    });
+  };
+  const clearClosed = () => {
+    setRowErr(null);
+    void botApi('archive-closed', 'POST', chain === 'all' ? {} : { chainId: chain }).then(() => refresh()).catch((e: Error) => setRowErr(e.message));
+  };
 
   const notices: { key: string; level: 'warn' | 'error'; text: React.ReactNode; open?: () => void }[] = [];
   if (ver && ver.state !== 'current') {
@@ -287,11 +325,19 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
         <section className="bots" aria-label="Your bots">
           <div className="bots-head">
             <h3>Your bots</h3>
-            <button type="button" className="btn primary small-btn" onClick={() => nav({ v: 'new', kind: 'grid' })}>New bot</button>
+            <div className="bots-actions">
+              {canClear && <button type="button" className="btn small-btn" onClick={clearClosed}>Clear closed</button>}
+              {closable.length > 0 && <button type="button" className="btn small-btn" onClick={closeAll}>Close all</button>}
+              <button type="button" className="btn primary small-btn" onClick={() => nav({ v: 'new', kind: 'grid' })}>New bot</button>
+            </div>
           </div>
+          {kept.length > 0 && (
+            <p className="bots-note small muted">{kept.length} closed bot{kept.length === 1 ? '' : 's'} kept in <button type="button" className="linklike" onClick={() => nav({ v: 'tools', tab: 'analytics' })}>Analytics</button>.</p>
+          )}
+          {rowErr && <div className="banner error" role="alert"><span className="grow">{rowErr}</span><button type="button" className="btn ghost small-btn" onClick={() => setRowErr(null)}>Dismiss</button></div>}
           {bots.map((b) => (b.kind === 'lp'
-            ? <LpRow key={b.id} s={s} b={b} price={priceOf(b)} nav={nav} act={act} busy={busy} />
-            : <BotRow key={b.id} s={s} b={b} price={priceOf(b)} nav={nav} act={act} busy={busy} />))}
+            ? <LpRow key={b.id} s={s} b={b} price={priceOf(b)} nav={nav} act={act} busy={busy} closing={isClosing(b)} onClose={() => closeBot(b)} />
+            : <BotRow key={b.id} s={s} b={b} price={priceOf(b)} nav={nav} act={act} busy={busy} closing={isClosing(b)} onClose={() => closeBot(b)} />))}
           {bots.length === 0 && (
             <div className="empty">
               <p>No bots{chain !== 'all' ? ' on this chain' : ''} yet. Start one in paper mode to see how it behaves with real prices and no real money.</p>

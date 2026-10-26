@@ -142,11 +142,20 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/grids/:id/start', wrap(async (req) => { await bot.start(req.params.id, startBody(req.body ?? {})); void bot.tickAll(); }));
   app.post('/api/bot/grids/:id/resume', wrap((req) => { bot.resume(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/grids/:id/stop', wrap((req) => bot.stop(req.params.id)));
+  app.post('/api/bot/grids/:id/close', wrap((req) => bot.closeGrid(req.params.id)));
   app.put('/api/bot/grids/:id/limits', wrap((req) => bot.setLimits(req.params.id, limitsBody(req.body ?? {}))));
   app.put('/api/bot/grids/:id/recenter', wrap((req) => bot.setRecenter(req.params.id, req.body?.enabled === true)));
   app.put('/api/bot/grids/:id/profits', wrap((req) => bot.setProfits(req.params.id, profitsBody(req.body) ?? (() => { throw new Error('profits required'); })())));
   app.delete('/api/bot/grids/:id', wrap((req) => bot.remove(req.params.id)));
   app.post('/api/bot/stop-all', wrap(() => bot.stopAll()));
+  app.post('/api/bot/close-all', wrap((req) => {
+    const raw = req.body?.chainId;
+    return bot.closeAll(raw == null || raw === '' ? undefined : Number(raw));
+  }));
+  app.post('/api/bot/archive-closed', wrap((req) => {
+    const raw = req.body?.chainId;
+    return bot.archiveClosed(raw == null || raw === '' ? undefined : Number(raw));
+  }));
 
   // ── Chains / custom markets ──────────────────────────────────────────
   app.get('/api/chains', wrap(() => ({
@@ -159,6 +168,7 @@ export function createApp(o: AppOpts) {
     }),
   })));
   app.post('/api/chains/:id/stop', wrap((req) => ({ ok: true, stopped: bot.stopChain(Number(req.params.id)) })));
+  app.post('/api/chains/:id/close', wrap((req) => bot.closeAll(Number(req.params.id))));
   app.post('/api/tokens/inspect', wrap(async (req) => plain(await bot.hub.inspect(marketReq(req.body ?? {})))));
   app.get('/api/markets', wrap(() => ({ markets: bot.marketList() })));
 
@@ -224,7 +234,8 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/bot/trends/:id/resume', wrap((req) => { bot.resumeTrend(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/trends/:id/stop', wrap((req) => bot.stopTrend(req.params.id)));
-  app.post('/api/bot/trends/:id/close', wrap((req) => { bot.closeTrend(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/trends/:id/sell', wrap((req) => bot.sellTrend(req.params.id)));
+  app.post('/api/bot/trends/:id/close', wrap((req) => bot.closeTrend(req.params.id)));
   app.put('/api/bot/trends/:id/limits', wrap((req) => bot.setTrendLimits(req.params.id, limitsBody(req.body ?? {}))));
   app.put('/api/bot/trends/:id/lines', wrap((req) => bot.setTrendLines(req.params.id, req.body?.lines)));
   app.delete('/api/bot/trends/:id', wrap((req) => bot.removeTrend(req.params.id)));
@@ -242,7 +253,7 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/bot/lps/:id/resume', wrap((req) => { bot.resumeLp(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
-  app.post('/api/bot/lps/:id/close', wrap((req) => { bot.closeLp(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/lps/:id/close', wrap((req) => bot.closeLp(req.params.id)));
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
   // { bandPct? }: move the range to the price now (a new width, or the same one)
   app.post('/api/bot/lps/:id/move', wrap(async (req) => {

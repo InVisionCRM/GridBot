@@ -183,6 +183,50 @@ export class MultiBot {
       label: (k) => this.hub.label(k),
     });
     this.hub.onSuspect = (k, why) => { void this.taxWatch.suspect(k, why); };
+    this.resumeClosing();
+  }
+
+  /** On-chain unwinds started by Close. They run beside the poll loop and don't wait for each other. */
+  private unwinds: Promise<void>[] = [];
+  /** Closes that arrived while a poll was already walking the bots. Run after that poll, still not one-by-one in the handler. */
+  private pendingUnwind: (() => Promise<void>)[] = [];
+
+  private trackUnwind(p: Promise<void>) {
+    this.unwinds.push(p);
+    void p.finally(() => { this.unwinds = this.unwinds.filter((x) => x !== p); });
+  }
+
+  /** Start one bot's unwind. Same-chain sends still take turns in that chain's TxGate. */
+  kick(fn: () => Promise<void>) {
+    if (this.ticking) { this.pendingUnwind.push(fn); return; }
+    this.trackUnwind(fn().then(() => undefined, () => undefined));
+  }
+
+  /** Resolves when unwinds started so far have finished. Tests use this; the HTTP handler does not. */
+  whenSettled(): Promise<void> {
+    return Promise.all(this.unwinds).then(() => undefined);
+  }
+
+  /**
+   * A live bot saved as `closing` (restart mid-unwind) starts that unwind now, not on the next poll.
+   * Paper is never left closing: it finishes from memory with no chain calls.
+   */
+  private resumeClosing() {
+    for (const e of this.engines.values()) {
+      if (e.state.archivedAt) continue;
+      if (e.state.mode !== 'live') { if (e.state.closing) e.requestClose(); continue; }
+      if (e.state.closing) this.kick(() => e.tick());
+    }
+    for (const e of this.trendEngines.values()) {
+      if (e.state.archivedAt) continue;
+      if (e.state.mode !== 'live') { if (e.state.closing) e.requestClose(); continue; }
+      if (e.state.closing) this.kick(() => e.tick(this.spots[e.state.quote]));
+    }
+    for (const e of this.lpEngines.values()) {
+      if (e.state.archivedAt) continue;
+      if (e.state.mode !== 'live') { if (e.state.closing) e.close(); continue; }
+      if (e.state.closing) this.kick(() => e.tick());
+    }
   }
 
   /** Markets with a safety report (custom tokens, verified built-ins) that have a running or in-flight bot — the tax watcher only re-checks these. */
@@ -287,6 +331,71 @@ export class MultiBot {
   setLimits(id: string, l: Partial<SafetyLimits>) { this.engine(id).setLimits(l); }
   setRecenter(id: string, enabled: boolean) { this.engine(id).setRecenter(enabled); }
   setProfits(id: string, p: ProfitMode) { return this.engine(id).setProfits(p); }
+  /** End a grid. Paper leaves the list immediately; a live grid that holds coins is marked closing and sold. */
+  closeGrid(id: string) {
+    const e = this.engine(id);
+    const live = e.requestClose();
+    if (live) this.kick(() => e.tick());
+    this.activity.emit('status');
+    return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
+  }
+
+  /**
+   * End every bot that is still on the active list. Paper work finishes in this call.
+   * Live unwinds are started together; each chain's TxGate still sends one transaction at a time.
+   */
+  closeAll(chainId?: number) {
+    let closed = 0, closing = 0;
+    const on = (cid: number) => chainId == null || cid === chainId;
+    for (const e of this.engines.values()) {
+      if (!on(e.chainId) || e.state.archivedAt) continue;
+      if (e.requestClose()) { closing++; this.kick(() => e.tick()); }
+      else if (e.state.archivedAt) closed++;
+    }
+    for (const e of this.trendEngines.values()) {
+      if (!on(e.chainId) || e.state.archivedAt) continue;
+      if (e.requestClose()) { closing++; this.kick(() => e.tick(this.spots[e.state.quote])); }
+      else if (e.state.archivedAt) closed++;
+    }
+    for (const e of this.lpEngines.values()) {
+      if (!on(e.chainId) || e.state.archivedAt) continue;
+      if (e.close()) { closing++; this.kick(() => e.tick()); }
+      else if (e.state.archivedAt) closed++;
+    }
+    this.activity.emit('status');
+    return { ok: true, closed, closing };
+  }
+
+  /**
+   * Hide stopped bots from the active list. Does not sell and does not delete history.
+   * A live trend or liquidity bot that still holds a position stays until Close unwinds it.
+   * A stopped live grid can be hidden: the coins it bought are already in the wallet.
+   */
+  archiveClosed(chainId?: number) {
+    let n = 0;
+    const on = (cid: number) => chainId == null || cid === chainId;
+    for (const e of this.engines.values()) {
+      if (!on(e.chainId) || e.state.archivedAt || e.state.status === 'running' || e.state.closing) continue;
+      if (e.state.mode !== 'live') e.requestClose();
+      else e.archiveIfSettled();
+      if (e.state.archivedAt) n++;
+    }
+    for (const e of this.trendEngines.values()) {
+      if (!on(e.chainId) || e.state.archivedAt || e.state.status === 'running' || e.state.closing) continue;
+      if (e.state.mode !== 'live') e.requestClose();
+      else e.archiveIfSettled();
+      if (e.state.archivedAt) n++;
+    }
+    for (const e of this.lpEngines.values()) {
+      if (!on(e.chainId) || e.state.archivedAt || e.state.status === 'running' || e.state.closing) continue;
+      if (e.state.mode !== 'live') e.close();
+      else e.archiveIfSettled();
+      if (e.state.archivedAt) n++;
+    }
+    if (n) this.activity.emit('status');
+    return { ok: true, archived: n };
+  }
+
   remove(id: string) {
     const eng = this.engines.get(id);
     if (eng && eng.state.status === 'running') eng.stop();
@@ -310,7 +419,21 @@ export class MultiBot {
   }
   resumeTrend(id: string) { this.trend(id).resume(); }
   stopTrend(id: string) { this.trend(id).stop(); }
-  closeTrend(id: string) { this.trend(id).closePosition(); }
+  /** Sell the open trend position and keep watching for the next signal. */
+  sellTrend(id: string) {
+    const e = this.trend(id);
+    e.closePosition();
+    this.kick(() => e.tick(this.spots[e.state.quote]));
+    return { ok: true };
+  }
+  /** End the trend bot. Paper settles immediately; live sells through the normal cap and slippage. */
+  closeTrend(id: string) {
+    const e = this.trend(id);
+    const live = e.requestClose();
+    if (live) this.kick(() => e.tick(this.spots[e.state.quote]));
+    this.activity.emit('status');
+    return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
+  }
   setTrendLimits(id: string, l: Partial<SafetyLimits>) { this.trend(id).setLimits(l); }
   setTrendLines(id: string, lines: DrawnLine[]) { this.trend(id).setLines(lines); }
   removeTrend(id: string, force = false) {
@@ -339,7 +462,13 @@ export class MultiBot {
   }
   stopLp(id: string) { this.lp(id).stop(); }
   resumeLp(id: string) { this.lp(id).resume(); }
-  closeLp(id: string) { this.lp(id).close(); }
+  closeLp(id: string) {
+    const e = this.lp(id);
+    const live = e.close();
+    if (live) this.kick(() => e.tick());
+    this.activity.emit('status');
+    return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
+  }
   setLpRerange(id: string, enabled: boolean) { this.lp(id).setRerange(enabled); }
   /** Move a liquidity bot's range to the price now, at a new width or the same one; it starts on the next tick. */
   moveLp(id: string, bandPct?: number) { return this.lp(id).move(bandPct); }
@@ -537,14 +666,18 @@ export class MultiBot {
       const byChain = new Map<number, (() => Promise<void>)[]>();
       const push = (cid: number, f: () => Promise<void>) => { const a = byChain.get(cid) ?? []; a.push(f); byChain.set(cid, a); };
       for (const e of this.engines.values()) {
-        if (e.state.status === 'running' || e.state.inFlight || e.state.config) push(e.chainId, () => e.tick());
+        // A stopped grid has nothing to do. Ticking it used to re-read price and balances for every one, ahead of a close.
+        if (e.state.archivedAt) continue;
+        if (e.state.status === 'running' || e.state.closing || e.state.inFlight || e.state.payoutInFlight) push(e.chainId, () => e.tick());
       }
       for (const e of this.trendEngines.values()) {
-        if (e.state.status === 'running' || e.state.inFlight) push(e.chainId, () => e.tick(this.spots[e.state.quote]));
+        if (e.state.archivedAt) continue;
+        if (e.state.status === 'running' || e.state.closing || e.state.inFlight) push(e.chainId, () => e.tick(this.spots[e.state.quote]));
       }
       // A stopped liquidity bot still reads its position (value, fees) and settles a tx already sent.
       for (const e of this.lpEngines.values()) {
-        if (e.state.status === 'running' || e.state.status === 'stopped') push(e.chainId, () => e.tick());
+        if (e.state.archivedAt || e.state.status === 'idle' || e.state.status === 'closed') continue;
+        if (e.state.status === 'running' || e.state.status === 'stopped' || e.state.closing) push(e.chainId, () => e.tick());
       }
       await Promise.all([...byChain.values()].map(async (jobs) => { for (const j of jobs) await j(); }));
       this.checkRanges();
@@ -554,15 +687,23 @@ export class MultiBot {
       this.activity.emit('status');
     } finally {
       this.ticking = false;
+      const pending = this.pendingUnwind.splice(0);
+      if (pending.length) {
+        await Promise.all(pending.map((fn) => {
+          const p = fn().then(() => undefined, () => undefined);
+          this.trackUnwind(p);
+          return p;
+        }));
+      }
     }
   }
 
   /** Markets a bot or alert uses, in their original orientation (flipped series derive from it): the candle sync keeps every timeframe of these. */
   activeCandleKeys(): Set<string> {
     const s = new Set<string>();
-    for (const g of this.multi.grids) s.add(unflipKey(g.stable));
-    for (const t of this.multi.trends) s.add(unflipKey(t.quote));
-    for (const t of this.multi.lps) s.add(unflipKey(t.market));
+    for (const g of this.multi.grids) if (!g.archivedAt) s.add(unflipKey(g.stable));
+    for (const t of this.multi.trends) if (!t.archivedAt) s.add(unflipKey(t.quote));
+    for (const t of this.multi.lps) if (!t.archivedAt) s.add(unflipKey(t.market));
     for (const a of this.multi.alerts) s.add(unflipKey(a.pair));
     return s;
   }
@@ -571,9 +712,9 @@ export class MultiBot {
   watchedKeys(all = true): string[] {
     const used = new Set<string>();
     for (const d of this.hub.list()) if (d.legacy) used.add(d.key);
-    for (const g of this.multi.grids) used.add(g.stable);
-    for (const t of this.multi.trends) used.add(t.quote);
-    for (const t of this.multi.lps) used.add(t.market);
+    for (const g of this.multi.grids) if (!g.archivedAt) used.add(g.stable);
+    for (const t of this.multi.trends) if (!t.archivedAt) used.add(t.quote);
+    for (const t of this.multi.lps) if (!t.archivedAt) used.add(t.market);
     for (const a of this.multi.alerts) used.add(a.pair);
     if (all) for (const d of this.hub.list()) used.add(d.key);
     // A flipped market's candles are derived from its original: always price the original too.
@@ -705,7 +846,7 @@ export class MultiBot {
       const capital = s.config.totalCapitalUsd;
       const eqHist = s.equity ?? [];
       rows.push({
-        id: s.id, kind: 'grid', name: `Grid ${e.label}`, pair: s.stable, chainId: e.chainId, mode: s.mode, status: s.status, usdPerQuote: this.usdPerQuote(s.stable),
+        id: s.id, kind: 'grid', name: `Grid ${e.label}`, pair: s.stable, chainId: e.chainId, mode: s.mode, status: s.archivedAt ? 'closed' : s.status, usdPerQuote: this.usdPerQuote(s.stable),
         capital, equity: capital + t.realized + t.unrealized, realized: t.realized, unrealized: t.unrealized,
         fees: tr.reduce((a, x) => a + (x.feeQuote ?? 0), 0), gas: t.gasUsd,
         plsHeld: t.pos.plsHeld, quoteFree: Math.max(0, capital + t.realized - t.pos.costUsd), startedAt: s.startedAt ?? tr[0]?.timestamp ?? null,
@@ -719,7 +860,7 @@ export class MultiBot {
       const st = e.status();
       if (!st.capital || st.mode !== mode) continue;
       rows.push({
-        id: st.id, kind: 'trend', name: st.name, pair: st.quote, chainId: e.chainId, mode: st.mode, status: st.status, usdPerQuote: this.usdPerQuote(st.quote),
+        id: st.id, kind: 'trend', name: st.name, pair: st.quote, chainId: e.chainId, mode: st.mode, status: e.state.archivedAt ? 'closed' : st.status, usdPerQuote: this.usdPerQuote(st.quote),
         capital: st.capital, equity: st.pnl.equity, realized: st.pnl.realized, unrealized: st.pnl.unrealized, fees: st.pnl.fees, gas: st.pnl.gas,
         plsHeld: st.position?.pls ?? 0, quoteFree: st.cash, startedAt: st.startedAt, equityHist: e.state.equity,
         closed: e.modeTrades().filter((x) => x.side === 'sell' && !x.failed).map((x) => ({ pnl: x.realizedPnlUsd, t: x.timestamp, holdMs: (x as TrendTrade).holdMs })),
@@ -730,7 +871,7 @@ export class MultiBot {
       const s = e.state, pnl = e.pnl(), vw = e.view;
       if (!s.config || !pnl || !vw || s.mode !== mode) continue;
       rows.push({
-        id: s.id, kind: 'lp', name: `Liquidity ${e.label}`, pair: s.market, chainId: e.chainId, mode: s.mode, status: s.status, usdPerQuote: this.usdPerQuote(s.market),
+        id: s.id, kind: 'lp', name: `Liquidity ${e.label}`, pair: s.market, chainId: e.chainId, mode: s.mode, status: s.archivedAt ? 'closed' : s.status, usdPerQuote: this.usdPerQuote(s.market),
         // earned after costs is the LP's "banked" side; the price side moves with the price like unsold coins
         capital: e.startValue()!, equity: pnl.equity, realized: pnl.net, unrealized: pnl.price, fees: 0, gas: pnl.gas,
         plsHeld: vw.coins.base + vw.owed.base + s.idle.base, quoteFree: vw.coins.quote + vw.owed.quote + s.idle.quote, startedAt: s.startedAt, equityHist: s.equity,

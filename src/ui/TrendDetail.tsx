@@ -42,27 +42,33 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const q = quoteSym(t), base = t.base ?? 'PLS';
   const profit: number = t.pnl.equity - t.capital;
   const running = t.status === 'running';
+  const closing = !!t.closing;
   const pos = t.position;
   const stratLabel = STRATEGIES.find((x) => x.id === t.cfg.strategy)?.label ?? t.cfg.strategy;
   const remove = () => act(async () => { if (confirm(`Remove ${t.name} and its history?`)) { await botApi(`trends/${t.id}`, 'DELETE'); nav({ v: 'home' }); } });
-  const closePos = () => act(async () => { if (confirm(`Sell ${t.name}'s ${base} at market now?`)) await botApi(`trends/${t.id}/close`, 'POST'); });
+  const closePos = () => { if (confirm(`Sell ${t.name}'s ${base} at market now?`)) act(() => botApi(`trends/${t.id}/sell`, 'POST')); };
+  const doClose = () => {
+    if (t.mode === 'live' && !confirm(`Close ${t.name}? It sells the open trade, with the same price-impact and slippage limits.`)) return;
+    act(() => botApi(`trends/${t.id}/close`, 'POST'));
+  };
 
   return (
     <main className="stack">
       <button type="button" className="back" onClick={() => nav({ v: 'home' })}>← Home</button>
       <div className="detail-head">
-        <StatusDot beat={t.priceAt} state={t.lastError ? 'error' : t.status} />
+        <StatusDot beat={t.priceAt} state={closing ? 'closing' : t.lastError ? 'error' : t.status} />
         <ChainBadge c={chainOf(s, t.chainId ?? s.legacyChainId)} testnet={false} />
         <h2>{t.name}</h2>
         <span className="tag">Trend</span>
         {t.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={t.dexName} feeBps={t.feeBps} feeTier={t.feeTier} />
-        <span className={`st ${t.status}`}>{running ? 'Running' : 'Stopped'}{t.inFlight ? ' · swap in flight' : ''}</span>
+        <span className={`st ${closing ? 'closing' : t.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{t.inFlight ? ' · swap in flight' : ''}</span>
         <span className="grow" />
         {running
           ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/stop`, 'POST'))}>Stop</button>
           : <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/resume`, 'POST'))}>Resume</button>}
-        <button type="button" className="btn" disabled={busy || !pos || !running} onClick={closePos}>Sell now</button>
+        <button type="button" className="btn" disabled={busy || !pos || !running || closing} onClick={closePos}>Sell now</button>
+        <button type="button" className="btn" disabled={busy || closing} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
         <button type="button" className="btn danger" disabled={busy || running || !!t.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
       </div>
 

@@ -106,6 +106,10 @@ export interface TrendState {
   startPrice: number | null;
   /** [ms, equity in quote] */
   equity: [number, number][];
+  /** Live unwind in progress (sell the open position, then leave the active list). Absent on older state. */
+  closing?: boolean;
+  /** Hidden from the active list; trades stay for analytics. Absent on older state. */
+  archivedAt?: number | null;
 }
 
 export interface TrendDeps {
@@ -151,6 +155,7 @@ export function freshTrend(net: LiveNetwork, id?: string): TrendState {
     status: 'idle', cfg: { ...DEFAULT_TREND }, limits: { ...DEFAULT_LIMITS }, capital: 0, cash: 0, position: null, queue: [],
     inFlight: null, trades: [], signals: [], lastBarT: null, cooldownUntil: 0, lastPrice: null, lastPriceAt: null,
     lastNote: '', blocked: 0, startedAt: null, startPrice: null, equity: [],
+    closing: false, archivedAt: null,
   };
 }
 
@@ -162,6 +167,8 @@ export class TrendEngine {
   private executor: Executor;
   private ticking = false;
   private draining = false;
+  /** Why the close sell was skipped. Shown while a live close is still waiting. */
+  private closeNote: string | null = null;
   private readonly now: () => number;
   readonly hub: Hub;
 
@@ -252,6 +259,7 @@ export class TrendEngine {
       status: 'running', cfg, limits, capital: p.capital, cash: p.capital, position: null, queue: [], inFlight: null,
       trades: p.mode === 'paper' ? [] : keepTrades, signals: [], lastBarT: null, cooldownUntil: 0, lastPrice: price, lastPriceAt: this.now(),
       lastNote: 'waiting for the next closed candle', blocked: 0, startedAt: this.now(), startPrice: price, equity: [[this.now(), p.capital]],
+      closing: false, archivedAt: null,
     };
     // Don't act on the candle that closed before start: wait for the next close.
     const k = closedOnly(this.d.candles(p.quote, p.tf), p.tf, Math.floor(this.now() / 1000));
@@ -269,6 +277,9 @@ export class TrendEngine {
     if (this.state.mode === 'live' && !this.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
     if (this.state.mode === 'live' && this.def?.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
     this.state.status = 'running';
+    this.state.closing = false;
+    this.state.archivedAt = null;
+    this.closeNote = null;
     this.save();
     this.log('info', 'Resumed.');
     this.emit('started', `Trend bot resumed — ${this.state.name}`);
@@ -278,16 +289,91 @@ export class TrendEngine {
     const dropped = this.state.queue.length;
     this.state.queue = [];
     if (this.state.status === 'running') this.state.status = 'stopped';
+    this.state.closing = false;
+    this.closeNote = null;
     this.save();
     this.log('warn', `${why}. ${dropped} queued dropped.${this.state.position ? ' Position stays open; stops are NOT monitored while stopped.' : ''}`);
     this.emit('stopped', `${this.state.name}: ${why.toLowerCase()}${this.state.position ? ' (position open, stops paused)' : ''}`, { level: 'warn', notify: true });
   }
 
-  /** Queue a market sell of the whole position (works while running; resumes nothing else). */
+  /** Queue a market sell of the whole position (works while running; the bot keeps watching for the next signal). */
   closePosition() {
     if (!this.state.position) throw new Error('No open position.');
     if (this.state.status !== 'running') throw new Error('Resume the bot first (closing needs the executor loop), or it will close on the next run.');
     this.enqueue({ side: 'sell', reason: 'manual', amount: this.state.position.pls, triggerPrice: this.state.lastPrice ?? 0, manual: true });
+  }
+
+  /**
+   * End the bot. A paper position is booked at the last price already in memory (pool fee only, no quote, no RPC)
+   * and the bot leaves the active list immediately. A live position is marked closing and sold through the normal
+   * quote, price-impact cap and slippage. @returns true when that on-chain sell still has to run.
+   */
+  requestClose(): boolean {
+    if (this.state.archivedAt) return false;
+    // Paper books the open trade at the last price already in memory. No quote, no poll.
+    if (this.state.mode !== 'live') {
+      this.settlePaper();
+      this.finishClose();
+      return false;
+    }
+    if (this.state.closing) return false;
+    if (!this.state.position && !this.state.inFlight) {
+      this.finishClose();
+      return false;
+    }
+    this.state.closing = true;
+    this.state.status = 'running';
+    this.closeNote = null;
+    this.lastError = null;
+    this.state.queue = this.state.queue.filter((q) => q.side === 'sell');
+    if (this.state.position && !this.state.inFlight && !this.state.queue.some((q) => q.side === 'sell')) {
+      this.enqueue({ side: 'sell', reason: 'manual', amount: this.state.position.pls, triggerPrice: this.state.lastPrice ?? this.state.position.entryPrice, manual: true });
+    }
+    this.save();
+    this.emit('info', `${this.state.name}: closing…`, { level: 'warn' });
+    return true;
+  }
+
+  /** Book the open paper position at the last known price. No quoter, no gas read. */
+  private settlePaper() {
+    const s = this.state, pos = s.position;
+    if (!pos) { s.queue = []; s.inFlight = null; return; }
+    const price = s.lastPrice && s.lastPrice > 0 ? s.lastPrice : pos.entryPrice;
+    const fee = (this.def?.pool.feeBps ?? FEE_BPS) / 10_000;
+    const pls = pos.pls;
+    const gross = pls * price;
+    const quote = gross * (1 - fee);
+    const realized = quote - pos.cost;
+    s.cash += quote;
+    s.trades.push({
+      id: `paper-close-${this.now().toString(36)}`, network: this.netKey, side: 'sell', intervalIndex: -1, stable: s.quote,
+      plsAmount: pls, stableAmount: quote, price, gasPls: 0, gasUsd: 0, txHash: `paper-close-${s.id}`, timestamp: this.now(),
+      realizedPnlUsd: realized, paper: true, reason: 'manual', triggerPrice: price, quotedPrice: price, execPrice: price,
+      slippagePct: 0, fromReceipt: false, feeQuote: gross * fee, lotCost: pos.cost, roundTripNet: realized,
+      entryPrice: pos.entryPrice, holdMs: Math.max(0, this.now() - pos.entryAt), outSource: 'paper',
+    });
+    s.position = null;
+    s.queue = [];
+    s.inFlight = null;
+  }
+
+  private finishClose() {
+    this.state.queue = [];
+    this.state.status = 'stopped';
+    this.state.closing = false;
+    this.state.archivedAt = this.now();
+    this.closeNote = null;
+    this.save();
+    this.emit('stopped', `${this.state.name || 'Trend bot'} closed`, { level: 'success', notify: true });
+  }
+
+  /** Hide a stopped trend bot. A live one that still holds a coin stays until Close unwinds it. */
+  archiveIfSettled(): boolean {
+    if (this.state.archivedAt || this.state.closing || this.state.status === 'running' || this.state.inFlight) return false;
+    if (this.state.mode === 'live' && this.state.position) return false;
+    this.state.archivedAt = this.now();
+    this.save();
+    return true;
   }
 
   setLimits(l: Partial<SafetyLimits>) {
@@ -336,7 +422,11 @@ export class TrendEngine {
       this.state.lastPrice = p;
       this.state.lastPriceAt = this.now();
       const s = this.state;
-      if (s.status === 'running' && !s.inFlight && !s.queue.length) {
+      // One close sell per tick. A skipped sell (price-impact cap, quote) stays closing and tries again next poll.
+      if (s.closing && s.position && !s.inFlight && !s.queue.some((q) => q.side === 'sell')) {
+        this.enqueue({ side: 'sell', reason: 'manual', amount: s.position.pls, triggerPrice: p, manual: true });
+      }
+      if (s.status === 'running' && !s.inFlight && !s.queue.length && !s.closing) {
         if (s.position) {
           const why = priceExit(s.position.risk, p);
           if (why) {
@@ -349,8 +439,10 @@ export class TrendEngine {
       if (s.startedAt && (!s.equity.length || this.now() - s.equity[s.equity.length - 1][0] >= 60_000)) pushCapped(s.equity, [this.now(), this.equityNow(p)], 3000);
       this.save();
       await this.drain();
+      if (this.state.closing && !this.state.inFlight && !this.state.queue.length && !this.state.position) this.finishClose();
       // A tick that got through means the last error (often one RPC timeout) is over; the Activity log keeps it.
-      this.lastError = null;
+      // A close that could not sell keeps that reason on the row.
+      this.lastError = this.state.closing ? this.closeNote : null;
     } catch (e) {
       this.lastError = (e as Error).message;
       this.log('error', `tick: ${this.lastError}`);
@@ -452,6 +544,7 @@ export class TrendEngine {
   }
 
   private skip(job: TrendJob, why: string) {
+    if (this.state.closing) this.closeNote = why;
     this.log('warn', `Skipped ${job.side} (${job.reason}): ${why}`);
     this.emit('skipped', `${this.state.name}: skipped ${job.side} — ${why}`, { level: 'warn', notify: job.side === 'sell' });
   }
@@ -611,7 +704,7 @@ export class TrendEngine {
       pnl: { realized, unrealized, equity, returnPct: s.capital ? equity / s.capital - 1 : 0, gas: trades.reduce((a, t) => a + t.gasUsd, 0), fees: trades.reduce((a, t) => a + (t.feeQuote ?? 0), 0) },
       stats: { ...tradeStats(closed), maxDrawdown: drawdown(s.equity).max, timeInMarket: s.startedAt ? inMarketMs / Math.max(1, this.now() - s.startedAt) : 0 },
       equityHist: s.equity.slice(-600),
-      blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, lastError: this.lastError,
+      blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, lastError: this.lastError,
     };
   }
 }
