@@ -11,9 +11,10 @@ describe('desk series', () => {
       bot('b', [[now - 3_600_000, 5], [now, 8]]),
     ];
     const hour = portfolioSeries(bots, '1H', now);
-    expect(hour[0]).toBe(10 * 2);
-    expect(hour[hour.length - 1]).toBe(11 * 2 + 8 * 2);
-    expect(seriesChange(hour).delta).toBe((11 * 2 + 8 * 2) - 20);
+    expect(hour[0]).toBe(0);
+    // a: 20 before the hour, then 24, then 22. b starts at 10 inside the hour, then 16. Change is (22-20) + (16-10).
+    expect(hour[hour.length - 1]).toBe(8);
+    expect(seriesChange(hour).delta).toBe(8);
   });
 
   it('calls a price near either edge amber, and outside the band out', () => {

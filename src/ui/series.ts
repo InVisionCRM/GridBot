@@ -46,24 +46,36 @@ function downsample(pts: number[], n: number): number[] {
   return out;
 }
 
-/** Sum of each bot's dollar equity across the window. Points before the window seed the start. */
+/**
+ * Change in dollar equity over the window. A bot's first sample is its baseline,
+ * so capital showing up is not counted as profit. Points before the window are the baseline.
+ */
 export function portfolioSeries(bots: AnyObj[], range: DeskRange, now = Date.now()): number[] {
   const win = WIN[range];
   const from = win == null ? 0 : now - win;
-  const seeds = new Map<string, number>();
-  const ev: { t: number; id: string; v: number }[] = [];
+  const before = new Map<string, number>();
+  const inside: { t: number; id: string; v: number }[] = [];
   for (const b of bots) {
     for (const [t, v] of equityPoints(b)) {
-      if (t < from) seeds.set(b.id, v);
-      else ev.push({ t, id: b.id, v });
+      if (t < from) before.set(b.id, v);
+      else inside.push({ t, id: b.id, v });
     }
   }
-  if (!ev.length && seeds.size === 0) return [0, 0];
-  ev.sort((a, c) => a.t - c.t);
-  const cur = new Map(seeds);
-  const sum = () => [...cur.values()].reduce((a, n) => a + n, 0);
-  const pts = [sum()];
-  for (const e of ev) { cur.set(e.id, e.v); pts.push(sum()); }
+  if (!inside.length && before.size === 0) return [0, 0];
+  inside.sort((a, c) => a.t - c.t);
+  const base = new Map(before);
+  const cur = new Map(before);
+  const pnl = () => {
+    let s = 0;
+    for (const [id, v] of cur) s += v - (base.get(id) ?? v);
+    return s;
+  };
+  const pts = [pnl()];
+  for (const e of inside) {
+    if (!base.has(e.id)) base.set(e.id, e.v);
+    cur.set(e.id, e.v);
+    pts.push(pnl());
+  }
   return downsample(pts, 64);
 }
 
