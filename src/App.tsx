@@ -1,4 +1,4 @@
-/** App shell: top bar, Home / Opportunities / New bot / bot detail / Tools, activity drawer, Guide. */
+/** App shell: Home, Bots, Holdings, More, bot detail, activity drawer, Guide. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Guide } from './Guide';
 import { useStream, type ActivityEvent } from './ui/useStream';
@@ -8,6 +8,8 @@ import { botApi, http } from './ui/api';
 import { usd } from './ui/fmt';
 import { ChainFilterCtx, chainOf, RefreshCtx, type ChainFilter } from './ui/chains';
 import { Home } from './ui/Home';
+import { Bots } from './ui/Bots';
+import { More } from './ui/More';
 import { NewBot } from './ui/NewBot';
 import { GridDetail } from './ui/GridDetail';
 import { TrendDetail } from './ui/TrendDetail';
@@ -25,7 +27,7 @@ import { loadShowUsd, saveShowUsd, ShowUsdCtx } from './ui/money';
 function loadView(): View {
   try {
     const v = JSON.parse(localStorage.getItem('view') ?? 'null') as View | null;
-    if (v && ['home', 'opps', 'auto', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
+    if (v && ['home', 'bots', 'more', 'opps', 'auto', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
   } catch { /* storage unavailable */ }
   return { v: 'home' };
 }
@@ -119,7 +121,6 @@ export default function App() {
   if (!s) return <div className="app"><p className="muted" style={{ paddingTop: 24 }}>{err ?? streamErr ?? 'Connecting to the bot server…'}</p></div>;
 
   const sel = chain === 'all' ? null : chainOf(s, chain);
-  const running = [...s.grids, ...(s.trends ?? []), ...(s.lps ?? [])].filter((b: { status: string }) => b.status === 'running').length;
   const stopAll = () => {
     if (scrolling.current) return;
     const what = sel ? `every bot on ${sel.name}` : 'every bot on every chain';
@@ -131,14 +132,15 @@ export default function App() {
       <div className="app">
         <Header
           s={s} view={view} nav={nav} chain={chain} setChain={setChain} showUsd={showUsd} setShowUsd={usdCtx.set}
-          connected={connected} busy={busy} running={running} ver={ver.v} holdings={holdings.data}
-          onStopAll={stopAll} onActivity={() => setDrawer(true)} onGuide={() => setGuide(true)}
+          connected={connected} ver={ver.v} holdings={holdings.data} onActivity={() => setDrawer(true)}
         />
 
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}
 
         <ViewError key={`${view.v}:${'id' in view ? view.id : ''}:${'tab' in view ? view.tab : ''}:${view.v === 'holdings' ? view.focus ?? '' : ''}`} onHome={() => nav({ v: 'home' })}>
-          {view.v === 'home' && <Home s={s} events={events} ticks={ticks} ver={ver.v} nav={nav} act={act} busy={busy} />}
+          {view.v === 'home' && <Home s={s} nav={nav} holdings={holdings.data} />}
+          {view.v === 'bots' && <Bots s={s} nav={nav} busy={busy} onStopAll={stopAll} />}
+          {view.v === 'more' && <More s={s} nav={nav} onGuide={() => setGuide(true)} onActivity={() => setDrawer(true)} />}
           {view.v === 'opps' && <Opportunities s={s} nav={nav} act={act} busy={busy} />}
           {view.v === 'auto' && <SmartTrader s={s} nav={nav} />}
           {view.v === 'holdings' && <Holdings s={s} snap={holdings.data} loading={holdings.loading} error={holdings.err} reload={holdings.reload} focus={view.focus} nav={nav} />}

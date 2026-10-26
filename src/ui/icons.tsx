@@ -50,7 +50,7 @@ export function ChainMark({ short, color, size = 28 }: { short: string; color: s
 
 export type IconName =
   | 'grid' | 'trend' | 'drop' | 'wallet' | 'layers' | 'spark' | 'chart' | 'search' | 'flask'
-  | 'swap' | 'bell' | 'gear' | 'users' | 'book' | 'pulse' | 'user' | 'activity' | 'coins' | 'target' | 'list';
+  | 'swap' | 'bell' | 'gear' | 'users' | 'book' | 'pulse' | 'user' | 'activity' | 'coins' | 'target' | 'list' | 'home' | 'more';
 
 const STROKE = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
 
@@ -75,6 +75,8 @@ const PATHS: Record<IconName, ReactNode> = {
   coins: <><ellipse {...STROKE} cx="12" cy="7" rx="7" ry="3" /><path {...STROKE} d="M5 7v5c0 1.7 3.1 3 7 3s7-1.3 7-3V7M5 12v5c0 1.7 3.1 3 7 3s7-1.3 7-3v-5" /></>,
   target: <><circle {...STROKE} cx="12" cy="12" r="7" /><circle {...STROKE} cx="12" cy="12" r="3" /><path {...STROKE} d="M12 3v2M12 19v2M3 12h2M19 12h2" /></>,
   list: <path {...STROKE} d="M8 7h12M8 12h12M8 17h12M4 7h.01M4 12h.01M4 17h.01" />,
+  home: <path {...STROKE} d="M4 11.5 12 4l8 7.5V20a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1v-8.5z" />,
+  more: <><circle cx="6" cy="12" r="1.15" fill="currentColor" /><circle cx="12" cy="12" r="1.15" fill="currentColor" /><circle cx="18" cy="12" r="1.15" fill="currentColor" /></>,
 };
 
 export function Icon({ name, size = 20 }: { name: IconName; size?: number }) {

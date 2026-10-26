@@ -19,6 +19,8 @@ export type ToolTab = (typeof TOOL_TABS)[number][0];
 export type HoldingsFocus = 'wallet' | 'lp' | 'fees' | 'bots' | 'chains' | 'how';
 export type View =
   | { v: 'home' }
+  | { v: 'bots' }
+  | { v: 'more' }
   | { v: 'opps' }
   | { v: 'auto' }
   | { v: 'holdings'; focus?: HoldingsFocus }
