@@ -1,5 +1,6 @@
 /** Sticky glass header: tabs open pictured menus, a net-worth chip, and the guarded Stop all control. */
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKey } from 'react';
+import { createPortal } from 'react-dom';
 import { chainOf, chains, type ChainFilter } from './chains';
 import { ChainMark, Icon, TokenMark, type IconName } from './icons';
 import { formatUsdChip, type HoldingsSnapshot } from '../live/holdingsMath';
@@ -384,7 +385,7 @@ export function Header({
           ))}
         </div>
       )}
-      {drawer && <>
+      {drawer && createPortal(<>
         <div className="nav-scrim" onClick={() => setDrawer(false)} />
         <aside className="nav-drawer" id={drawerId} ref={drawerRef} role="dialog" aria-modal="true" aria-label="Menu">
           <div className="nav-drawer-head">
@@ -422,7 +423,7 @@ export function Header({
             );
           })}
         </aside>
-      </>}
+      </>, document.body)}
     </header>
   );
 }
