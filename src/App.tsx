@@ -1,4 +1,4 @@
-/** App shell: top bar, Home / New bot / bot detail / Tools, activity drawer, Guide. */
+/** App shell: top bar, Home / Opportunities / New bot / bot detail / Tools, activity drawer, Guide. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Guide } from './Guide';
 import { useStream, type ActivityEvent } from './ui/useStream';
@@ -14,13 +14,15 @@ import { TrendDetail } from './ui/TrendDetail';
 import { LpDetail } from './ui/LpDetail';
 import { ViewError } from './ui/ViewError';
 import { Tools } from './ui/Tools';
+import { Opportunities } from './ui/Opportunities';
 import { useVersion, VersionPill } from './ui/System';
 import { TOOL_TABS, type View } from './ui/model';
+import { loadShowUsd, saveShowUsd, ShowUsdCtx } from './ui/money';
 
 function loadView(): View {
   try {
     const v = JSON.parse(localStorage.getItem('view') ?? 'null') as View | null;
-    if (v && ['home', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
+    if (v && ['home', 'opps', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
   } catch { /* storage unavailable */ }
   return { v: 'home' };
 }
@@ -50,6 +52,8 @@ export default function App() {
   const [chain, setChainState] = useState<ChainFilter>(loadChain);
   const setChain = (c: ChainFilter) => { setChainState(c); try { localStorage.setItem('chain', String(c)); } catch { /* storage unavailable */ } };
   const chainCtx = useMemo(() => ({ chain, setChain }), [chain]);
+  const [showUsd, setShowUsdState] = useState(loadShowUsd);
+  const usdCtx = useMemo(() => ({ on: showUsd, set: (on: boolean) => { setShowUsdState(on); saveShowUsd(on); } }), [showUsd]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const ver = useVersion();
@@ -101,12 +105,13 @@ export default function App() {
   const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
   return (
-    <ChainFilterCtx.Provider value={chainCtx}><RefreshCtx.Provider value={refresh}>
+    <ChainFilterCtx.Provider value={chainCtx}><RefreshCtx.Provider value={refresh}><ShowUsdCtx.Provider value={usdCtx}>
       <div className="app">
         <header className="topbar">
           <span className="logo"><i />GridBot</span>
           <nav className="nav" aria-label="main">
             <button type="button" className={view.v === 'home' || view.v === 'grid' || view.v === 'trend' || view.v === 'lp' ? 'on' : ''} onClick={() => nav({ v: 'home' })}>Home</button>
+            <button type="button" className={view.v === 'opps' ? 'on' : ''} onClick={() => nav({ v: 'opps' })}>Opportunities</button>
             <button type="button" className={view.v === 'new' ? 'on' : ''} onClick={() => nav({ v: 'new', kind: 'grid' })}>New bot</button>
             <button type="button" className={view.v === 'tools' ? 'on' : ''} onClick={() => nav({ v: 'tools', tab: view.v === 'tools' ? view.tab : TOOL_TABS[0][0] })}>Tools</button>
           </nav>
@@ -120,6 +125,8 @@ export default function App() {
               </button>
             ))}
           </div>
+          <button type="button" className={`pill usd-switch ${showUsd ? 'on' : ''}`} aria-pressed={showUsd} onClick={() => usdCtx.set(!showUsd)}
+            title={showUsd ? 'Dollar values are shown beside coin amounts. Tap to show coins only.' : 'Results are shown in coins. Tap to also show their dollar value at today\'s price.'}>$ {showUsd ? 'on' : 'off'}</button>
           {s.address
             ? <span className="pill" title={s.address}>Address {short(s.address)}</span>
             : <span className="pill warn" title="No signing key in .env: every bot runs in paper mode">Paper only</span>}
@@ -136,6 +143,7 @@ export default function App() {
 
         <ViewError key={`${view.v}:${'id' in view ? view.id : ''}:${'tab' in view ? view.tab : ''}`} onHome={() => nav({ v: 'home' })}>
           {view.v === 'home' && <Home s={s} events={events} ticks={ticks} ver={ver.v} nav={nav} act={act} busy={busy} />}
+          {view.v === 'opps' && <Opportunities s={s} nav={nav} act={act} busy={busy} />}
           {view.v === 'new' && <NewBot s={s} kind={view.kind} trendPrefill={view.trendPrefill} gridPrefill={view.gridPrefill} lpPrefill={view.lpPrefill} nav={nav} act={act} busy={busy} />}
           {view.v === 'grid' && <GridDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'trend' && <TrendDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
@@ -152,6 +160,6 @@ export default function App() {
         </>}
         {guide && <Guide onClose={closeGuide} />}
       </div>
-    </RefreshCtx.Provider></ChainFilterCtx.Provider>
+    </ShowUsdCtx.Provider></RefreshCtx.Provider></ChainFilterCtx.Provider>
   );
 }

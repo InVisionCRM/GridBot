@@ -3,7 +3,7 @@
  *   App          the running code vs the build, the checkout and GitHub
  *   Chains       RPC answers (timed), signing key, gas, wallet balances
  *   Bots         ticking, errors, levels that can never trade, stuck transactions, range, pool readable, next trade
- *   Market data  GeckoTerminal rate limits (counted on this machine), daily scan
+ *   Market data  GeckoTerminal rate limits (counted on this machine), the opportunity scan
  * Every finding says what it means and, when something is wrong, the one fix.
  */
 import type { VersionReport } from './version';
@@ -58,7 +58,7 @@ export function botChecks(b: AnyObj, kind: 'grid' | 'trend' | 'lp', now: number,
   if (kind === 'grid') gridChecks(b, now, add);
   if (kind === 'lp') {
     if (b.step?.hash && b.step.sentAt && now - b.step.sentAt > 10 * 60_000) add('tx', 'warn', `A transaction has waited ${mins(now - b.step.sentAt)} to confirm.`, 'Check it on the explorer; the bot settles it by hash when it lands.');
-    if (b.status === 'running' && b.position && b.inRange === false && !b.config?.rerange) add('range', 'warn', "The price is outside the range and moving the range is off, so it isn't earning.", 'Turn on "Move the range with the price", or close the position.');
+    if (b.status === 'running' && b.position && b.inRange === false && !b.config?.rerange) add('range', 'warn', "The price is outside the range and moving the range is off, so it isn't earning.", 'Turn on Auto-move or move it to the price on the bot\'s page, or close the position.');
   }
   if (!out.length) add('ok', 'pass', kind === 'lp' ? (b.position ? (b.inRange ? 'In range and earning.' : 'Out of range; the range moves if it stays out.') : 'Opening…') : 'Running and reading prices.');
   return out;
@@ -104,7 +104,7 @@ export function dataChecks(sync: AnyObj | null, scan: AnyObj | null, now: number
   if (sync) {
     const n = sync.limited1h as number;
     out.push({
-      id: 'data:gecko', group: 'Market data', name: 'GeckoTerminal (charts, daily scan)', state: n > 0 ? 'warn' : 'pass',
+      id: 'data:gecko', group: 'Market data', name: 'GeckoTerminal (charts, opportunity scan)', state: n > 0 ? 'warn' : 'pass',
       detail: n > 0
         ? `${n} rate limit${n === 1 ? '' : 's'} (HTTP 429) in the last hour. The app slows down by itself (now one request every ${(sync.paceMs / 1000).toFixed(1)} s). Trading doesn't use GeckoTerminal, only charts and the scan do.`
         : `No rate limits in the last hour (${sync.calls} requests since start, one every ${(sync.paceMs / 1000).toFixed(1)} s at most). Trading doesn't use GeckoTerminal.`,
@@ -114,7 +114,7 @@ export function dataChecks(sync: AnyObj | null, scan: AnyObj | null, now: number
   if (scan) {
     const age = scan.at == null ? null : now - scan.at;
     out.push({
-      id: 'data:scan', group: 'Market data', name: 'Daily scan', state: scan.running ? 'pass' : age == null || age > 26 * 3600_000 ? 'warn' : 'pass',
+      id: 'data:scan', group: 'Market data', name: 'Opportunity scan', state: scan.running ? 'pass' : age == null || age > 26 * 3600_000 ? 'warn' : 'pass',
       detail: scan.running ? 'Scanning now.' : age == null ? 'Not run yet.' : `Last scan ${Math.round(age / 3600_000)} h ago.`,
     });
   }

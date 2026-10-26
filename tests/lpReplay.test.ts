@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addSwaps, replayLp, replayTable, type PoolMinute, type ReplayOpts, type ReplayPool } from '../src/market/lpReplay';
-import { LP_MAX_MOVES_PER_DAY } from '../src/market/lp';
+import { addSwaps, positionFor, replayLp, replayTable, type PoolMinute, type ReplayOpts, type ReplayPool } from '../src/market/lpReplay';
 import { sqrtPriceAt } from '../src/live/v3Liquidity';
 
 /** WETH/USDG-like pool: base = token0 (18 decimals), quote = token1 (6), tick spacing 1, 0.01 % swaps. */
@@ -43,14 +42,29 @@ describe('addSwaps: a pool\'s swaps folded into minutes', () => {
 });
 
 describe('replayLp: fees', () => {
-  it('a price that never leaves the range: the result vs holding is exactly the fees, and fees scale with trading', () => {
+  it('a price that never leaves the range: earned after costs is the fees less the opening swap, and fees scale with trading', () => {
     const a = replayLp(minutes(repeat(T, 100)), POOL, { ...BASE, bandPct: 0.05, rerange: true });
     expect(a.moves).toBe(0);
     expect(a.inRange).toBe(1);
     expect(a.fees).toBeGreaterThan(0);
-    expect(a.vsHold).toBeCloseTo(a.fees, 6);
+    expect(a.moveLoss).toBe(0);
+    expect(a.net).toBeCloseTo(a.fees - a.swapCost, 9);
     const b = replayLp(minutes(repeat(T, 100), 2e-9), POOL, { ...BASE, bandPct: 0.05, rerange: true });
     expect(b.fees).toBeCloseTo(2 * a.fees, 6);
+  });
+
+  it('fees are counted in the coin they were paid in', () => {
+    // quote fees only: all of it is quote coin
+    const q = replayLp(minutes(repeat(T, 50)), POOL, { ...BASE, bandPct: 0.05, rerange: false });
+    expect(q.feeCoins.base).toBe(0);
+    expect(q.feeCoins.quote).toBeCloseTo(q.fees, 12);
+    // base fees only (f0 per unit of liquidity, raw token0 with 18 decimals): base coin, worth base × price
+    const rows = minutes(repeat(T, 50), 0).map((m) => ({ ...m, f0: 1e-6 }));
+    const b = replayLp(rows, POOL, { ...BASE, bandPct: 0.05, rerange: false });
+    const price = sqrtPriceAt(T) ** 2 * 1e12; // quote per base (18 vs 6 decimals)
+    expect(b.feeCoins.quote).toBe(0);
+    expect(b.feeCoins.base).toBeGreaterThan(0);
+    expect(b.fees).toBeCloseTo(b.feeCoins.base * price, 6);
   });
 
   it('earns only for the part of a minute inside the range', () => {
@@ -74,36 +88,20 @@ function rawUpper(band: number) { return sqrtPriceAt(T) ** 2 * (1 + band); }
 describe('replayLp: moving the range (the live bot\'s rule)', () => {
   const away = [T, ...repeat(T + 2000, 300)]; // jumps above a ±5% range and trades there
 
-  it('moves once the fees missed reach what moving costs; never with moves off', () => {
-    const cheap = replayLp(minutes(away), POOL, { ...BASE, bandPct: 0.05, rerange: true, gasMove: 0.001 });
-    expect(cheap.moves).toBe(1);
+  it('moves as soon as a minute ends outside the range, whatever moving costs; never with moves off', () => {
+    const on = replayLp(minutes(away), POOL, { ...BASE, bandPct: 0.05, rerange: true, gasMove: 0.001 });
+    expect(on.moves).toBe(1);
     const off = replayLp(minutes(away), POOL, { ...BASE, bandPct: 0.05, rerange: false, gasMove: 0.001 });
     expect(off.moves).toBe(0);
-    // a costlier move waits for more missed fees: too costly to be worth it in 300 minutes, so no move
-    const dear = replayLp(minutes(away), POOL, { ...BASE, bandPct: 0.05, rerange: true, gasMove: 1e6 });
-    expect(dear.moves).toBe(0);
     // after the move the price is inside the new range
-    expect(cheap.inRange).toBeGreaterThan(0.9);
+    expect(on.inRange).toBeGreaterThan(0.9);
   });
 
-  it('a minute back in range only earns back that minute: the tally keeps most of what was missed', () => {
-    const free = { ...POOL, swapFee: 0 };
-    // one minute's fees in range = what the position misses per minute out of range (quote fees, so the price doesn't matter)
-    const c = replayLp(minutes([T, T]), free, { ...BASE, bandPct: 0.05, rerange: false }).fees;
-    const o = { ...BASE, bandPct: 0.05, rerange: true, gasMove: 24.5 * c };
-    // 20 minutes out (20c missed), 1 back in (19c), then 10 out: 19c + 6c passes 24.5c
-    const r = replayLp(minutes([T, ...repeat(T + 2000, 20), T, ...repeat(T + 2000, 10)]), free, o);
-    expect(r.moves).toBe(1);
-    // the last 10 minutes out alone don't reach it: the move came from the tally kept through the dip
-    expect(replayLp(minutes([T, ...repeat(T + 2000, 10)]), free, o).moves).toBe(0);
-  });
-
-  it(`at most ${LP_MAX_MOVES_PER_DAY} moves in any 24 hours`, () => {
-    // the price flips 20% each minute for a day and a bit: every minute is a move that's due
+  it('no daily limit: a price flipping in and out of the range moves every time it is out', () => {
+    // the price flips 20% each minute for a day and a bit: every other minute ends outside the range
     const ticks = Array.from({ length: 1500 }, (_, i) => (i % 2 ? T + 2000 : T));
     const r = replayLp(minutes(ticks, 1e-6), POOL, { ...BASE, bandPct: 0.05, rerange: true });
-    // minutes 1–8 move, then nothing until 24 h after the first move (minute 1441), which allows 8 more by minute 1500
-    expect(r.moves).toBe(2 * LP_MAX_MOVES_PER_DAY);
+    expect(r.moves).toBe(1499); // each minute ends 20% from the last move's centre
   });
 
   it('a swap over the price-impact cap holds the move back, counted once per stretch out of range', () => {
@@ -123,10 +121,11 @@ describe('replayLp: moving the range (the live bot\'s rule)', () => {
     const stay = replayLp(minutes(ticks, 1e-12), POOL, { ...BASE, bandPct: 0.01, rerange: false });
     expect(move.moves).toBe(2); // up, then back down
     expect(stay.moves).toBe(0);
-    // staying is back to its opening coins (plus fees); moving sold on the way up and bought back higher
-    expect(stay.vsHold).toBeGreaterThan(0);
-    expect(move.vsHold).toBeLessThan(stay.vsHold);
-    expect(move.vsHold - move.fees).toBeLessThan(-1); // the coin-mix loss is real money on $1,000
+    // staying is back to its opening coins (plus fees): nothing lost; moving sold on the way up and bought back higher
+    expect(stay.moveLoss).toBe(0);
+    expect(move.moveLoss).toBeGreaterThan(1); // real money on $1,000
+    expect(move.net).toBeCloseTo(move.fees - move.gas - move.swapCost - move.moveLoss, 9);
+    expect(move.net).toBeLessThan(stay.net);
   });
 
   it('pays gas and swap costs on every open', () => {
@@ -143,16 +142,23 @@ describe('replayLp: moving the range (the live bot\'s rule)', () => {
   });
 });
 
+describe('positionFor: a position opened now', () => {
+  it('holds coins worth the money put in, and a narrower range is more liquidity for the same money', () => {
+    const price = sqrtPriceAt(T) ** 2 * 1e12;
+    const wide = positionFor(1000, 0.2, T, POOL), narrow = positionFor(1000, 0.02, T, POOL);
+    for (const x of [wide, narrow]) expect((x.coins.base * price + x.coins.quote) / 1000).toBeCloseTo(1, 3);
+    expect(narrow.L / wide.L).toBeGreaterThan(5);
+    // double the money, double the liquidity
+    expect(positionFor(2000, 0.02, T, POOL).L / narrow.L).toBeCloseTo(2, 6);
+  });
+});
+
 describe('replayTable', () => {
-  it('each range with moves on and off, and every whole day of the window on its own', () => {
-    // 7 days of minutes; the window starts 30 s after its 7-day mark, as a "last 7 days" cut does
-    const rows = minutes(repeat(T, 7 * 1440)).map((m) => ({ ...m, t: m.t + 30 }));
-    rows[rows.length - 1] = { ...rows[rows.length - 1], t: rows[0].t - 30 + 7 * 86_400 };
-    const tab = replayTable(rows, POOL, BASE, [0.02, 0.05]);
+  it('each range with moves on and off', () => {
+    const tab = replayTable(minutes(repeat(T, 1440)), POOL, BASE, [0.02, 0.05]);
     expect(tab.map((r) => [r.bandPct, r.rerange])).toEqual([[0.02, true], [0.02, false], [0.05, true], [0.05, false]]);
-    for (const r of tab) {
-      expect(r.daysRun).toBe(7);
-      expect(r.daysAhead).toBe(7); // only fees, nothing else changes
-    }
+    // the price never moves: narrower earns more (more liquidity for the same money), nothing is lost to moves
+    expect(tab[0].fees).toBeGreaterThan(tab[2].fees);
+    for (const r of tab) expect(r.moveLoss).toBe(0);
   });
 });

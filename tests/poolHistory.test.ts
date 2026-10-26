@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { decodeSwap, KEEP_DAYS, PoolHistories, type PoolRef } from '../src/server/lp/poolHistory';
 import { V3_SWAP_TOPIC, type LogReader } from '../src/server/market/onchain';
+import { syncAnswer } from '../src/server/lp/replay';
 
 const POOL = '0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca';
 const T0 = 1_790_000_000;
@@ -62,17 +63,40 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
     expect(saved.rows).toHaveLength(m.length);
     const again = new PoolHistories(dir, () => c.reader, fast(now)).get(REF);
     expect(again.minutes).toEqual(m);
+    // read to the head once: after a restart its week is used while the next top-up runs
+    expect(again.state.ready).toBe(true);
+  });
+
+  it('a first read stopped half way is saved, but not trusted after a restart: the rest of the week is read first', async () => {
+    const c = chain({ days: KEEP_DAYS + 1, every: 600, cap: 10_000 });
+    const dir = mkdtempSync(join(tmpdir(), 'ph-'));
+    let t = (T0 + c.latest) * 1000, calls = 0;
+    // each request takes 40 s (so the sync saves as it goes); the RPC dies after 3 of them
+    const reader: LogReader = { ...c.reader, getLogs: async (f) => { if (++calls > 3) throw new Error('connect ECONNREFUSED'); t += 40_000; return c.reader.getLogs(f); } };
+    const h = new PoolHistories(dir, () => reader, { now: () => t, gapMs: 0, sleep: async () => {} }).get({ ...REF, logChunk: 20_000 });
+    await expect(h.sync()).rejects.toThrow(/ECONNREFUSED/);
+    expect(h.minutes.length).toBeGreaterThan(0);
+    const again = new PoolHistories(dir, () => c.reader, fast(() => t)).get(REF);
+    expect(again.minutes.length).toBeGreaterThan(0); // part of the week was saved
+    expect(again.state.ready).toBe(false);
+    expect(syncAnswer({ ...again.state, syncing: true })).toMatchObject({ state: 'syncing' });
   });
 
   it('a later sync reads only the new blocks and continues the last minute', async () => {
     const c = chain({ days: 1, every: 20, cap: 10_000 });
     let t = (T0 + c.latest) * 1000;
     const h = new PoolHistories(null, () => c.reader, fast(() => t)).get(REF);
+    expect(h.state.ready).toBe(false);
     await h.sync();
+    expect(h.state.ready).toBe(true);
     const n = h.minutes.length, logs = c.calls.logs;
     c.grow(600);
     t += 600_000;
-    await h.sync();
+    const topUp = h.sync();
+    // the week already read stays usable while the new blocks are read
+    expect(h.state).toMatchObject({ syncing: true, ready: true });
+    expect(syncAnswer(h.state)).toBeNull();
+    await topUp;
     expect(h.minutes.length).toBeGreaterThanOrEqual(n + 9);
     expect(h.minutes.length).toBeLessThanOrEqual(n + 10);
     expect(h.state.total).toBe(600);
@@ -93,9 +117,12 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
   it('a request that keeps failing on a single block is a real error, kept for the page to show', async () => {
     const c = chain({ days: 1, every: 1, cap: 0 });
     const h = new PoolHistories(null, () => c.reader, fast(() => (T0 + c.latest) * 1000)).get(REF);
-    await expect(h.sync()).rejects.toThrow(/exceeds limit/);
+    const first = h.sync();
+    expect(syncAnswer(h.state)).toEqual({ state: 'syncing', done: 0, total: 0 }); // a first read shows its progress
+    await expect(first).rejects.toThrow(/exceeds limit/);
     expect(h.state.error).toMatch(/exceeds limit/);
-    expect(h.state.syncing).toBe(false);
+    expect(h.state).toMatchObject({ syncing: false, ready: false });
+    expect(syncAnswer(h.state)).toEqual({ state: 'error', error: h.state.error });
   });
 
   it('a rate-limited RPC (429) is waited out, 1 s then 2 s, without shrinking the requests', async () => {

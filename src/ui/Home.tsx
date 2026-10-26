@@ -3,26 +3,28 @@
  * doing right now (each grid's price gliding between its next buy and sell), a live feed where every trade shows its
  * own result, and what needs attention.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { http, botApi } from './api';
 import { AnimatedNumber, StatusDot, useFlash } from './motion';
-import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
+import { ago, cls, num, pct, px, qty, usd } from './fmt';
+import { Usd, useShowUsd } from './money';
 import { ChainBadge, DexTag, chainOf, chains, useChainFilter } from './chains';
 import { humanAmount } from '../live/amount';
-import { botView, earnedByCoin, errMsg, gridName, gridPnlUsd, quoteSym, rangeState, trendPnlUsd, type AnyObj, type Nav } from './model';
+import { botView, earnedByCoin, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { buildFeed, LiveFeed, LiveLevels, LivePrice, livePrice, LiveRange } from './live';
 import { nextLevels } from '../live/liveGrid';
 import type { ActivityEvent, Ticks } from './useStream';
 import { L } from './Tip';
+import { scanStep, useOpportunities } from './Opportunities';
+import { gridRank, lpRank, type Opportunity } from '../market/scan';
 
 interface Props { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 interface HomeProps extends Props { events: ActivityEvent[]; ticks: Ticks | null; ver: AnyObj | null }
 
-function BotRow({ s, b, hold, price, nav, act, busy }: { s: AnyObj; b: AnyObj; hold: number | null; price: number | null; nav: Nav; act: Props['act']; busy: boolean }) {
+function BotRow({ s, b, price, nav, act, busy }: { s: AnyObj; b: AnyObj; price: number | null; nav: Nav; act: Props['act']; busy: boolean }) {
   const grid = b.kind === 'grid';
   const flash = useFlash(b.trades.length);
-  const pnl = grid ? gridPnlUsd(b) : trendPnlUsd(b);
-  const pnlQuote = grid ? b.pnl.realized + b.pnl.unrealized : b.pnl.equity - b.capital;
+  const q = quoteSym(b), k: number | null = b.usdPerQuote ?? null;
   const rs = grid ? rangeState(b) : null;
   const state = b.lastError ? 'error' : b.status;
   const meta = grid
@@ -41,17 +43,13 @@ function BotRow({ s, b, hold, price, nav, act, busy }: { s: AnyObj; b: AnyObj; h
         {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
       </div>
-      {grid
-        ? <div className={`bot-pnl ${cls(b.pnl.realized)}`} title="Earned by trading: completed buy → sell trades, after fees and gas">
-          <AnimatedNumber value={b.pnl.realized} format={(x) => qty(x, quoteSym(b), 4)} />
-        </div>
-        : <div className={`bot-pnl ${cls(pnl ?? pnlQuote)}`}>
-          {pnl != null ? <AnimatedNumber value={pnl} format={(x) => usd(x, true)} /> : qty(pnlQuote, quoteSym(b), 4)}
-        </div>}
+      <div className={`bot-pnl ${cls(b.pnl.realized)}`} title="Earned by trading: completed buy → sell trades, after fees and gas">
+        <AnimatedNumber value={b.pnl.realized} format={(x) => qty(x, q, 4)} /><Usd v={b.pnl.realized} k={k} />
+      </div>
       <div className="bot-meta">{b.available === false ? <span className="warn-t">Unavailable on this server</span> : b.lastError ? <span className="neg">{b.lastError}</span> : meta.filter(Boolean).join(' · ')}</div>
       {grid
-        ? <div className="bot-hold" title="Coins bought and not sold yet: their value moves with the price until they sell">{b.pnl.plsHeld > 0 ? `not sold yet: ${qty(b.pnl.unrealized, quoteSym(b), 4)}` : ''}</div>
-        : <div className="bot-hold" title="What the same money would have made by buying and holding at the bot's start">{hold != null ? `holding: ${usd(hold, true)}` : ''}</div>}
+        ? <div className="bot-hold" title="Coins bought and not sold yet: their value moves with the price until they sell">{b.pnl.plsHeld > 0 ? `not sold yet: ${qty(b.pnl.unrealized, q, 4)}` : ''}</div>
+        : <div className="bot-hold" title="The trade it holds now: its value moves with the price until it sells">{b.position ? `open trade: ${qty(b.position.unrealized, q, 4)}` : ''}</div>}
       {grid && b.status === 'running' && <div className="bot-live"><LiveLevels g={b} price={price} /></div>}
       <div className="bot-act" onClick={(e) => e.stopPropagation()}>
         {b.status === 'running'
@@ -62,7 +60,7 @@ function BotRow({ s, b, hold, price, nav, act, busy }: { s: AnyObj; b: AnyObj; h
   );
 }
 
-/** A liquidity bot: fees earned (after gas) is what it makes; the price side moves with the price. */
+/** A liquidity bot: fees earned after costs is what it makes; the fees themselves come in both coins. */
 function LpRow({ s, b, price, nav, act, busy }: { s: AnyObj; b: AnyObj; price: number | null; nav: Nav; act: Props['act']; busy: boolean }) {
   const flash = useFlash(b.reranges);
   const q = quoteSym(b), pnl: AnyObj | null = b.pnl;
@@ -84,11 +82,11 @@ function LpRow({ s, b, price, nav, act, busy }: { s: AnyObj; b: AnyObj; price: n
         {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
       </div>
-      <div className={`bot-pnl ${cls(pnl ? pnl.fees - pnl.gas : null)}`} title="Fees earned (collected + waiting in the position) minus gas">
-        {pnl ? <AnimatedNumber value={pnl.fees - pnl.gas} format={(x) => qty(x, q, 4)} /> : '—'}
+      <div className={`bot-pnl ${cls(pnl?.net)}`} title="Earned after costs: fees (collected + waiting in the position) minus gas, swap costs and what range moves lost">
+        {pnl ? <><AnimatedNumber value={pnl.net} format={(x) => qty(x, q, 4)} /><Usd v={pnl.net} k={b.usdPerQuote} /></> : '—'}
       </div>
       <div className="bot-meta">{b.available === false ? <span className="warn-t">Unavailable on this server</span> : b.lastError ? <span className="neg">{b.lastError}</span> : meta.filter(Boolean).join(' · ')}</div>
-      <div className="bot-hold" title="What price moves and swaps did to the coins: it moves with the price">{pnl ? `price: ${qty(pnl.price, q, 4)}` : ''}</div>
+      <div className="bot-hold" title="Fees earned so far, in the coins they were paid in">{pnl ? `fees ${qty(pnl.feeCoins.base, b.base, 4)} · ${qty(pnl.feeCoins.quote, q, 4)}` : ''}</div>
       {b.status !== 'closed' && <div className="bot-live"><LiveRange b={b} price={price} /></div>}
       <div className="bot-act" onClick={(e) => e.stopPropagation()}>
         {b.status === 'running'
@@ -125,115 +123,32 @@ function WalletPanel({ s, chain }: { s: AnyObj; chain: number | 'all' }) {
   );
 }
 
-const money = (x: number) => (x >= 1e9 ? `$${(x / 1e9).toFixed(1)}B` : x >= 1e6 ? `$${(x / 1e6).toFixed(1)}M` : x >= 1e3 ? `$${(x / 1e3).toFixed(0)}K` : `$${x.toFixed(0)}`);
-
-function PickRow({ k, use, busy }: { k: AnyObj; use: (k: AnyObj) => void; busy: boolean }) {
-  const t = k.test;
+/** Home's glance at Opportunities: the 2 safe pools ranked first for a grid and for liquidity, on the chain shown. */
+function BestThisWeek({ s, chain, nav }: { s: AnyObj; chain: number | 'all'; nav: Nav }) {
+  const { p, err } = useOpportunities();
+  if (err || !p) return null;
+  const safe = ((p.chains ?? []) as AnyObj[]).filter((c) => chain === 'all' || c.chainId === chain).flatMap((c) => c.items as Opportunity[])
+    .filter((o) => o.liveAllowed && (o.risk == null || o.risk === 'low'));
+  const top = (rank: (o: Opportunity) => number | null) => safe.filter((o) => rank(o) != null).sort((a, b) => rank(b)! - rank(a)!).slice(0, 2);
+  const rows = [...top(gridRank).map((o) => ({ o, how: 'grid' as const })), ...top(lpRank).map((o) => ({ o, how: 'lp' as const }))];
   return (
-    <div className="pick">
-      <span className="pick-rank">{k.rank}</span>
-      <div className="pick-main">
-        <div className="pick-name"><b>{k.label}</b>{k.key ? null : <span className="tag" title={k.add.address}>new token {k.add.address.slice(0, 6)}…{k.add.address.slice(-4)}</span>}{k.risk && k.risk !== 'low' ? <span className="tag live" title={k.riskWhy ?? ''}>risk {k.risk}</span> : null}</div>
-        {k.risk && k.risk !== 'low' && k.riskWhy ? <div className="small muted">{k.riskWhy}</div> : null}
-        <div className="small muted">±{Math.round(k.bandPct * 100)}% around {px(k.price)} · {k.gridCount} levels · spends {k.spend}{k.activity ? ` · ${money(k.activity.volume24Usd)} traded today · ${money(k.activity.liquidityUsd)} in the pool` : ''}</div>
-      </div>
-      <div className="pick-test">
-        <b className={cls(t.returnPct)}>{pct(t.returnPct, 2, true)}</b>
-        <span className="small muted">{t.roundTrips} trades in 7 days</span>
-        <span className="small muted">holding {pct(t.holdPct, 1, true)} · worst dip {pct(t.maxDrawdownPct, 1)}</span>
-      </div>
-      <button type="button" className="btn small-btn primary" disabled={busy} onClick={() => use(k)}>Use this</button>
-    </div>
-  );
-}
-
-/** "Scanning Robinhood Chain (2 of 3): testing pairs 5 of 11…" */
-function scanStep(g: AnyObj | null): string {
-  if (!g) return 'Scanning…';
-  return `Scanning ${g.chain} (${g.chainNo} of ${g.chains}): ${g.phase}${g.phase === 'finding pools' ? '' : ` ${g.done + 1} of ${g.total}`}…`;
-}
-
-/** Today's picks: the daily scan's best grid setups per chain, tested on the last 7 days of hourly prices. */
-/** Grid vs liquidity position vs hold for every pair the scan tested on one chain (same week, same test size). */
-function CompareList({ s, c, testUsd, nav }: { s: AnyObj; c: AnyObj; testUsd: number; nav: Nav }) {
-  if (!c.compare?.length) return null;
-  const lpOk = (r: AnyObj) => r.key && r.lp?.bandPct != null && (s.marketList ?? []).some((m: AnyObj) => m.key === r.key && m.lpOk);
-  const dexName = (id: string) => chainOf(s, c.chainId)?.dexes?.find((d: AnyObj) => d.id === id)?.name ?? id;
-  return (
-    <details className="more">
-      <summary>Grid vs liquidity position vs holding ({c.compare.length} pairs)</summary>
-      <p className="small muted picks-note">Same 7 days, about ${testUsd.toLocaleString('en-US')} each. A liquidity position (LP) earns its share of the pool's trading fees, after the DEX's own cut, while the price stays inside its range, and like a grid it ends up holding more of whichever coin fell. The LP here is a range that stays where it opened; New bot → Liquidity replays the pool's real trades with and without moving the range. Holding means putting all of it in the coin.</p>
-      <div className="cmp">
-        <div className="cmp-row cmp-head"><span>Pair</span><span className="n">Hold</span><span className="n">Grid</span><span className="n">LP</span></div>
-        {c.compare.map((r: AnyObj, i: number) => {
-          const best = Math.max(r.holdPct, r.grid?.returnPct ?? -Infinity, r.lp?.returnPct ?? -Infinity);
-          const cell = (x: number | null | undefined) => (x == null ? <span className="n muted">—</span> : <span className={`n ${cls(x)}${x === best ? ' win' : ''}`}>{pct(x, 1, true)}</span>);
-          return (
-            <div key={i} className="cmp-row">
-              <span className="cmp-name"><b>{r.label}</b> <DexTag name={dexName(r.dex)} feeBps={r.feeBps} /></span>
-              {cell(r.holdPct)}{cell(r.grid?.returnPct)}{cell(r.lp?.returnPct)}
-              <span className="cmp-why small muted">
-                {r.entryImpactPct >= 0.005 ? <span className="neg">Putting all ${testUsd.toLocaleString('en-US')} in at once moves this pool's price {pct(r.entryImpactPct, 1)}, which is in the hold and LP numbers. </span> : null}
-                {r.grid ? `Grid ±${Math.round(r.grid.bandPct * 100)}%, ${r.grid.gridCount} levels. ` : 'No grid made money. '}
-                {r.lp
-                  ? `LP ${r.lp.bandPct == null ? 'full range' : `±${Math.round(r.lp.bandPct * 100)}%`}: fees ${pct(r.lp.feesPct, 2, true)}, in range ${pct(r.lp.inRangePct, 0)} of the time, ${pct(r.lp.poolSharePct, 2)} of the pool. LPs keep ${pct(r.lpShare, 0)} of the fee here.`
-                  : `LP not tested: ${r.lpWhy}`}
-                {lpOk(r) && <> <button type="button" className="btn small-btn" onClick={() => nav({ v: 'new', kind: 'lp', lpPrefill: { pair: r.key, bandPct: r.lp.bandPct, nonce: Date.now() } })}>Start LP ±{Math.round(r.lp.bandPct * 100)}%</button></>}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </details>
-  );
-}
-
-function PicksPanel({ s, chain, nav, act, busy }: { s: AnyObj; chain: number | 'all'; nav: Nav; act: Props['act']; busy: boolean }) {
-  const [p, setP] = useState<AnyObj | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [usd, setUsd] = useState<string | null>(null);
-  const load = useCallback(() => http('/api/picks').then((x) => { setP(x); setErr(null); }).catch((e) => setErr(errMsg(e))), []);
-  useEffect(() => { void load(); }, [load]);
-  useEffect(() => {
-    if (!p?.running) return;
-    const t = setInterval(load, 4000);
-    return () => clearInterval(t);
-  }, [p?.running, load]);
-  if (err) return <div className="banner info"><span className="grow">Today's picks: {err}</span></div>;
-  if (!p) return null;
-  const testUsd = usd ?? String(p.testUsd);
-  const scan = () => act(async () => { await http('/api/picks/scan', 'POST', { testUsd: Number(testUsd) }); setP({ ...p, running: true }); });
-  const use = (k: AnyObj) => act(async () => {
-    const key = k.key ?? (await http('/api/picks/use', 'POST', { chainId: k.chainId, ...k.add })).key;
-    nav({ v: 'new', kind: 'grid', gridPrefill: { pair: key, bandPct: k.bandPct, gridCount: k.gridCount, nonce: Date.now() } });
-  });
-  const shown: AnyObj[] = p.chains.filter((c: AnyObj) => chain === 'all' || c.chainId === chain);
-  return (
-    <section className="card" aria-label="Today's picks">
+    <section className="card" aria-label="Best this week">
       <div className="card-head">
-        <h3>Today's picks</h3>
-        <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `scanned ${ago(p.at)} · next scan ${time(p.nextAt)}` : 'not scanned yet'}</span>
+        <h3><L tip="The safe pools ranked first in Opportunities: for a grid (how much the price swings, where a grid earned) and for liquidity (what it earned after costs), over the last 7 days at your test size.">Best this week</L></h3>
+        <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `scanned ${ago(p.at)}` : 'not scanned yet'}</span>
         <span className="grow" />
-        <label className="small muted test-usd"><L tip="The amount every setup is tested with, in dollars. Use what you plan to put in: price impact and your share of a pool depend on it.">Test with $</L><input value={testUsd} inputMode="decimal" onChange={(e) => setUsd(e.target.value.replace(/[$,\s]/g, ''))} /></label>
-        <button type="button" className="btn small-btn" disabled={busy || p.running} onClick={scan}>{p.running ? 'Scanning…' : 'Scan now'}</button>
+        <button type="button" className="btn small-btn primary" onClick={() => nav({ v: 'opps' })}>See all opportunities</button>
       </div>
-      <p className="small muted picks-note">Each chain's busiest pools are checked for real trading and safety, then the grid is replayed on the last 7 days of hourly prices with the pool's fee, price impact and gas, using about ${p.testUsd.toLocaleString('en-US')} of the coin it spends. These are the setups that made the most. A good week doesn't promise the next one, so start in paper first.</p>
-      {shown.map((c) => (
-        <div key={c.chainId} className="pick-chain">
-          <div className="pick-chain-head"><ChainBadge c={chainOf(s, c.chainId)} testnet={false} /><b>{c.name}</b><span className="muted small">{c.tested} pairs tested</span></div>
-          {c.error ? <p className="small neg">{c.error}</p>
-            : !c.picks.length ? <p className="small muted">Nothing made money here over the last 7 days. A grid would have lost to fees or to a one-way move.</p>
-            : c.picks.map((k: AnyObj) => <PickRow key={`${k.rank}-${k.label}`} k={k} use={use} busy={busy} />)}
-          <CompareList s={s} c={c} testUsd={p.testUsd} nav={nav} />
-          {c.skipped.length > 0 && (
-            <details className="more">
-              <summary>Why other pools were left out ({c.skipped.length})</summary>
-              <ul className="skip-list">{c.skipped.map((x: AnyObj, i: number) => <li key={i}><b>{x.name}</b> {x.why}</li>)}</ul>
-            </details>
-          )}
-        </div>
-      ))}
-      {!shown.length && !p.running && <p className="small muted">No scan yet. Press Scan now.</p>}
+      {rows.map(({ o, how }) => {
+        const e = how === 'grid' ? o.grid!.earnedPct : o.lp!.earnedPct;
+        return (
+          <div key={`${how}-${o.chainId}-${o.add?.pool ?? o.key}`} className="best-row">
+            <span className="best-name"><ChainBadge c={chainOf(s, o.chainId)} testnet={false} /><b>{o.label}</b><span className="small muted">{how === 'lp' ? `liquidity ±${num(o.lp!.bandPct * 100, 0)}%` : `grid ±${num(o.grid!.bandPct * 100, 0)}%, ${o.grid!.gridCount} levels · swings ${pct(o.swingPct, 0)} a day`}</span></span>
+            <span className="n"><b className={cls(e)}>{qty(e * o.capital, o.spend, 4)}</b> <span className="small muted">last week</span></span>
+          </div>
+        );
+      })}
+      {!rows.length && <p className="small muted">{p.at ? 'No safe pool earned from trading here last week.' : 'The first scan runs on its own; it takes a while.'}</p>}
     </section>
   );
 }
@@ -274,10 +189,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
     .sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
   const liveBots = bots.filter((b) => b.mode === 'live'), paperBots = bots.filter((b) => b.mode === 'paper');
   const ovLive: AnyObj[] = (ov.live?.bots ?? []).filter(here);
-  const holdOf = (id: string) => {
-    const o = [...ovLive, ...(ov.paper?.bots ?? [])].find((x) => x.id === id);
-    return o && o.hodlUsd != null ? o.hodlUsd - o.capitalUsd : null;
-  };
+  const { on: showUsd } = useShowUsd();
   // The change on coins not sold yet in ≈USD at today's prices (bots spend different coins, so dollars are the only way
   // to add them up); for a liquidity bot, what price moves did to its coins.
   const sumUsd = (part: (b: AnyObj) => number) => {
@@ -316,7 +228,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
     if (b.available === false) notices.push({ key: `na-${b.id}`, level: 'warn', text: <><b>{name}</b> trades on a chain or token this server doesn't load (removed, or turned off in .env). It is stopped; open it to remove it.</>, open });
     else if (b.lastError) notices.push({ key: `err-${b.id}`, level: 'error', text: <><b>{name}:</b> {b.lastError}</>, open });
     else if (b.kind === 'lp' && b.status === 'running' && b.position && b.inRange === false && !b.config?.rerange) {
-      notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is out of range</b> and isn't earning. Moving the range is off, so it waits for the price to come back. Open it to turn moving on or close it.</>, open });
+      notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is out of range</b> and isn't earning. Auto-move is off, so it waits for the price to come back. Open it to move the range or turn Auto-move on.</>, open });
     } else if (b.kind === 'grid' && b.status === 'running') {
       const rs = rangeState(b);
       if (rs === 'above' && !b.recenter?.enabled) notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is above its range.</b> Everything is sold and it waits for the price to come back. Open it to move the range or turn on Follow the price up.</>, open });
@@ -348,9 +260,11 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
           {next && <div className="small">Next likely trade: <b>{next.bot}</b>{next.paper ? <span className="tag paper-tag">paper</span> : null} {next.side === 'buy' ? 'buys' : 'sells'} at <b>{px(next.at)}</b>, {pct(next.dist, 2)} away</div>}
         </div>
       </section>
-      <p className="hero-foot muted small">
-        <L tip="Your live bots' coins valued at today's prices. It moves with the market every day, whether or not the bots trade. Paper bots aren't included.">Live holdings at today's prices:</L> <b>{value != null ? usd(value) : '—'}</b>{unsold != null && unsold !== 0 ? <> (coins not sold yet: <span className={cls(unsold)}>{usd(unsold, true)}</span>)</> : null}. This moves with the market every day; it isn't a trading result.
-      </p>
+      {showUsd && (
+        <p className="hero-foot muted small">
+          <L tip="Your live bots' coins valued at today's prices. It moves with the market every day, whether or not the bots trade. Paper bots aren't included.">Live holdings at today's prices:</L> <b>{value != null ? usd(value) : '—'}</b>{unsold != null && unsold !== 0 ? <> (coins not sold yet: <span className={cls(unsold)}>{usd(unsold, true)}</span>)</> : null}. This moves with the market every day; it isn't a trading result.
+        </p>
+      )}
       {paperBots.length > 0 && (
         <p className="paper-line small">
           <span className="tag paper-tag">paper</span> Simulated, not counted above: {paperEarn.length ? paperEarn.map((e) => `${e.amount > 0 ? '+' : e.amount < 0 ? '−' : ''}${humanAmount(Math.abs(e.amount))} ${e.symbol}`).join(' · ') : 'nothing yet'} from {paperTot.trades} trade{paperTot.trades === 1 ? '' : 's'} on {paperBots.length} paper bot{paperBots.length === 1 ? '' : 's'}.{' '}
@@ -377,7 +291,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
           </div>
           {bots.map((b) => (b.kind === 'lp'
             ? <LpRow key={b.id} s={s} b={b} price={priceOf(b)} nav={nav} act={act} busy={busy} />
-            : <BotRow key={b.id} s={s} b={b} hold={holdOf(b.id)} price={priceOf(b)} nav={nav} act={act} busy={busy} />))}
+            : <BotRow key={b.id} s={s} b={b} price={priceOf(b)} nav={nav} act={act} busy={busy} />))}
           {bots.length === 0 && (
             <div className="empty">
               <p>No bots{chain !== 'all' ? ' on this chain' : ''} yet. Start one in paper mode to see how it behaves with real prices and no real money.</p>
@@ -393,7 +307,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
 
       <WalletPanel s={s} chain={chain} />
 
-      <PicksPanel s={s} chain={chain} nav={nav} act={act} busy={busy} />
+      <BestThisWeek s={s} chain={chain} nav={nav} />
     </main>
   );
 }

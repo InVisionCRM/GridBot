@@ -609,7 +609,6 @@ export class TrendEngine {
       nextCloseAt: (bucketStart(Math.floor(this.now() / 1000), s.tf) + tfSec) * 1000,
       trades: trades.slice(-100).reverse(),
       pnl: { realized, unrealized, equity, returnPct: s.capital ? equity / s.capital - 1 : 0, gas: trades.reduce((a, t) => a + t.gasUsd, 0), fees: trades.reduce((a, t) => a + (t.feeQuote ?? 0), 0) },
-      hodl: s.startPrice && price ? (s.capital / s.startPrice) * price : null,
       stats: { ...tradeStats(closed), maxDrawdown: drawdown(s.equity).max, timeInMarket: s.startedAt ? inMarketMs / Math.max(1, this.now() - s.startedAt) : 0 },
       equityHist: s.equity.slice(-600),
       blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, lastError: this.lastError,

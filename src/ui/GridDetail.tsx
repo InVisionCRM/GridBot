@@ -1,10 +1,10 @@
-/** One grid: profit vs holding, chart with levels and fills, its own log, change range (restarts on its own pair). */
+/** One grid: what it earned in the coin it spends, chart with levels and fills, its own log, change range (restarts on its own pair). */
 import { useEffect, useState } from 'react';
 import { formatPrice } from '../lib/format';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
-import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
+import { ago, cls, num, pct, px, qty, time } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { T } from './theme';
@@ -15,6 +15,7 @@ import { humanAmount } from '../live/amount';
 import { recenterAt } from '../live/recenter';
 import { LiveLevels, livePrice } from './live';
 import { L, Tip } from './Tip';
+import { Amt, Usd } from './money';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -156,7 +157,7 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
         <tbody>
           {g.trades.map((t: AnyObj) => {
             const profit = t.side === 'sell' || t.failed ? net(t) : null;
-            const profitTxt = profit == null ? '' : k ? usd(profit * k, true) : qty(profit, q, 4);
+            const profitTxt = profit == null ? '' : <Amt v={profit} sym={q} k={k} sig={4} />;
             return all ? (
               <tr key={t.id} className={t.failed ? 'failed-row' : ''}>
                 <td>{time(t.timestamp)}</td><td className={`side ${t.side}`} title={t.seed ? `Start-up buy for levels ${t.seed.join(', ')} above the start price` : undefined}>{t.side}{t.seed ? ' (start-up)' : ''}{t.failed ? ' ✗' : ''}</td><td className="muted">{t.intervalIndex}</td>
@@ -190,9 +191,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const q = quoteSym(g);
   const rs = rangeState(g);
   const earned: number = g.pnl.realized, open: number = g.pnl.unrealized, held: number = g.pnl.plsHeld;
-  const inUsd = (x: number) => (k ? ` · ≈ ${usd(x * k, true)} today` : '');
   const running = g.status === 'running';
-  const money = (x: number) => (k ? usd(x * k, true) : qty(x, q, 4));
   const remove = () => act(async () => { if (confirm(`Remove the ${gridName(g)} grid and its history? ${g.base} it still holds stays in your wallet.`)) { await botApi(`grids/${g.id}`, 'DELETE'); nav({ v: 'home' }); } });
 
   return (
@@ -227,24 +226,19 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip="Every completed buy then sell: what the sell brought in minus what that buy cost, after pool fees and gas. This is money the grid has made; the coin's price no longer changes it.">Earned by trading</L></span>
           <div className={`kpi-v ${cls(earned)}`}><AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} /></div>
-          <span className="sub">from {g.stats.roundTrips} completed buy → sell trade{g.stats.roundTrips === 1 ? '' : 's'}, after fees and gas{inUsd(earned)}</span>
+          <span className="sub">from {g.stats.roundTrips} completed buy → sell trade{g.stats.roundTrips === 1 ? '' : 's'}, after fees and gas<Usd v={earned} k={k} /></span>
         </div>
         <div className="kpi">
           <span><L tip="Coins the grid bought that haven't sold yet, compared with what they cost. This goes up and down with the price until they sell one level up; it isn't a loss unless they're sold below cost.">Bought, not sold yet</L></span>
           <div className={`kpi-v ${cls(open)}`}>{held > 0 ? qty(open, q, 5) : '—'}</div>
-          <span className="sub">{held > 0 ? `${num(held, held < 10 ? 6 : 2)} ${g.base} bought for ${qty(g.pnl.costUsd, q, 5, false)}, worth ${qty(held * (g.price ?? 0), q, 5, false)} now` : 'nothing waiting to sell'}</span>
+          <span className="sub">{held > 0 ? <>{num(held, held < 10 ? 6 : 2)} {g.base} bought for {qty(g.pnl.costUsd, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now<Usd v={open} k={k} /></> : 'nothing waiting to sell'}</span>
         </div>
         <div className="kpi">
           <span><L tip={`Earned by trading plus the change on the coins not sold yet, in ${q}.`}>Overall, in {q}</L></span>
           <div className={`kpi-v ${cls(earned + open)}`}>{qty(earned + open, q, 5)}</div>
-          <span className="sub">{k ? `≈ ${usd((earned + open) * k, true)} at today's ${q} price` : 'no dollar price for this coin'}</span>
+          <span className="sub">earned + not sold yet<Usd v={earned + open} k={k} /></span>
         </div>
-        <div className="kpi">
-          <span><L tip={`What the grid has now (${q} and ${g.base ?? 'PLS'} at today's price) minus what the coins it held right after its setup would be worth today. Positive: its buying and selling beat simply keeping those coins. Negative: just keeping them would have left you with more. The coin's own price move is in both, so it cancels out.`}>Result vs holding</L></span>
-          <div className={`kpi-v ${cls(g.pnl.vsHold)}`}>{g.pnl.vsHold != null ? qty(g.pnl.vsHold, q, 5) : '—'}</div>
-          <span className="sub">{g.opening && g.pnl.hold != null ? `keeping the ${num(g.opening.base, g.opening.base < 10 ? 6 : 2)} ${g.base} + ${num(g.opening.quote, 2)} ${q} it started with: ${qty(g.pnl.hold, q, 5, false)}${inUsd(g.pnl.vsHold)}` : 'once its start-up buy is done'}</span>
-        </div>
-        <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg {money(g.stats.avgNet)} each · {g.stats.wins} profitable</span></div>
+        <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg <Amt v={g.stats.avgNet} sym={q} k={k} sig={4} /> each · {g.stats.wins} profitable</span></div>
         <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>
       </div>
 

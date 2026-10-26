@@ -241,10 +241,10 @@ describe('Multi-chain operation', () => {
     eth.addToken(MEME);
     const pool = eth.v3Pool('uniswap-v3', MEME, 1e6, WETH, 100, 3000);
     const req = { chainId: 1, address: MEME.address, quote: WETH.address, pool };
-    const key = await bot.addPickMarket(req);
+    const key = await bot.addOpportunityMarket(req);
     expect(bot.spots[key]).toBeGreaterThan(0);
     expect(bot.hub.def(key).quote).toMatchObject({ native: true, symbol: 'ETH' });
-    expect(await bot.addPickMarket(req)).toBe(key);
+    expect(await bot.addOpportunityMarket(req)).toBe(key);
     expect(bot.hub.byChain(1).filter((m) => m.custom)).toHaveLength(1);
   });
 

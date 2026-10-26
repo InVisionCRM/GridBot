@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MultiBot, type MultiState } from '../src/server/bot/multi';
+import { freshState } from '../src/server/bot/engine';
 import { Logger } from '../src/server/bot/logger';
 import { MemoryStore } from '../src/server/bot/store';
 import { ActivityBus } from '../src/server/bot/activity';
@@ -249,6 +250,16 @@ describe('TrendEngine', () => {
     const s = setup({ store });
     expect(s.bot.overview('live').portfolio).toEqual([]);
     expect(s.bot.overview('paper').portfolio).toEqual([]);
+  });
+
+  it('a grid saved with its opening coins (the old "vs holding") loads without them', () => {
+    const store = new MemoryStore<MultiState>();
+    const g = { ...freshState(NET, 'g1'), opening: { base: 5, quote: 20 } };
+    store.save({ version: 4, defaults: {}, grids: [g], trends: [], lps: [], alerts: [], portfolio: { live: [], paper: [] } } as unknown as MultiState);
+    setup({ store }); // loading saves the upgraded state
+    const saved = store.load()!.grids[0];
+    expect(saved.id).toBe('g1');
+    expect('opening' in saved).toBe(false);
   });
 
   it('portfolio period change and drawdown exclude capital added by starting a new bot', async () => {

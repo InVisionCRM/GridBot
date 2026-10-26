@@ -8,19 +8,21 @@
  *    folded into minutes, within about 5%.
  *  - Fees: in range, the position earns L / (L + pool liquidity) of what one unit earned, for the share of the minute's
  *    ticks (low to high) inside its range.
- *  - Moves (rerange on): out of range, the fees missed build up and fees earned back in range lower them (tally); once
- *    they reach what moving costs (gas plus the swap to the new range's mix) the position comes out at the minute's last
- *    price and opens ±band around it. At most LP_MAX_MOVES_PER_DAY in any 24 hours; a swap over the price-impact cap
- *    blocks the move. Fees are added back in at each move.
+ *  - Moves (rerange on): like the bot, as soon as a minute ends outside the range the position comes out at that price
+ *    and opens ±band around it; a swap over the price-impact cap blocks the move. Fees are added back in at each move.
  *  - Swaps pay the pool fee and a price impact worked out from the minute's active liquidity (inside one tick range,
  *    so a thin pool's impact is understated); a gap under LP_MIN_SWAP_SHARE of the value isn't swapped.
- *  - Result vs holding: the value at the end minus the coins held right after opening, valued at the end price. That
- *    leaves out the coin's own price move (holding gets it too) and shows only what the position's trading did.
+ *  - Fees are counted in the coin they were paid in (and their worth in the quote coin when earned).
+ *  - Lost to moves: a position sells the coin that rises and buys the one that falls. A move takes it out at that mix and
+ *    opens again, which makes the difference to the coins it went in with final (valued at the move's price). A range
+ *    that stays keeps it open, and gets it back if the price returns, so it is not counted for a range still open.
+ *  - Earned after costs = fees − gas − what the swaps cost − lost to moves, in the quote coin. The coins' own price move
+ *    is left out: it happens to the coins whether or not they sit in a pool.
  *
  * The timing of a move decides a lot: in a 12-day check a move a minute later put the next range 29 ticks lower and
- * changed that setup's result by $15. So one replay is one path, and replayTable also runs every day on its own.
+ * changed that setup's result by $15. So one replay is one path.
  */
-import { LP_MAX_MOVES_PER_DAY, LP_MIN_SWAP_SHARE } from './lp';
+import { LP_MIN_SWAP_SHARE } from './lp';
 import { amountsForLiquidity, coinsOfRaw, liquidityForAmounts, marketPrice, rangeTicks, rawOfCoins, sqrtPriceAt, type PoolSides } from '../live/v3Liquidity';
 
 /** One minute of a V3 pool's trading. */
@@ -86,35 +88,58 @@ export interface ReplayOpts {
   maxImpact: number;
 }
 
+export interface Coins { base: number; quote: number }
+
 export interface ReplayResult {
   bandPct: number;
   rerange: boolean;
   days: number;
-  /** Fees earned, gas paid, and what the swaps cost (pool fee + impact), all quote */
-  fees: number; gas: number; swapCost: number;
+  /** Fees earned in each coin, and their worth in the quote coin at the minute they were earned */
+  feeCoins: Coins; fees: number;
+  /** Gas paid and what the swaps cost (pool fee + impact), quote */
+  gas: number; swapCost: number;
   moves: number;
   /** Times a due move was held back by the price-impact cap (each stretch out of range counts once) */
   blocked: number;
   /** Share of the minutes with trades that the price spent inside the range */
   inRange: number;
-  /** Value at the end (quote), the coins held right after opening valued at the end price, and the difference */
-  end: number; hold: number; vsHold: number;
+  /** What moves locked in (see above), quote */
+  moveLoss: number;
+  /** Earned after costs: fees − gas − swap costs − lost to moves, quote */
+  net: number;
 }
-
-interface Coins { base: number; quote: number }
+/** One range as the replay API answers it: the replay, and a position opened now with the same money (its coins, and its share of the pool's active liquidity) */
+export type ReplayRow = ReplayResult & { coinsNow: Coins; poolShareNow: number };
 const DAY_S = 86_400;
+
+const priceAt = (tick: number, pool: PoolSides) => marketPrice(sqrtPriceAt(tick) ** 2, pool);
+/** The coins liquidity L holds in [tl, tu) with the price at `tick` */
+const heldBy = (L: number, tl: number, tu: number, tick: number, pool: PoolSides): Coins => {
+  const a = amountsForLiquidity(sqrtPriceAt(tick), sqrtPriceAt(tl), sqrtPriceAt(tu), L);
+  return coinsOfRaw(a.amount0, a.amount1, pool);
+};
+
+/**
+ * A position opened at `tick` with `capital` (quote) in ±band, before costs: its liquidity (the pool's raw units, so it
+ * compares with the pool's active liquidity) and the coins it holds.
+ */
+export function positionFor(capital: number, bandPct: number, tick: number, pool: ReplayPool): { L: number; coins: Coins } {
+  const p = priceAt(tick, pool);
+  const { tickLower: tl, tickUpper: tu } = rangeTicks(p * (1 - bandPct), p * (1 + bandPct), pool.spacing, pool);
+  const per = heldBy(1e18, tl, tu, tick, pool), share = (per.base * p) / (per.base * p + per.quote);
+  const r = rawOfCoins({ base: (share * capital) / p, quote: (1 - share) * capital }, pool);
+  const L = liquidityForAmounts(sqrtPriceAt(tick), sqrtPriceAt(tl), sqrtPriceAt(tu), r.a0, r.a1);
+  return { L, coins: heldBy(L, tl, tu, tick, pool) };
+}
 
 /** One liquidity bot over `rows` (oldest first): opens at the first minute's last price. */
 export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): ReplayResult {
   if (rows.length < 2) throw new Error('need at least 2 minutes of trades');
   if (!(o.bandPct > 0 && o.bandPct < 1)) throw new Error(`bad range ±${o.bandPct}`);
   if (!(o.capital > 0)) throw new Error('capital must be > 0');
-  const price = (tick: number) => marketPrice(sqrtPriceAt(tick) ** 2, pool);
+  const price = (tick: number) => priceAt(tick, pool);
   const val = (c: Coins, p: number) => c.base * p + c.quote;
-  const held = (L: number, tl: number, tu: number, tick: number): Coins => {
-    const a = amountsForLiquidity(sqrtPriceAt(tick), sqrtPriceAt(tl), sqrtPriceAt(tu), L);
-    return coinsOfRaw(a.amount0, a.amount1, pool);
-  };
+  const held = (L: number, tl: number, tu: number, tick: number) => heldBy(L, tl, tu, tick, pool);
   /** Price impact of putting `amountIn` (human, of the coin going in) into the pool at `tick` with liquidity `liq`. */
   const impact = (amountIn: number, baseIn: boolean, tick: number, liq: number) => {
     if (!(liq > 0)) return Infinity;
@@ -132,9 +157,11 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     return { gap, cost: Math.abs(gap) * (pool.swapFee + imp / 2), impact: imp, share, value };
   };
 
-  let gas = 0, swapCost = 0, fees = 0, moves = 0, blocked = 0, missed = 0, inTime = 0;
+  let gas = 0, swapCost = 0, fees = 0, moves = 0, blocked = 0, inTime = 0, moveLoss = 0;
   let pos = { tl: 0, tu: 0, L: 0 }, idle: Coins = { base: 0, quote: 0 }, owed: Coins = { base: 0, quote: 0 };
-  const recent: number[] = [];
+  const feeCoins: Coins = { base: 0, quote: 0 };
+  /** The coins the open position went in with */
+  let putIn: Coins = { base: 0, quote: 0 };
   /** Swap `have` to the range's mix around `tick`, pay `gasQuote`, open the position; the rest stays idle. */
   const open = (have: Coins, tick: number, liq: number, gasQuote: number) => {
     const p = price(tick);
@@ -151,13 +178,12 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     const L = liquidityForAmounts(sqrtPriceAt(tick), sqrtPriceAt(tl), sqrtPriceAt(tu), r.a0, r.a1);
     const used = held(L, tl, tu, tick);
     pos = { tl, tu, L };
+    putIn = used;
     idle = { base: Math.max(0, coins.base - used.base), quote: coins.quote - used.quote };
   };
 
   const first = rows[0];
   open({ base: 0, quote: o.capital }, first.c, first.liq, o.gasOpen);
-  const c0 = held(pos.L, pos.tl, pos.tu, first.c);
-  const opening: Coins = { base: c0.base + idle.base, quote: c0.quote + idle.quote };
   let heldBack = false;
 
   for (let i = 1; i < rows.length; i++) {
@@ -169,57 +195,34 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     const could = coinsOfRaw(pos.L * m.f0 * dil, pos.L * m.f1 * dil, pool);
     const earned = { base: could.base * r, quote: could.quote * r };
     owed = { base: owed.base + earned.base, quote: owed.quote + earned.quote };
+    feeCoins.base += earned.base; feeCoins.quote += earned.quote;
     fees += val(earned, p);
-    missed = Math.max(0, missed - val(earned, p)) + val(could, p) * (1 - r);
 
     const out = m.c < pos.tl || m.c >= pos.tu;
     if (!out) heldBack = false;
     if (!o.rerange || !out) continue;
-    while (recent.length && m.t - recent[0] >= DAY_S) recent.shift();
-    if (recent.length >= LP_MAX_MOVES_PER_DAY) continue;
     const c = held(pos.L, pos.tl, pos.tu, m.c);
     const have = { base: c.base + idle.base + owed.base, quote: c.quote + idle.quote + owed.quote };
     const next = rangeTicks(p * (1 - o.bandPct), p * (1 + o.bandPct), pool.spacing, pool);
     const s = plan(have, next.tickLower, next.tickUpper, m.c, m.liq);
-    // like the bot: a swap over the impact cap blocks the move whatever was missed
+    // like the bot: a swap over the impact cap blocks the move
     if (s.impact > o.maxImpact) { if (!heldBack) blocked++; heldBack = true; continue; }
     heldBack = false;
-    if (missed < o.gasMove + s.cost) continue;
+    moveLoss += val(putIn, p) - val(c, p);
     owed = { base: 0, quote: 0 };
     open(have, m.c, m.liq, o.gasMove);
-    missed = 0;
     moves++;
-    recent.push(m.t);
   }
 
-  const lastRow = rows[rows.length - 1], pEnd = price(lastRow.c);
-  const c = held(pos.L, pos.tl, pos.tu, lastRow.c);
-  const end = val({ base: c.base + idle.base + owed.base, quote: c.quote + idle.quote + owed.quote }, pEnd);
-  const hold = val(opening, pEnd);
+  const lastRow = rows[rows.length - 1];
   return {
     bandPct: o.bandPct, rerange: o.rerange, days: (lastRow.t - first.t) / DAY_S,
-    fees, gas, swapCost, moves, blocked, inRange: inTime / (rows.length - 1), end, hold, vsHold: end - hold,
+    feeCoins, fees, gas, swapCost, moves, blocked, inRange: inTime / (rows.length - 1), moveLoss,
+    net: fees - gas - swapCost - moveLoss,
   };
 }
 
-export interface ReplayRow extends ReplayResult {
-  /** The same setup started fresh each day: how many days it beat holding, out of how many */
-  daysAhead: number; daysRun: number;
-}
-
-/** Each range with moves on and off, over all of `rows` and over each whole day ending at the last minute. */
-export function replayTable(rows: PoolMinute[], pool: ReplayPool, base: Omit<ReplayOpts, 'bandPct' | 'rerange'>, bands: number[]): ReplayRow[] {
-  const endT = rows[rows.length - 1].t;
-  const days: PoolMinute[][] = [];
-  // whole days back from the last minute (a window of N days starts up to a minute after its N-day mark)
-  const n = Math.floor((endT - rows[0].t + 60) / DAY_S);
-  for (let d = 1; d <= n; d++) {
-    const day = rows.filter((m) => m.t > endT - d * DAY_S && m.t <= endT - (d - 1) * DAY_S);
-    if (day.length >= 2) days.push(day);
-  }
-  return bands.flatMap((bandPct) => [true, false].map((rerange) => {
-    const o = { ...base, bandPct, rerange };
-    const daily = days.map((d) => replayLp(d, pool, o));
-    return { ...replayLp(rows, pool, o), daysAhead: daily.filter((r) => r.vsHold > 0).length, daysRun: daily.length };
-  }));
+/** Each range with moves on and off, over all of `rows`. */
+export function replayTable(rows: PoolMinute[], pool: ReplayPool, base: Omit<ReplayOpts, 'bandPct' | 'rerange'>, bands: number[]): ReplayResult[] {
+  return bands.flatMap((bandPct) => [true, false].map((rerange) => replayLp(rows, pool, { ...base, bandPct, rerange })));
 }

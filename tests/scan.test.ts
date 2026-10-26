@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { bestSetup, MIN_SCAN_CANDLES, MIN_SELL_HOURS, NATIVE_EEEE, NATIVE_ZERO, parseTopPools, pickTokens, SCAN_EVERY_MS, SCAN_RULES, TEST_USD, type TopPool } from '../src/market/scan';
+import { bestSetup, dailySwing, gridRank, lpRank, SETUP_BANDS, SETUP_LEVELS, MIN_SCAN_CANDLES, MIN_SELL_HOURS, NATIVE_EEEE, NATIVE_ZERO, parseTopPools, pickTokens, SCAN_EVERY_MS, SCAN_PAGES, SCAN_RULES, TEST_USD, type TopPool } from '../src/market/scan';
 import { DEFAULT_COSTS } from '../src/market/costs';
+import { runGridBacktest } from '../src/market/backtest';
 import type { Candle } from '../src/market/candles';
 import { DailyScanner, type ScanDeps, type ScanFile } from '../src/server/market/scanner';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, recenterAt } from '../src/live/recenter';
@@ -34,6 +35,24 @@ describe('parseTopPools (GeckoTerminal /networks/{slug}/pools)', () => {
   });
 });
 
+describe('ranking (walk-forward, Oct 2026): grids by swing, liquidity by what it earned', () => {
+  it('dailySwing adds up the hourly high-low ranges per day, whichever way the price ended', () => {
+    const hour = (h: number, l: number): Candle => ({ t: 0, o: l, h, l, c: h, v: 1 });
+    // 48 hours that each range 1% (log): 24 × 1% = 24% a day, up or down alike
+    const up = Array.from({ length: 48 }, () => hour(1.01, 1));
+    expect(dailySwing(up)).toBeCloseTo(24 * Math.log(1.01), 12);
+    expect(dailySwing(up.map((k) => ({ ...k, o: k.h, c: k.l })))).toBeCloseTo(24 * Math.log(1.01), 12);
+    expect(() => dailySwing([])).toThrow(/no candles/);
+  });
+  it('a grid ranks only when it earned last week; liquidity by what it earned after costs', () => {
+    const grid = { bandPct: 0.08, gridCount: 20, earnedPct: 0.01, roundTrips: 9, returnPct: -0.05, maxDrawdownPct: 0.1 };
+    expect(gridRank({ grid, swingPct: 0.3 })).toBe(0.3);
+    expect(gridRank({ grid: null, swingPct: 0.9 })).toBeNull(); // swings a lot, but no grid earned at this size
+    expect(lpRank({ lp: { bandPct: 0.05, earnedPct: 0.02, feesPct: 0.03, inRangePct: 1, poolSharePct: 0.001, returnPct: -0.1 } })).toBe(0.02);
+    expect(lpRank({ lp: null })).toBeNull();
+  });
+});
+
 describe('pickTokens: real activity, something the bot can spend', () => {
   it('drops fake volume, thin pools, few trades, stable/stable and token/token; keeps one pool per token', () => {
     const r = pickTokens([
@@ -50,7 +69,7 @@ describe('pickTokens: real activity, something the bot can spend', () => {
     ], SPEND, WETH);
     expect(r.picked.map((p) => [p.pool.name, p.token, p.spend])).toEqual([['WBTC / USDT', WBTC, USDT], ['USDC / PEPE', '0xf1', USDC]]);
     const why = Object.fromEntries(r.skipped.map((s) => [s.name, s.why]));
-    expect(why['BIS / WETH']).toMatch(/liquidity \$45 is below \$50,000/);
+    expect(why['BIS / WETH']).toMatch(/liquidity \$45 is below \$10,000/);
     expect(why['USDC / USDT']).toBe('both sides are the native coin or stablecoins');
     expect(why['ETH / USDT (V4 native)']).toBe('both sides are the native coin or stablecoins');
     expect(why['USDC / ETH (0xEeee)']).toBe('both sides are the native coin or stablecoins');
@@ -97,6 +116,18 @@ describe('bestSetup: replay the week through the grid backtester', () => {
     expect(bestSetup(flat([40, 90, 140]), COSTS, 1000)).not.toBeNull();
   });
 
+  it('a falling pair that still swings: its trades earned, so it has a setup, chosen by what they earned (the total return was negative)', () => {
+    const k = wave(168, 1, 0.04, -0.0008); // −12.6% over the week, ±4% a day
+    const s = bestSetup(k, COSTS, 1000)!;
+    expect(s).not.toBeNull();
+    expect(s.earnedPct).toBeGreaterThan(0);
+    expect(s.returnPct).toBeLessThan(0);
+    for (const bandPct of SETUP_BANDS) for (const gridCount of SETUP_LEVELS) {
+      const r = runGridBacktest(k, { lowerPrice: k[0].o * (1 - bandPct), upperPrice: k[0].o * (1 + bandPct), gridCount, capital: 1000 }, '1h', COSTS);
+      if (new Set(r.trades.map((t) => t.exitT)).size >= MIN_SELL_HOURS) expect(s.earnedPct).toBeGreaterThanOrEqual(r.metrics.earned / 1000);
+    }
+  });
+
   it('a pair that only falls has no setup that made money', () => {
     expect(bestSetup(wave(168, 1, 0.002, -0.004), COSTS, 1000)).toBeNull();
   });
@@ -110,95 +141,127 @@ const tok = (address: string, symbol: string, extra: Partial<MarketDef['base']> 
 const mkt = (key: string, base: MarketDef['base'], quote: MarketDef['quote'], o: Partial<MarketDef> = {}): MarketDef => ({
   key, chainId: 1, base, quote, pool: { dex: 'uniswap-v3', kind: 'v3', address: `0xpool${key}`, feeBps: 30 }, probe: 1, quoteKind: 'stable', ...o,
 });
+const NOW = 1_800_000_000_000;
+const LAST_CLOSED = Math.floor(NOW / 1000 / 3600) * 3600 - 3600;
 
-function fakeDeps(o: { candles?: Record<string, Candle[]>; stored?: Record<string, Candle[]>; inspectFails?: Record<string, string>; rateLimitOnce?: boolean; http500Once?: boolean; lpUnverified?: string[] } = {}) {
+function fakeDeps(o: { candles?: Record<string, Candle[]>; stored?: Record<string, Candle[]>; unsafe?: string[]; rateLimitOnce?: boolean; http500Once?: boolean; lpUnverified?: string[]; fullPages?: boolean } = {}) {
   const ethUsdc = mkt('ethereum:ETH/USDC', tok(WETH, 'ETH', { native: true }), tok(USDC, 'USDC'));
   const store = new MemoryStore<ScanFile>();
   const calls: string[] = [];
   let limited = !!o.rateLimitOnce, http500 = !!o.http500Once;
   const deps: ScanDeps = {
-    chains: () => [{ id: 1, name: 'Ethereum', slug: 'eth', wrapped: WETH, spendable: SPEND, dexes: ['uniswap_v3', 'uniswap_v2'] }],
+    chains: () => [{ id: 1, name: 'Ethereum', slug: 'eth', wrapped: WETH, spendable: SPEND, dexes: ['uniswap_v3', 'uniswap_v2'], lpDexes: ['uniswap-v3'] }],
     existing: () => [ethUsdc],
     inspect: async (_c, token) => {
-      if (o.inspectFails?.[token]) throw new Error(o.inspectFails[token]);
-      return mkt(`ethereum:${token}/USDT`, tok(token, token.slice(0, 6)), tok(USDT, 'USDT'), { custom: true, safety: { risk: 'low', liveAllowed: true, reasons: ['Simulated buy, transfer and sell matched quotes exactly.'] } as MarketDef['safety'] });
+      const safety = o.unsafe?.includes(token)
+        ? { risk: 'blocked', liveAllowed: false, reasons: ['Honeypot: the simulated sell reverted.'] }
+        : { risk: 'low', liveAllowed: true, reasons: ['Simulated buy, transfer and sell matched quotes exactly.'] };
+      return mkt(`ethereum:${token}/USDT`, tok(token, token.slice(0, 6)), tok(USDT, 'USDT'), { custom: true, safety: safety as MarketDef['safety'] });
     },
     snapshot: async () => ({ spot: 2, quoteReserve: 1e9, plsReserve: 5e8, gasPricePls: 0, feeBps: 30 }),
     storedHourly: (d) => o.stored?.[d.key] ?? [],
     lpShare: async (d) => { if (o.lpUnverified?.includes(d.key)) throw new Error('Uniswap V3: not verified'); return 0.75; },
     usdPerSpend: async () => 1,
     gecko: {
-      topPools: async (n, dex) => {
-        calls.push(`top:${n}/${dex}`);
-        return dex === 'uniswap_v3' ? [pool({ name: 'WBTC / USDT', base: WBTC, quote: USDT })] : [pool({ name: 'DEAD / USDC', base: '0xdead', quote: USDC })];
+      topPools: async (n, dex, page = 1) => {
+        calls.push(`top:${n}/${dex}/${page}`);
+        if (dex === 'uniswap_v3') {
+          // a full page (20 rows) means there may be more; page 1 holds the real pools
+          const filler = Array.from({ length: o.fullPages ? 20 : 0 }, (_, i) => pool({ name: `F${page}-${i} / USDC`, base: USDC, quote: USDT, volume24Usd: 1 }));
+          return page === 1 ? [pool({ name: 'WBTC / USDT', base: WBTC, quote: USDT }), ...filler].slice(0, Math.max(1, filler.length)) : filler;
+        }
+        return [pool({ name: 'DEAD / USDC', base: '0xdead', quote: USDC })];
       },
       ohlcv: async (p, token) => {
         calls.push(`${p}:${token}`);
         if (limited) { limited = false; throw new RateLimited(0); }
         if (http500) { http500 = false; throw new Error('GeckoTerminal HTTP 500'); }
-        return o.candles?.[token] ?? wave(168, 2, 0.001);
+        // ending at the last closed hour, like GeckoTerminal's answer
+        const k = o.candles?.[token] ?? wave(168, 2, 0.001);
+        return k.map((x, i) => ({ ...x, t: LAST_CLOSED - (k.length - 1 - i) * 3600 }));
       },
     },
-    store, approval: 'exact', now: () => 1_800_000_000_000,
+    store, approval: 'exact', now: () => NOW,
   };
   return { deps, store, calls };
 }
 
-describe('DailyScanner', () => {
-  it('tests existing markets and new tokens, ranks by the week\'s result, saves, and says why others were left out', async () => {
-    const { deps, store, calls } = fakeDeps({
-      candles: { [WETH]: wave(168, 2, 0.03), [WBTC]: wave(168, 2, 0.08) },
-      inspectFails: { '0xdead': 'failed the safety check (blocked): honeypot' },
-    });
+describe('DailyScanner: opportunities', () => {
+  it('tests the app\'s markets and new tokens both ways, keeps every safety level, measures the swing, and saves', async () => {
+    const { deps, store, calls } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03), [WBTC]: wave(168, 2, 0.08) }, unsafe: ['0xdead'] });
     const sc = new DailyScanner(deps);
     const f = await sc.run();
     const c = f.chains[0];
     expect(c.error).toBeNull();
-    expect(c.tested).toBe(2);
-    expect(c.picks.map((p) => [p.rank, p.label])).toEqual([[1, `${WBTC.slice(0, 6)}/USDT`], [2, 'ETH/USDC']]);
-    const [wbtc, eth] = c.picks;
-    // New token → added on "Use this"; existing market → its key.
-    expect(wbtc).toMatchObject({ key: null, add: { address: WBTC, quote: USDT, pool: `0xpoolethereum:${WBTC}/USDT` }, risk: 'low', activity: { tx24: 1000 } });
-    expect(eth).toMatchObject({ key: 'ethereum:ETH/USDC', add: null, activity: null });
-    // Range centred on the price at scan time with the winning width.
-    expect(eth.lowerPrice).toBeCloseTo(2 * (1 - eth.bandPct), 6);
-    expect(eth.upperPrice).toBeCloseTo(2 * (1 + eth.bandPct), 6);
-    expect(eth.test).toMatchObject({ usd: TEST_USD, capital: TEST_USD });
-    expect(wbtc.test.returnPct).toBeGreaterThan(eth.test.returnPct);
+    expect(c.tested).toBe(3);
+    // the app's markets first, then new tokens as found
+    expect(c.items.map((x) => x.label)).toEqual(['ETH/USDC', `${WBTC.slice(0, 6)}/USDT`, '0xdead/USDT']);
+    const [eth, wbtc, dead] = c.items;
+    // New token → added on "Try it"; existing market → its key.
+    expect(wbtc).toMatchObject({ key: null, add: { address: WBTC, quote: USDT, pool: `0xpoolethereum:${WBTC}/USDT` }, risk: 'low', liveAllowed: true, activity: { tx24: 1000 } });
+    expect(eth).toMatchObject({ key: 'ethereum:ETH/USDC', add: null, activity: null, kind: 'v3', capital: TEST_USD, usd: TEST_USD });
+    // a token that fails the safety check is shown with why, paper only
+    expect(dead).toMatchObject({ risk: 'blocked', liveAllowed: false, riskWhy: 'Honeypot: the simulated sell reverted.' });
+    // both ways, ranked by the better of the two
+    for (const x of [wbtc, eth]) {
+      expect(x.grid!.earnedPct).toBeGreaterThan(0);
+      expect(x.lp!.feesPct).toBeGreaterThan(0);
+    }
+    // ±8% a day swings more than ±3%: it ranks first among grids
+    expect(wbtc.swingPct).toBeGreaterThan(eth.swingPct);
+    expect(gridRank(wbtc)!).toBeGreaterThan(gridRank(eth)!);
+    expect(wbtc.swingPct).toBeCloseTo(dailySwing(wave(168, 2, 0.08)), 9);
     // Only the DEXes this app trades are read (not the chain-wide list, which on Robinhood is mostly Uniswap V4).
-    expect(calls.filter((x) => x.startsWith('top:'))).toEqual(['top:eth/uniswap_v3', 'top:eth/uniswap_v2']);
+    expect(calls.filter((x) => x.startsWith('top:'))).toEqual(['top:eth/uniswap_v3/1', 'top:eth/uniswap_v2/1']);
     // Native base asks GeckoTerminal for the wrapped token's price.
     expect(calls).toContain(`0xpoolethereum:ETH/USDC:${WETH}`);
-    expect(c.skipped).toContainEqual({ name: 'DEAD / USDC', why: 'failed the safety check (blocked): honeypot' });
-    expect(store.load()!.chains[0].picks).toHaveLength(2);
-    expect(sc.status()).toMatchObject({ running: false, nextAt: 1_800_000_000_000 + SCAN_EVERY_MS });
+    expect(store.load()).toMatchObject({ version: 3, chains: [{ items: [{}, {}, {}] }] });
+    expect(sc.status()).toMatchObject({ running: false, nextAt: NOW + SCAN_EVERY_MS });
   });
 
-  it('a flat week gives no pick and says so; a 429 is retried once', async () => {
+  it(`reads up to ${SCAN_PAGES} pages of each DEX's busiest pools; a short page is the last`, async () => {
+    const { deps, calls } = fakeDeps({ fullPages: true });
+    await new DailyScanner(deps).run();
+    expect(calls.filter((x) => x.startsWith('top:eth/uniswap_v3/'))).toHaveLength(SCAN_PAGES);
+    expect(calls.filter((x) => x.startsWith('top:eth/uniswap_v2/'))).toEqual(['top:eth/uniswap_v2/1']);
+  });
+
+  it('a quiet pool\'s candles skip hours without trades: the week is the last 7 days, filled, not the last 168 candles', async () => {
+    // a trade every 2 hours for 14 days: the price was 1 until 8 days ago and 2 since
+    const k: Candle[] = Array.from({ length: 168 }, (_, i) => {
+      const t = LAST_CLOSED - (167 - i) * 7200, p = t >= LAST_CLOSED - 8 * 86_400 ? 2 : 1;
+      return { t, o: p, h: p, l: p, c: p, v: 1 };
+    });
+    const { deps } = fakeDeps();
+    const odd = { ...deps, gecko: { ...deps.gecko, ohlcv: async () => k } };
+    const eth = (await new DailyScanner(odd).run()).chains[0].items.find((x) => x.label === 'ETH/USDC')!;
+    expect(eth.movePct).toBe(0); // the last 168 candles would start 14 days back, at 1: +100%
+  });
+
+  it('a calm week: no grid earned, and it says why; a 429 is retried once', async () => {
     const { deps } = fakeDeps({ rateLimitOnce: true });
-    const c = (await new DailyScanner(deps).run()).chains[0];
-    expect(c.picks).toEqual([]);
-    expect(c.skipped.find((x) => x.name === 'ETH/USDC')!.why).toMatch(/^no range made money over the last 7 days \(price [+-]\d+\.\d% this week\)$/);
+    const eth = (await new DailyScanner(deps).run()).chains[0].items.find((x) => x.label === 'ETH/USDC')!;
+    expect(eth.grid).toBeNull();
+    expect(eth.gridWhy).toMatch(/^no grid earned from its trades this week \(price [+-]\d+\.\d%\)$/);
   });
 
-  it('one-off prints in a thin pool are clipped before testing: four 25% wicks in a calm week make no pick', async () => {
+  it('one-off prints in a thin pool are clipped before testing: four 25% wicks in a calm week earn no grid', async () => {
     const spiky = wave(168, 2, 0.001).map((k, i) => ([20, 60, 100, 140].includes(i) ? { ...k, l: k.l * 0.75 } : k));
     // As printed, the wicks look like a pattern (sells in 4 different hours) and would rank
     expect(bestSetup(spiky, COSTS, 1000)).not.toBeNull();
     const { deps } = fakeDeps({ candles: { [WBTC]: spiky } });
-    const c = (await new DailyScanner(deps).run()).chains[0];
-    expect(c.picks).toEqual([]);
-    expect(c.skipped.find((x) => x.name === `${WBTC.slice(0, 6)}/USDT`)!.why).toMatch(/^no range made money/);
+    const wbtc = (await new DailyScanner(deps).run()).chains[0].items.find((x) => x.label === `${WBTC.slice(0, 6)}/USDT`)!;
+    expect(wbtc.grid).toBeNull();
   });
 
   it('a GeckoTerminal 5xx is retried once (the real scan lost ETH/USDC to one HTTP 500)', async () => {
     const { deps, calls } = fakeDeps({ http500Once: true, candles: { [WETH]: wave(168, 2, 0.03) } });
     const c = (await new DailyScanner(deps).run()).chains[0];
-    expect(c.picks.map((p) => p.label)).toContain('ETH/USDC');
+    expect(c.items.find((x) => x.label === 'ETH/USDC')!.grid).not.toBeNull();
     expect(calls.filter((x) => x.endsWith(WETH))).toHaveLength(2);
   });
 
-  it('reports what it is doing while it runs (shown on Home), and clears it when done', async () => {
+  it('reports what it is doing while it runs, and clears it when done', async () => {
     const { deps } = fakeDeps();
     const seen: unknown[] = [];
     const sc = new DailyScanner({ ...deps, snapshot: async (d) => { seen.push(sc.status().progress); return deps.snapshot(d); } });
@@ -209,16 +272,57 @@ describe('DailyScanner', () => {
   });
 
   it('a market in the app reuses its saved hourly candles when they cover the week (no GeckoTerminal request)', async () => {
-    const nowSec = 1_800_000_000; // fakeDeps clock
-    const week = wave(168, 2, 0.03).map((x, i) => ({ ...x, t: nowSec - 3600 - (167 - i) * 3600 }));
+    const week = wave(168, 2, 0.03).map((x, i) => ({ ...x, t: LAST_CLOSED - (167 - i) * 3600 }));
     const { deps, calls } = fakeDeps({ stored: { 'ethereum:ETH/USDC': week } });
     const c = (await new DailyScanner(deps).run()).chains[0];
     expect(calls.some((x) => x.endsWith(WETH))).toBe(false);
-    expect(c.picks.map((p) => p.label)).toContain('ETH/USDC');
+    expect(c.items.find((x) => x.label === 'ETH/USDC')!.grid).not.toBeNull();
     // Too old to cover the week up to the last 2 hours → fetched as before.
     const stale = fakeDeps({ stored: { 'ethereum:ETH/USDC': week.map((x) => ({ ...x, t: x.t - 3 * 3600 })) } });
     await new DailyScanner(stale.deps).run();
     expect(stale.calls.some((x) => x.endsWith(WETH))).toBe(true);
+  });
+
+  it('a V2 pool: only the grid is tested, a liquidity bot can\'t run there', async () => {
+    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) } });
+    const v2 = { ...deps, existing: () => deps.existing(1).map((d) => ({ ...d, pool: { ...d.pool, dex: 'uniswap-v2', kind: 'v2' as const } })) };
+    const eth = (await new DailyScanner(v2).run()).chains[0].items.find((x) => x.label === 'ETH/USDC')!;
+    expect(eth).toMatchObject({ kind: 'v2', lp: null, lpWhy: expect.stringMatching(/needs a V3 pool/) });
+    expect(eth.grid).not.toBeNull();
+    expect(lpRank(eth)).toBeNull();
+  });
+
+  it('a V3 pool on a DEX without a verified position manager: grid only, and it says so', async () => {
+    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) } });
+    const cake = { ...deps, existing: () => deps.existing(1).map((d) => ({ ...d, pool: { ...d.pool, dex: 'pancakeswap-v3' } })) };
+    const eth = (await new DailyScanner(cake).run()).chains[0].items.find((x) => x.label === 'ETH/USDC')!;
+    expect(eth).toMatchObject({ kind: 'v3', lp: null, lpWhy: expect.stringMatching(/no verified position manager/) });
+  });
+
+  it('an unverified fee share leaves the liquidity side empty and says why; the grid still runs', async () => {
+    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) }, lpUnverified: ['ethereum:ETH/USDC'] });
+    const eth = (await new DailyScanner(deps).run()).chains[0].items.find((x) => x.label === 'ETH/USDC')!;
+    expect(eth).toMatchObject({ lp: null, lpWhy: 'Uniswap V3: not verified' });
+    expect(eth.grid).not.toBeNull();
+  });
+
+  it('tests with the size you choose, keeps it for the daily scans after, and refuses nonsense', async () => {
+    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) } });
+    const sc = new DailyScanner(deps);
+    expect(sc.status().testUsd).toBe(TEST_USD);
+    const f = await sc.run(25_000);
+    expect(f.testUsd).toBe(25_000);
+    expect(f.chains[0].items.find((x) => x.label === 'ETH/USDC')).toMatchObject({ usd: 25_000, capital: 25_000 });
+    expect((await sc.run()).testUsd).toBe(25_000);
+    expect(new DailyScanner(deps).status().testUsd).toBe(25_000); // saved
+    await expect(sc.run(5)).rejects.toThrow(/from \$10 to \$10,000,000/);
+    await expect(sc.run(Number.NaN)).rejects.toThrow(/dollar amount/);
+  });
+
+  it('a saved scan from before (3 picks a chain, ranked with the price move) is dropped; its test size is kept', () => {
+    const { deps, store } = fakeDeps();
+    store.save({ version: 2, at: 123, testUsd: 5000, chains: [{ picks: [] }] } as unknown as ScanFile);
+    expect(new DailyScanner(deps).status()).toMatchObject({ at: null, chains: [], testUsd: 5000 });
   });
 
   it('runs one scan at a time', async () => {
@@ -227,57 +331,6 @@ describe('DailyScanner', () => {
     const first = sc.run();
     await expect(sc.run()).rejects.toThrow('A scan is already running.');
     await first;
-  });
-});
-
-describe('DailyScanner: grid vs liquidity position vs hold, at your test size', () => {
-  it('every tested pair gets a row: hold, the best grid (or none), the best LP with the pool\'s fee share', async () => {
-    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03), [WBTC]: wave(168, 2, 0.08) } });
-    const c = (await new DailyScanner(deps).run()).chains[0];
-    expect(c.compare.map((r) => r.label).sort()).toEqual(['ETH/USDC', `${WBTC.slice(0, 6)}/USDT`, '0xdead/USDT'].sort());
-    const eth = c.compare.find((r) => r.label === 'ETH/USDC')!;
-    expect(eth).toMatchObject({ dex: 'uniswap-v3', feeBps: 30, lpShare: 0.75, lpWhy: null });
-    expect(eth.grid!.returnPct).toBeCloseTo(c.picks.find((p) => p.label === 'ETH/USDC')!.test.returnPct, 12);
-    expect(eth.lp!.feesPct).toBeGreaterThan(0);
-    expect(eth.lp!.holdPct).toBeCloseTo(eth.holdPct, 12);
-    expect(eth.entryImpactPct).toBeGreaterThan(0);
-  });
-
-  it('a big test size in a thin pool shows its own price impact (what makes "hold" look so bad)', async () => {
-    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) } });
-    const thin = { ...deps, snapshot: async () => ({ spot: 2, quoteReserve: 20_000, plsReserve: 10_000, gasPricePls: 0, feeBps: 30 }) };
-    const small = (await new DailyScanner(thin).run(100)).chains[0].compare.find((r) => r.label === 'ETH/USDC')!;
-    const big = (await new DailyScanner(thin).run(25_000)).chains[0].compare.find((r) => r.label === 'ETH/USDC')!;
-    expect(small.entryImpactPct).toBeLessThan(0.01);
-    expect(big.entryImpactPct).toBeGreaterThan(0.5);
-    expect(big.holdPct).toBeLessThan(small.holdPct - 0.4);
-  });
-
-  it('an unverified fee share leaves the LP column empty and says why; the grid still runs', async () => {
-    const { deps } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) }, lpUnverified: ['ethereum:ETH/USDC'] });
-    const eth = (await new DailyScanner(deps).run()).chains[0].compare.find((r) => r.label === 'ETH/USDC')!;
-    expect(eth).toMatchObject({ lp: null, lpShare: null, lpWhy: 'Uniswap V3: not verified' });
-    expect(eth.grid).not.toBeNull();
-  });
-
-  it('tests with the size you choose, keeps it for the daily scans after, and refuses nonsense', async () => {
-    const { deps, store } = fakeDeps({ candles: { [WETH]: wave(168, 2, 0.03) } });
-    const sc = new DailyScanner(deps);
-    expect(sc.status().testUsd).toBe(TEST_USD);
-    const f = await sc.run(25_000);
-    expect(f.testUsd).toBe(25_000);
-    expect(f.chains[0].picks.find((p) => p.label === 'ETH/USDC')!.test).toMatchObject({ usd: 25_000, capital: 25_000 });
-    expect((await sc.run()).testUsd).toBe(25_000);
-    expect(new DailyScanner(deps).status().testUsd).toBe(25_000); // saved
-    expect(store.load()!.version).toBe(2);
-    await expect(sc.run(5)).rejects.toThrow(/from \$10 to \$10,000,000/);
-    await expect(sc.run(Number.NaN)).rejects.toThrow(/dollar amount/);
-  });
-
-  it('a saved scan from before the comparison existed is dropped (no rows to show), not half-shown', () => {
-    const { deps, store } = fakeDeps();
-    store.save({ version: 1, at: 123, chains: [] } as unknown as ScanFile);
-    expect(new DailyScanner(deps).status()).toMatchObject({ at: null, chains: [], testUsd: TEST_USD });
   });
 });
 

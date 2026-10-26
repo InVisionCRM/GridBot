@@ -162,19 +162,19 @@ export function createApp(o: AppOpts) {
   app.post('/api/tokens/inspect', wrap(async (req) => plain(await bot.hub.inspect(marketReq(req.body ?? {})))));
   app.get('/api/markets', wrap(() => ({ markets: bot.marketList() })));
 
-  // ── Daily picks ──────────────────────────────────────────────────────
+  // ── Opportunities (daily scan) ───────────────────────────────────────
   const scanner = () => { if (!o.scanner) throw new Error('The daily scan is off (CANDLES_GECKO=off).'); return o.scanner; };
-  app.get('/api/picks', wrap(() => scanner().status()));
+  app.get('/api/opportunities', wrap(() => scanner().status()));
   // { testUsd } = test size in USD (checked here so a bad value is an error, not a silently failed background scan).
-  app.post('/api/picks/scan', wrap((req) => {
+  app.post('/api/opportunities/scan', wrap((req) => {
     const sc = scanner();
     const usd = req.body?.testUsd == null ? undefined : checkTestUsd(req.body.testUsd);
     void sc.run(usd).catch(() => undefined);
     return { ok: true };
   }));
-  app.post('/api/picks/use', wrap(async (req) => {
+  app.post('/api/opportunities/use', wrap(async (req) => {
     const b = req.body ?? {};
-    const key = await bot.addPickMarket({ chainId: Number(b.chainId), address: String(b.address ?? ''), quote: String(b.quote ?? ''), pool: String(b.pool ?? '') });
+    const key = await bot.addOpportunityMarket({ chainId: Number(b.chainId), address: String(b.address ?? ''), quote: String(b.quote ?? ''), pool: String(b.pool ?? '') });
     void bot.tickAll();
     return { ok: true, key };
   }));
@@ -244,6 +244,13 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
   app.post('/api/bot/lps/:id/close', wrap((req) => { bot.closeLp(req.params.id); void bot.tickAll(); }));
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
+  // { bandPct? }: move the range to the price now (a new width, or the same one)
+  app.post('/api/bot/lps/:id/move', wrap(async (req) => {
+    const b = req.body?.bandPct;
+    await bot.moveLp(req.params.id, b == null ? undefined : Number(b));
+    void bot.tickAll();
+    return { ok: true };
+  }));
   app.put('/api/bot/lps/:id/profits', wrap((req) => bot.setLpProfits(req.params.id, profitsBody(req.body) ?? (() => { throw new Error('profits required'); })())));
   app.delete('/api/bot/lps/:id', wrap((req) => bot.removeLp(req.params.id)));
   app.get('/api/lp/replay', wrap((req) => {

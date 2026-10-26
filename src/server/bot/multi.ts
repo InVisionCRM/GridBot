@@ -12,7 +12,7 @@ import { checkGasReserve, reserveCfg } from '../../live/gasReserve';
 import { humanAmount } from '../../live/amount';
 import { totals, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
-import { GridEngine, freshState, openingFromTrades, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
+import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
 import { LpEngine, freshLp, upgradeLp, type LpStartParams, type LpState } from './lpEngine';
 import { TaxWatch } from './taxWatch';
@@ -102,11 +102,8 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
     return {
       version: 4,
       defaults: { ...DEFAULT_LIMITS, ...((o.defaults as SafetyLimits) ?? {}) },
-      // grids saved before the opening coins were kept get them from their trades, once
-      grids: (o.grids as BotState[]).map((g) => {
-        const x = { ...freshState(net, g.id), ...g, id: g.id || freshState(net).id };
-        return 'opening' in g ? x : { ...x, opening: openingFromTrades(x) };
-      }),
+      // `opening` (the coins after setup, for "vs holding") is no longer kept
+      grids: (o.grids as (BotState & { opening?: unknown })[]).map(({ opening: _, ...g }) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
       trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
       // config.baseAmount arrived with funding from wallet coins: earlier bots put in none
       lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => upgradeLp({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],
@@ -344,6 +341,8 @@ export class MultiBot {
   resumeLp(id: string) { this.lp(id).resume(); }
   closeLp(id: string) { this.lp(id).close(); }
   setLpRerange(id: string, enabled: boolean) { this.lp(id).setRerange(enabled); }
+  /** Move a liquidity bot's range to the price now, at a new width or the same one; it starts on the next tick. */
+  moveLp(id: string, bandPct?: number) { return this.lp(id).move(bandPct); }
   setLpProfits(id: string, p: ProfitMode) { return this.lp(id).setProfits(p); }
   /** Only a closed bot (or one that never opened) can be removed: a live position must be closed first. */
   removeLp(id: string, force = false) {
@@ -694,7 +693,7 @@ export class MultiBot {
   private botRows(mode: Mode) {
     const rows: {
       id: string; kind: 'grid' | 'trend' | 'lp'; name: string; pair: string; chainId: number; mode: Mode; status: string; usdPerQuote: number | null;
-      capital: number; equity: number; realized: number; unrealized: number; fees: number; gas: number; hodl: number | null;
+      capital: number; equity: number; realized: number; unrealized: number; fees: number; gas: number;
       plsHeld: number; quoteFree: number; startedAt: number | null; equityHist: [number, number][];
       closed: { pnl: number; t: number; holdMs?: number }[]; trades: LiveTrade[]; inMarket: number;
     }[] = [];
@@ -704,13 +703,11 @@ export class MultiBot {
       const tr = e.modeTrades();
       const t = totals(tr, s.lastPrice);
       const capital = s.config.totalCapitalUsd;
-      const startPrice = s.startPrice ?? tr[0]?.price ?? null;
       const eqHist = s.equity ?? [];
       rows.push({
         id: s.id, kind: 'grid', name: `Grid ${e.label}`, pair: s.stable, chainId: e.chainId, mode: s.mode, status: s.status, usdPerQuote: this.usdPerQuote(s.stable),
         capital, equity: capital + t.realized + t.unrealized, realized: t.realized, unrealized: t.unrealized,
         fees: tr.reduce((a, x) => a + (x.feeQuote ?? 0), 0), gas: t.gasUsd,
-        hodl: startPrice && s.lastPrice ? (capital / startPrice) * s.lastPrice : null,
         plsHeld: t.pos.plsHeld, quoteFree: Math.max(0, capital + t.realized - t.pos.costUsd), startedAt: s.startedAt ?? tr[0]?.timestamp ?? null,
         equityHist: eqHist,
         closed: tr.filter((x) => x.side === 'sell' && !x.failed && x.roundTripNet != null).map((x) => ({ pnl: x.roundTripNet!, t: x.timestamp })),
@@ -724,7 +721,7 @@ export class MultiBot {
       rows.push({
         id: st.id, kind: 'trend', name: st.name, pair: st.quote, chainId: e.chainId, mode: st.mode, status: st.status, usdPerQuote: this.usdPerQuote(st.quote),
         capital: st.capital, equity: st.pnl.equity, realized: st.pnl.realized, unrealized: st.pnl.unrealized, fees: st.pnl.fees, gas: st.pnl.gas,
-        hodl: st.hodl, plsHeld: st.position?.pls ?? 0, quoteFree: st.cash, startedAt: st.startedAt, equityHist: e.state.equity,
+        plsHeld: st.position?.pls ?? 0, quoteFree: st.cash, startedAt: st.startedAt, equityHist: e.state.equity,
         closed: e.modeTrades().filter((x) => x.side === 'sell' && !x.failed).map((x) => ({ pnl: x.realizedPnlUsd, t: x.timestamp, holdMs: (x as TrendTrade).holdMs })),
         trades: e.modeTrades(), inMarket: st.stats.timeInMarket,
       });
@@ -734,9 +731,8 @@ export class MultiBot {
       if (!s.config || !pnl || !vw || s.mode !== mode) continue;
       rows.push({
         id: s.id, kind: 'lp', name: `Liquidity ${e.label}`, pair: s.market, chainId: e.chainId, mode: s.mode, status: s.status, usdPerQuote: this.usdPerQuote(s.market),
-        // fees earned (net of gas) are the LP's "banked" side; the price side moves with the price like unsold coins
-        capital: e.startValue()!, equity: pnl.equity, realized: pnl.fees - pnl.gas, unrealized: pnl.price, fees: 0, gas: pnl.gas,
-        hodl: s.startPrice && s.lastPrice ? (s.config.capital / s.startPrice) * s.lastPrice : null,
+        // earned after costs is the LP's "banked" side; the price side moves with the price like unsold coins
+        capital: e.startValue()!, equity: pnl.equity, realized: pnl.net, unrealized: pnl.price, fees: 0, gas: pnl.gas,
         plsHeld: vw.coins.base + vw.owed.base + s.idle.base, quoteFree: vw.coins.quote + vw.owed.quote + s.idle.quote, startedAt: s.startedAt, equityHist: s.equity,
         closed: [], trades: [], inMarket: s.position ? 1 : 0,
       });
@@ -790,8 +786,8 @@ export class MultiBot {
         id: r.id, kind: r.kind, name: r.name, pair: r.pair, chainId: r.chainId, mode: r.mode, status: r.status, usdPerQuote: r.usdPerQuote,
         capital: r.capital, equity: r.equity, equityUsd: usd(r, r.equity), capitalUsd: usd(r, r.capital),
         realized: r.realized, unrealized: r.unrealized, realizedUsd: usd(r, r.realized), unrealizedUsd: usd(r, r.unrealized),
-        feesUsd: usd(r, r.fees), gasUsd: usd(r, r.gas), hodlUsd: r.hodl != null ? usd(r, r.hodl) : null,
-        returnPct: r.capital ? r.equity / r.capital - 1 : 0, vsHodlPct: r.hodl ? r.equity / r.hodl - 1 : null,
+        feesUsd: usd(r, r.fees), gasUsd: usd(r, r.gas),
+        returnPct: r.capital ? r.equity / r.capital - 1 : 0,
         plsHeld: r.plsHeld, quoteFree: r.quoteFree, startedAt: r.startedAt,
         stats: { ...st, profitFactor: st.profitFactor === Infinity ? null : st.profitFactor, maxDrawdown: drawdown(r.equityHist).max, timeInMarket: r.inMarket },
         equity_hist: r.equityHist.map(([t, v]) => [t, usd(r, v)] as [number, number]),
@@ -827,10 +823,9 @@ export class MultiBot {
         lowGas: mode === 'live' && rt.gas.low, nativeSymbol: rt.cfg.nativeSymbol,
       };
     }).filter((c) => c.bots > 0 || c.gasNative != null);
-    const hodl = bots.reduce((a, b) => a + (b.hodlUsd ?? b.capitalUsd), 0);
     return {
       t: now, mode,
-      totals: { equityUsd: sum('equityUsd'), capitalUsd: sum('capitalUsd'), realizedUsd: sum('realizedUsd'), unrealizedUsd: sum('unrealizedUsd'), feesUsd: sum('feesUsd'), gasUsd: sum('gasUsd'), hodlUsd: hodl, vsHodlPct: hodl ? sum('equityUsd') / hodl - 1 : null },
+      totals: { equityUsd: sum('equityUsd'), capitalUsd: sum('capitalUsd'), realizedUsd: sum('realizedUsd'), unrealizedUsd: sum('unrealizedUsd'), feesUsd: sum('feesUsd'), gasUsd: sum('gasUsd') },
       periods: per,
       allocation: [...alloc.values()].filter((x) => x.usd > 0.005).sort((a, b) => b.usd - a.usd),
       chains,
@@ -1090,8 +1085,8 @@ export class MultiBot {
     await this.hub.ensureSpot(d.key);
     return d.key;
   }
-  /** Daily pick → market key: the market already added for this token, quote and pool, or a new one (safety re-checked). */
-  async addPickMarket(req: { chainId: number; address: string; quote: string; pool: string }): Promise<string> {
+  /** Opportunity → market key: the market already added for this token, quote and pool, or a new one (safety re-checked; one that fails is paper only). */
+  async addOpportunityMarket(req: { chainId: number; address: string; quote: string; pool: string }): Promise<string> {
     const have = this.hub.byChain(req.chainId).find((m) => sameAddr(m.base.address, req.address) && sameAddr(m.quote.address, req.quote) && sameAddr(m.pool.address, req.pool));
     const key = have ? have.key : (await this.addMarket(req)).key;
     // Priced now, not on the next all-markets poll (~30 s): New bot centres the range on this price right away.

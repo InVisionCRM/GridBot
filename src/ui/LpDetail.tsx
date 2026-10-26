@@ -1,16 +1,18 @@
-/** One liquidity bot: range vs price, fees earned vs gas vs price change, the position's coins, settings, its own log. */
+/** One liquidity bot: range vs price, fees earned in each coin, what it cost, its coins and pool share, settings, its own log. */
 import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
-import { ago, cls, dur, num, pct, px, qty, usd } from './fmt';
+import { ago, cls, num, pct, px, qty } from './fmt';
+import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
 import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { T } from './theme';
 import { L } from './Tip';
-import { lpPnlUsd, type AnyObj, type Nav } from './model';
+import { type AnyObj, type Nav } from './model';
+import { Usd } from './money';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -19,12 +21,47 @@ const STAGE: Record<string, string> = { exit: 'taking the position out', swap: "
 
 /** Out of range: when the range moves, or why it doesn't. */
 function moveNote(b: AnyObj): string {
-  const m = b.move, q = b.quote;
-  if (!b.config?.rerange) return 'Moving the range is off: it waits for the price to come back.';
-  if (m.block) return `It won't move the range now: ${m.block}.`;
-  if (m.cappedUntil) return `It already moved ${m.perDay} times in 24 hours; the next move can come in ${dur(m.cappedUntil - Date.now())}.`;
-  if (m.cost == null) return "It moves the range around the price once the fees it's missing pass what moving costs (working out the cost).";
-  return `It moves the range around the price once the fees it's missing pass what moving costs: ${qty(m.missed, q, 3, false)} missed so far, the move costs ≈${qty(m.cost, q, 3, false)}.`;
+  if (!b.config?.rerange) return 'Auto-move is off: it waits for the price to come back, or move it yourself below.';
+  if (b.move.block) return `It can't move the range now: ${b.move.block}.`;
+  return 'Auto-move is on: it moves the range to the price on its next check.';
+}
+
+const WIDTHS = [0.01, 0.02, 0.05, 0.08, 0.12, 0.2];
+
+/** Auto-move on or off, and a move now: to the price at the same width, or at a new one. */
+function RangeControls({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boolean }) {
+  const cur: number = b.config.bandPct;
+  const [w, setW] = useState(String(+(cur * 100).toFixed(2)));
+  const band = Number(w) / 100, ok = band >= LP_BAND.min && band <= LP_BAND.max, same = ok && Math.abs(band - cur) < 1e-9;
+  const why = b.status !== 'running' ? 'Resume it first' : b.step ? 'Busy with a step' : !ok ? `Range must be ±${LP_BAND.min * 100}% to ±${LP_BAND.max * 100}%` : '';
+  const move = () => act(async () => {
+    if (b.mode === 'live' && !confirm(`${same ? 'Move the range to the price' : `Change the range to ±${+(band * 100).toFixed(2)}%`}? The position is taken out and opened again around ${px(b.price)}: gas, a swap to the new mix, and the coin mix it has now becomes final.`)) return;
+    await botApi(`lps/${b.id}/move`, 'POST', { bandPct: band });
+  });
+  return (
+    <div className="range-ctl">
+      <div className="seg-field">
+        <span className="k"><L tip="On: as soon as the price leaves the range, the position is taken out and opened again around the price, same width. Off: it waits for the price to come back. Each move makes the coin mix it had final (lost to range moves).">Auto-move</L></span>
+        <div className="seg" role="radiogroup" aria-label="Auto-move">
+          {([[true, 'On'], [false, 'Off']] as const).map(([v, t]) => (
+            <button key={t} type="button" role="radio" aria-checked={!!b.config.rerange === v} className={!!b.config.rerange === v ? 'on' : ''} disabled={busy}
+              onClick={() => act(() => botApi(`lps/${b.id}/rerange`, 'PUT', { enabled: v }))}>{t}</button>
+          ))}
+        </div>
+      </div>
+      <div className="seg-field">
+        <span className="k"><L tip="The range's width around the price. Pick another and press Change to take the position out and open it again at that width, around today's price.">Range ±%</L></span>
+        <div className="range-w">
+          {WIDTHS.map((x) => <button key={x} type="button" className={`btn small-btn ${Math.abs(band - x) < 1e-9 ? 'primary' : ''}`} onClick={() => setW(String(x * 100))}>±{x * 100}%</button>)}
+          <input value={w} inputMode="decimal" aria-label="Range ± %" onChange={(e) => setW(e.target.value.replace(/[^\d.]/g, ''))} />
+        </div>
+      </div>
+      <button type="button" className="btn primary" disabled={busy || !!why} title={why} onClick={move}>
+        {same ? 'Move to the price now' : ok ? `Change to ±${+(band * 100).toFixed(2)}%` : 'Change range'}
+      </button>
+      <p className="muted small">Moved {b.reranges} time{b.reranges === 1 ? '' : 's'}{b.lastRerangeAt ? `, last ${ago(b.lastRerangeAt)}` : ''}.</p>
+    </div>
+  );
 }
 
 /** Range on a line: the band is the position, the marker is the price (the line reaches 25% of the width past each end). */
@@ -48,10 +85,6 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
   return (
     <div className="card">
       <h3>Settings</h3>
-      <label className="check follow">
-        <input type="checkbox" checked={!!b.config?.rerange} disabled={busy || b.status === 'closed'} onChange={(e) => act(() => botApi(`lps/${b.id}/rerange`, 'PUT', { enabled: e.target.checked }))} />
-        <span><b>Move the range with the price</b> <span className="muted">Moved {b.reranges} time{b.reranges === 1 ? '' : 's'}{b.lastRerangeAt ? `, last ${ago(b.lastRerangeAt)}` : ''}. Outside the range it moves once the fees it's missing pass what the move costs (gas plus the swap back to the range's mix), at most {b.move.perDay} times in any 24 hours.</span></span>
-      </label>
       <div className="follow-row">
         <ProfitsField p={p} set={setP} kind="lp" />
         {changed && <button type="button" className="btn small-btn primary" disabled={busy || (p.mode === 'send' && !isAddress(p.to))}
@@ -70,12 +103,10 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
   const q = b.quote, base = b.base, k: number | null = b.usdPerQuote ?? null;
   const pnl: AnyObj | null = b.pnl;
-  const profitUsd = lpPnlUsd(b);
-  const inUsd = (x: number) => (k ? ` · ${usd(x * k, true)}` : '');
   const pos = b.position, step = b.step;
   const running = b.status === 'running', closed = b.status === 'closed';
-  const owedQ = b.owed && b.price != null ? b.owed.base * b.price + b.owed.quote : 0;
-  const hold = b.startPrice && b.price && b.startValue ? (b.startValue / b.startPrice) * b.price - b.startValue : null;
+  // a daily rate only once it has run a full day: the first minutes' costs scaled to a day say nothing
+  const days = b.startedAt ? (Date.now() - b.startedAt) / 86_400_000 : null;
   const close = () => act(async () => { if (confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}.`)) await botApi(`lps/${b.id}/close`, 'POST'); });
   const remove = () => act(async () => { if (confirm(`Remove the ${b.label} liquidity bot and its history?`)) { await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' }); } });
 
@@ -106,29 +137,29 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <div className="kpi-row">
         <div className="kpi">
-          <span><L tip="Your share of the pool's trading fees: collected so far plus what's waiting in the position. The coins' price doesn't change this.">Fees earned</L></span>
-          <div className={`kpi-v ${cls(pnl?.fees)}`}>{pnl ? <AnimatedNumber value={pnl.fees} format={(x) => qty(x, q, 5)} /> : '—'}</div>
-          <span className="sub">{pnl ? `${qty(b.totals.fees, q, 4, false)} collected · ${qty(owedQ, q, 4, false)} waiting${inUsd(pnl.fees)}` : 'measuring…'}</span>
+          <span><L tip={`Your share of the pool's trading fees, in the coins they were paid in: collected so far plus what's waiting in the position. A trade selling ${base} pays its fee in ${base}; one buying it pays in ${q}. The coins' price doesn't change these amounts.`}>Fees earned</L></span>
+          <div className="kpi-v coins2">{pnl ? <><b className={cls(pnl.feeCoins.base)}>{qty(pnl.feeCoins.base, base, 5)}</b><b className={cls(pnl.feeCoins.quote)}>{qty(pnl.feeCoins.quote, q, 5)}</b></> : '—'}</div>
+          <span className="sub">{pnl ? <>waiting in the position: {num(b.owed?.base, 6)} {base} + {num(b.owed?.quote, 6)} {q}<Usd v={pnl.fees} k={k} /></> : 'measuring…'}</span>
         </div>
         <div className="kpi">
-          <span><L tip="Network fees for every open, range move, swap, close and fee collect.">Gas paid</L></span>
-          <div className="kpi-v">{pnl ? qty(-pnl.gas, q, 4) : '—'}</div>
-          <span className="sub">{b.reranges} range move{b.reranges === 1 ? '' : 's'}</span>
+          <span><L tip={`Gas for every open, range move, close and fee collect, plus what the swaps to the range's mix lost to the pool fee and price impact. Counted in ${q}.`}>Costs</L></span>
+          <div className="kpi-v">{pnl ? qty(-(pnl.gas + pnl.swapCost), q, 4) : '—'}</div>
+          <span className="sub">{pnl ? <>gas {qty(pnl.gas, q, 3, false)} · swaps {qty(pnl.swapCost, q, 3, false)}<Usd v={-(pnl.gas + pnl.swapCost)} k={k} /></> : ''}</span>
         </div>
         <div className="kpi">
-          <span><L tip="What price moves did to the coins (a position ends up holding more of whichever coin fell), plus the swap costs of opening and moving the range.">Price change and swaps</L></span>
-          <div className={`kpi-v ${cls(pnl?.price)}`}>{pnl ? qty(pnl.price, q, 5) : '—'}</div>
-          <span className="sub">{hold != null ? `holding ${base} instead: ${qty(hold, q, 4)}` : 'moves with the price'}</span>
+          <span><L tip={`While the price is inside the range, the position sells ${base} as it rises and buys it as it falls, so it ends up with more of whichever coin fell. Taking it out (to move the range, or to close) makes that final. This is how much less those coins were worth than the ones put in, at the same price.`}>Lost to range moves</L></span>
+          <div className={`kpi-v ${pnl?.moveLoss ? 'neg' : ''}`}>{pnl ? qty(-pnl.moveLoss, q, 4) : '—'}</div>
+          <span className="sub">{b.reranges} range move{b.reranges === 1 ? '' : 's'}<Usd v={pnl ? -pnl.moveLoss : null} k={k} /></span>
         </div>
         <div className="kpi">
-          <span><L tip="Fees earned − gas ± price change and swaps, in the coin this bot spends.">Overall, in {q}</L></span>
-          <div className={`kpi-v ${cls(pnl?.profit)}`}>{pnl ? qty(pnl.profit, q, 5) : '—'}</div>
-          <span className="sub">{pnl && b.startValue ? `${pct(pnl.profit / b.startValue, 2, true)} of ${qty(b.startValue, q, 5, false)} put in` : ''}{profitUsd != null ? ` · ${usd(profitUsd, true)}` : ''}</span>
+          <span><L tip={`Fees earned minus costs and what range moves lost, in ${q}. The coins' own price move isn't in it: that happens whether or not the bot runs.`}>Earned after costs</L></span>
+          <div className={`kpi-v ${cls(pnl?.net)}`}>{pnl ? <AnimatedNumber value={pnl.net} format={(x) => qty(x, q, 5)} /> : '—'}</div>
+          <span className="sub">{pnl && b.startValue ? <>{pct(pnl.net / b.startValue, 2, true)} of what you put in{days != null && days >= 1 ? ` · ${qty(pnl.net / days, q, 3)} a day` : ''}<Usd v={pnl.net} k={k} /></> : ''}</span>
         </div>
         <div className="kpi">
-          <span><L tip={`What the bot has now (with fees, after gas since it opened) minus what the coins it held right after opening would be worth today. Positive: its fees beat what the range and its moves cost. Negative: just keeping those coins would have left you with more. The coin's own price move is in both, so it cancels out.`}>Result vs holding</L></span>
-          <div className={`kpi-v ${cls(pnl?.vsHold)}`}>{pnl?.vsHold != null ? qty(pnl.vsHold, q, 5) : '—'}</div>
-          <span className="sub">{b.opening && pnl?.hold != null ? `keeping the ${num(b.opening.base, 6)} ${base} + ${num(b.opening.quote, 2)} ${q} it opened with: ${qty(pnl.hold, q, 5, false)}${inUsd(pnl.vsHold)}` : 'once the position is open'}</span>
+          <span><L tip="The coins in the position right now (they change as the price moves inside the range), and its share of the liquidity trading at today's price, which is its share of every trade's fee. Out of range the share is 0.">Liquidity provided</L></span>
+          <div className="kpi-v coins2">{b.coins ? <><b>{num(b.coins.base, 6)} {base}</b><b>{num(b.coins.quote, 6)} {q}</b></> : '—'}</div>
+          <span className="sub">{b.poolShare != null ? <>{pct(b.poolShare, b.poolShare < 0.001 ? 4 : 2)} of the pool's active liquidity</> : 'once the position is open'}<Usd v={b.coins && b.price != null ? b.coins.base * b.price + b.coins.quote : null} k={k} sign={false} /></span>
         </div>
       </div>
 
@@ -143,6 +174,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
             {pos ? <>
               <p className="small">{px(pos.lower)} – {px(pos.upper)} {q}/{base} · price {px(b.price)}</p>
               <RangeGauge lower={pos.lower} upper={pos.upper} price={b.price} />
+              {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
               <p className="small">In the position: <b>{num(b.coins?.base, 6)} {base}</b> + <b>{num(b.coins?.quote, 6)} {q}</b></p>
               <p className="small">Fees waiting: {num(b.owed?.base, 8)} {base} + {num(b.owed?.quote, 8)} {q}</p>
               <p className="muted small">Opened {ago(pos.openedAt)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>

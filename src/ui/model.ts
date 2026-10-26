@@ -1,4 +1,4 @@
-/** View model shared by the screens: bot names, ≈USD profit, range checks, navigation. */
+/** View model shared by the screens: bot names, coins earned, range checks, navigation. */
 import type { TF } from '../market/candles';
 import type { TrendConfig } from '../market/strategy';
 import { gasReserve, type GasReserveCfg } from '../live/gasReserve';
@@ -8,9 +8,9 @@ export type AnyObj = Record<string, any>; // eslint-disable-line @typescript-esl
 
 export interface TrendPrefill { pair: string; tf: TF; cfg: TrendConfig; capital?: number; nonce: number }
 export interface BtPrefill { pair: string; tf: TF; cfg: TrendConfig; nonce: number }
-/** A daily pick opened in New bot: the range is re-centred on the live price with the pick's width. */
+/** A grid from Opportunities opened in New bot: the range is re-centred on the live price with that setting's width. */
 export interface GridPrefill { pair: string; bandPct: number; gridCount: number; nonce: number }
-/** A liquidity setup from the daily scan's comparison opened in New bot. */
+/** A liquidity range from Opportunities opened in New bot. */
 export interface LpPrefill { pair: string; bandPct: number; nonce: number }
 
 export const TOOL_TABS = [['chart', 'Charts'], ['backtest', 'Backtest'], ['analytics', 'Analytics'], ['markets', 'Markets'], ['convert', 'Convert'], ['alerts', 'Alerts'], ['system', 'System']] as const;
@@ -18,6 +18,7 @@ export type ToolTab = (typeof TOOL_TABS)[number][0];
 
 export type View =
   | { v: 'home' }
+  | { v: 'opps' }
   | { v: 'new'; kind: BotKind; trendPrefill?: TrendPrefill; gridPrefill?: GridPrefill; lpPrefill?: LpPrefill }
   | { v: 'grid'; id: string }
   | { v: 'trend'; id: string }
@@ -31,14 +32,6 @@ export const botView = (kind: BotKind, id: string): View => ({ v: kind, id });
 /** 'PLS/DAI', 'ETH/USDC' (chain suffix dropped: the chain badge shows it). */
 export const gridName = (g: AnyObj) => String(g.label ?? `PLS/${g.stable}`).replace(/·.*/, '');
 export const quoteSym = (b: AnyObj) => b.quoteSym ?? b.stable ?? b.quote;
-
-/** Grid profit (realized + unrealized) in ≈USD, or null when the quote has no USD route. */
-export const gridPnlUsd = (g: AnyObj): number | null => (g.usdPerQuote == null ? null : (g.pnl.realized + g.pnl.unrealized) * g.usdPerQuote);
-/** Trend bot profit (equity − capital) in ≈USD, or null when the quote has no USD route. */
-export const trendPnlUsd = (t: AnyObj): number | null => (t.usdPerQuote == null ? null : (t.pnl.equity - t.capital) * t.usdPerQuote);
-
-/** Liquidity bot profit (fees − gas ± price, see LpEngine.pnl) in ≈USD, or null when unknown. */
-export const lpPnlUsd = (b: AnyObj): number | null => (b.usdPerQuote == null || !b.pnl ? null : b.pnl.profit * b.usdPerQuote);
 
 export function rangeState(g: AnyObj): 'in' | 'below' | 'above' | null {
   if (!g.config || g.price == null) return null;
@@ -93,7 +86,10 @@ export function coinFunds(s: AnyObj, key: string, side: 'base' | 'quote', amount
   return { symbol: side === 'quote' ? m.quote : m.base, have, readError, inUse, reserve, need, max, ok: have == null ? null : have + 1e-9 >= need };
 }
 
-/** What every bot made by trading, per coin (no price conversion): banked trades, and liquidity fees after gas. */
+/**
+ * What every bot made by trading, per coin it spends (no dollar conversion): banked trades, and a liquidity bot's fees
+ * after gas, swap costs and coins lost to range moves (LpEngine.pnl net).
+ */
 export interface CoinEarnings { symbol: string; amount: number; trades: number; wins: number; losses: number; fees: number }
 export function earnedByCoin(bots: AnyObj[]): CoinEarnings[] {
   const m = new Map<string, CoinEarnings>();
@@ -107,7 +103,7 @@ export function earnedByCoin(bots: AnyObj[]): CoinEarnings[] {
       e.amount += b.pnl.realized; e.trades += b.stats.count; e.wins += won; e.losses += b.stats.count - won;
     } else if (b.pnl) {
       const e = at(quoteSym(b));
-      e.amount += b.pnl.fees - b.pnl.gas; e.fees += b.pnl.fees;
+      e.amount += b.pnl.net; e.fees += b.pnl.fees;
     }
   }
   return [...m.values()].sort((a, b) => b.trades + b.fees - (a.trades + a.fees));

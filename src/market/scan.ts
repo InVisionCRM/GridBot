@@ -1,15 +1,20 @@
 /**
- * Daily pair scan (pure). Two steps:
+ * Opportunity scan (pure). Two steps:
  *  1. pickTokens: GeckoTerminal "top pools by 24h volume" rows → tokens worth testing. Volume alone is misleading
  *     (verified 2026-10-17: $53M "volume" on $45 of liquidity, stablecoin/stablecoin pools that never move), so a
  *     pool must pair the token with something the bot can spend (the chain's native coin or a stablecoin), hold real
  *     liquidity, show real trades, and have volume in proportion to its liquidity.
  *  2. bestSetup: replay the last days of hourly candles through the grid backtester (fees, impact, gas) for a set
- *     of ranges × level counts and keep the one that made the most.
+ *     of ranges × level counts and keep the one whose completed trades earned the most. The price move is left out:
+ *     it isn't the grid's doing, and last week's total return didn't predict the next week at all (walk-forward in
+ *     the README: rank correlation −0.08 over 90 pools).
+ *  3. Ranking (gridRank, lpRank), from that walk-forward: grids by how much the price swings, liquidity by what the
+ *     position earned after costs.
  */
 import { runGridBacktest } from './backtest';
 import type { Candle } from './candles';
 import type { CostModel } from './costs';
+import type { SafetyReport } from '../live/markets';
 
 /**
  * Default test size: every setup is tested with this much of the spend coin (in USD) so gas weighs the same on every
@@ -28,7 +33,8 @@ export function checkTestUsd(v: unknown): number {
   return n;
 }
 export const SCAN_EVERY_MS = 24 * 3600_000;
-export const PICKS_PER_CHAIN = 3;
+/** GeckoTerminal pages of top pools read per DEX (20 pools a page, busiest first) */
+export const SCAN_PAGES = 5;
 /** 7 days of hourly candles */
 export const SCAN_CANDLES = 168;
 
@@ -74,13 +80,13 @@ export function parseTopPools(json: unknown): TopPool[] {
 
 export const SCAN_RULES = {
   /** Pool liquidity in USD */
-  minLiquidityUsd: 50_000,
+  minLiquidityUsd: 10_000,
   /** Buys + sells in 24 h */
-  minTx24: 100,
+  minTx24: 50,
   /** 24 h volume ÷ liquidity above this is wash trading */
   maxVolumeToLiquidity: 20,
   /** Tokens tested per chain (each costs one candle request) */
-  maxTokens: 8,
+  maxTokens: 100,
 };
 
 export interface TokenCandidate { token: string; spend: string; pool: TopPool }
@@ -118,6 +124,58 @@ export function pickTokens(pools: TopPool[], spendable: string[], wrapped: strin
   return { picked, skipped };
 }
 
+/** One pool, tested both ways over the same week at the same test size. */
+export interface Opportunity {
+  chainId: number;
+  /** Market key when the pair is already in the app (may be a flipped key such as 'HEX~') */
+  key: string | null;
+  /** How to add it otherwise (POST /api/opportunities/use) */
+  add: { address: string; quote: string; pool: string } | null;
+  label: string;
+  spend: string;
+  stack: string;
+  dex: string;
+  kind: 'v2' | 'v3';
+  feeBps: number;
+  risk: SafetyReport['risk'] | null;
+  /** Why the safety check gave that risk */
+  riskWhy: string | null;
+  /** false: it failed the safety check, so it can only be paper traded */
+  liveAllowed: boolean;
+  /** Spot when scanned */
+  price: number;
+  /** The pair's price change over the test week: shown, never ranked */
+  movePct: number;
+  /** How far the price swung back and forth: the hourly high-low ranges added up, per day (dailySwing) */
+  swingPct: number;
+  activity: { volume24Usd: number; liquidityUsd: number; tx24: number } | null;
+  /** The test amount in the spend coin, and in USD */
+  capital: number;
+  usd: number;
+  /** Best grid by what its completed trades earned (null: none earned, see gridWhy) */
+  grid: { bandPct: number; gridCount: number; earnedPct: number; roundTrips: number; returnPct: number; maxDrawdownPct: number } | null;
+  gridWhy: string | null;
+  /** Best liquidity range by fees − costs (null: not tested, see lpWhy). Only where a liquidity bot can run: a V3 pool on a DEX with a verified position manager */
+  lp: { bandPct: number; earnedPct: number; feesPct: number; inRangePct: number; poolSharePct: number; returnPct: number } | null;
+  lpWhy: string | null;
+}
+
+/** The hourly high-low ranges (log) added up, per day: how far the price went back and forth, whichever way it ended. */
+export function dailySwing(k: Candle[]): number {
+  if (!k.length) throw new Error('no candles');
+  return k.reduce((a, c) => a + Math.log(c.h / c.l), 0) / (k.length / 24);
+}
+
+/**
+ * Grid ranking: pools where a grid earned from its trades last week, by how much the price swings. Walk-forward over
+ * 90 pools × 4 weeks (Oct 2026, README): the swing predicted next week's grid earnings best (rank correlation 0.53;
+ * last week's own grid earnings 0.36, last week's total return −0.08), and came out ahead on each half of the pools
+ * separately (0.50 / 0.54 against 0.34 / 0.37).
+ */
+export const gridRank = (o: Pick<Opportunity, 'grid' | 'swingPct'>): number | null => (o.grid ? o.swingPct : null);
+/** Liquidity ranking: what the position earned after costs last week (walk-forward: rank correlation 0.85 with the next week). */
+export const lpRank = (o: Pick<Opportunity, 'lp'>): number | null => o.lp?.earnedPct ?? null;
+
 /** Ranges (± around the start price) and level counts tried for every pair. */
 export const SETUP_BANDS = [0.05, 0.08, 0.12, 0.18, 0.25];
 export const SETUP_LEVELS = [6, 10, 14, 20, 30, 40];
@@ -135,16 +193,16 @@ export interface Setup {
   gridCount: number;
   /** Net result over the test window (fees, impact, gas; open lots marked to the last close) */
   returnPct: number;
+  /** What the completed buy → sell trades made after every cost ÷ the amount (coins still held aren't in it) */
+  earnedPct: number;
   roundTrips: number;
   maxDrawdownPct: number;
-  /** Buy-and-hold over the same window */
-  holdPct: number;
   days: number;
 }
 
 /**
- * Best range × level count over `k` (hourly candles, oldest first), each started at the first candle's open.
- * Null when no setup made a positive net result with sells in at least MIN_SELL_HOURS different hours.
+ * Best range × level count over `k` (hourly candles, oldest first), each started at the first candle's open, by what
+ * its completed trades earned. Null when no setup earned money with sells in at least MIN_SELL_HOURS different hours.
  */
 export function bestSetup(k: Candle[], costs: CostModel, capital: number): Setup | null {
   if (k.length < MIN_SCAN_CANDLES) throw new Error(`only ${k.length} hourly candles (need ${MIN_SCAN_CANDLES})`);
@@ -154,9 +212,9 @@ export function bestSetup(k: Candle[], costs: CostModel, capital: number): Setup
     for (const gridCount of SETUP_LEVELS) {
       const r = runGridBacktest(k, { lowerPrice: p0 * (1 - bandPct), upperPrice: p0 * (1 + bandPct), gridCount, capital }, '1h', costs);
       const m = r.metrics;
-      if (new Set(r.trades.map((t) => t.exitT)).size < MIN_SELL_HOURS || !(m.totalReturn > 0)) continue;
-      const s: Setup = { bandPct, gridCount, returnPct: m.totalReturn, roundTrips: m.trades, maxDrawdownPct: m.maxDrawdown, holdPct: m.bhReturn, days: m.days };
-      if (!best || s.returnPct > best.returnPct || (s.returnPct === best.returnPct && s.roundTrips > best.roundTrips)) best = s;
+      if (new Set(r.trades.map((t) => t.exitT)).size < MIN_SELL_HOURS || !(m.earned > 0)) continue;
+      const s: Setup = { bandPct, gridCount, returnPct: m.totalReturn, earnedPct: m.earned / capital, roundTrips: m.trades, maxDrawdownPct: m.maxDrawdown, days: m.days };
+      if (!best || s.earnedPct > best.earnedPct || (s.earnedPct === best.earnedPct && s.roundTrips > best.roundTrips)) best = s;
     }
   }
   return best;
