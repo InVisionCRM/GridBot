@@ -13,7 +13,7 @@ export interface GridPrefill { pair: string; bandPct: number; gridCount: number;
 /** A liquidity range from Opportunities opened in New bot. */
 export interface LpPrefill { pair: string; bandPct: number; nonce: number }
 
-export const TOOL_TABS = [['chart', 'Charts'], ['backtest', 'Backtest'], ['analytics', 'Analytics'], ['markets', 'Markets'], ['convert', 'Convert'], ['alerts', 'Alerts'], ['system', 'System']] as const;
+export const TOOL_TABS = [['chart', 'Charts'], ['backtest', 'Backtest'], ['analytics', 'Analytics'], ['markets', 'Markets'], ['convert', 'Convert'], ['alerts', 'Alerts'], ['system', 'System'], ['friends', 'Friends']] as const;
 export type ToolTab = (typeof TOOL_TABS)[number][0];
 
 export type View =

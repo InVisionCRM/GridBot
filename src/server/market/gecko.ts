@@ -31,6 +31,7 @@ export const SPEEDUP_AFTER = 20;
  */
 export class GeckoSource {
   private nextAt = 0;
+  private backoffUntil = 0;
   private chain: Promise<unknown> = Promise.resolve();
   private gap: number;
   private okStreak = 0;
@@ -50,7 +51,7 @@ export class GeckoSource {
     if (this.limits.length > 200) this.limits.shift();
     this.gap = Math.min(MAX_GAP_MS, this.gap * 2);
     this.okStreak = 0;
-    this.nextAt = this.now() + 65_000;
+    this.nextAt = this.backoffUntil = this.now() + 65_000;
     return new RateLimited(this.nextAt);
   }
   private succeeded() {
@@ -61,6 +62,8 @@ export class GeckoSource {
   }
   private sleep(ms: number) { return (this.opts.sleep ?? ((m) => new Promise((r) => setTimeout(r, m))))(ms); }
   get blockedUntil() { return this.nextAt > this.now() ? this.nextAt : 0; }
+  /** End of the 65 s back-off after a 429 (0 when not backing off; the pace between calls doesn't count). */
+  get limitedUntil() { return this.backoffUntil > this.now() ? this.backoffUntil : 0; }
   /** 429s received in the last `ms` */
   limitedWithin(ms: number) { const from = this.now() - ms; return this.limits.filter((t) => t >= from).length; }
 
@@ -78,16 +81,20 @@ export class GeckoSource {
     return p;
   }
 
-  /** Top pools of one DEX on a network by 24 h volume (20 per page). */
-  async topPools(network: string, dex: string, page = 1): Promise<TopPool[]> {
-    const url = `https://api.geckoterminal.com/api/v2/networks/${network}/dexes/${dex}/pools?sort=h24_volume_usd_desc&page=${page}`;
+  /** One GeckoTerminal URL's JSON, paced and backed off like every call (also what the host relays for friends' copies). */
+  getJson(url: string): Promise<unknown> {
     return this.request(async () => {
       const r = await this.fetchFn(url, { headers: { accept: 'application/json' } });
       if (r.status === 429) throw this.limited();
       if (!r.ok) throw new Error(`GeckoTerminal HTTP ${r.status}`);
       this.succeeded();
-      return parseTopPools(await r.json());
+      return r.json();
     });
+  }
+
+  /** Top pools of one DEX on a network by 24 h volume (20 per page). */
+  async topPools(network: string, dex: string, page = 1): Promise<TopPool[]> {
+    return parseTopPools(await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${network}/dexes/${dex}/pools?sort=h24_volume_usd_desc&page=${page}`));
   }
 
   /** `token` = base token address (price is quoted per base); o.network / o.feeBps override the defaults per market. */
@@ -96,19 +103,12 @@ export class GeckoSource {
     const net = o.network ?? this.opts.network ?? 'pulsechain';
     const q = new URLSearchParams({ aggregate: String(agg), limit: String(limit), currency: 'token', token: wpls });
     if (beforeSec) q.set('before_timestamp', String(beforeSec));
-    const url = `https://api.geckoterminal.com/api/v2/networks/${net}/pools/${pool}/ohlcv/${unit}?${q}`;
-    return this.request(async () => {
-      const r = await this.fetchFn(url, { headers: { accept: 'application/json' } });
-      if (r.status === 429) throw this.limited();
-      if (!r.ok) throw new Error(`GeckoTerminal HTTP ${r.status}`);
-      this.succeeded();
-      const j = (await r.json()) as { data?: { attributes?: { ohlcv_list?: number[][] } } };
-      const rows = j.data?.attributes?.ohlcv_list ?? [];
-      const k = 1 - (o.feeBps ?? this.opts.feeBps ?? 29) / 10_000;
-      return rows
-        .filter((x) => x.length >= 6 && x[4] > 0)
-        .map(([t, o, h, l, c, v]) => ({ t, o: o * k, h: h * k, l: l * k, c: c * k, v }))
-        .sort((a, b) => a.t - b.t);
-    });
+    const j = (await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${net}/pools/${pool}/ohlcv/${unit}?${q}`)) as { data?: { attributes?: { ohlcv_list?: number[][] } } };
+    const rows = j.data?.attributes?.ohlcv_list ?? [];
+    const k = 1 - (o.feeBps ?? this.opts.feeBps ?? 29) / 10_000;
+    return rows
+      .filter((x) => x.length >= 6 && x[4] > 0)
+      .map(([t, o, h, l, c, v]) => ({ t, o: o * k, h: h * k, l: l * k, c: c * k, v }))
+      .sort((a, b) => a.t - b.t);
   }
 }

@@ -23,6 +23,7 @@ import type { Emit } from './activity';
 import { pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, type RecenterState } from '../../live/recenter';
+import { noKey } from '../words';
 
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
@@ -223,7 +224,7 @@ export class GridEngine {
     }
     if (mode === 'live') {
       const rt = this.hub.chainOf(key);
-      if (!rt.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
+      if (!rt.signer) throw new Error(noKey());
       return new LiveExecutor(quoter, rt.signer, {
         approval: this.d.approval ?? 'exact',
         receiptTimeoutMs: this.d.receiptTimeoutMs ?? 180_000,
@@ -262,7 +263,7 @@ export class GridEngine {
     const stable = p.stable ?? this.state.stable;
     if (this.state.config && stable !== this.state.stable) throw new Error(`This grid trades ${this.hub.label(this.state.stable)}; its pair can't change. Add a new grid for ${this.hub.label(stable)}.`);
     const def = this.hub.def(stable);
-    if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push('Live mode needs PRIVATE_KEY in .env');
+    if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push(noKey());
     if (errs.length) throw new Error(errs.join('; '));
     if (p.mode === 'live' && def.safety) await this.requireLiveSafety(stable);
 
@@ -324,7 +325,7 @@ export class GridEngine {
     if (this.state.status === 'running') return;
     if (!this.state.config) throw new Error('No grid to resume.');
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
-    if (this.state.mode === 'live' && !this.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
+    if (this.state.mode === 'live' && !this.signer) throw new Error(noKey());
     if (this.state.mode === 'live' && this.def?.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
     this.state.status = 'running';
     this.save();

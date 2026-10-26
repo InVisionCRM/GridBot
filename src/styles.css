@@ -729,3 +729,12 @@ label.wide input { min-width: 180px; }
 .paper-view .kpi-v, .paper-view .big { opacity: 0.85; }
 .paper-line { color: var(--muted); border: 1px dashed var(--line-2); border-radius: 8px; padding: 6px 10px; margin: 0; }
 .linklike { appearance: none; background: none; border: 0; padding: 0; font: inherit; color: var(--text); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+
+/* ── Tools → Friends ─────────────────────────────────────── */
+.steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; color: var(--muted); }
+.link-box { border: 1px solid rgba(61, 255, 162, 0.35); background: var(--sel); border-radius: 9px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.link-url { overflow-wrap: anywhere; font-size: 0.8rem; background: none; border: 0; padding: 0; }
+.friend-list { display: flex; flex-direction: column; }
+.friend-row { display: flex; flex-direction: column; gap: 4px; padding: 10px 0; border-top: 1px solid var(--line); }
+.friend-row:first-child { border-top: 0; }
+.btn.neg { color: var(--loss); }

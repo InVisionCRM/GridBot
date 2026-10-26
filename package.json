@@ -14,7 +14,8 @@
     "test:watch": "vitest",
     "preview": "vite preview",
     "check:onchain": "tsx scripts/onchainCheck.ts",
-    "candles:backfill": "tsx scripts/backfillCandles.ts"
+    "candles:backfill": "tsx scripts/backfillCandles.ts",
+    "friends:setup": "node scripts/friendsSetup.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

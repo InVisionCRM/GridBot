@@ -165,6 +165,31 @@ Swaps everything the wallet holds on one chain into a single coin: the chain's o
 - **API.** `GET /api/convert/targets?chainId=` · `POST /api/convert/plan {chainId, target, keepNative?, maxImpact?}` · `POST /api/convert/run {planId, coins[]}` · `GET /api/convert/job` · `POST /api/convert/stop`.
 - **Checked.** `tests/convert.test.ts`: routes, scam names, bots' coins, the impact cap, dust; a full run on the mock chain (unwrap, approve, both swaps, nonces in order); explorer decimals that disagree with the chain; a listed coin that reverts; a bot that takes a coin after the plan; Stop between coins and in the middle of one (on an unwrap, on an approve). Read-only against the real PulseChain wallet: the plan listed 10 coins, 7 were convertible, the website-named airdrop was skipped and two dust coins were skipped; the check took about 50 s.
 
+## Friends' copies (Tools → Friends)
+
+Friends get their own copy of the app on your computer and open it on their phone: their own bots, key, history and log-in (`src/server/friends`). Your app and your key are unchanged and stay on 127.0.0.1; friends only ever reach the friends' gateway.
+
+**Set up (once, on your computer)**
+1. `npm run friends:setup` adds `FRIENDS_SECRET` to `.env`. It locks friends' keys and signs their log-ins. Keep it: a new one makes the saved keys unreadable.
+2. `npm run build`, then `npm start`. Friends' copies run from the built app; `npm run dev` leaves them off.
+3. Install [Tailscale](https://tailscale.com/download) and log in, then run `tailscale funnel --bg 3850` once. It prints `https://<computer>.<tailnet>.ts.net`. Funnel needs HTTPS and the Funnel attribute turned on for your tailnet (the admin console asks the first time). See the [Funnel guide](https://tailscale.com/kb/1223/funnel).
+4. Tools → Friends: your name and that address, then **Make invite link** and text it to the friend.
+
+**A friend, on their phone**: opens the link, chooses a password, and pastes their key if they want to trade live (it can be added later under **Account**). Then they log in with their name and password; the page can be added to the home screen like an app. A forgotten password gets a **New password link** from you; their bots and key stay.
+
+**How it is kept apart**
+- **One process per friend**, in its own folder (`data/friends/<id>/`), running the same built server. Its environment is an allow-list (`SHARED_ENV` in `copies.ts`: chains, poll and safety settings) plus the friend's own key. Your `PRIVATE_KEY*`, `RPC_URL_*` (they can hold API keys) and `FRIENDS_SECRET` never reach it. Checked on a running copy: its whole environment was `CHAINS FRIEND_NAME HOST_NAME HOST_URL NODE_CHANNEL_* NODE_ENV PORT PRIVATE_KEY`.
+- **Keys at rest**: AES-256-GCM under a key derived from `FRIENDS_SECRET` (in `.env`, not `data/`), each box bound to its friend. A key that is yours or another friend's is refused. The friend is told plainly that you run the computer that holds it.
+- **The gateway** (port `FRIENDS_PORT`, default 3850, on 127.0.0.1 for Funnel to reach) serves log-in, invite and account pages and passes a logged-in friend to their own copy only. It drops the friend's cookie, Origin and forwarding headers, and refuses any change that doesn't come from your address. Log-ins are scrypt-hashed and last 30 days, in a signed cookie (HttpOnly, Secure, SameSite=Lax) that survives restarts. A name locks for 15 min after 5 wrong passwords, and all log-ins pause while more than 30 failed in the last minute. Invite links work once, for 7 days; only their hash is kept.
+- **Restarts**: copies start with your app and their bots carry on; a crashed copy restarts after 2 s, backing off to 60 s. A copy stops when your app stops, even when it is killed (the IPC channel closes; checked with SIGKILL).
+- **Live bots protect the key**: a friend can't change or remove their key while they have live bots, and you can't remove a friend whose copy has live bots, so no coins are left with a bot nobody runs.
+
+**Shared, so friends don't multiply the load**: GeckoTerminal limits by IP, so a copy fetches candles through your app (`GET /api/host/gecko`, candle URLs only). There one client paces every call from this computer, and a request another copy just made comes from a cache (6 h for history, 60 s for the newest candles). While your daily scan runs, copies are told to wait. The Opportunities scan is yours: copies show it and can't start one. Each copy reads the chains through the public RPCs and keeps its own candles and pool histories.
+
+**API (your app only)**: `GET /api/friends` · `PUT /api/friends/host {name?, address?}` · `POST /api/friends/invites {name}` · `DELETE /api/friends/invites/:id` · `POST /api/friends/:id/reset|start|stop|restart` · `DELETE /api/friends/:id`.
+
+**Checked**: `tests/friends.test.ts` covers key boxes, invites (once, expiry), lockout, new-password links ending old log-ins, cookie forgery and expiry, a copy's environment, and the gateway (no log-in → /login or 401, the forwarded request is local with no cookie or Origin, changes from another site refused, the live stream passing through, a copy that is down). It also covers the relay (candle URLs only, cache, waits while the scan runs) and a copy's candles round-tripping through the relay route. In the sandbox, an end-to-end run on a 390 px phone screen: invite → sign up with a key → app → Account. The copy's environment was checked as above, your app was killed and restarted, and the copy came back with the friend still logged in.
+
 ## Chains, DEXes & sources (verified 2026-10-08)
 
 Every address below was checked on-chain (code, `router.factory()`, `quoter.factory()`, token `symbol()`/`decimals()`, a live quote). `npm run check:onchain` re-runs all of it read-only. Nothing is guessed: chains or DEXes without an official deployment are left out or marked unavailable.

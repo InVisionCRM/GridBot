@@ -82,6 +82,8 @@ export interface MultiDeps {
   market?: (quote: string) => Promise<MarketSnapshot>;
   /** Multi-chain hub. Default: single PulseChain hub built from net/reader/signer (tests, legacy wiring). */
   hub?: Hub;
+  /** Set in a friend's copy (env.ts readCopy): the app shows whose copy it is and where the key is added */
+  copy?: { friend: string; host: string } | null;
 }
 
 export interface ChainWallet {
@@ -1213,6 +1215,7 @@ export class MultiBot {
     return {
       network: this.d.net.key, chainId: this.d.net.chainId, explorer: this.d.net.explorer,
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol),
+      copy: this.d.copy ?? null,
       hasSigner: this.hasSigner, address: this.address, walletBalances: this.walletBalances, wallets: this.walletView(), defaults: this.multi.defaults,
       txBusy: this.gate.busy, spots: this.spots, spotsAt: this.spotsAt,
       legacyChainId: this.hub.legacyChainId,

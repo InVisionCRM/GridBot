@@ -159,8 +159,12 @@ export function Opportunities({ s, nav, act, busy }: { s: AnyObj; nav: Nav; act:
           <h2>Opportunities</h2>
           <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `scanned ${ago(p.at)} · next ${time(p.nextAt)}` : 'not scanned yet'}</span>
           <span className="grow" />
-          <label className="small muted test-usd"><L tip="Every pool is tested with this much, in dollars. Use what you plan to put in: price impact and your share of a pool depend on it.">Test with $</L><input value={testUsd} inputMode="decimal" onChange={(e) => setUsd(e.target.value.replace(/[$,\s]/g, ''))} /></label>
-          <button type="button" className="btn small-btn" disabled={busy || p.running} onClick={scan}>{p.running ? 'Scanning…' : 'Scan now'}</button>
+          {s.copy
+            ? <span className="small muted">{s.copy.host}'s app scans once a day for everyone.</span>
+            : <>
+              <label className="small muted test-usd"><L tip="Every pool is tested with this much, in dollars. Use what you plan to put in: price impact and your share of a pool depend on it.">Test with $</L><input value={testUsd} inputMode="decimal" onChange={(e) => setUsd(e.target.value.replace(/[$,\s]/g, ''))} /></label>
+              <button type="button" className="btn small-btn" disabled={busy || p.running} onClick={scan}>{p.running ? 'Scanning…' : 'Scan now'}</button>
+            </>}
         </div>
         <p className="small muted">
           The busiest pools on each chain, replayed over the last 7 days of real prices as a grid and as a liquidity position, with each pool's fee, price impact and gas, at ${p.testUsd.toLocaleString('en-US')}.
@@ -188,7 +192,7 @@ export function Opportunities({ s, nav, act, busy }: { s: AnyObj; nav: Nav; act:
         {list.slice(0, shown).map((o, i) => <OppCard key={`${o.chainId}-${o.add?.pool ?? o.key}`} s={s} o={o} rank={i + 1} strategy={f.strategy} nav={nav} act={act} busy={busy} />)}
       </div>
       {list.length > shown && <button type="button" className="btn" onClick={() => setShown((n) => n + PAGE)}>Show {Math.min(PAGE, list.length - shown)} more</button>}
-      {!p.at && !p.running && <p className="small muted">No scan yet. Press Scan now: it takes a while (GeckoTerminal allows a few requests a minute).</p>}
+      {!p.at && !p.running && <p className="small muted">{s.copy ? `No scan yet. ${s.copy.host}'s app runs the first one soon.` : 'No scan yet. Press Scan now: it takes a while (GeckoTerminal allows a few requests a minute).'}</p>}
 
       {chainsShown.filter((c) => c.skipped.length).map((c) => (
         <details key={c.chainId} className="more">

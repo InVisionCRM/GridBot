@@ -36,6 +36,7 @@ import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
 import type { Logger } from './logger';
 import type { Store } from './store';
+import { noKey } from '../words';
 
 export interface LpPosition {
   /** NFT id (live) or a paper id */
@@ -239,7 +240,7 @@ export class LpEngine {
       const q = this.hub.quoter(this.state.market);
       if (this.state.mode === 'live') {
         const rt = this.hub.chainOf(this.state.market);
-        if (!rt.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
+        if (!rt.signer) throw new Error(noKey());
         return new LiveExecutor(q, rt.signer, { approval: this.d.approval ?? 'exact', receiptTimeoutMs: this.d.receiptTimeoutMs ?? 180_000, sharedNonce: rt.nonce });
       }
       return new PaperExecutor(q, () => ({ pls: this.state.idle.base, stable: this.state.idle.quote }), this.d.approval ?? 'exact');

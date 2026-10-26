@@ -100,7 +100,11 @@ function LpRow({ s, b, price, nav, act, busy }: { s: AnyObj; b: AnyObj; price: n
 /** What the signing wallet holds on each chain, and how much of each coin running live bots already use. */
 function WalletPanel({ s, chain }: { s: AnyObj; chain: number | 'all' }) {
   const wallets: AnyObj[] = (s.wallets ?? []).filter((w: AnyObj) => chain === 'all' || w.chainId === chain);
-  if (!s.hasSigner) return <div className="banner info"><span className="grow"><b>No signing key in .env</b>, so every bot runs in paper mode with simulated trades. Add your key to .env and restart to trade live.</span></div>;
+  if (!s.hasSigner) {
+    return s.copy
+      ? <div className="banner info"><span className="grow"><b>No key added yet</b>, so every bot runs in paper mode with practice trades. To trade live, add your key under <a href="/account">Account</a>.</span></div>
+      : <div className="banner info"><span className="grow"><b>No signing key in .env</b>, so every bot runs in paper mode with simulated trades. Add your key to .env and restart to trade live.</span></div>;
+  }
   if (!wallets.length) return null;
   const inUse = (w: AnyObj, c: AnyObj) => (s.allocations?.rows ?? []).find((r: AnyObj) => r.chainId === w.chainId && (c.native ? r.native : String(r.address).toLowerCase() === c.address))?.allocated ?? 0;
   const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
@@ -225,7 +229,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
   for (const b of bots) {
     const name = b.kind === 'grid' ? gridName(b) : b.kind === 'lp' ? `Liquidity ${b.label}` : b.name;
     const open = () => nav(botView(b.kind, b.id));
-    if (b.available === false) notices.push({ key: `na-${b.id}`, level: 'warn', text: <><b>{name}</b> trades on a chain or token this server doesn't load (removed, or turned off in .env). It is stopped; open it to remove it.</>, open });
+    if (b.available === false) notices.push({ key: `na-${b.id}`, level: 'warn', text: <><b>{name}</b> trades on a chain or token this server doesn't load (removed, or turned off {s.copy ? `by ${s.copy.host}` : 'in .env'}). It is stopped; open it to remove it.</>, open });
     else if (b.lastError) notices.push({ key: `err-${b.id}`, level: 'error', text: <><b>{name}:</b> {b.lastError}</>, open });
     else if (b.kind === 'lp' && b.status === 'running' && b.position && b.inRange === false && !b.config?.rerange) {
       notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is out of range</b> and isn't earning. Auto-move is off, so it waits for the price to come back. Open it to move the range or turn Auto-move on.</>, open });

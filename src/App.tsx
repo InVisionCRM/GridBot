@@ -129,11 +129,12 @@ export default function App() {
             title={showUsd ? 'Dollar values are shown beside coin amounts. Tap to show coins only.' : 'Results are shown in coins. Tap to also show their dollar value at today\'s price.'}>$ {showUsd ? 'on' : 'off'}</button>
           {s.address
             ? <span className="pill" title={s.address}>Address {short(s.address)}</span>
-            : <span className="pill warn" title="No signing key in .env: every bot runs in paper mode">Paper only</span>}
+            : <span className="pill warn" title={s.copy ? 'No key added: every bot runs in paper mode. Add one under Account.' : 'No signing key in .env: every bot runs in paper mode'}>Paper only</span>}
           {connected ? <span className="pill live-pill" title="Live: prices and trades stream in as they happen"><i />Live</span> : <span className="pill warn" title="Live stream lost; polling every 3 s">Reconnecting</span>}
-          <VersionPill v={ver.v} nav={nav} />
+          {!s.copy && <VersionPill v={ver.v} nav={nav} />}
           <button type="button" className="btn ghost small-btn" onClick={() => setDrawer(true)}>Activity</button>
           <button type="button" className="btn ghost small-btn" onClick={() => setGuide(true)}>Guide</button>
+          {s.copy && <a className="btn ghost small-btn" href="/account" title={`Logged in as ${s.copy.friend}: your key, password and log out`}>Account</a>}
           <button type="button" className="btn kill small-btn" disabled={busy || running === 0}
             title={sel ? `Stop every bot on ${sel.name}. Holdings are kept.` : 'Stop every bot on every chain. Holdings are kept.'}
             onClick={stopAll}>{sel ? `Stop all on ${sel.short}` : 'Stop all'}</button>

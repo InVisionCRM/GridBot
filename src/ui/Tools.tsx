@@ -11,6 +11,7 @@ import type { Ticks } from './useStream';
 import { TOOL_TABS, type AnyObj, type Nav, type View } from './model';
 import { SystemTab, type useVersion } from './System';
 import { Convert } from './Convert';
+import { Friends } from './Friends';
 
 function ChartTab({ s, ticks }: { s: AnyObj; ticks: Ticks | null }) {
   const { chain } = useChainFilter();
@@ -41,7 +42,7 @@ export function Tools({ s, view, ticks, nav, act, busy, prefs, setPrefs, ver }: 
   return (
     <main className="stack">
       <nav className="tabs" aria-label="Tools">
-        {TOOL_TABS.map(([k, l]) => <button key={k} type="button" className={tab === k ? 'on' : ''} aria-current={tab === k} onClick={() => nav({ v: 'tools', tab: k })}>{l}</button>)}
+        {TOOL_TABS.filter(([k]) => !(k === 'friends' && s.copy)).map(([k, l]) => <button key={k} type="button" className={tab === k ? 'on' : ''} aria-current={tab === k} onClick={() => nav({ v: 'tools', tab: k })}>{l}</button>)}
       </nav>
       {tab === 'chart' && <ChartTab s={s} ticks={ticks} />}
       {tab === 'backtest' && <Backtest status={s} prefill={view.btPrefill ?? null}
@@ -50,7 +51,8 @@ export function Tools({ s, view, ticks, nav, act, busy, prefs, setPrefs, ver }: 
       {tab === 'markets' && <Markets status={s} act={act} busy={busy} />}
       {tab === 'convert' && <Convert s={s} />}
       {tab === 'alerts' && <Alerts status={s} prefs={prefs} setPrefs={setPrefs} />}
-      {tab === 'system' && <SystemTab ver={ver} />}
+      {tab === 'system' && <SystemTab ver={ver} copy={!!s.copy} />}
+      {tab === 'friends' && !s.copy && <Friends />}
     </main>
   );
 }

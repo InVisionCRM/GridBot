@@ -6,6 +6,8 @@ export async function http<T = any>(path: string, method = 'GET', body?: unknown
     body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
   });
   const j = await r.json().catch(() => ({}));
+  // A friend's login ran out (the friends' gateway answers 401 with login: true): back to its log-in page.
+  if (r.status === 401 && j.login === true) window.location.assign('/login');
   if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
   return j as T;
 }

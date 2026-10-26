@@ -18,14 +18,21 @@ import type { VersionCheck } from './system/version';
 import { runChecks } from './system/checks';
 import type { Converter } from './convert/converter';
 import type { PoolSearch } from './market/poolSearch';
+import type { FriendsHost } from './friends/host';
+import type { GeckoRelay } from './friends/relay';
+import { noKey } from './words';
 
 export interface AppOpts {
   bot: MultiBot;
   net: LiveNetwork;
   /** Background candle backfill (server only) */
   backfill?: (pair: string, source: 'gecko' | 'onchain', days: number) => Promise<unknown>;
-  /** Daily pair scan (server only) */
+  /** Daily pair scan (server only; a friend's copy shows the host's) */
   scanner?: { status(): unknown; run(testUsd?: number): Promise<unknown> };
+  /** The host's GeckoTerminal relay for friends' copies (host only) */
+  relay?: GeckoRelay;
+  /** Friends' copies (host only): on, or why they are off */
+  friends?: FriendsHost | { off: string };
   /** A chart was opened: the candle sync keeps every timeframe of that market for a while (server only) */
   viewCandles?: (pair: string) => void;
   /** Liquidity replay over a pool's real trades (server only: reads the chain) */
@@ -36,8 +43,8 @@ export interface AppOpts {
   poolSearch?: PoolSearch;
   heartbeatMs?: number;
   statusThrottleMs?: number;
-  /** Version check + self-test (server only: needs the git checkout and the build stamp) */
-  system?: { version: VersionCheck; pollMs: number };
+  /** Version check + self-test (server only: needs the git checkout and the build stamp; a friend's copy has no version check) */
+  system?: { version: VersionCheck | null; pollMs: number };
 }
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
@@ -133,7 +140,7 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/presets/:id/start', wrap(async (req) => {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
-    if (mode === 'live' && !bot.hasSigner) throw new Error('Live mode needs PRIVATE_KEY in .env');
+    if (mode === 'live' && !bot.hasSigner) throw new Error(noKey());
     const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined, profits: profitsBody(b.profits) });
     void bot.tickAll();
     return { ok: true, ...out };
@@ -276,16 +283,44 @@ export function createApp(o: AppOpts) {
   app.get('/api/convert/job', wrap(() => ({ job: cv().job() })));
   app.post('/api/convert/stop', wrap(() => { cv().stop(); return { ok: true }; }));
 
+  // ── Friends' copies: the host's Tools → Friends, and the relay the copies fetch candles through ─────
+  app.get('/api/host/gecko', wrap(async (req, res) => {
+    if (!o.relay) throw new Error('Only the host app relays GeckoTerminal.');
+    const a = await o.relay.get(String(req.query.url ?? ''));
+    if (a.status === 200) return a.body;
+    res.status(a.status).json(a.status === 429 ? { error: 'GeckoTerminal is busy; try again later.', retryAt: a.retryAt } : { error: a.error });
+  }));
+  const fh = (): FriendsHost => {
+    if (!o.friends) throw new Error('Friends\' copies are run by the host app.');
+    if ('off' in o.friends) throw new Error(o.friends.off);
+    return o.friends;
+  };
+  app.get('/api/friends', wrap(() => (o.friends && 'off' in o.friends ? { on: false, off: o.friends.off } : { on: true, ...fh().view() })));
+  app.put('/api/friends/host', wrap((req) => {
+    const b = req.body ?? {};
+    fh().setHost({ name: b.name == null ? undefined : String(b.name), address: b.address == null ? undefined : String(b.address) });
+  }));
+  app.post('/api/friends/invites', wrap((req) => fh().invite(String(req.body?.name ?? ''))));
+  app.delete('/api/friends/invites/:id', wrap((req) => fh().cancelInvite(req.params.id)));
+  app.post('/api/friends/:id/reset', wrap((req) => fh().resetLink(req.params.id)));
+  app.post('/api/friends/:id/start', wrap((req) => fh().startCopy(req.params.id)));
+  app.post('/api/friends/:id/stop', wrap((req) => fh().stopCopy(req.params.id)));
+  app.post('/api/friends/:id/restart', wrap((req) => fh().restartCopy(req.params.id)));
+  app.delete('/api/friends/:id', wrap((req) => fh().remove(req.params.id)));
+
   // ── System: version + self-test ───────────────────────────────────────
   if (o.system) {
     const { version, pollMs } = o.system;
-    app.get('/api/system/version', wrap((req) => version.report(req.query.refresh === '1')));
+    app.get('/api/system/version', wrap((req) => {
+      if (!version) throw new Error('This copy is kept up to date by the app that runs it.');
+      return version.report(req.query.refresh === '1');
+    }));
     app.get('/api/system/check', wrap(() => runChecks({
-      version: () => version.report(true),
+      version: version ? () => version.report(true) : null,
       status: async () => { await bot.refreshWallet(true); return plain(bot.status()); },
       probeChain: async (id) => { const t0 = Date.now(); await bot.hub.rt(id).reader.getFeeData(); return Date.now() - t0; },
       probeMarket: async (k) => { await bot.hub.quoter(k).market(); },
-      scan: o.scanner ? () => o.scanner!.status() as Record<string, unknown> : null,
+      scan: o.scanner ? async () => (await o.scanner!.status()) as Record<string, unknown> : null,
       pollMs,
     })));
   }

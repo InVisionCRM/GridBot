@@ -25,6 +25,7 @@ import type { Logger } from './logger';
 import type { Store } from './store';
 import type { SharedNonce, TxGate } from './txGate';
 import type { Mode, Status } from './engine';
+import { noKey } from '../words';
 
 export type TrendReason = 'entry' | ExitReason;
 
@@ -230,7 +231,7 @@ export class TrendEngine {
     if (!isTF(p.tf)) errs.push('unknown timeframe');
     if (!(p.capital > 0)) errs.push('capital must be > 0');
     const def = this.hub.def(p.quote);
-    if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push('Live mode needs PRIVATE_KEY in .env');
+    if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push(noKey());
     if (errs.length) throw new Error(errs.join('; '));
     if (p.mode === 'live' && def.safety) {
       let sf = def.safety ?? null;
@@ -266,7 +267,7 @@ export class TrendEngine {
     if (this.state.status === 'running') return;
     if (!this.state.capital) throw new Error('Nothing to resume.');
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
-    if (this.state.mode === 'live' && !this.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
+    if (this.state.mode === 'live' && !this.signer) throw new Error(noKey());
     if (this.state.mode === 'live' && this.def?.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
     this.state.status = 'running';
     this.save();

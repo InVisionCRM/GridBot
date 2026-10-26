@@ -8,6 +8,7 @@
  */
 import type { VersionReport } from './version';
 import { nextLevels, type LiveInterval } from '../../live/liveGrid';
+import { hostFix } from '../words';
 
 export type CheckState = 'pass' | 'warn' | 'fail';
 export type CheckGroup = 'App' | 'Chains' | 'Bots' | 'Market data';
@@ -17,14 +18,16 @@ export interface CheckReport { at: number; checks: Check[]; counts: Record<Check
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 export interface CheckDeps {
-  version: () => Promise<VersionReport>;
+  /** null in a friend's copy: the host keeps it up to date */
+  version: (() => Promise<VersionReport>) | null;
   /** MultiBot.status() after a fresh wallet read */
   status: () => Promise<AnyObj>;
   /** Time one RPC request on a chain (throws when the RPC doesn't answer) */
   probeChain: (chainId: number) => Promise<number>;
   /** Read a market's pool the way a trade would (throws when it can't) */
   probeMarket: (key: string) => Promise<void>;
-  scan: (() => AnyObj) | null;
+  /** The opportunity scan (a friend's copy asks the host for it) */
+  scan: (() => AnyObj | Promise<AnyObj>) | null;
   pollMs: number;
   now?: () => number;
 }
@@ -47,7 +50,7 @@ export function botChecks(b: AnyObj, kind: 'grid' | 'trend' | 'lp', now: number,
   const id = `bot:${b.id}`;
   const out: Check[] = [];
   const add = (sub: string, state: CheckState, detail: string, fix?: string) => out.push({ id: `${id}:${sub}`, group: 'Bots', name, state, detail, ...(fix ? { fix } : {}) });
-  if (b.available === false) { add('available', 'fail', "Its chain or token isn't loaded on this server, so it can't trade.", 'Turn the chain back on in .env, or remove the bot.'); return out; }
+  if (b.available === false) { add('available', 'fail', "Its chain or token isn't loaded on this server, so it can't trade.", hostFix('Turn the chain back on in .env, or remove the bot.')); return out; }
   if (b.status === 'closed') return out;
   if (b.status !== 'running') add('status', 'warn', `${kind === 'lp' ? 'Paused' : 'Stopped'}: it isn't trading.`, 'Press Resume on the bot.');
   if (b.status === 'running') {
@@ -90,7 +93,7 @@ export function chainChecks(c: AnyObj, rpcMs: number | Error, liveBots: number):
   const id = `chain:${c.id}`, name = c.name as string;
   const out: Check[] = [];
   out.push(rpcMs instanceof Error
-    ? { id: `${id}:rpc`, group: 'Chains', name, state: 'fail', detail: `RPC ${c.rpc ?? ''} didn't answer: ${rpcMs.message}`, fix: 'Set another RPC for this chain in .env (RPC_URL_…) and restart.' }
+    ? { id: `${id}:rpc`, group: 'Chains', name, state: 'fail', detail: `RPC ${c.rpc ?? ''} didn't answer: ${rpcMs.message}`, fix: hostFix('Set another RPC for this chain in .env (RPC_URL_…) and restart.') }
     : { id: `${id}:rpc`, group: 'Chains', name, state: rpcMs > 3000 ? 'warn' : 'pass', detail: `RPC answered in ${rpcMs} ms${rpcMs > 3000 ? ' (slow: trades may be late)' : ''}.` });
   if (!c.hasSigner) out.push({ id: `${id}:key`, group: 'Chains', name, state: liveBots ? 'fail' : 'pass', detail: liveBots ? 'No signing key for this chain, but live bots use it.' : 'No signing key: paper only here.' });
   else if (c.walletError) out.push({ id: `${id}:wallet`, group: 'Chains', name, state: 'fail', detail: `Couldn't read the wallet: ${c.walletError}`, fix: 'Usually the RPC; check it above.' });
@@ -123,7 +126,7 @@ export function dataChecks(sync: AnyObj | null, scan: AnyObj | null, now: number
 
 export async function runChecks(d: CheckDeps): Promise<CheckReport> {
   const now = (d.now ?? Date.now)();
-  const [version, s] = await Promise.all([d.version(), d.status()]);
+  const [version, s, scan] = await Promise.all([d.version?.() ?? null, d.status(), d.scan?.() ?? null]);
   const chains: AnyObj[] = s.chains ?? [];
   const bots = [
     ...(s.grids ?? []).map((b: AnyObj) => ({ b, kind: 'grid' as const, market: b.stable })),
@@ -136,14 +139,14 @@ export async function runChecks(d: CheckDeps): Promise<CheckReport> {
   const markets = [...new Set(bots.filter(({ b }) => b.status === 'running' && b.available !== false).map(({ market }) => market as string))];
   const probes = new Map(await Promise.all(markets.map(async (k) => [k, await d.probeMarket(k).then(() => null, (e: Error) => e.message)] as const)));
   const checks: Check[] = [
-    versionCheck(version),
+    ...(version ? [versionCheck(version)] : []),
     ...chains.flatMap((c, i) => chainChecks(c, rpc[i], live(c.id))),
     ...bots.flatMap(({ b, kind, market }) => {
       const err = probes.get(market);
       const pool: Check[] = err ? [{ id: `bot:${b.id}:pool`, group: 'Bots', name: kind === 'trend' ? b.name : `${kind === 'lp' ? 'Liquidity' : 'Grid'} ${b.label}`, state: 'fail', detail: `Can't read its pool: ${err}` }] : [];
       return [...pool, ...botChecks(b, kind, now, d.pollMs)];
     }),
-    ...dataChecks(s.candleSync, d.scan?.() ?? null, now),
+    ...dataChecks(s.candleSync, scan, now),
   ];
   const counts = { pass: 0, warn: 0, fail: 0 };
   for (const c of checks) counts[c.state]++;

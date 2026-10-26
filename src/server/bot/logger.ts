@@ -4,7 +4,7 @@ export interface LogEntry { t: number; level: 'info' | 'warn' | 'error'; msg: st
 const secrets: string[] = [];
 export function registerSecret(s: string) {
   const v = s.trim();
-  if (v.length < 16) return;
+  if (v.length < 16 || secrets.includes(v)) return;
   secrets.push(v, v.startsWith('0x') ? v.slice(2) : `0x${v}`);
 }
 export function redact(msg: string): string {
