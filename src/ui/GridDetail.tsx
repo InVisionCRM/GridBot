@@ -5,6 +5,7 @@ import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { RangeBar } from './charts';
 import { Chart, EquityChart } from './Chart';
+import { StatTable } from './StatTable';
 import { ago, cls, num, pct, px, qty, time } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -242,6 +243,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           </div>
         )}
         <p className="muted small"><Orientation m={{ base: g.base ?? 'PLS', quote: q, flipped: g.flipped, label: g.label }} compact /> · dashed lines are the grid levels · solid lines are the range · B and S mark fills · pool fee {feeLabel(mk(s, g.stable))} per swap</p>
+        <StatTable b={g} s={s} />
       </div>
 
       {running && <div className="card live-strip"><LiveLevels g={g} price={livePrice(ticks, g.stable, g.price)} /></div>}

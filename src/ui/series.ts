@@ -35,6 +35,9 @@ export function bookUsd(b: AnyObj): number | null {
   const k = quoteUsd(b);
   if (b.kind === 'trend' && k && typeof b.capital === 'number') return b.capital * k;
   if (b.kind === 'lp' && k && typeof b.config?.capital === 'number') return b.config.capital * k;
+  if ((b.kind === 'trader' || b.kind === 'sniper') && typeof b.spentUsd === 'number') {
+    return b.spentUsd + (typeof b.pnlUsd === 'number' ? b.pnlUsd : 0);
+  }
   return null;
 }
 

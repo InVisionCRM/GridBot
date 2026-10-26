@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
+import { StatTable } from './StatTable';
 import { ago, cls, dur, num, pct, px, qty, time } from './fmt';
 import { ChainBadge, DexTag, chainOf, dexName } from './chains';
 import { STRATEGIES } from '../market/strategy';
@@ -97,6 +98,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
             : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact desk height={480}
                 emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
           <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
+          <StatTable b={t} s={s} />
         </div>
         <div className="stack">
           <div className="card">

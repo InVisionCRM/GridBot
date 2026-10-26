@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
+import { StatTable } from './StatTable';
 import { ago, cls, dur, num, pct, px, qty, usd } from './fmt';
 import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
@@ -221,6 +222,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="card">
           <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact desk height={480} />
           <p className="muted small">The amber lines are the position's range. It earns fees while the price is between them.</p>
+          <StatTable b={b} s={s} />
         </div>
         <div className="stack">
           <div className="card">

@@ -3,11 +3,13 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { botApi } from './api';
 import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
-import { cls, pct, px, qty, usd } from './fmt';
+import { botFacts } from './deskStats';
+import { cls, dur, pct, px, qty, usd } from './fmt';
 import { ChainMark, TokenMark } from './icons';
 import { useShowUsd } from './money';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { bookUsd, botSpark } from './series';
+import { StatTable } from './StatTable';
 
 export function listBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
   return [
@@ -28,12 +30,22 @@ function pairOf(b: AnyObj): { base: string; quote: string; title: string } {
   const base = String(b.base ?? '');
   if (b.kind === 'grid') return { base, quote, title: gridName(b) };
   if (b.kind === 'lp') return { base, quote, title: b.label ? String(b.label) : `${base}/${quote}` };
+  if (b.kind === 'trader' || b.kind === 'sniper') {
+    const name = String(b.label || b.name || '');
+    return { base: String(b.token || b.base || name), quote: String(b.spend || quote), title: name || 'Token trader' };
+  }
   const name = String(b.name ?? '');
   return { base: base || name.split('/')[0] || name, quote, title: name || `${base}/${quote}` };
 }
 
 function kindWord(b: AnyObj) {
+  if (b.kind === 'sniper') return 'Sniper';
+  if (b.kind === 'trader') return 'Token trader';
   return b.kind === 'lp' ? 'Liquidity' : b.kind === 'trend' ? 'Trend' : 'Grid';
+}
+
+function isTrader(b: AnyObj) {
+  return b.kind === 'trader' || b.kind === 'sniper';
 }
 
 function statusWord(b: AnyObj) {
@@ -46,6 +58,11 @@ function statusWord(b: AnyObj) {
 /** Realized plus what is still unsold, in quote units, and as a fraction of the money put in. */
 export function pnlParts(b: AnyObj): { quote: number | null; usd: number | null; pct: number | null } {
   const k = typeof b.usdPerQuote === 'number' && b.usdPerQuote > 0 ? b.usdPerQuote : null;
+  if (b.kind === 'trader' || b.kind === 'sniper') {
+    const u = typeof b.pnlUsd === 'number' ? b.pnlUsd : typeof b.pnl?.unrealized === 'number' ? b.pnl.unrealized : null;
+    const cap = typeof b.spentUsd === 'number' ? b.spentUsd : null;
+    return { quote: u, usd: u, pct: u != null && cap ? u / cap : null };
+  }
   if (b.kind === 'lp') {
     const net = typeof b.pnl?.net === 'number' ? b.pnl.net : null;
     const cap = b.config?.capital;
@@ -151,14 +168,16 @@ function RowMenu({ b, nav, pause, close }: { b: AnyObj; nav: Nav; pause: (b: Any
     return () => { window.removeEventListener('mousedown', down); window.removeEventListener('keydown', key); };
   }, [open]);
   const running = b.status === 'running';
+  const trader = isTrader(b);
+  const openBot = () => { setOpen(false); trader ? nav({ v: 'auto' }) : nav(botView(b.kind, b.id)); };
   return (
     <div className="row-menu" ref={root}>
       <button type="button" className="menu-btn" aria-expanded={open} aria-label={`Actions for ${pairOf(b).title}`} onClick={() => setOpen((v) => !v)}><span /><span /><span /></button>
       {open && (
         <div className="row-pop" role="menu">
-          <button type="button" role="menuitem" onClick={() => { setOpen(false); pause(b); }}>{running ? 'Pause' : 'Resume'}</button>
-          <button type="button" role="menuitem" onClick={() => { setOpen(false); close(b); }}>Close</button>
-          <button type="button" role="menuitem" onClick={() => { setOpen(false); nav(botView(b.kind, b.id)); }}>Open</button>
+          {!trader && <button type="button" role="menuitem" onClick={() => { setOpen(false); pause(b); }}>{running ? 'Pause' : 'Resume'}</button>}
+          {!trader && <button type="button" role="menuitem" onClick={() => { setOpen(false); close(b); }}>Close</button>}
+          <button type="button" role="menuitem" onClick={openBot}>Open</button>
         </div>
       )}
     </div>
@@ -166,6 +185,7 @@ function RowMenu({ b, nav, pause, close }: { b: AnyObj; nav: Nav; pause: (b: Any
 }
 
 function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
+  if (isTrader(b)) return null;
   const sym = String(quoteSym(b) ?? '');
   const fees = feeQuote(b);
   if (b.kind === 'lp') {
@@ -211,7 +231,7 @@ function BotRange({ b, fills }: { b: AnyObj; fills: number | null }) {
   return <span className="muted">—</span>;
 }
 
-export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, columns }: {
+export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, columns, metrics }: {
   s: AnyObj;
   b: AnyObj;
   nav: Nav;
@@ -221,6 +241,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   open?: boolean;
   onToggle?: () => void;
   columns?: boolean;
+  metrics?: boolean;
 }) {
   const { on: showUsd } = useShowUsd();
   const pair = pairOf(b);
@@ -232,11 +253,13 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   const money = showUsd && pnl.usd != null ? usd(pnl.usd, true) : pnl.quote != null ? qty(pnl.quote, pair.quote, 4) : '—';
   const pos = b.position;
   const value = bookUsd(b);
+  const facts = metrics ? botFacts(b) : null;
+  const go = () => (isTrader(b) ? nav({ v: 'auto' }) : expandable ? onToggle?.() : nav(botView(b.kind, b.id)));
   if (columns) {
     return (
       <div className={`bot-block${open ? ' open' : ''}`}>
         <div className="desk-row">
-          <button type="button" className="desk-pair" onClick={() => (expandable ? onToggle?.() : nav(botView(b.kind, b.id)))} aria-expanded={expandable ? !!open : undefined}>
+          <button type="button" className="desk-pair" onClick={go} aria-expanded={expandable ? !!open : undefined}>
             <span className="pair-marks">
               <TokenMark symbol={pair.base} size={22} />
               <TokenMark symbol={pair.quote} size={22} />
@@ -255,12 +278,19 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           <span className="desk-val">{value == null ? '—' : usd(value)}</span>
           <span className="desk-pnl">
             <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
-            <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>
+            {!metrics && <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>}
           </span>
+          {metrics && facts && <>
+            <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
+            <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
+            <span className="desk-apr">{facts.est.d365?.pct == null ? '—' : pct(facts.est.d365.pct, 1, true)}</span>
+            <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
+            <span className="desk-fees">{facts.feesEarnedUsd == null ? '—' : usd(facts.feesEarnedUsd)}</span>
+          </>}
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
         </div>
         {bad && <p className="line-note">{b.lastError}</p>}
-        {open && <Expanded b={b} nav={nav} />}
+        {open && <div className="desk-expand"><Expanded b={b} nav={nav} /><StatTable b={b} s={s} /></div>}
       </div>
     );
   }

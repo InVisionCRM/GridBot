@@ -13,6 +13,8 @@ import type { DrawnLine } from '../market/strategy';
 import { LinesLayer, bindDrawing, type DrawCtl, type Pt } from './drawnLines';
 import { TFS, TF_SEC, type Candle, type TF } from '../market/candles';
 import { http } from './api';
+import { BotMenu, type ChartBot } from './BotMenu';
+import { readOff, saveOff } from './botPick';
 import { px, num, ago } from './fmt';
 import type { Ticks } from './useStream';
 import { ChainBadge, MarketOptions, chainOf, feeLabel, flipKey, isFlipKey, mk, orientedKey, unflipKey } from './chains';
@@ -58,7 +60,11 @@ export function Chart(p: ChartProps) {
   const candles = loaded.k;
   const [meta, setMeta] = useState<AnyObj | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [ov, setOv] = useState({ ema: !p.desk, dc: false, bb: false, vol: !p.desk, rsi: !p.compact && !p.desk, macd: false, bots: true });
+  const [ov, setOv] = useState({ ema: !p.desk, dc: false, bb: false, vol: !p.desk, rsi: !p.compact && !p.desk, macd: false });
+  const [off, setOff] = useState<string[]>([]);
+  const chartId = unflipKey(pair);
+  useEffect(() => { setOff(readOff(chartId)); }, [chartId]);
+  const changeOff = (next: string[]) => { setOff(next); saveOff(chartId, next); };
   const [legend, setLegend] = useState<Candle | null>(null);
   const [backfill, setBackfill] = useState('');
   const el = useRef<HTMLDivElement>(null);
@@ -205,16 +211,37 @@ export function Chart(p: ChartProps) {
       lps: (s.lps ?? []).filter((l: AnyObj) => l.market === pair && l.position),
     };
   }, [p.status, p.btTrades, pair]);
+  const chartBots = useMemo((): ChartBot[] => {
+    const s = p.status;
+    if (!s || p.btTrades) return [];
+    const chain = (id: number | undefined, fallback?: string) => chainOf(s, id ?? s.legacyChainId)?.short ?? fallback ?? '';
+    const out: ChartBot[] = [];
+    for (const g of (s.grids ?? []) as AnyObj[]) {
+      if (g.stable !== pair || !g.config) continue;
+      out.push({ id: g.id, name: String(g.label || `${g.base ?? ''}/${g.quoteSym ?? ''}`), kind: 'Grid', chain: chain(g.chainId, g.chainShort) });
+    }
+    for (const t of (s.trends ?? []) as AnyObj[]) {
+      if (t.quote !== pair) continue;
+      out.push({ id: t.id, name: String(t.name || t.label || pair), kind: 'Trend', chain: chain(t.chainId, t.chainShort) });
+    }
+    for (const l of (s.lps ?? []) as AnyObj[]) {
+      if (l.market !== pair || !l.position) continue;
+      out.push({ id: l.id, name: String(l.label || pair), kind: 'Liquidity', chain: chain(l.chainId) });
+    }
+    return out;
+  }, [p.status, p.btTrades, pair]);
   useEffect(() => {
     const c = cs.current;
     if (!c || !markers.current) return;
     for (const l of lines.current) c.removePriceLine(l);
     lines.current = [];
-    if (!ov.bots || !candles.length) { markers.current.setMarkers([]); return; }
+    if (!candles.length) { markers.current.setMarkers([]); return; }
+    const hide = new Set(off);
     const s0 = candles[0].t, tfs = TF_SEC[tf];
     const snap = (ms: number) => Math.floor(ms / 1000 / tfs) * tfs;
     const mk: SeriesMarker<Time>[] = [];
     for (const g of botsHere.grids) {
+      if (hide.has(g.id)) continue;
       if (g.config?.lowerPrice != null && g.config?.upperPrice != null) {
         lines.current.push(c.createPriceLine({ price: g.config.lowerPrice, color: T.text, lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: false, title: '' }));
         lines.current.push(c.createPriceLine({ price: g.config.upperPrice, color: T.text, lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: false, title: '' }));
@@ -233,6 +260,7 @@ export function Chart(p: ChartProps) {
       });
     }
     for (const t of botsHere.trends) {
+      if (hide.has(t.id)) continue;
       for (const tr of t.trades ?? []) {
         if (tr.failed || snap(tr.timestamp) < s0) continue;
         const buy = tr.side === 'buy';
@@ -246,6 +274,7 @@ export function Chart(p: ChartProps) {
       }
     }
     for (const l of botsHere.lps) {
+      if (hide.has(l.id)) continue;
       lines.current.push(c.createPriceLine({ price: l.position.upper, color: C.lp, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'LP top' }));
       lines.current.push(c.createPriceLine({ price: l.position.lower, color: C.lp, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'LP bottom' }));
     }
@@ -257,7 +286,7 @@ export function Chart(p: ChartProps) {
     }
     mk.sort((a, b) => (a.time as number) - (b.time as number));
     markers.current.setMarkers(mk);
-  }, [botsHere, candles, ov.bots, tf, p.btTrades, built]);
+  }, [botsHere, candles, off, tf, p.btTrades, built]);
 
   const toggle = (k: keyof typeof ov) => setOv((o) => ({ ...o, [k]: !o[k] }));
   const changePair = (x: string) => { setPair(x); p.onPairChange?.(x); };
@@ -277,10 +306,11 @@ export function Chart(p: ChartProps) {
         {!p.compact && <button type="button" className={`flip-btn ${isFlipKey(pair) ? 'on' : ''}`} aria-pressed={isFlipKey(pair)} aria-label="flip base and quote" title={`Flip → ${mk(p.status ?? {}, flipKey(pair)).label} (inverted OHLC: high ↔ 1/low)`} onClick={() => changePair(flipKey(pair))}>⇄</button>}
         <div className="seg">{TFS.map((x) => <button key={x} type="button" className={x === tf ? 'on' : ''} onClick={() => setTf(x)}>{x}</button>)}</div>
         {!p.desk && <div className="seg">
-          {([['ema', `EMA ${fast}/${slow}`], ['dc', 'Donchian'], ['bb', 'Bollinger'], ['vol', 'Vol'], ['rsi', 'RSI'], ['macd', 'MACD'], ['bots', 'Bots']] as const).map(([k, l]) => (
+          {([['ema', `EMA ${fast}/${slow}`], ['dc', 'Donchian'], ['bb', 'Bollinger'], ['vol', 'Vol'], ['rsi', 'RSI'], ['macd', 'MACD']] as const).map(([k, l]) => (
             <button key={k} type="button" className={ov[k] ? 'on' : ''} onClick={() => toggle(k)}>{l}</button>
           ))}
         </div>}
+        {!p.btTrades && <BotMenu bots={chartBots} off={off} onChange={changeOff} />}
       </div>
       <div className="chart-legend">
         <ChainBadge c={chainOf(p.status ?? {}, pm.chainId)} testnet={false} /><strong>{pm.label.replace(/·.*/, '')}</strong> <span className="muted">{tf}</span>
