@@ -51,6 +51,8 @@ export interface LpPosition {
   openedAt: number;
   /** The coins it went in with (null: opened before version 5, set at its next reading) */
   putIn: Coins | null;
+  /** The bot's fees in each coin (collected) when this position opened: what came before it */
+  feesBefore: Coins;
   /** Paper: the pool's global fee growth and whether the price was in range at the last reading; fees earned (raw, token order) */
   paper?: { g0: string; g1: string; inRange: boolean; owed0: string; owed1: string };
 }
@@ -140,7 +142,7 @@ const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
   return {
-    kind: 'lp', version: 5, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
+    kind: 'lp', version: 6, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
     outSince: null, lastRerangeAt: null, reranges: 0, seen: null, totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
   };
@@ -183,6 +185,11 @@ export function upgradeLp(s: LpState): LpState {
       ...rest, version: 5, totals: { ...t.totals, feeCoins: { base: 0, quote: t.totals.fees }, swapCost: 0, moveLoss: 0 },
       position: t.position ? { ...t.position, putIn: null } : null, seen: t.seen ? { g0: t.seen.g0, g1: t.seen.g1 } : null,
     };
+  }
+  if (t.version < 6) {
+    // A position open at the upgrade: what was collected until now came before it. Exact when fees are reinvested
+    // (they stay in the position until it is taken out); with Send, fees it sent before the upgrade aren't counted as its.
+    t = { ...t, version: 6, position: t.position ? { ...t.position, feesBefore: { ...t.totals.feeCoins } } : null };
   }
   return t;
 }
@@ -491,6 +498,12 @@ export class LpEngine {
       gas: t.gas, swapCost: t.swapCost, moveLoss: t.moveLoss, net, price: equity - start - net,
     };
   }
+  /** What the open position has earned in fees since it opened (collected + waiting), per coin: its own history. */
+  positionFees(): { coins: Coins; since: number } | null {
+    const p = this.state.position, pnl = this.pnl();
+    if (!p || !pnl) return null;
+    return { coins: { base: pnl.feeCoins.base - p.feesBefore.base, quote: pnl.feeCoins.quote - p.feesBefore.quote }, since: p.openedAt };
+  }
   /**
    * The position's share of the liquidity trading at the price, which is its share of each trade's fee; 0 out of range.
    * A live position is part of the pool's active liquidity; a paper one isn't, so it is added (as paper fees are).
@@ -731,7 +744,7 @@ export class LpEngine {
   private minted(s: LpStep, id: string, L: bigint, used: Coins, v: PoolView, pool: LpPool, paper?: LpPosition['paper']) {
     const range = s.range!;
     const { lower, upper } = pool.rangePrices(range.tickLower, range.tickUpper, v);
-    this.state.position = { id, tickLower: range.tickLower, tickUpper: range.tickUpper, liquidity: L.toString(), lower, upper, openedAt: this.now(), putIn: used, ...(paper ? { paper } : {}) };
+    this.state.position = { id, tickLower: range.tickLower, tickUpper: range.tickUpper, liquidity: L.toString(), lower, upper, openedAt: this.now(), putIn: used, feesBefore: { ...this.state.totals.feeCoins }, ...(paper ? { paper } : {}) };
     this.state.idle = { base: Math.max(0, this.state.idle.base - used.base), quote: Math.max(0, this.state.idle.quote - used.quote) };
     if (s.action === 'rerange') { this.state.lastRerangeAt = this.now(); this.state.reranges++; }
     this.state.step = null;
@@ -789,7 +802,7 @@ export class LpEngine {
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
       status: s.status, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, move: this.moveStatus(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
+      outSince: s.outSince, move: this.moveStatus(), positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }

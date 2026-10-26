@@ -8,7 +8,9 @@
  *   pool's real fee, depth, gas and the share of fees liquidity providers keep.
  * Each pool gets its best grid and its best liquidity range by what they EARNED: completed trades for a grid, fees −
  * swap and gas costs for a position, and how far its price swung. The price move is left out (shown separately): it
- * isn't the bot's doing. The page ranks them (gridRank / lpRank in market/scan.ts).
+ * isn't the bot's doing. The page sorts them by what they are expected to earn next week (expectedGrid / expectedLp in
+ * market/scan.ts). A chain with no earlier result shows its pools as they are tested; a re-scan keeps the earlier list
+ * until the chain is done.
  * Nothing is added or started here: "Try it" adds the market and opens New bot. Results persist in data/picks.json.
  */
 import type { MarketDef, MarketToken } from '../../live/markets';
@@ -76,6 +78,8 @@ export class DailyScanner {
   private file: ScanFile;
   private running = false;
   private progress: ScanProgress | null = null;
+  /** This run's chains: finished ones, and the one being scanned (its items grow as pools are tested) */
+  private live: { done: ScanChain[]; current: ScanChain | null } | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly d: ScanDeps) {
@@ -87,7 +91,19 @@ export class DailyScanner {
   private now() { return (this.d.now ?? Date.now)(); }
 
   status() {
-    return { ...this.file, running: this.running, progress: this.progress, nextAt: this.file.at == null ? null : this.file.at + SCAN_EVERY_MS };
+    return { ...this.file, chains: this.chainsNow(), running: this.running, progress: this.progress, nextAt: this.file.at == null ? null : this.file.at + SCAN_EVERY_MS };
+  }
+
+  /**
+   * What to show while a scan runs. A first scan takes about an hour (GeckoTerminal allows a few requests a minute), so
+   * a chain with no earlier result shows its pools as they are tested; one with an earlier result keeps it until its
+   * new result is complete. Chains finished in this run replace their earlier result.
+   */
+  private chainsNow(): ScanChain[] {
+    if (!this.live) return this.file.chains;
+    const { done, current } = this.live, old = this.file.chains;
+    const fresh = current && !old.some((c) => c.chainId === current.chainId) ? [...done, current] : done;
+    return [...fresh, ...old.filter((c) => !fresh.some((f) => f.chainId === c.chainId))];
   }
 
   /** Check every 30 min; scan when the last one is a day old (or there is none). */
@@ -107,6 +123,7 @@ export class DailyScanner {
     this.d.emit?.({ type: 'info', kind: 'system', msg: `Opportunity scan started ($${usd.toLocaleString('en-US')} test size)` });
     try {
       const chains: ScanChain[] = [];
+      this.live = { done: chains, current: null };
       const list = this.d.chains();
       for (const [i, c] of list.entries()) chains.push(await this.scanChain(c, i + 1, list.length, usd));
       this.file = { version: 3, at: this.now(), testUsd: usd, chains };
@@ -116,6 +133,7 @@ export class DailyScanner {
     } finally {
       this.running = false;
       this.progress = null;
+      this.live = null;
     }
   }
 
@@ -134,6 +152,7 @@ export class DailyScanner {
     const step = (phase: ScanProgress['phase'], done: number, total: number) => { this.progress = { chain: c.name, chainNo, chains, phase, done, total }; };
     step('finding pools', 0, 1);
     const out: ScanChain = { chainId: c.id, name: c.name, at: this.now(), items: [], tested: 0, skipped: [], error: null };
+    this.live!.current = out;
     if (!c.slug) { out.error = 'No GeckoTerminal price history for this chain.'; return out; }
     try {
       // Busiest pools of each DEX this app trades. The chain-wide list is the wrong input: on 2026-10-17, 33 of

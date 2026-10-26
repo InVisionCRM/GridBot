@@ -15,8 +15,8 @@ import { buildFeed, LiveFeed, LiveLevels, LivePrice, livePrice, LiveRange } from
 import { nextLevels } from '../live/liveGrid';
 import type { ActivityEvent, Ticks } from './useStream';
 import { L } from './Tip';
-import { scanStep, useOpportunities } from './Opportunities';
-import { gridRank, lpRank, type Opportunity } from '../market/scan';
+import { isSafe, scanStep, useOpportunities, wayOf } from './Opportunities';
+import type { Opportunity } from '../market/scan';
 
 interface Props { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 interface HomeProps extends Props { events: ActivityEvent[]; ticks: Ticks | null; ver: AnyObj | null }
@@ -127,32 +127,28 @@ function WalletPanel({ s, chain }: { s: AnyObj; chain: number | 'all' }) {
   );
 }
 
-/** Home's glance at Opportunities: the 2 safe pools ranked first for a grid and for liquidity, on the chain shown. */
+/** Home's glance at Opportunities: the 3 safe pools expected to earn the most next week, on the chain shown. */
 function BestThisWeek({ s, chain, nav }: { s: AnyObj; chain: number | 'all'; nav: Nav }) {
   const { p, err } = useOpportunities();
   if (err || !p) return null;
-  const safe = ((p.chains ?? []) as AnyObj[]).filter((c) => chain === 'all' || c.chainId === chain).flatMap((c) => c.items as Opportunity[])
-    .filter((o) => o.liveAllowed && (o.risk == null || o.risk === 'low'));
-  const top = (rank: (o: Opportunity) => number | null) => safe.filter((o) => rank(o) != null).sort((a, b) => rank(b)! - rank(a)!).slice(0, 2);
-  const rows = [...top(gridRank).map((o) => ({ o, how: 'grid' as const })), ...top(lpRank).map((o) => ({ o, how: 'lp' as const }))];
+  const rows = ((p.chains ?? []) as AnyObj[]).filter((c) => chain === 'all' || c.chainId === chain).flatMap((c) => c.items as Opportunity[])
+    .filter(isSafe).flatMap((o) => { const w = wayOf(o, 'best'); return w ? [{ o, w }] : []; })
+    .sort((a, b) => b.w.expected - a.w.expected).slice(0, 3);
   return (
     <section className="card" aria-label="Best this week">
       <div className="card-head">
-        <h3><L tip="The safe pools ranked first in Opportunities: for a grid (how much the price swings, where a grid earned) and for liquidity (what it earned after costs), over the last 7 days at your test size.">Best this week</L></h3>
-        <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `scanned ${ago(p.at)}` : 'not scanned yet'}</span>
+        <h3><L tip="The safe pools expected to earn the most next week, from the last 7 days of their real trades (Opportunities has the full list).">Best this week</L></h3>
+        <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `updated ${ago(p.at)}` : 'not checked yet'}</span>
         <span className="grow" />
-        <button type="button" className="btn small-btn primary" onClick={() => nav({ v: 'opps' })}>See all opportunities</button>
+        <button type="button" className="btn small-btn primary" onClick={() => nav({ v: 'opps' })}>See all</button>
       </div>
-      {rows.map(({ o, how }) => {
-        const e = how === 'grid' ? o.grid!.earnedPct : o.lp!.earnedPct;
-        return (
-          <div key={`${how}-${o.chainId}-${o.add?.pool ?? o.key}`} className="best-row">
-            <span className="best-name"><ChainBadge c={chainOf(s, o.chainId)} testnet={false} /><b>{o.label}</b><span className="small muted">{how === 'lp' ? `liquidity ±${num(o.lp!.bandPct * 100, 0)}%` : `grid ±${num(o.grid!.bandPct * 100, 0)}%, ${o.grid!.gridCount} levels · swings ${pct(o.swingPct, 0)} a day`}</span></span>
-            <span className="n"><b className={cls(e)}>{qty(e * o.capital, o.spend, 4)}</b> <span className="small muted">last week</span></span>
-          </div>
-        );
-      })}
-      {!rows.length && <p className="small muted">{p.at ? 'No safe pool earned from trading here last week.' : 'The first scan runs on its own; it takes a while.'}</p>}
+      {rows.map(({ o, w }) => (
+        <div key={`${o.chainId}-${o.add?.pool ?? o.key}`} className="best-row">
+          <span className="best-name"><ChainBadge c={chainOf(s, o.chainId)} testnet={false} /><b>{o.label}</b><span className="small muted">{w.how === 'lp' ? `liquidity ±${num(o.lp!.bandPct * 100, 0)}%` : `grid ±${num(o.grid!.bandPct * 100, 0)}%`}</span></span>
+          <span className="n"><b className="pos">≈ {pct(w.expected, 1, true)}</b> <span className="small muted">a week</span></span>
+        </div>
+      ))}
+      {!rows.length && <p className="small muted">{p.at ? 'No safe pool is expected to earn here this week.' : 'The first check runs on its own; it takes a while.'}</p>}
     </section>
   );
 }
