@@ -5,7 +5,7 @@ import { MultiBot, type MultiState } from './bot/multi';
 import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
 import { ActivityBus } from './bot/activity';
-import { createSigners, loadEnv, readCopy, readSettings, takeFriendsSecret } from './env';
+import { createSigners, loadEnv, readCopy, readSettings, takeFriendsSecret, takeHostAuth } from './env';
 import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
@@ -26,6 +26,7 @@ import { Autopilot, type AutopilotState, type ScanView } from './bot/autopilot';
 
 loadEnv();
 const friendsSecret = takeFriendsSecret();
+const hostAuth = takeHostAuth();
 const cfg = readSettings();
 const isProd = process.env.NODE_ENV === 'production';
 const log = new Logger();
@@ -98,6 +99,7 @@ const friends = copy ? undefined
       : new FriendsHost({
         secret: friendsSecret, dataDir, entry, hostEnv: { ...process.env }, hostPort: cfg.port, port: Number(process.env.FRIENDS_PORT || 3850),
         publicDir: clientDir, hostAddresses: () => hostAddresses,
+        hostAuth, gatewayHost: process.env.GATEWAY_HOST?.trim() || null,
         say: (msg, level) => activity.emitEvent({ type: 'info', kind: 'system', level, msg }),
       });
 const lpReplay = new LpReplay(hub, new PoolHistories(path.join(dataDir, 'pool-history'), (id) => readers.get(id)!), cfg.approval);
@@ -133,7 +135,10 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   if (friends instanceof FriendsHost) {
     for (const rt of hub.runtimes()) if (rt.signer) hostAddresses.push(await rt.signer.getAddress());
     await friends.start().catch((e: Error) => { log.error(e.message); process.exit(1); });
-    log.info(`Friends' gateway on http://127.0.0.1:${friends.view().port} · ${friends.friends.list().length} friend copies`);
+    const phone = hostAuth ? `owner login on (${hostAuth.login})` : 'owner login off (npm run host:password)';
+    log.info(`Friends' gateway on http://127.0.0.1:${friends.view().port} · ${phone} · ${friends.friends.list().length} friend copies`);
+  } else if (hostAuth && !copy) {
+    log.warn('Owner phone password is set, but the gateway is off. Run npm run friends:setup, npm run build, then npm start.');
   }
 });
 server.on('error', (err: NodeJS.ErrnoException) => {

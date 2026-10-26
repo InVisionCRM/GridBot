@@ -149,6 +149,25 @@ ${keyForm}
 <form method="post" action="/logout"><button type="submit">Log out</button></form>`);
 }
 
+/** The owner is logged in on the phone. No key form: their key stays in .env on the computer. */
+export function ownerAccountPage(): string {
+  return page('Your GridBot', `<section class="card">
+<h1>Your GridBot</h1>
+<p class="muted">This is your own app, on this computer. A friend's login never opens it.</p>
+<a class="btn" href="/">Back to the app</a>
+</section>
+<form method="post" action="/logout"><button type="submit">Log out of this phone</button></form>
+<p class="small muted">Logging out ends this phone's login. Your bots keep running.</p>`);
+}
+
+/** The owner is logged in but the host app doesn't answer. */
+export function hostDownPage(): string {
+  return page('Not answering', `<section class="card">
+<h1>Your app isn't answering</h1>
+<p class="muted">The log-in page is up, but GridBot on this computer isn't. On the computer, check that it is running, then reload.</p>
+</section>`, { refreshSec: 5 });
+}
+
 /** The friend is logged in but their copy doesn't answer. */
 export function copyDownPage(host: string, state: 'starting' | 'stopped' | 'crashed'): string {
   if (state === 'stopped') {

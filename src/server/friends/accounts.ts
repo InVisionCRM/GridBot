@@ -32,6 +32,35 @@ const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
 /** Names log in without regard to case or extra spaces. */
 export const loginOf = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
 
+/**
+ * Shared by friend and owner log-ins so one burst of guesses hits one limit: 5 wrong tries locks that name for
+ * 15 min, and 30 failures in a minute pauses every login.
+ */
+export class LoginGate {
+  private fails = new Map<string, { n: number; until: number }>();
+  private recent: number[] = [];
+  constructor(private readonly now: () => number = Date.now) {}
+
+  begin(login: string) {
+    const now = this.now();
+    this.recent = this.recent.filter((t) => t > now - 60_000);
+    if (this.recent.length >= GLOBAL_FAILS_PER_MIN) throw new Error('Too many wrong passwords just now. Wait a minute and try again.');
+    const lock = this.fails.get(login);
+    if (lock && lock.until > now) throw new Error(`Too many wrong passwords for this name. Try again in ${Math.ceil((lock.until - now) / 60_000)} min.`);
+  }
+
+  fail(login: string) {
+    const now = this.now();
+    this.recent.push(now);
+    const l = this.fails.get(login) ?? { n: 0, until: 0 };
+    l.n++;
+    if (l.n >= LOCK_AFTER) { l.n = 0; l.until = now + LOCK_MS; }
+    this.fails.set(login, l);
+  }
+
+  ok(login: string) { this.fails.delete(login); }
+}
+
 export function cleanName(raw: string): string {
   const n = raw.trim().replace(/\s+/g, ' ');
   if (!/^[\p{L}\p{N} ._'-]{2,32}$/u.test(n)) throw new Error('A name is 2 to 32 letters, numbers, spaces, dots or dashes.');
@@ -49,14 +78,14 @@ export function cleanAddress(raw: string): string {
 
 export class Friends {
   private f: FriendsFile;
-  private fails = new Map<string, { n: number; until: number }>();
-  private recentFails: number[] = [];
+  private readonly gate: LoginGate;
 
   constructor(
     private readonly store: Store<FriendsFile>, private readonly secret: Buffer,
-    private readonly o: { now?: () => number; hostAddresses?: () => string[] } = {},
+    private readonly o: { now?: () => number; hostAddresses?: () => string[]; gate?: LoginGate; reserved?: (login: string) => boolean } = {},
   ) {
     this.f = store.load() ?? { v: 1, host: { name: '', address: null }, invites: [], friends: [] };
+    this.gate = o.gate ?? new LoginGate(() => this.now());
   }
 
   private now() { return (this.o.now ?? Date.now)(); }
@@ -89,7 +118,9 @@ export class Friends {
   }
   /** The link is shown once (only its hash is kept). */
   createInvite(name: string): { invite: Invite; link: string } {
-    return this.link(cleanName(name), null);
+    const n = cleanName(name);
+    if (this.o.reserved?.(loginOf(n))) throw new Error('That name is reserved for the owner of this computer.');
+    return this.link(n, null);
   }
   /** A one-time link for a friend who forgot their password. Their copy, bots and key stay as they are. */
   createReset(friendId: string): { invite: Invite; link: string } {
@@ -129,6 +160,7 @@ export class Friends {
     const inv = this.inviteFor(token);
     if (!inv || inv.friendId !== null) throw new Error(used);
     const name = cleanName(p.name);
+    if (this.o.reserved?.(loginOf(name))) throw new Error('That name is reserved for the owner of this computer.');
     if (this.f.friends.some((x) => loginOf(x.name) === loginOf(name))) throw new Error('That name is taken. Pick another.');
     const id = randomUUID();
     const sealed = p.key.trim() ? this.sealed(id, p.key) : { key: null, address: null };
@@ -158,23 +190,16 @@ export class Friends {
   private dummy: Promise<PassHash> | null = null;
 
   async login(name: string, password: string): Promise<Friend> {
-    const login = loginOf(name), now = this.now();
-    this.recentFails = this.recentFails.filter((t) => t > now - 60_000);
-    if (this.recentFails.length >= GLOBAL_FAILS_PER_MIN) throw new Error('Too many wrong passwords just now. Wait a minute and try again.');
-    const lock = this.fails.get(login);
-    if (lock && lock.until > now) throw new Error(`Too many wrong passwords for this name. Try again in ${Math.ceil((lock.until - now) / 60_000)} min.`);
+    const login = loginOf(name);
+    this.gate.begin(login);
     const f = this.f.friends.find((x) => loginOf(x.name) === login);
-    const ok = await checkPassword(password, f?.pass ?? await (this.dummy ??= hashPassword('not-a-password')));
+    const ok = password.length <= 256 && await checkPassword(password, f?.pass ?? await (this.dummy ??= hashPassword('not-a-password')));
     if (!f || !ok) {
-      this.recentFails.push(now);
-      const l = this.fails.get(login) ?? { n: 0, until: 0 };
-      l.n++;
-      if (l.n >= LOCK_AFTER) { l.n = 0; l.until = now + LOCK_MS; }
-      this.fails.set(login, l);
+      this.gate.fail(login);
       throw new Error('Wrong name or password.');
     }
-    this.fails.delete(login);
-    f.lastLoginAt = now;
+    this.gate.ok(login);
+    f.lastLoginAt = this.now();
     this.save();
     return f;
   }

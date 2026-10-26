@@ -98,6 +98,7 @@ describe("friends: a copy's environment", () => {
   it("carries the friend's key and shared settings, never the host's keys, RPCs or secret", () => {
     const hostEnv = {
       PRIVATE_KEY: '0xhost', PRIVATE_KEY_ETHEREUM: '0xhosteth', FRIENDS_SECRET: 'f'.repeat(64), RPC_URL_ETHEREUM: 'https://eth.example/v2/apikey',
+      HOST_PASSWORD_HASH: 'c2FsdA==.aGFzaA==', HOST_LOGIN: 'owner', HOST_SESSION: '1', GATEWAY_HOST: 'mac.tailnet.ts.net',
       HOME: '/home/kyle', PATH: '/usr/bin', STATE_FILE: '/home/kyle/gridbot/data/state.json', CHAINS: 'ethereum,robinhood', POLL_MS: '10000',
     };
     const env = childEnv(hostEnv, { id: 'a', name: 'Alex', port: 3851, key: '0xfriend' }, { name: 'Kyle', url: 'http://127.0.0.1:3847' });
@@ -105,7 +106,11 @@ describe("friends: a copy's environment", () => {
       CHAINS: 'ethereum,robinhood', POLL_MS: '10000', NODE_ENV: 'production', PORT: '3851',
       FRIEND_NAME: 'Alex', HOST_NAME: 'Kyle', HOST_URL: 'http://127.0.0.1:3847', PRIVATE_KEY: '0xfriend',
     });
-    expect(childEnv(hostEnv, { id: 'a', name: 'Alex', port: 3851, key: null }, { name: 'Kyle', url: 'x' })).not.toHaveProperty('PRIVATE_KEY');
+    const paper = childEnv(hostEnv, { id: 'a', name: 'Alex', port: 3851, key: null }, { name: 'Kyle', url: 'x' });
+    expect(paper).not.toHaveProperty('PRIVATE_KEY');
+    expect(paper).not.toHaveProperty('HOST_PASSWORD_HASH');
+    expect(paper).not.toHaveProperty('FRIENDS_SECRET');
+    expect(paper).not.toHaveProperty('GATEWAY_HOST');
   });
 });
 

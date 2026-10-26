@@ -137,6 +137,7 @@ export default function App() {
           <button type="button" className="btn ghost small-btn" onClick={() => setDrawer(true)}>Activity</button>
           <button type="button" className="btn ghost small-btn" onClick={() => setGuide(true)}>Guide</button>
           {s.copy && <a className="btn ghost small-btn" href="/account" title={`Logged in as ${s.copy.friend}: your key, password and log out`}>Account</a>}
+          {!s.copy && typeof window !== 'undefined' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname) && <a className="btn ghost small-btn" href="/account" title="Your phone login. Log out of this device. Bots keep running.">Account</a>}
           <button type="button" className="btn kill small-btn" disabled={busy || running === 0}
             title={sel ? `Stop every bot on ${sel.name}. Holdings are kept.` : 'Stop every bot on every chain. Holdings are kept.'}
             onClick={stopAll}>{sel ? `Stop all on ${sel.short}` : 'Stop all'}</button>

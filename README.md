@@ -207,14 +207,42 @@ Give it an amount on a chain and turn it on; it runs that money as grid and liqu
     - Turned off with *close*, all six came back and the PLS and ETH were swapped back: 992.79 USDG and 495.89 DAI, after ~10 minutes of opening and closing costs.
     - That run found a bug: a few wei of a coin left after a liquidity close made the sale's quote fail ("rounds to zero"), so the close never finished. Dust is now checked before quoting (test reproduces it).
 
+## Phone access
+
+Your own dashboard stays on this computer. To open it from your iPhone, reach the gateway over your tailnet only. That is private to machines logged into your Tailscale account. It is not published to the internet.
+
+**On your Mac**
+
+1. `npm run friends:setup` once, if `.env` does not already have `FRIENDS_SECRET`. The gateway signs log-ins with it. Keep it: a new one makes friends' saved keys unreadable.
+2. `npm run host:password`. Type a password of at least 12 characters. It writes `HOST_PASSWORD_HASH` and `HOST_SESSION` to `.env` (a scrypt hash, not the password, and not in `data/friends`). The log-in name defaults to `owner`. Run it again to change the password; that ends the old phone log-in after you restart.
+3. Tell the gateway the name your phone will use. Either add this to `.env`:
+   ```
+   GATEWAY_HOST=your-mac.your-tailnet.ts.net
+   ```
+   or, after the app is up, paste `https://your-mac.your-tailnet.ts.net` under Tools → Friends. Use the hostname `tailscale serve` prints, with no path. Restart after changing `GATEWAY_HOST`.
+4. `npm run build`, then `npm start`. The gateway listens on `127.0.0.1:3850` (`FRIENDS_PORT`). Your app stays on `127.0.0.1:3847`.
+5. Install [Tailscale](https://tailscale.com/download), log in, then:
+   ```
+   tailscale serve --bg 3850
+   ```
+   That serves the gateway at `https://<mac>.<tailnet>.ts.net` to your tailnet only. `tailscale serve status` prints the address. Leave Funnel off unless a friend who is not on your tailnet needs a link.
+
+**On your iPhone**
+
+Install the Tailscale app and log in to the same tailnet. Open `https://<mac>.<tailnet>.ts.net`, log in as `owner` with the password from step 2, and add the page to the home screen if you want. You need the Tailscale app running so the phone is on the tailnet; Safari alone cannot see a tailnet address.
+
+`tailscale serve` forwards with `Host: <mac>.<tailnet>.ts.net` and `X-Forwarded-*` headers. The gateway allows that hostname (from `GATEWAY_HOST` or the address saved under Tools → Friends) and refuses any other public host. It does not trust `X-Forwarded-Host`. It then calls your app on `127.0.0.1:3847` with a localhost Host, and sets a localhost Origin only after its own same-origin check. The app still refuses any other Host or Origin on a direct connection, so opening port 3847 does not skip the gateway.
+
+The owner log-in is not a friend. Invite links cannot create it. A friend's cookie is never sent to your app. Five wrong passwords lock that name for 15 minutes, and 30 failures in a minute pause every log-in. The cookie is signed, HttpOnly, Secure, SameSite=Lax, and lasts 30 days. Tailscale is the second factor: only devices on your tailnet can open `tailscale serve`. Use `tailscale funnel` only when a friend needs the public internet. Funnel publishes the gateway; your owner password is then what stands in front of your bots.
+
 ## Friends' copies (Tools → Friends)
 
-Friends get their own copy of the app on your computer and open it on their phone: their own bots, key, history and log-in (`src/server/friends`). Your app and your key are unchanged and stay on 127.0.0.1; friends only ever reach the friends' gateway.
+Friends get their own copy of the app on your computer and open it on their phone: their own bots, key, history and log-in (`src/server/friends`). Your app and your key are unchanged and stay on 127.0.0.1; friends only ever reach the friends' gateway. Your own phone uses the same gateway, with the owner log-in from Phone access, and is proxied to your app rather than to a copy.
 
 **Set up (once, on your computer)**
 1. `npm run friends:setup` adds `FRIENDS_SECRET` to `.env`. It locks friends' keys and signs their log-ins. Keep it: a new one makes the saved keys unreadable.
 2. `npm run build`, then `npm start`. Friends' copies run from the built app; `npm run dev` leaves them off.
-3. Install [Tailscale](https://tailscale.com/download) and log in, then run `tailscale funnel --bg 3850` once. It prints `https://<computer>.<tailnet>.ts.net`. Funnel needs HTTPS and the Funnel attribute turned on for your tailnet (the admin console asks the first time). See the [Funnel guide](https://tailscale.com/kb/1223/funnel).
+3. Install [Tailscale](https://tailscale.com/download) and log in. For your own phone, follow Phone access (`tailscale serve --bg 3850`), which stays on your tailnet. For a friend who is not on your tailnet, run `tailscale funnel --bg 3850` once. It prints `https://<computer>.<tailnet>.ts.net`. Funnel publishes the gateway to the internet and needs the Funnel attribute turned on for your tailnet (the admin console asks the first time). See the [Funnel guide](https://tailscale.com/kb/1223/funnel).
 4. Tools → Friends: your name and that address, then **Make invite link** and text it to the friend.
 
 **A friend, on their phone**: opens the link, chooses a password, and pastes their key if they want to trade live (it can be added later under **Account**). Then they log in with their name and password; the page can be added to the home screen like an app. A forgotten password gets a **New password link** from you; their bots and key stay.
@@ -222,7 +250,7 @@ Friends get their own copy of the app on your computer and open it on their phon
 **How it is kept apart**
 - **One process per friend**, in its own folder (`data/friends/<id>/`), running the same built server. Its environment is an allow-list (`SHARED_ENV` in `copies.ts`: chains, poll and safety settings) plus the friend's own key. Your `PRIVATE_KEY*`, `RPC_URL_*` (they can hold API keys) and `FRIENDS_SECRET` never reach it. Checked on a running copy: its whole environment was `CHAINS FRIEND_NAME HOST_NAME HOST_URL NODE_CHANNEL_* NODE_ENV PORT PRIVATE_KEY`.
 - **Keys at rest**: AES-256-GCM under a key derived from `FRIENDS_SECRET` (in `.env`, not `data/`), each box bound to its friend. A key that is yours or another friend's is refused. The friend is told plainly that you run the computer that holds it.
-- **The gateway** (port `FRIENDS_PORT`, default 3850, on 127.0.0.1 for Funnel to reach) serves log-in, invite and account pages and passes a logged-in friend to their own copy only. It drops the friend's cookie, Origin and forwarding headers, and refuses any change that doesn't come from your address. Log-ins are scrypt-hashed and last 30 days, in a signed cookie (HttpOnly, Secure, SameSite=Lax) that survives restarts. A name locks for 15 min after 5 wrong passwords, and all log-ins pause while more than 30 failed in the last minute. Invite links work once, for 7 days; only their hash is kept.
+- **The gateway** (port `FRIENDS_PORT`, default 3850, on 127.0.0.1 for Tailscale to reach) serves log-in, invite and account pages and passes a logged-in friend to their own copy only. The owner log-in (`npm run host:password`, stored as `HOST_PASSWORD_HASH` in `.env`, not in `data/friends`) is passed to your own app instead: Host is rewritten to `127.0.0.1:3847`, and a localhost Origin is set only after the gateway's own same-origin check. A friend's cookie is never forwarded and never reaches your app. An invite cannot create the owner session. The gateway allows only loopback and the public host you configured (`GATEWAY_HOST` or Tools → Friends) and drops forwarding headers. Log-ins are scrypt-hashed and last 30 days, in a signed cookie (HttpOnly, Secure, SameSite=Lax) that survives restarts. A name locks for 15 min after 5 wrong passwords, and all log-ins pause while more than 30 failed in the last minute. Invite links work once, for 7 days; only their hash is kept.
 - **Restarts**: copies start with your app and their bots carry on; a crashed copy restarts after 2 s, backing off to 60 s. A copy stops when your app stops, even when it is killed (the IPC channel closes; checked with SIGKILL).
 - **Live bots protect the key**: a friend can't change or remove their key while they have live bots, and you can't remove a friend whose copy has live bots, so no coins are left with a bot nobody runs.
 
@@ -230,7 +258,7 @@ Friends get their own copy of the app on your computer and open it on their phon
 
 **API (your app only)**: `GET /api/friends` · `PUT /api/friends/host {name?, address?}` · `POST /api/friends/invites {name}` · `DELETE /api/friends/invites/:id` · `POST /api/friends/:id/reset|start|stop|restart` · `DELETE /api/friends/:id`.
 
-**Checked**: `tests/friends.test.ts` covers key boxes, invites (once, expiry), lockout, new-password links ending old log-ins, cookie forgery and expiry, a copy's environment, and the gateway (no log-in → /login or 401, the forwarded request is local with no cookie or Origin, changes from another site refused, the live stream passing through, a copy that is down). It also covers the relay (candle URLs only, cache, waits while the scan runs) and a copy's candles round-tripping through the relay route. In the sandbox, an end-to-end run on a 390 px phone screen: invite → sign up with a key → app → Account. The copy's environment was checked as above, your app was killed and restarted, and the copy came back with the friend still logged in.
+**Checked**: `tests/friends.test.ts` covers key boxes, invites (once, expiry), lockout, new-password links ending old log-ins, cookie forgery and expiry, a copy's environment (no `HOST_PASSWORD_HASH`), and the gateway (no log-in → /login or 401, the forwarded request is local with no cookie or Origin, changes from another site refused, the live stream passing through, a copy that is down). `tests/hostLogin.test.ts` covers the owner: no cookie → login, wrong-password lockout, a friend cookie cannot reach the host app, an owner cookie reaches the host API with a rewritten localhost Host and Origin, a change from another site refused, a forged or expired cookie refused, the public host allow-list (and a spoofed `X-Forwarded-Host` refused), the live stream passing through, and the host app still rejecting that public host on a direct connection. `tests/friends.test.ts` also covers the relay (candle URLs only, cache, waits while the scan runs) and a copy's candles round-tripping through the relay route. In the sandbox, an end-to-end run on a 390 px phone screen: invite → sign up with a key → app → Account. The copy's environment was checked as above, your app was killed and restarted, and the copy came back with the friend still logged in.
 
 ## Chains, DEXes & sources (verified 2026-10-08)
 

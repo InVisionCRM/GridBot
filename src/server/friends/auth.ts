@@ -1,7 +1,8 @@
 /**
- * Friends' logins: scrypt password hashes, and a signed session cookie (HMAC under a key from FRIENDS_SECRET) that
- * survives host restarts. A friend's `session` number is part of the signature, so changing the password or removing
- * the friend ends every login they had.
+ * Logins: scrypt password hashes, and a signed session cookie (HMAC under a key from FRIENDS_SECRET) that survives
+ * restarts. A friend's `session` number is part of the signature, so changing the password or removing the friend ends
+ * every login they had. The owner's cookie is the same shape with role `host` and subject HOST_ID, which is not a
+ * friend id, so an invite can never mint it and a friend cookie can never be read as the owner.
  */
 import { createHmac, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 
@@ -28,12 +29,15 @@ export async function checkPassword(pw: string, h: PassHash): Promise<boolean> {
 }
 
 export const COOKIE = 'gb_session';
-/** A login lasts 30 days and is renewed when a friend uses the app with under 15 days left. */
+/** A login lasts 30 days and is renewed when someone uses the app with under 15 days left. */
 export const SESSION_MS = 30 * 86_400_000;
 export const RENEW_MS = 15 * 86_400_000;
 
-/** f = friend id, s = their session number, e = expiry (ms) */
-export interface Session { f: string; s: number; e: number }
+/** Cookie subject for the owner. Friend ids are UUIDs, so this never collides with one. */
+export const HOST_ID = 'host';
+
+/** f = friend id, or HOST_ID when role is host. s = session number. e = expiry (ms). */
+export interface Session { f: string; s: number; e: number; role?: 'host' }
 
 const b64 = (b: Buffer) => b.toString('base64url');
 const mac = (key: Buffer, body: string) => createHmac('sha256', key).update(body).digest();
@@ -43,15 +47,21 @@ export function signSession(key: Buffer, s: Session): string {
   return `${body}.${b64(mac(key, body))}`;
 }
 
-/** The session in a cookie value, or null when it is missing, forged or expired. */
+/** The session in a cookie value, or null when it is missing, forged, the wrong shape, or expired. */
 export function readSession(key: Buffer, value: string | undefined, now: number): Session | null {
   if (!value) return null;
-  const [body, sig] = value.split('.');
-  if (!body || !sig) return null;
+  const dot = value.indexOf('.');
+  if (dot <= 0) return null;
+  const body = value.slice(0, dot), sig = value.slice(dot + 1);
+  if (!body || !sig || sig.includes('.')) return null;
   const want = mac(key, body), got = Buffer.from(sig, 'base64url');
   if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
-  const s = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Session;
-  return typeof s.f === 'string' && Number.isInteger(s.s) && s.e > now ? s : null;
+  let s: Session;
+  try { s = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Session; } catch { return null; }
+  if (typeof s.f !== 'string' || !Number.isInteger(s.s) || !(typeof s.e === 'number' && s.e > now)) return null;
+  if (s.role == null) return { f: s.f, s: s.s, e: s.e };
+  if (s.role !== 'host' || s.f !== HOST_ID) return null;
+  return { f: HOST_ID, s: s.s, e: s.e, role: 'host' };
 }
 
 /** One cookie out of a Cookie header. */

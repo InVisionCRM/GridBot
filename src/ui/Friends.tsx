@@ -75,7 +75,8 @@ function On({ v, busy, run }: { v: On; busy: boolean; run: (fn: () => Promise<un
       <section className="card">
         <h3>1 · Where friends open it</h3>
         <p className="small muted">
-          Friends reach this computer through Tailscale Funnel (free). Install Tailscale here and log in, then run <code>tailscale funnel --bg {v.port}</code> once.
+          Your own phone stays on your tailnet: <code>tailscale serve --bg {v.port}</code> (readme, Phone access).
+          Friends who are not on your tailnet need Tailscale Funnel: <code>tailscale funnel --bg {v.port}</code>.
           It prints an address starting with https://; paste it below. <a href="https://tailscale.com/kb/1223/funnel" target="_blank" rel="noreferrer">Funnel guide</a>
         </p>
         <div className="form-row">

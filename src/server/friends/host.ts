@@ -6,9 +6,11 @@
 import http from 'node:http';
 import { join } from 'node:path';
 import { JsonStore } from '../bot/store';
-import { Friends, type Friend, type FriendsFile } from './accounts';
+import { Friends, LoginGate, loginOf, type Friend, type FriendsFile } from './accounts';
 import { Copies, portFree, type CopySpec, type CopyStatus } from './copies';
-import { createGateway } from './gateway';
+import { createGateway, proxyUpgrade, type GatewayDeps } from './gateway';
+import { OwnerLogin, type OwnerConfig } from './owner';
+import { configuredHosts, configuredOrigins } from './publicHost';
 import { subKey } from './vault';
 
 export interface FriendRow { id: string; name: string; address: string | null; port: number; createdAt: number; lastLoginAt: number | null; stopped: boolean; copy: CopyStatus }
@@ -22,9 +24,11 @@ export interface FriendsView {
 export class FriendsHost {
   readonly friends: Friends;
   readonly copies: Copies;
+  readonly owner: OwnerLogin;
   private server: http.Server | null = null;
   /** Ports handed out by sign-ups still in progress, so two at once can't get the same one */
   private reserved = new Set<number>();
+  private readonly gate = new LoginGate();
 
   constructor(private readonly o: {
     secret: Buffer; dataDir: string;
@@ -37,9 +41,16 @@ export class FriendsHost {
     /** The host's own signing addresses: a friend can't use the host's key */
     hostAddresses: () => string[];
     say: (msg: string, level: 'info' | 'warn') => void;
+    /** Owner password from .env, or null when `npm run host:password` has not been run */
+    hostAuth?: OwnerConfig | null;
+    /** GATEWAY_HOST: a tailnet hostname (or https URL) allowed to open the gateway, besides the Friends address */
+    gatewayHost?: string | null;
   }) {
     const root = join(o.dataDir, 'friends');
-    this.friends = new Friends(new JsonStore<FriendsFile>(join(root, 'friends.json')), o.secret, { hostAddresses: o.hostAddresses });
+    this.owner = new OwnerLogin(o.hostAuth ?? null, this.gate);
+    this.friends = new Friends(new JsonStore<FriendsFile>(join(root, 'friends.json')), o.secret, {
+      hostAddresses: o.hostAddresses, gate: this.gate, reserved: (login) => this.owner.isOwnerName(login),
+    });
     this.copies = new Copies({
       root, entry: o.entry, hostEnv: o.hostEnv, say: o.say,
       host: () => ({ name: this.friends.host().name, url: `http://127.0.0.1:${o.hostPort}` }),
@@ -50,16 +61,24 @@ export class FriendsHost {
 
   /** Opens the gateway, then starts every copy the host hasn't stopped (their bots carry on where they were). */
   async start() {
-    const app = createGateway({
+    const name = this.owner.loginName;
+    if (name) {
+      const clash = this.friends.list().find((f) => loginOf(f.name) === name);
+      if (clash) this.o.say(`The owner log-in "${name}" is also ${clash.name}'s name. That friend can't log in until HOST_LOGIN in .env is a different name and the app is restarted.`, 'warn');
+    }
+    const deps: GatewayDeps = {
       friends: this.friends, sessionKey: subKey(this.o.secret, 'session'), publicDir: this.o.publicDir,
       copyState: (id) => this.copies.status(id).state,
       liveBots: (id) => this.copies.liveBots(id),
       signUp: (token, p) => this.signUp(token, p),
       setKey: (id, raw) => this.setKey(id, raw),
       origins: () => this.origins(),
-    });
+      owner: this.owner, hostPort: this.o.hostPort, publicHosts: () => this.publicHosts(),
+    };
+    const app = createGateway(deps);
     this.server = await new Promise<http.Server>((resolve, reject) => {
       const s = app.listen(this.o.port, '127.0.0.1', () => resolve(s));
+      s.on('upgrade', (req, socket, head) => proxyUpgrade(deps, req, socket, head));
       s.once('error', (e: NodeJS.ErrnoException) => reject(e.code === 'EADDRINUSE' ? new Error(`The friends' port ${this.o.port} is in use. Set FRIENDS_PORT=… in .env.`) : e));
     });
     for (const f of this.friends.list()) if (!f.stopped) this.copies.start(this.spec(f));
@@ -67,9 +86,13 @@ export class FriendsHost {
 
   stop() { this.copies.stopAll(); this.server?.close(); }
 
+  /** Hostnames tailscale serve may use, besides loopback. */
+  publicHosts(): string[] {
+    return configuredHosts(this.friends.host().address, this.o.gatewayHost);
+  }
+
   origins(): string[] {
-    const a = this.friends.host().address;
-    return [...(a ? [a] : []), `http://127.0.0.1:${this.o.port}`, `http://localhost:${this.o.port}`];
+    return configuredOrigins(this.friends.host().address, this.o.gatewayHost, this.o.port);
   }
 
   private async freePort(): Promise<number> {

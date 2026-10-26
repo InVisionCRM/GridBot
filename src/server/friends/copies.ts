@@ -1,7 +1,7 @@
 /**
  * Each friend's copy of the app: the same built server (dist/server/index.js) run as a child process in its own folder
  * (data/friends/<id>/), so it has its own bots, history and settings. Its environment is built from an allow-list, never
- * copied from the host's: no PRIVATE_KEY*, RPC_URL* (they can hold API keys) or FRIENDS_SECRET reach it. The friend's
+ * copied from the host's: no PRIVATE_KEY*, RPC_URL* (they can hold API keys), FRIENDS_SECRET or HOST_PASSWORD_HASH reach it. The friend's
  * own key goes in as its PRIVATE_KEY, which the copy's env.ts removes at once, as the host's does. An IPC channel ties
  * the copy to the host: when the host stops, even when killed, the channel closes and the copy shuts down.
  */

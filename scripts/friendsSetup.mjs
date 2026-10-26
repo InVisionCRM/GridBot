@@ -14,9 +14,9 @@ appendFileSync(file, `${lead}\n# Locks friends' keys and signs their log-ins (np
 const port = process.env.FRIENDS_PORT || 3850;
 console.log(`Added FRIENDS_SECRET to .env.
 
-Next:
-  1. Restart the app: npm run build, then npm start.
-  2. Install Tailscale on this computer, log in, then run once:
-       tailscale funnel --bg ${port}
-     It prints an address starting with https://
-  3. Open the app → Tools → Friends: add your name and that address, then make invite links.`);
+Next, for your own phone (tailnet only, not the public internet):
+  1. npm run host:password
+  2. npm run build, then npm start
+  3. tailscale serve --bg ${port}
+
+See the readme, "Phone access". Use tailscale funnel only if a friend who is not on your tailnet needs a link.`)

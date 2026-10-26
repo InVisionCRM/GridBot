@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { FetchRequest, JsonRpcProvider, Wallet } from 'ethers';
 import { getNetwork, type NetworkKey } from '../live/networks';
 import { registerSecret } from './bot/logger';
+import { ownerLoginFrom, parsePassHash, type OwnerConfig } from './friends/owner';
 
 /** Load .env from the working directory (Node ≥ 20.12). Missing file is fine. */
 export function loadEnv(file = '.env') {
@@ -39,6 +40,24 @@ export function takeFriendsSecret(): Buffer | null {
   if (!/^[0-9a-fA-F]{64}$/.test(v)) throw new Error('FRIENDS_SECRET in .env must be 64 hex characters. Run npm run friends:setup to make one.');
   registerSecret(v);
   return Buffer.from(v, 'hex');
+}
+
+/**
+ * Owner phone login (npm run host:password). The hash is removed from process.env at once, like FRIENDS_SECRET, and
+ * redacted from logs. null = the gateway has no owner login. The plaintext password is never stored.
+ */
+export function takeHostAuth(): OwnerConfig | null {
+  const hash = process.env.HOST_PASSWORD_HASH;
+  const loginRaw = process.env.HOST_LOGIN;
+  const sessionRaw = process.env.HOST_SESSION;
+  delete process.env.HOST_PASSWORD_HASH;
+  delete process.env.HOST_LOGIN;
+  delete process.env.HOST_SESSION;
+  if (!hash?.trim()) return null;
+  registerSecret(hash.trim());
+  const pass = parsePassHash(hash);
+  const n = Number(sessionRaw);
+  return { login: ownerLoginFrom(loginRaw), pass, session: Number.isInteger(n) && n > 0 ? n : 1 };
 }
 
 /** What a friend's copy knows about itself: set by the host app that starts it (friends/copies.ts). */
