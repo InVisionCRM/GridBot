@@ -44,7 +44,7 @@ export function DeskTable({ s, bots, nav, pause, close }: {
   );
 
   return (
-    <div className="desk metrics">
+    <div className="desk desk-book">
       <div className="desk-tools">
         <input className="desk-search" value={q.q} placeholder="Search" aria-label="Search bots" onChange={(e) => set({ q: e.target.value })} />
         <div className="desk-chips" role="group" aria-label="Type">
