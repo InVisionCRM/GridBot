@@ -63,6 +63,23 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
     expect(saved.rows).toHaveLength(m.length);
     const again = new PoolHistories(dir, () => c.reader, fast(now)).get(REF);
     expect(again.minutes).toEqual(m);
+    // read to the head once: after a restart its week is used while the next top-up runs
+    expect(again.state.ready).toBe(true);
+  });
+
+  it('a first read stopped half way is saved, but not trusted after a restart: the rest of the week is read first', async () => {
+    const c = chain({ days: KEEP_DAYS + 1, every: 600, cap: 10_000 });
+    const dir = mkdtempSync(join(tmpdir(), 'ph-'));
+    let t = (T0 + c.latest) * 1000, calls = 0;
+    // each request takes 40 s (so the sync saves as it goes); the RPC dies after 3 of them
+    const reader: LogReader = { ...c.reader, getLogs: async (f) => { if (++calls > 3) throw new Error('connect ECONNREFUSED'); t += 40_000; return c.reader.getLogs(f); } };
+    const h = new PoolHistories(dir, () => reader, { now: () => t, gapMs: 0, sleep: async () => {} }).get({ ...REF, logChunk: 20_000 });
+    await expect(h.sync()).rejects.toThrow(/ECONNREFUSED/);
+    expect(h.minutes.length).toBeGreaterThan(0);
+    const again = new PoolHistories(dir, () => c.reader, fast(() => t)).get(REF);
+    expect(again.minutes.length).toBeGreaterThan(0); // part of the week was saved
+    expect(again.state.ready).toBe(false);
+    expect(syncAnswer({ ...again.state, syncing: true })).toMatchObject({ state: 'syncing' });
   });
 
   it('a later sync reads only the new blocks and continues the last minute', async () => {

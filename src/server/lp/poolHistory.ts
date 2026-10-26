@@ -36,12 +36,12 @@ export interface SyncState {
   error: string | null;
   /** When the last sync ended, done or failed (ms) */
   at: number | null;
-  /** A sync has read every swap up to the chain's head in this process: the minutes cover the whole window (a later one only tops them up) */
+  /** A sync has read every swap up to the chain's head (kept in the file): the minutes cover the whole window, a later sync only tops them up */
   ready: boolean;
 }
 
 type Row = [number, number, number, number, number, number, number, number];
-interface PoolFile { version: 1; chainId: number; pool: string; feeTier: number; lpShare: number; toBlock: number; lastTick: number | null; rows: Row[] }
+interface PoolFile { version: 1; chainId: number; pool: string; feeTier: number; lpShare: number; toBlock: number; lastTick: number | null; rows: Row[]; ready?: boolean }
 
 const toRow = (m: PoolMinute): Row => [m.t, m.lo, m.hi, m.c, m.f0, m.f1, m.liq, m.n];
 const fromRow = (r: Row): PoolMinute => ({ t: r[0], lo: r[1], hi: r[2], c: r[3], f0: r[4], f1: r[5], liq: r[6], n: r[7] });
@@ -95,11 +95,13 @@ export class PoolHistory {
     this.minutes = f.rows.map(fromRow);
     this.toBlock = f.toBlock;
     this.lastTick = f.lastTick;
+    // a first read stopped half way (saved every SAVE_EVERY_MS) covers part of the window only; files from before this flag too
+    this.state.ready = f.ready === true;
   }
 
   private save() {
     if (!this.file || this.toBlock == null) return;
-    const f: PoolFile = { version: 1, chainId: this.ref.chainId, pool: this.ref.pool, feeTier: this.ref.feeTier, lpShare: this.ref.lpShare, toBlock: this.toBlock, lastTick: this.lastTick, rows: this.minutes.map(toRow) };
+    const f: PoolFile = { version: 1, chainId: this.ref.chainId, pool: this.ref.pool, feeTier: this.ref.feeTier, lpShare: this.ref.lpShare, toBlock: this.toBlock, lastTick: this.lastTick, rows: this.minutes.map(toRow), ready: this.state.ready };
     const tmp = `${this.file}.tmp`;
     writeFileSync(tmp, JSON.stringify(f));
     renameSync(tmp, this.file);
@@ -150,8 +152,8 @@ export class PoolHistory {
         if (this.now() - saved >= SAVE_EVERY_MS) { this.trim(); this.save(); saved = this.now(); }
       }
       this.trim();
-      this.save();
       this.state.ready = true;
+      this.save();
     } catch (e) {
       this.state.error = (e as Error).message.slice(0, 200);
       this.save();
