@@ -25,6 +25,7 @@ import type { Emit } from './activity';
 import type { Mode } from './engine';
 import { ExecError, LiveExecutor, PaperExecutor, type Executor } from './chain';
 import { candidates, HOLD_MS, MIN_PIECE, planBudget, poolId, wayKey, type Candidate, type PlanOptions } from '../../market/autopilot';
+import { DEFAULT_MAX_POOL_SHARE, capGridEntry, capLpEntry, entryCostFraction } from '../../market/poolSize';
 import { findRoute, type CoinId, type Hop, type RouteMarket } from '../../market/convertRoute';
 import { NATIVE } from '../../live/swapMath';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
@@ -485,10 +486,10 @@ export class Autopilot {
   }
 
   /**
-   * Bots back in cash are removed and their value credited (once there is a reading of it), and a review is due. A bot
-   * to close whose close isn't under way (never asked, or it was started or resumed again since) is asked to close to
-   * cash, except a bot that is stopped (by hand, KILL ALL or a safety pause: it waits until it runs again) or one of a
-   * stopped budget. A liquidity bot closed by hand is closed to cash.
+   * Bots whose close finished (asked by the trader or by hand: off the active list) are removed, what they hold goes to
+   * the account (their spend coin, and the base coin a liquidity bot withdraws or a grid still held, to be swapped back),
+   * and a review is due. A bot to close whose close isn't under way is asked to close, except a bot that is stopped (by
+   * hand, KILL ALL or a safety pause: it waits until it runs again) or one of a stopped budget.
    */
   private settle() {
     for (const a of this.state.accounts) {
@@ -503,22 +504,24 @@ export class Autopilot {
           continue;
         }
         if (this.d.bot.botCashedOut(b.kind, b.id)) {
-          const value = this.d.bot.botValue(b.kind, b.id);
-          if (value == null) continue; // no reading of it yet
+          const value = this.d.bot.botValue(b.kind, b.id), back = this.d.bot.botCoins(b.kind, b.id);
+          if (value == null || back == null) continue; // no reading of it yet
+          const d = this.hub.def(b.market), base = d.base.native ? this.nativeSym(c) : d.base.symbol;
           if (b.kind === 'grid') this.d.bot.remove(b.id); else this.d.bot.removeLp(b.id);
-          this.add(a, b.spend, value + b.reserve);
+          this.add(a, b.spend, back.quote + b.reserve);
+          if (back.base > 0) this.add(a, base, back.base);
           a.bots = a.bots.filter((x) => x !== b);
           const r = value - b.capital;
-          this.say(`closed ${b.label} (${b.retiring?.why ?? 'closed to cash by hand'}): ${fmt(value)} ${b.spend} back, ${r >= 0 ? '+' : ''}${fmt(r)} on the ${fmt(b.capital)} it had`, r >= 0 ? 'success' : 'warn', c);
+          this.say(`closed ${b.label} (${b.retiring?.why ?? 'closed by hand'}): ${fmt(value)} ${b.spend} back${back.base > 0 ? ` (${fmt(back.base)} ${base} of it, to swap back)` : ''}, ${r >= 0 ? '+' : ''}${fmt(r)} on the ${fmt(b.capital)} it had`, r >= 0 ? 'success' : 'warn', c);
           this.state.reviewedAt = null;
           this.save();
           continue;
         }
         const st = this.d.bot.botStatus(b.kind, b.id);
-        if (!b.retiring && (this.state.closeAll || st.status === 'closed')) b.retiring = { why: this.state.closeAll ? 'turned off' : 'closed by hand', started: false, alt: null };
-        if (!b.retiring || st.closing || a.killed || (st.status !== 'running' && st.status !== 'closed')) continue;
+        if (!b.retiring && this.state.closeAll) b.retiring = { why: 'turned off', started: false, alt: null };
+        if (!b.retiring || st.closing || a.killed || st.status !== 'running') continue;
         try {
-          if (b.kind === 'grid') this.d.bot.gridToCash(b.id); else this.d.bot.closeLp(b.id, true);
+          if (b.kind === 'grid') this.d.bot.closeGrid(b.id); else this.d.bot.closeLp(b.id);
           b.retiring.started = true;
           this.save();
         } catch (e) { this.warn(`couldn't start closing ${b.label}: ${msg(e)}`, c); }
@@ -600,7 +603,13 @@ export class Autopilot {
     await this.refreshRates(a, [...new Set(items.map((x) => x.spend))]);
     const now = this.now();
     for (const [id, until] of this.failed) if (until <= now) this.failed.delete(id);
-    const { cands, gone } = candidates(items, o, this.reach(a));
+    // An entry swap's cost at the size it would open at (a pool of unknown depth is taken as deep enough)
+    const piece = a.budget.amount / Math.max(1, o.slots), cap = this.d.bot.limits.maxPriceImpact;
+    const { cands, gone } = candidates(items, o, this.reach(a), (x) => {
+      const liq = x.activity?.liquidityUsd ?? 0, usdPer = x.capital > 0 ? x.usd / x.capital : 0;
+      if (!(liq > 0) || !(usdPer > 0)) return 0;
+      return entryCostFraction({ capital: piece / this.rate(c, x.spend)!, quoteReserve: liq / 2 / usdPer, feeBps: x.feeBps, maxImpact: cap, maxPoolShare: DEFAULT_MAX_POOL_SHARE });
+    });
     // Bots closing or not running (stopped by hand, KILL ALL, a safety pause) keep their slot and pair, but aren't judged.
     // One removed by hand since the last check isn't counted (the next settle drops it).
     const bots = a.bots.filter((b) => this.d.bot.hasBot(b.kind, b.id)), runs = (b: AutoBot) => this.d.bot.botStatus(b.kind, b.id).status === 'running';
@@ -632,6 +641,23 @@ export class Autopilot {
   }
 
   /**
+   * `capital` (in the budget's coin) cut to what the pool takes under the price-impact cap and the pool-share cap; `r` =
+   * budget coins per unit of the pool's coin. A pool of unknown depth is taken as deep enough.
+   */
+  private fitEntry(c: Candidate, capital: number, r: number): number {
+    const liq = c.o.activity?.liquidityUsd ?? 0, usdPer = c.o.capital > 0 ? c.o.usd / c.o.capital : 0;
+    if (!(liq > 0) || !(usdPer > 0)) return capital;
+    const ask = capital / r, reserve = liq / 2 / usdPer, maxImpact = this.d.bot.limits.maxPriceImpact;
+    const fit = c.how === 'lp'
+      ? capLpEntry({ capital: ask, quoteReserve: reserve, feeBps: c.feeBps, maxImpact })
+      : capGridEntry({ capital: ask, quoteReserve: reserve, feeBps: c.feeBps, maxImpact, gridCount: c.o.grid!.gridCount });
+    if (!(fit.amount > 0)) throw new Error('the pool is too thin for the price-impact cap');
+    if (!fit.why || fit.amount >= ask * 0.98) return capital;
+    this.say(`${c.label}: ${fit.why}`, 'info', c.o.chainId);
+    return fit.amount * r;
+  }
+
+  /**
    * A new bot with `capital` (in the budget's coin) put into the pool's coin: what the account holds of that coin
    * first, then swapped from the budget's coin, then from any other coin it holds. Everything that can fail before a
    * swap is checked first: its market, the safety check, a price, and every swap into the pool's coin is planned and
@@ -639,8 +665,9 @@ export class Autopilot {
    * the loss limit) or set up anew meanwhile: nothing more is sent, and a bot that started anyway is stopped at once. A
    * way that fails to open for a reason of its own is skipped until the next daily review.
    */
-  private async open(a: Account, c: Candidate, capital: number, why: string): Promise<boolean> {
+  private async open(a: Account, c: Candidate, capitalIn: number, why: string): Promise<boolean> {
     const bot = this.d.bot, mode = this.state.mode, chainId = a.budget.chainId, spend = c.o.spend;
+    let capital = capitalIn;
     const alive = () => { if (!this.state.on || a.killed || a.halted || !this.state.accounts.includes(a)) throw new Stopped(`stopped meanwhile (${a.killed ?? (a.halted ? 'the loss limit' : 'turned off')}): nothing more is sent`); };
     try {
       const market = c.o.key ?? await bot.addOpportunityMarket({ chainId, ...c.o.ref });
@@ -653,6 +680,7 @@ export class Autopilot {
       alive();
       const r = this.rate(chainId, spend);
       if (r == null) throw new Error(`no price for ${spend} yet`);
+      capital = this.fitEntry(c, capital, r);
       // Spending the chain's own coin: the gas reserve a start needs comes out of the same coins and goes with the bot
       const native = spend === this.nativeSym(chainId), cfg = reserveCfg(bot.limits), want = capital / r;
       const sized = (h: number) => (native ? Math.max(0, Math.min(want, h / (1 + cfg.pct), h - cfg.fixed)) : Math.min(want, h));

@@ -159,7 +159,7 @@ input:disabled, select:disabled { opacity: 0.55; }
 /* status dot: green running, amber stopped, red error, dim when the price feed is stale */
 .hb { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; vertical-align: 1px; margin-right: 6px; }
 .hb-running { background: var(--profit); }
-.hb-stopped { background: var(--warn); }
+.hb-stopped, .hb-closing { background: var(--warn); }
 .hb-error { background: var(--loss); }
 .hb-stale { opacity: 0.45; }
 
@@ -183,7 +183,9 @@ input:disabled, select:disabled { opacity: 0.55; }
 .kpi-row .kpi-v { font-size: 1.05rem; }
 
 .bots { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
-.bots-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.bots-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.bots-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.bots-note { margin: 0; padding: 8px 14px 0; }
 .bot-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 2px 14px; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .bot-row:last-child { border-bottom: 0; }
 .bot-row:hover { background: var(--sel); }
@@ -191,7 +193,7 @@ input:disabled, select:disabled { opacity: 0.55; }
 .bot-meta { grid-column: 1; font-size: 0.78rem; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .bot-pnl { grid-column: 2; grid-row: 1; font-family: var(--mono); text-align: right; }
 .bot-hold { grid-column: 2; grid-row: 2; font-family: var(--mono); font-size: 0.74rem; color: var(--muted); text-align: right; white-space: nowrap; }
-.bot-act { grid-column: 3; grid-row: 1 / span 2; }
+.bot-act { grid-column: 3; grid-row: 1 / span 2; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; align-content: center; }
 .empty { padding: 28px 16px; text-align: center; color: var(--muted); display: flex; flex-direction: column; gap: 12px; align-items: center; }
 .fill-flash { animation: fill-flash 1.2s ease-out; }
 @keyframes fill-flash { from { background: rgba(61, 255, 162, 0.14); } to { background: transparent; } }
@@ -285,7 +287,7 @@ tr.subrow > td { background: var(--surface-2); }
 .side.sell, .sell { color: var(--loss); }
 .st { font-family: var(--font); }
 .st.running { color: var(--profit); }
-.st.stopped, .st.paused { color: var(--warn); }
+.st.stopped, .st.paused, .st.closing { color: var(--warn); }
 .st.holding, .st.pendingSell { color: var(--text); }
 .st.waitingBuy, .st.pendingBuy { color: var(--muted); }
 .st.inactive { color: var(--muted); opacity: 0.6; }
@@ -674,8 +676,9 @@ label.wide input { min-width: 180px; }
   .bot-name, .bot-pnl, .bot-hold, .bot-act, .bot-meta { min-width: 0; }
   .bot-pnl { grid-column: 1; grid-row: 2; text-align: left; font-size: 1.05rem; overflow-wrap: anywhere; }
   .bot-pnl .usd { white-space: normal; }
-  .bot-act { grid-column: 2; grid-row: 2 / span 2; justify-self: end; }
-  .bot-act .btn { min-height: 40px; padding: 8px 12px; }
+  .bot-act { grid-column: 1 / -1; grid-row: 6; justify-content: flex-start; }
+  .bots-actions { width: 100%; }
+  .bots-actions .btn, .bot-act .btn { min-height: 36px; }
   .bot-meta { grid-column: 1; grid-row: 3; }
   .bot-hold { grid-column: 1 / -1; grid-row: 4; text-align: left; white-space: normal; overflow-wrap: anywhere; }
   .bot-live { grid-column: 1 / -1; grid-row: 5; }
@@ -779,6 +782,13 @@ label.wide input { min-width: 180px; }
 .smart-bot-v b { font-family: var(--mono); font-weight: 500; }
 .smart-log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 420px; overflow: auto; }
 .smart-log li { display: flex; gap: 8px; align-items: baseline; font-size: 0.86rem; padding: 4px 0; border-top: 1px solid var(--line); }
+.tt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-top: 8px; }
+.tt-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-top: 8px; }
+.tt-grid input, .tt-row input, .tt-grid select { width: 100%; min-height: 36px; }
+@media (max-width: 560px) {
+  .tt-grid { grid-template-columns: 1fr 1fr; }
+  .tt-row { align-items: stretch; }
+}
 .smart-log li:first-child { border-top: 0; }
 .smart-log li.success > span:last-child { color: var(--profit); }
 .smart-log li.warn > span:last-child { color: var(--warn); }

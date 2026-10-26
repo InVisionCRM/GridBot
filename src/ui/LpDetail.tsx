@@ -147,27 +147,31 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const pnl: AnyObj | null = b.pnl;
   const pos = b.position, step = b.step;
   const running = b.status === 'running', closed = b.status === 'closed';
+  const closing = !!b.closing || step?.action === 'close';
   // a daily rate only once it has run a full day: the first minutes' costs scaled to a day say nothing
   const days = b.startedAt ? (Date.now() - b.startedAt) / 86_400_000 : null;
-  const close = () => act(async () => { if (confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}.`)) await botApi(`lps/${b.id}/close`, 'POST'); });
+  const close = () => {
+    if (b.mode === 'live' && !confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
+    act(() => botApi(`lps/${b.id}/close`, 'POST'));
+  };
   const remove = () => act(async () => { if (confirm(`Remove the ${b.label} liquidity bot and its history?`)) { await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' }); } });
 
   return (
     <main className="stack">
       <button type="button" className="back" onClick={() => nav({ v: 'home' })}>← Home</button>
       <div className="detail-head">
-        <StatusDot beat={b.priceAt} state={b.lastError ? 'error' : b.status} />
+        <StatusDot beat={b.priceAt} state={closing ? 'closing' : b.lastError ? 'error' : b.status} />
         <ChainBadge c={chainOf(s, b.chainId)} testnet={false} />
         <h2>{b.label}</h2>
         <span className="tag">Liquidity</span>
         {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
-        <span className={`st ${b.status}`}>{closed ? 'Closed' : running ? 'Running' : 'Paused'}{step ? ` · ${ACTION[step.action].toLowerCase()}` : ''}</span>
+        <span className={`st ${closing ? 'closing' : b.status}`}>{closing ? 'Closing…' : closed ? 'Closed' : running ? 'Running' : 'Paused'}{step && !closing ? ` · ${ACTION[step.action].toLowerCase()}` : ''}</span>
         {prices.base != null && <span className="pill mono" title={`Today's prices in dollars${prices.quote != null ? ` (${q} at ${usd(prices.quote)})` : ''}`}>{base} {usd(prices.base)}{prices.quote != null && Math.abs(prices.quote - 1) > 0.02 ? ` · ${q} ${usd(prices.quote)}` : ''}</span>}
         <span className="grow" />
         {running && <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST'))}>Pause</button>}
         {b.status === 'stopped' && <button type="button" className="btn primary" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
-        {!closed && <button type="button" className="btn" disabled={busy || !!step?.hash || b.available === false} title={step?.hash ? 'A transaction is still being confirmed' : 'Take everything out and end the bot'} onClick={close}>Close position</button>}
+        {!closed && <button type="button" className="btn" disabled={busy || closing || b.available === false} title={step?.hash ? 'A transaction is still being confirmed' : 'Take everything out and end the bot'} onClick={close}>{closing ? 'Closing…' : 'Close'}</button>}
         <button type="button" className="btn danger" disabled={busy || !!pos || !!step} title={pos || step ? 'Close the position first' : ''} onClick={remove}>Remove</button>
       </div>
 

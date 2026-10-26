@@ -235,71 +235,37 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s2.positionFees!.coins.quote).toBeCloseTo(p2.feeCoins.quote - s2.totals.feeCoins.quote, 12);
   });
 
-  it('close to cash: takes the position out, sells the base coin back to the quote coin, then closed', async () => {
+  it('paper close takes the position out from the last reading and keeps both coins', async () => {
     const { lp, m, pool } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
     await lp.tick();
     m.movePrice(pool, 0.95); // in range, holding more PLS now
     await lp.tick();
     expect(lp.status().coins!.base).toBeGreaterThan(0);
-    lp.close(true);
-    for (let i = 0; i < 4 && lp.status().status !== 'closed'; i++) await lp.tick();
+    const base = lp.status().coins!.base, quote = lp.status().coins!.quote;
+    expect(lp.close()).toBe(false);
     const st = lp.status();
-    expect(st.status).toBe('closed');
-    expect(st.position).toBeNull();
-    expect(st.idle.base * st.price!).toBeLessThan(st.idle.quote * 1e-4); // at most dust left
-    expect(st.idle.quote).toBeGreaterThan(900);
-    // plain Close keeps both coins
-    const other = world();
-    await other.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
-    await other.lp.tick();
-    other.lp.close();
-    for (let i = 0; i < 4 && other.lp.status().status !== 'closed'; i++) await other.lp.tick();
-    expect(other.lp.status().idle.base).toBeGreaterThan(0);
-    // a few wei of the base coin left (float rounding) is dust: closed without asking for a quote that would fail
-    const third = world();
-    await third.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
-    await third.lp.tick();
-    third.lp.close(true);
-    await third.lp.tick();
-    third.lp.state.idle.base = 1e-17; // 10 wei: its output rounds to zero, so a quote for it throws
-    third.lp.state.status = 'running';
-    third.lp.state.step = { action: 'close', stage: 'swap', tries: 0, toCash: true };
-    await third.lp.tick();
-    expect(third.lp.status()).toMatchObject({ status: 'closed', lastError: null });
+    expect(st).toMatchObject({ status: 'closed', position: null, closing: false });
+    expect(st.archivedAt).toBeGreaterThan(0);
+    expect(st.idle.base).toBeGreaterThan(0);
+    expect(st.idle.base).toBeCloseTo(base, 6);
+    expect(st.idle.quote).toBeGreaterThan(quote * 0.5);
+    await lp.tick(); // already archived: no further pool work
+    expect(lp.status().status).toBe('closed');
   });
 
-  it('close to cash: a plain Close asked meanwhile keeps it a sale; on a bot closed plainly it sells the base left; only then is it cashed out', async () => {
-    const { lp } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
-    await lp.tick();
-    lp.close(); // plain Close: both coins stay
-    await lp.tick();
-    expect(lp.state).toMatchObject({ status: 'closed', cashedOutAt: null });
-    expect(lp.state.idle.base).toBeGreaterThan(0);
-    lp.close(true); // then to cash: the base left is sold, and on the next check it is closed
-    await lp.tick();
-    await lp.tick();
-    expect(lp.state.status).toBe('closed');
-    expect(lp.state.cashedOutAt).toBeGreaterThan(0);
-    expect(lp.state.idle.base * lp.state.lastPrice!).toBeLessThan(lp.state.idle.quote * 1e-4);
-    const b = world();
-    await b.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
-    await b.lp.tick();
-    b.lp.close(true);
-    b.lp.close(); // a plain Close while closing to cash
-    expect(b.lp.state.step).toMatchObject({ action: 'close', toCash: true });
-  });
-
-  it('a close to cash whose smallest piece is over the impact cap waits 10 minutes (one notice), and its swaps go through the chain queue', async () => {
+  it('a close to cash saved by an older version: a sale over the impact cap waits 10 minutes (one notice), and its swaps go through the chain queue', async () => {
     const { lp, hub, at } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
     await lp.tick();
+    // saved after its exit, with the base coin still to sell
+    lp.state.position = null;
+    lp.state.idle = { base: 50_000_000, quote: 500 };
+    lp.state.step = { action: 'close', stage: 'swap', tries: 0, toCash: true };
     const gate = hub.rt(369).gate, run = gate.run.bind(gate);
     let queued = 0;
     gate.run = (fn) => { queued++; return run(fn); };
     lp.state.limits.maxPriceImpact = 1e-12;
-    lp.close(true);
     await lp.tick();
     expect(lp.state.step).toMatchObject({ stage: 'swap', waitUntil: 1_800_000_000_000 + 10 * 60_000 });
     expect(lp.lastError).toBeNull();
@@ -377,8 +343,8 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
     await lp.tick();
     m.addFees(pool, Q128 / 10n ** 6n, 0n);
+    await lp.tick(); // fees land in the cached reading; close then settles from that, with no further tick
     lp.close();
-    await lp.tick();
     const s = lp.status();
     expect(s).toMatchObject({ status: 'closed', position: null, step: null });
     expect(s.totals.fees).toBeGreaterThan(0);
@@ -551,7 +517,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(bot.status().lps).toHaveLength(0);
   });
 
-  it('KILL ALL during a close to cash: the exit already sent is settled, but nothing new (no sale) is sent until it is resumed', async () => {
+  it('KILL ALL during a close: the exit already sent is settled and the bot ends; nothing new is sent', async () => {
     const w = live();
     const e = w.make();
     await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
@@ -565,21 +531,18 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     sales = 0;
     w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
     await e.tick();
-    e.close(true);
+    expect(e.close()).toBe(true);
     await e.tick();
     const exit = w.sent[1];
     e.stop('KILL ALL');
     w.ok(exit.hash, [w.ev('DecreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n]), w.ev('Collect', [5n, '0x0000000000000000000000000000000000000000', 1010n * 10n ** 18n, 4n * 10n ** 16n])]);
     await e.tick();
-    expect(e.state).toMatchObject({ status: 'stopped', position: null, step: { action: 'close', stage: 'swap', toCash: true } });
-    expect(sales).toBe(0);
+    expect(e.state).toMatchObject({ status: 'closed', position: null, step: null, closing: false });
+    expect(e.state.archivedAt).not.toBeNull();
     expect(e.state.idle.base).toBeGreaterThan(0);
-    e.resume();
     await e.tick();
-    await e.tick();
-    expect(sales).toBe(1);
-    expect(e.state).toMatchObject({ status: 'closed' });
-    expect(e.state.cashedOutAt).not.toBeNull();
+    expect(w.sent).toHaveLength(2);
+    expect(sales).toBe(0);
   });
 
   it("a close asked while a step's transaction is being sent waits for it (the transaction is never lost)", async () => {
@@ -594,19 +557,16 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     ex.sendTx = async (r) => { await new Promise<void>((ok) => { release = ok; }); return send(r); };
     const ticking = e.tick(); // the mint waits to be sent
     await new Promise((ok) => setTimeout(ok, 10));
-    e.close(true);
+    expect(e.close()).toBe(true);
     release();
     await ticking;
     ex.sendTx = send;
     const mint = w.sent[0];
-    expect(e.state.step).toMatchObject({ action: 'open', stage: 'mint', hash: mint.hash });
-    expect(e.state.closeAsked).toEqual({ toCash: true });
+    expect(e.state).toMatchObject({ closing: true, archivedAt: null, step: { action: 'open', stage: 'mint', hash: mint.hash } });
     w.ok(mint.hash, [w.ev('IncreaseLiquidity', [9n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
-    await e.tick(); // the mint settles: the position is recorded
+    await e.tick(); // the mint settles: the position is recorded, and the close takes it out
     expect(e.state.position).toMatchObject({ id: '9' });
-    await e.tick(); // then the close starts: one exit for that position
-    expect(e.state.closeAsked).toBeNull();
-    expect(e.state.step).toMatchObject({ action: 'close', stage: 'exit', toCash: true, hash: w.sent[1].hash });
+    expect(e.state.step).toMatchObject({ action: 'close', stage: 'exit', hash: w.sent[1].hash });
   });
 
   it("selling a native base back leaves room for the sale's gas when the wallet holds less than the bot counts", async () => {
@@ -639,39 +599,27 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   }
   const exitLogs = (w: ReturnType<typeof live>) => [w.ev('DecreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n]), w.ev('Collect', [5n, '0x0000000000000000000000000000000000000000', 1010n * 10n ** 18n, 4n * 10n ** 16n])];
 
-  it('a close asked while a transaction confirms, then KILL ALL: nothing is sent until it is resumed', async () => {
+  it('a close asked while a transaction confirms, then KILL ALL: the transaction is settled, nothing is sent, and the close is dropped (Close again)', async () => {
     const w = live();
     const e = w.make();
     await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick(); // the mint is sent
-    e.close(true);
-    expect(e.state.closeAsked).toEqual({ toCash: true });
+    expect(e.close()).toBe(true);
+    expect(e.state.step).toMatchObject({ action: 'open', stage: 'mint', hash: w.sent[0].hash });
     e.stop('KILL ALL');
     w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
     await e.tick(); await e.tick(); await e.tick();
     expect(w.sent).toHaveLength(1);
-    expect(e.state).toMatchObject({ status: 'stopped', closeAsked: { toCash: true } });
+    expect(e.state).toMatchObject({ status: 'stopped', closing: false, position: { id: '5' } });
     e.resume();
     await e.tick();
-    expect(w.sent).toHaveLength(2); // the exit, now
-    expect(e.state.step).toMatchObject({ action: 'close', stage: 'exit', toCash: true });
-  });
-
-  it('"to cash" asked while a plain Close\'s exit confirms turns that close into a close to cash', async () => {
-    const w = live();
-    const e = await opened(w);
-    e.close();
+    expect(w.sent).toHaveLength(1);
+    expect(e.close()).toBe(true);
     await e.tick();
-    const exit = w.sent[1];
-    e.close(true);
-    expect(e.state.step).toMatchObject({ action: 'close', toCash: true });
-    expect(e.state.closeAsked).toBeNull();
-    w.ok(exit.hash, exitLogs(w));
-    await e.tick(); await e.tick();
-    expect(e.state.status).toBe('closed');
-    expect(e.state.cashedOutAt).not.toBeNull();
+    expect(w.sent).toHaveLength(2); // the exit, now
+    expect(e.state.step).toMatchObject({ action: 'close', stage: 'exit' });
   });
 
   it('a close asked during a range move takes the coins out with the move and sends no new mint', async () => {
@@ -680,14 +628,14 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     e.state.step = { action: 'rerange', stage: 'exit', tries: 0 };
     await e.tick(); // the move's exit is sent
     const exit = w.sent[1];
-    e.close(true);
+    expect(e.close()).toBe(true);
     w.ok(exit.hash, exitLogs(w));
     await e.tick(); // the exit settles: the move goes no further
     expect(w.sent).toHaveLength(2);
     await e.tick(); await e.tick();
-    expect(w.sent).toHaveLength(2); // no new mint, no second exit: the close sold the idle coins
-    expect(e.state.status).toBe('closed');
-    expect(e.state.cashedOutAt).not.toBeNull();
+    expect(w.sent).toHaveLength(2); // no new mint, no second exit: the coins are back in the wallet
+    expect(e.state).toMatchObject({ status: 'closed', closing: false, position: null });
+    expect(e.state.archivedAt).not.toBeNull();
   });
 
   it('stopped while its transaction waits its turn in the chain queue: not sent', async () => {
@@ -696,7 +644,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     const gate = w.hub.rt(369).gate;
     let release!: () => void;
     const holding = gate.run(() => new Promise<void>((ok) => { release = ok; }));
-    e.close(true);
+    expect(e.close()).toBe(true);
     const ticking = e.tick(); // the exit waits for the queue
     await new Promise((ok) => setTimeout(ok, 10));
     e.stop('KILL ALL');
@@ -720,7 +668,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     e.state.step = { action: 'close', stage: 'swap', tries: 0, toCash: true };
     for (let i = 0; i < 3; i++) await e.tick();
     expect(e.state.status).toBe('closed');
-    expect(e.state.cashedOutAt).not.toBeNull();
+    expect(e.state.idle.base).toBeLessThan(1000); // part sold, the rest went on gas
   });
 
   it('a step that keeps reverting stops the bot after 3 tries (nothing lost)', async () => {
@@ -795,12 +743,12 @@ describe('LP bot in the app: API, status, restart, money split', () => {
     return { ...w, bot, store, call, close: () => new Promise((r) => server.close(r)) };
   }
 
-  it('a bot closed to cash is worth its coins after a restart too (it is never read again once closed)', async () => {
+  it('a closed bot is worth its coins after a restart too (it is never read again once closed)', async () => {
     const store = new MemoryStore<MultiState>();
     const a = await serve(store);
     const id = await a.bot.addLp({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
     await a.bot.tickAll();
-    a.bot.closeLp(id, true);
+    a.bot.closeLp(id);
     for (let i = 0; i < 4 && !a.bot.botCashedOut('lp', id); i++) await a.bot.tickAll();
     expect(a.bot.botCashedOut('lp', id)).toBe(true);
     const worth = a.bot.botValue('lp', id)!;

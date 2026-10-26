@@ -335,202 +335,96 @@ describe('Grids saved before per-level sizes', () => {
 });
 
 
-describe('GridEngine close to cash', () => {
-  it('sells everything the grid holds back to the spend coin, then stops; the levels wait to buy again', async () => {
+describe('GridEngine close', () => {
+  it('paper close archives immediately and does not sell; the coins stay where the fills left them', async () => {
     const { chain, engine } = make();
     await engine.start({ mode: 'paper', ...grid });
     chain.setPrice(P0 * 0.935); // buys at 0.98, 0.96, 0.94
     await engine.tick();
     const bought = engine.paperBalances().pls;
     expect(bought).toBeGreaterThan(0);
-    engine.closeToCash();
-    expect(engine.status()).toMatchObject({ status: 'running', cashOut: { size: null } });
-    await engine.tick();
-    expect(engine.paperBalances().pls).toBeCloseTo(0, 6);
-    await engine.tick(); // nothing left: done
+    expect(engine.requestClose()).toBe(false);
     const s = engine.status();
-    expect(s).toMatchObject({ status: 'stopped', cashOut: null });
-    expect(s.cashedOutAt).toBeGreaterThan(0);
-    expect(engine.state.intervals.some((i) => i.status === 'holding')).toBe(false);
-    // the sale is in the ledger: with nothing left, what it realized is what came back minus what went in, minus all gas
-    const sells = engine.state.trades.filter((t) => t.side === 'sell'), buys = engine.state.trades.filter((t) => t.side === 'buy');
-    expect(sells).toHaveLength(1);
-    expect(sells[0].plsAmount).toBeCloseTo(bought, 6);
-    const sum = (xs: typeof sells, f: (t: (typeof sells)[0]) => number) => xs.reduce((a, t) => a + f(t), 0);
-    expect(sum(engine.state.trades, (t) => t.realizedPnlUsd)).toBeCloseTo(sum(sells, (t) => t.stableAmount) - sum(buys, (t) => t.stableAmount) - sum(engine.state.trades, (t) => t.gasUsd), 9);
+    expect(s).toMatchObject({ status: 'stopped', closing: false });
+    expect(s.archivedAt).toBeGreaterThan(0);
+    expect(engine.paperBalances().pls).toBeCloseTo(bought, 6);
+    await engine.tick(); // archived: a later tick does not sell
+    expect(engine.paperBalances().pls).toBeCloseTo(bought, 6);
+    expect(engine.state.trades.filter((t) => t.side === 'sell')).toHaveLength(0);
   });
 
-  it('a sale over the price-impact cap is halved each check, down to 1/64, then waits 10 minutes', async () => {
+  it('Stop pauses without archiving; the grid keeps what it still holds', async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'paper', ...grid });
+    chain.setPrice(P0 * 0.935);
+    await engine.tick();
+    engine.stop();
+    expect(engine.state.archivedAt).toBeNull();
+    expect(engine.state.closing).toBe(false);
+    await engine.tick();
+    expect(engine.paperBalances().pls).toBeGreaterThan(0);
+    expect(engine.status().archivedAt).toBeNull();
+  });
+
+  it("a live close's sales that keep failing (reverts) wait 10, 20, 40, 80 minutes, then stop the grid after 5; Close again tries again", async () => {
     let now = 1_800_000_000_000;
     const { chain, engine } = make(undefined, undefined, undefined, { now: () => now });
-    await engine.start({ mode: 'paper', ...grid });
-    chain.setPrice(P0 * 0.935);
-    await engine.tick();
-    const held = engine.paperBalances().pls;
-    engine.setLimits({ maxPriceImpact: 1e-12 }); // nothing passes
-    engine.closeToCash();
-    const sizes: number[] = [];
-    for (let i = 0; i < 8; i++) { await engine.tick(); sizes.push(engine.state.cashOut!.size!); }
-    expect(sizes.slice(0, 6).map((x) => x / held)).toEqual([1 / 2, 1 / 4, 1 / 8, 1 / 16, 1 / 32, 1 / 64].map((x) => expect.closeTo(x, 9)));
-    expect(engine.state.cashOut!.waitUntil).toBe(now + 10 * 60_000);
-    expect(engine.state.cashOut!.why).toMatch(/price impact/);
-    expect(engine.paperBalances().pls).toBeCloseTo(held, 9); // nothing sold
-    engine.setLimits({ maxPriceImpact: 0.05 });
-    now += 10 * 60_000;
-    await engine.tick();
-    expect(engine.paperBalances().pls).toBeCloseTo(held * (1 - 1 / 64), 6); // the waiting piece goes first
-  });
-
-  it('Stop pauses the selling (KILL ALL, a safety pause): nothing is sold while stopped; Resume carries on', async () => {
-    const { chain, engine } = make();
-    await engine.start({ mode: 'paper', ...grid });
-    chain.setPrice(P0 * 0.935);
-    await engine.tick();
-    const held = engine.paperBalances().pls;
-    engine.closeToCash();
-    engine.stop();
-    expect(engine.status()).toMatchObject({ status: 'stopped', cashOut: { size: null }, cashedOutAt: null });
-    await engine.tick();
-    expect(engine.paperBalances().pls).toBeCloseTo(held, 9);
-    engine.resume();
-    await engine.tick();
-    await engine.tick();
-    expect(engine.status()).toMatchObject({ status: 'stopped', cashOut: null });
-    expect(engine.paperBalances().pls).toBeCloseTo(0, 6);
-    expect(engine.state.cashedOutAt).toBeGreaterThan(0);
-  });
-
-  it('a stop part way leaves levels that own only what the grid still holds; the sold ones wait to buy again', async () => {
-    const { chain, engine } = make();
-    await engine.start({ mode: 'paper', ...grid });
-    chain.setPrice(P0 * 0.935);
-    await engine.tick();
-    const held = engine.paperBalances().pls;
-    engine.setLimits({ maxPriceImpact: 1e-12 });
-    engine.closeToCash();
-    await engine.tick(); // the whole sale is over the cap: half next time
-    engine.setLimits({ maxPriceImpact: 0.05 });
-    await engine.tick(); // half sold
-    engine.stop();
-    const left = engine.paperBalances().pls;
-    expect(left).toBeCloseTo(held / 2, 6);
-    const holding = engine.state.intervals.filter((i) => i.status === 'holding');
-    expect(holding.reduce((a, i) => a + i.plsAmount, 0)).toBeCloseTo(left, 6);
-    expect(engine.state.intervals.filter((i) => i.status === 'waitingBuy' && i.needsRearm && i.index >= 7).length).toBeGreaterThan(0);
-    // the sale is a close to cash, not a grid round trip
-    const sale = engine.state.trades.find((t) => t.side === 'sell')!;
-    expect(sale).toMatchObject({ cashOut: true, roundTripNet: undefined });
-    expect(sale.levelPrice).toBeUndefined();
-    expect(engine.status().stats.roundTrips).toBe(0);
-  });
-
-  it('a sale over about 33% impact (a thin pool) is halved like any sale over the cap, not refused as a units mismatch', async () => {
-    const { chain, engine } = make();
-    await engine.start({ mode: 'paper', ...grid });
-    chain.setPrice(P0 * 0.935);
-    await engine.tick();
-    const held = engine.paperBalances().pls;
-    // the pool shrinks to about the size of what the grid holds
-    chain.rD = BigInt(Math.round(held * P0 * 0.935)) * 10n ** 18n / 1n;
-    chain.setPrice(P0 * 0.935, 'DAI');
-    engine.closeToCash();
-    await engine.tick();
-    expect(engine.state.cashOut!.why).toMatch(/price impact/);
-    expect(engine.state.cashOut!.size).toBeCloseTo(held / 2, 6);
-    for (let i = 0; i < 8; i++) await engine.tick();
-    expect(engine.paperBalances().pls).toBeLessThan(held); // pieces under the cap went through
-  });
-
-  it("a sale over the token's max transaction is halved too", async () => {
-    const { chain, engine } = make();
-    await engine.start({ mode: 'paper', ...grid });
-    chain.setPrice(P0 * 0.935);
-    await engine.tick();
-    const held = engine.paperBalances().pls;
-    (engine.def as { safety: unknown }).safety = { risk: 'low', liveAllowed: true, reasons: [], maxTxTokens: held / 2 };
-    engine.closeToCash();
-    await engine.tick();
-    expect(engine.state.cashOut!.why).toMatch(/max transaction/);
-    // half is still at the limit (it is checked at 99.9%): a quarter at a time, three quarters sold in 4 checks
-    for (let i = 0; i < 4; i++) await engine.tick();
-    expect(engine.paperBalances().pls).toBeCloseTo(held * 0.25, 6);
-  });
-
-  it('a new Start drops a paused close to cash (the grid trades again); Resume after a finished close clears "cashed out"', async () => {
-    const { chain, engine } = make();
-    await engine.start({ mode: 'paper', ...grid });
-    chain.setPrice(P0 * 0.935);
-    await engine.tick();
-    engine.closeToCash();
-    engine.stop();
-    await engine.start({ mode: 'paper', lowerPrice: P0 * 0.7, upperPrice: P0 * 0.95, gridCount: 10, totalCapitalUsd: 50 });
-    expect(engine.state).toMatchObject({ status: 'running', cashOut: null, cashedOutAt: null });
-    await engine.tick();
-    expect(engine.state.status).toBe('running');
-    expect(engine.state.trades.some((t) => t.cashOut)).toBe(false);
-    // a close that finished, then Resume: running again, not cashed out
-    engine.closeToCash();
-    for (let i = 0; i < 3; i++) await engine.tick();
-    expect(engine.state.cashedOutAt).not.toBeNull();
-    engine.resume();
-    expect(engine.state.cashedOutAt).toBeNull();
-  });
-
-  it('a close to cash saved before failures were counted gets a count on load (the backoff works)', async () => {
-    let now = 1_800_000_000_000;
-    const store = new MemoryStore<BotState>();
-    const { chain, engine } = make(undefined, store, undefined, { now: () => now });
     await engine.start({ mode: 'live', ...grid });
     chain.setPrice(P0 * 0.935);
     await engine.tick();
-    engine.closeToCash();
-    const { fails: _f, ...old } = engine.state.cashOut!;
-    store.save({ ...engine.state, cashOut: old as never });
-    const again = make(chain, store, undefined, { now: () => now }).engine;
-    expect(again.state.cashOut!.fails).toBe(0);
-    chain.faults = Array(4).fill('revert');
-    await again.tick();
-    expect(again.state.cashOut).toMatchObject({ fails: 1, waitUntil: now + 10 * 60_000 });
+    expect(engine.requestClose()).toBe(true);
+    chain.faults = Array(400).fill('revert');
+    const waits: number[] = [], sends: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const n = chain.sent.length;
+      await engine.tick();
+      sends.push(chain.sent.length - n);
+      await engine.tick(); // waiting: nothing is sent
+      const f = engine.state.closeFails;
+      if (f) { waits.push((f.retryAt - now) / 60_000); now = f.retryAt; }
+    }
+    // one sale per try (sent twice: the executor's own retry), the others wait with it
+    expect(sends).toEqual([2, 2, 2, 2, 2]);
+    expect(waits).toEqual([10, 20, 40, 80]);
+    expect(engine.state).toMatchObject({ status: 'stopped', closing: false, archivedAt: null, closeFails: null });
+    const n = chain.sent.length;
+    now += 3600_000;
+    await engine.tick();
+    expect(chain.sent.length).toBe(n);
+    chain.faults = [];
+    expect(engine.requestClose()).toBe(true);
+    for (let i = 0; i < 3; i++) await engine.tick();
+    expect(engine.state.archivedAt).not.toBeNull();
+    expect(engine.status().pnl.plsHeld).toBeLessThan(1e-6);
   });
 
-  it("selling the chain's own coin back with only a little more of it in the wallet than the grid holds: halved until it fits with its gas", async () => {
-    let now = 1_800_000_000_000;
-    const { chain, engine } = make(undefined, undefined, undefined, { now: () => now });
+  it("a live close's sales are in the position and its profit, not grid round trips", async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'live', ...grid });
+    chain.setPrice(P0 * 0.935);
+    await engine.tick();
+    engine.requestClose();
+    for (let i = 0; i < 3; i++) await engine.tick();
+    expect(engine.state.archivedAt).not.toBeNull();
+    const sales = engine.state.trades.filter((t) => t.side === 'sell' && !t.failed);
+    expect(sales.length).toBeGreaterThan(0);
+    expect(sales.every((t) => t.closeSale && t.roundTripNet === undefined)).toBe(true);
+    expect(engine.status().stats.roundTrips).toBe(0);
+  });
+
+  it('a close sale far over the impact cap (a thin pool) is refused for its impact, not as a units mismatch', async () => {
+    const { chain, engine } = make();
     await engine.start({ mode: 'live', ...grid });
     chain.setPrice(P0 * 0.935);
     await engine.tick();
     const held = engine.status().pnl.plsHeld;
-    chain.pls = BigInt(Math.round((held + 0.05) * 1e18)); // a sale's gas is 0.1 PLS
-    engine.closeToCash();
-    for (let i = 0; i < 20 && engine.state.cashOut; i++) { await engine.tick(); now += 11 * 60_000; }
-    expect(engine.state).toMatchObject({ status: 'stopped', cashOut: null });
-    expect(engine.state.cashedOutAt).not.toBeNull();
-  });
-
-  it('a sale that keeps failing (reverts) waits 10, 20, 40, 80 minutes, then stops after 5; Resume tries again', async () => {
-    let now = 1_800_000_000_000;
-    const { chain, engine } = make(undefined, undefined, undefined, { now: () => now });
-    await engine.start({ mode: 'live', ...grid });
-    chain.setPrice(P0 * 0.935);
+    // the pool shrinks to well under one sale's size: the quote's price, impact included, is far from the spot
+    chain.rD = BigInt(Math.round(held * P0 * 0.935 / 6)) * 10n ** 18n / 1n;
+    chain.setPrice(P0 * 0.935, 'DAI');
+    engine.setLimits({ maxPriceImpact: 0.05 });
+    engine.requestClose();
     await engine.tick();
-    engine.closeToCash();
-    chain.faults = Array(20).fill('revert');
-    const waits: number[] = [];
-    for (let i = 0; i < 5; i++) {
-      await engine.tick();
-      const c = engine.state.cashOut!;
-      if (c.waitUntil != null) { waits.push((c.waitUntil - now) / 60_000); now = c.waitUntil; }
-    }
-    expect(waits).toEqual([10, 20, 40, 80]);
-    expect(engine.state).toMatchObject({ status: 'stopped', cashOut: { fails: 5 } });
-    const sends = chain.sent.length;
-    await engine.tick();
-    expect(chain.sent.length).toBe(sends); // nothing more is sent while stopped
-    chain.faults = [];
-    engine.resume();
-    await engine.tick();
-    await engine.tick();
-    expect(engine.state).toMatchObject({ status: 'stopped', cashOut: null });
-    expect(engine.state.cashedOutAt).toBe(now);
+    expect(engine.status().lastError).toMatch(/price impact/);
+    expect(engine.status().lastError).not.toMatch(/inconsistent/);
   });
 });

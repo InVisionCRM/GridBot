@@ -29,8 +29,8 @@ export interface LiveTrade {
   failed?: boolean;
   /** Manual trade: counts gas, but not part of the grid position/PnL */
   manual?: boolean;
-  /** A sale of a close to cash: in the position and PnL, not a grid round trip */
-  cashOut?: boolean;
+  /** A sale of a close: in the position and PnL, not a grid round trip */
+  closeSale?: boolean;
   /** Simulated (paper mode) fill */
   paper?: boolean;
   /** DEX/version + pool fee the fill executed on (e.g. 'pulsex-v1', 29 bps; V3 adds feeTier). Absent on old fills = PulseX V2. */
@@ -116,7 +116,7 @@ export function totals(trades: LiveTrade[], price: number | null) {
 /** Per-grid round-trip stats (quote units). */
 export function roundTripStats(trades: LiveTrade[]) {
   const ok = trades.filter((t) => !t.failed && !t.manual);
-  const sells = ok.filter((t) => t.side === 'sell' && !t.cashOut);
+  const sells = ok.filter((t) => t.side === 'sell' && !t.closeSale);
   const nets = sells.map((t) => t.roundTripNet ?? t.realizedPnlUsd);
   const totalNet = nets.reduce((a, b) => a + b, 0);
   const slips = ok.filter((t) => t.slippagePct != null).map((t) => t.slippagePct!);

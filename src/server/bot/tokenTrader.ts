@@ -1,0 +1,368 @@
+/**
+ * Token trader. A separate file from the grid/liquidity state (data/token-trader.json, version 1) so a restart
+ * resumes these positions without touching state.json.
+ *
+ * Paper uses the same discovery, safety gate, sizing and exit rules as live, and fills with simBuy / simSell
+ * (impact, fee, tax). Live is opt-in: it needs a signing key and the existing safety classifier, and sends
+ * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
+ */
+import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
+import { simSell, type CostModel } from '../../market/costs';
+import {
+  decideExit, filterFresh, gateToken, sizeBuy, splitSell, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SNIPER_MIN_LIQ_USD,
+  type FreshPool, type GateInput,
+} from '../../market/tokenTrader';
+import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
+import type { Emit } from './activity';
+import type { Store } from './store';
+import type { PoolSniper, SnipeHit } from '../market/sniper';
+
+export interface SniperOptions {
+  on: boolean;
+  minLiquidityUsd: number;
+  delayBlocks: number;
+  delaySec: number;
+  maxPerHour: number;
+  /** chain id → watched. Missing means on when the sniper is on. */
+  chains: Record<number, boolean>;
+  /** Ethereum send URL only (Flashbots Protect and the like). Quotes and limits are unchanged. */
+  mevRpc: string | null;
+}
+
+export interface TraderOptions {
+  mode: 'paper' | 'live';
+  perTradeUsd: number;
+  totalUsd: number;
+  /** Scan discovery only. Snipes ignore it. */
+  minPoolAgeSec: number;
+  /** Empty = every chain the app trades */
+  chains: number[];
+  risk: 'safe' | 'medium' | 'any';
+  maxImpact: number;
+  maxPoolShare: number;
+  sniper: SniperOptions;
+}
+
+export interface Position {
+  id: string;
+  chainId: number;
+  pool: string;
+  dex: string;
+  label: string;
+  token: string;
+  spend: string;
+  mode: 'paper' | 'live';
+  entryPrice: number;
+  price: number;
+  peak: number;
+  tokens: number;
+  entryTokens: number;
+  spent: number;
+  spentUsd: number;
+  openedAt: number;
+  entryVolume: number;
+  volume: number;
+  entryLiq: number;
+  liq: number;
+  entrySellTax: number;
+  sellTax: number;
+  sellSimOk: boolean;
+  feeBps: number;
+  quoteReserve: number;
+  tokenReserve: number;
+  usdPerSpend: number;
+  buyTax: number;
+  tp1Done: boolean;
+  tp2Done: boolean;
+  source: 'scan' | 'snipe';
+  exitPlan: string;
+}
+
+export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null }
+export interface FeedItem { t: number; chainId: number; pool: string; label: string; verdict: 'bought' | 'skipped'; why: string }
+
+export interface TraderState {
+  version: 1;
+  on: boolean;
+  options: TraderOptions;
+  positions: Position[];
+  trades: TradeLog[];
+  feed: FeedItem[];
+  cursors: Record<string, number>;
+  /** Sniper buy timestamps (ms), for the per-hour cap */
+  snipesAt: number[];
+}
+
+export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string }
+export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string }
+
+const HOUR = 3600_000;
+const FEED_MAX = 80;
+const TRADE_MAX = 200;
+
+export const DEFAULT_TRADER: TraderOptions = {
+  mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
+  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
+  sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+};
+
+const fresh = (): TraderState => ({ version: 1, on: false, options: structuredClone(DEFAULT_TRADER), positions: [], trades: [], feed: [], cursors: {}, snipesAt: [] });
+
+export class TokenTrader {
+  private state: TraderState;
+  private busy = false;
+  lastError: string | null = null;
+
+  constructor(private readonly d: {
+    store: Store<TraderState>;
+    now?: () => number;
+    emit?: Emit;
+    /** Scan discovery (new + trending pools, DexScreener). Sniper hits are separate. */
+    discover?: () => Promise<FreshPool[]>;
+    /** Safety inputs for a pool. Required before any buy. */
+    assess?: (pool: FreshPool, mode: 'paper' | 'live', risk: TraderOptions['risk']) => Promise<GateInput>;
+    /** Latest price, depth, volume, tax, sell simulation. Paper tests can omit this and call mark(). */
+    mark?: (p: Position) => Promise<Partial<Position> | null>;
+    live?: {
+      buy(pool: FreshPool, spend: number, limits: SafetyLimits): Promise<LiveFill>;
+      sell(p: Position, tokens: number, limits: SafetyLimits): Promise<LiveSell>;
+    };
+    signerReady?: (chainId: number) => boolean;
+    sniper?: PoolSniper;
+    /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
+    resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
+  }) {
+    const loaded = d.store.load();
+    this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } } } : fresh();
+  }
+
+  private now() { return (this.d.now ?? Date.now)(); }
+  private save() { this.d.store.save(this.state); }
+  private say(msg: string, level: 'info' | 'warn' | 'success' = 'info') {
+    this.d.emit?.({ type: 'info', kind: 'system', level, msg });
+  }
+
+  status() {
+    const openUsd = this.openUsd();
+    return {
+      ...this.state,
+      openUsd,
+      lastError: this.lastError,
+      positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p) })),
+    };
+  }
+
+  configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
+    const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
+    if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
+    if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
+    if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
+    if (!(n.maxImpact > 0) || n.maxImpact > HARD_CAPS.maxPriceImpact) throw new Error('Price-impact cap must be between 0% and 5%.');
+    if (!(n.maxPoolShare > 0) || n.maxPoolShare > 0.5) throw new Error('Max pool share must be between 0% and 50%.');
+    if (n.sniper.mevRpc && !/^https:\/\//.test(n.sniper.mevRpc)) throw new Error('MEV URL must be an https RPC.');
+    this.state.options = n;
+    this.save();
+  }
+
+  turnOn() {
+    const o = this.state.options;
+    if (o.mode === 'live') {
+      if (!this.d.live) throw new Error('Live trading is not wired on this server.');
+      if (this.d.signerReady && o.chains.length && o.chains.some((id) => !this.d.signerReady!(id))) throw new Error('Live needs a signing key on every chain you turned on.');
+    }
+    this.state.on = true;
+    this.say(`token trader on (${o.mode}): up to ${o.perTradeUsd} USD a trade, ${o.totalUsd} USD open, pools at least ${Math.round(o.minPoolAgeSec / 3600)}h old unless the sniper is on`);
+    this.save();
+  }
+
+  turnOff() {
+    this.state.on = false;
+    this.say('token trader off; open positions stay until their exit rules fire');
+    this.save();
+  }
+
+  /** Test hook: push a mark onto an open position (price, reserves, tax, sell sim). */
+  mark(id: string, m: Partial<Position>) {
+    const p = this.state.positions.find((x) => x.id === id);
+    if (!p) return;
+    Object.assign(p, m);
+    if (m.price != null && m.price > p.peak) p.peak = m.price;
+  }
+
+  async tick() {
+    if (this.busy || !this.state.on) return;
+    this.busy = true;
+    try {
+      await this.takeSnipes();
+      await this.exits();
+      await this.scanEntries();
+      this.lastError = null;
+    } catch (e) {
+      this.lastError = (e as Error).message;
+    } finally {
+      this.save();
+      this.busy = false;
+    }
+  }
+
+  private openUsd() { return this.state.positions.reduce((s, p) => s + p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0), 0); }
+
+  private pnl(p: Position) {
+    const model = this.model(p);
+    const out = p.tokens > 0 ? simSell(p.tokens, p.price, model).quote * p.usdPerSpend : 0;
+    return out - p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0);
+  }
+
+  private plan(p: Position) {
+    const d = decideExit(this.exitOf(p));
+    return d.action === 'hold' ? 'hold' : d.why;
+  }
+
+  private model(p: Pick<Position, 'feeBps' | 'quoteReserve' | 'tokenReserve' | 'buyTax' | 'sellTax'>): CostModel {
+    return {
+      feeBps: p.feeBps, pool: { quoteReserve: Math.max(p.quoteReserve, 1e-12), plsReserve: Math.max(p.tokenReserve, 1e-12) },
+      gasPricePls: 0, approval: 'exact', slippageBps: 0, buyTaxPct: p.buyTax, sellTaxPct: p.sellTax,
+    };
+  }
+
+  private limits(): SafetyLimits {
+    return { maxPriceImpact: Math.min(this.state.options.maxImpact, HARD_CAPS.maxPriceImpact), slippageBps: 100, deadlineMinutes: 10 };
+  }
+
+  private wantChain(id: number) {
+    const c = this.state.options.chains;
+    return !c.length || c.includes(id);
+  }
+
+  private feed(item: FeedItem) {
+    this.state.feed.unshift(item);
+    if (this.state.feed.length > FEED_MAX) this.state.feed.length = FEED_MAX;
+  }
+
+  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number }> {
+    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0 };
+    const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
+    const r = gateToken({ ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) });
+    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0 };
+  }
+
+  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number) {
+    const o = this.state.options;
+    if (this.state.positions.some((p) => p.pool.toLowerCase() === pool.pool.toLowerCase() && p.chainId === pool.chainId)) return;
+    const sized = sizeBuy({
+      perTradeUsd: o.perTradeUsd, totalUsd: o.totalUsd, openUsd: this.openUsd(),
+      quoteReserve: pool.quoteReserve, usdPerSpend: pool.usdPerSpend, feeBps: pool.feeBps,
+      buyTax, price: pool.price, maxImpact: o.maxImpact, maxPoolShare: o.maxPoolShare || TOKEN_MAX_POOL_SHARE,
+    });
+    if (!sized) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: 'size is under the limits or the pool is too thin' }); return; }
+    let tokens = sized.tokens, spent = sized.spend, price = pool.price, spentUsd = sized.usd;
+    if (o.mode === 'live') {
+      if (!this.d.live) throw new Error('live broker missing');
+      const fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
+      tokens = fill.tokens; spent = fill.spent; price = fill.price; spentUsd = fill.spentUsd;
+    }
+    const pos: Position = {
+      id: `tt-${this.now().toString(36)}-${pool.pool.slice(2, 6)}`, chainId: pool.chainId, pool: pool.pool, dex: pool.dex,
+      label: `${pool.tokenSymbol}/${pool.spendSymbol}`, token: pool.token, spend: pool.spend, mode: o.mode,
+      entryPrice: price, price, peak: price, tokens, entryTokens: tokens, spent, spentUsd, openedAt: this.now(),
+      entryVolume: pool.volumeUsd, volume: pool.volumeUsd, entryLiq: pool.liquidityUsd, liq: pool.liquidityUsd,
+      entrySellTax: sellTax, sellTax, sellSimOk: true, feeBps: pool.feeBps, quoteReserve: pool.quoteReserve,
+      tokenReserve: pool.tokenReserve, usdPerSpend: pool.usdPerSpend, buyTax, tp1Done: false, tp2Done: false, source, exitPlan: 'hold',
+    };
+    this.state.positions.push(pos);
+    const why = `buy ${sized.why}`;
+    this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price, why, pnlUsd: null });
+    this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
+    this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success');
+    if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
+  }
+
+  private async consider(pool: FreshPool, source: 'scan' | 'snipe') {
+    const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
+    if (!this.wantChain(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'chain is off' }); return; }
+    if (pool.kind === 'v4') { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); return; }
+    const a = await this.assess(pool);
+    if (!a.ok) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
+    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax);
+  }
+
+  private async scanEntries() {
+    if (!this.d.discover) return;
+    const pools = await this.d.discover();
+    const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: 0 });
+    for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
+    for (const p of keep) await this.consider(p, 'scan');
+  }
+
+  private hourRoom() {
+    const since = this.now() - HOUR;
+    this.state.snipesAt = this.state.snipesAt.filter((t) => t >= since);
+    return Math.max(0, this.state.options.sniper.maxPerHour - this.state.snipesAt.length);
+  }
+
+  private async takeSnipes() {
+    const sn = this.state.options.sniper;
+    if (!sn.on || !this.d.sniper) return;
+    const { cursors, hits, notes } = await this.d.sniper.tick(this.state.cursors, { delayBlocks: sn.delayBlocks, delaySec: sn.delaySec });
+    this.state.cursors = cursors;
+    for (const n of notes) this.say(n.msg, n.level);
+    let room = this.hourRoom();
+    for (const hit of hits) {
+      if (sn.chains[hit.chainId] === false) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: hit.pool.slice(0, 8), verdict: 'skipped', why: 'sniper is off for this chain' }); continue; }
+      if (hit.skip) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: 'V4', verdict: 'skipped', why: hit.skip }); continue; }
+      if (hit.kind === 'v4') continue;
+      const pool = await this.d.resolve?.(hit) ?? null;
+      if (!pool) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: hit.pool.slice(0, 8), verdict: 'skipped', why: 'could not price the new pool' }); continue; }
+      if (pool.liquidityUsd < sn.minLiquidityUsd) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}` }); continue; }
+      if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); continue; }
+      const before = this.state.positions.length;
+      await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');
+      if (this.state.positions.length > before) { this.state.snipesAt.push(this.now()); room--; }
+    }
+  }
+
+  private exitOf(p: Position) {
+    return {
+      entryPrice: p.entryPrice, price: p.price, peak: p.peak, openedAt: p.openedAt, now: this.now(),
+      entryVolume: p.entryVolume, volume: p.volume, entryLiq: p.entryLiq, liq: p.liq,
+      sellTax: p.sellTax, entrySellTax: p.entrySellTax, sellSimOk: p.sellSimOk,
+      tp1Done: p.tp1Done, tp2Done: p.tp2Done, remainingFrac: p.entryTokens > 0 ? p.tokens / p.entryTokens : 0,
+    };
+  }
+
+  private async exits() {
+    const left: Position[] = [];
+    for (const p of this.state.positions) {
+      if (this.d.mark) {
+        const m = await this.d.mark(p);
+        if (m) Object.assign(p, m);
+      }
+      if (p.price > p.peak) p.peak = p.price;
+      const d = decideExit(this.exitOf(p));
+      p.exitPlan = d.action === 'hold' ? 'hold' : d.why;
+      if (d.action === 'hold') { left.push(p); continue; }
+      const qty = Math.min(p.tokens, p.entryTokens * d.frac);
+      const parts = splitSell(qty, Math.max(p.tokenReserve, 1e-12), p.feeBps, this.state.options.maxImpact);
+      let quote = 0, sold = 0;
+      if (p.mode === 'live' && this.d.live) {
+        for (const part of parts) {
+          const s = await this.d.live.sell(p, part, this.limits());
+          quote += s.quoteOut; sold += s.tokensIn;
+        }
+      } else {
+        const model = this.model(p);
+        for (const part of parts) { quote += simSell(part, p.price, model).quote; sold += part; }
+      }
+      p.tokens -= sold;
+      const usd = quote * p.usdPerSpend;
+      const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
+      this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why: d.why, pnlUsd: usd - cost });
+      this.say(`sold ${p.label}: ${d.why}`, usd - cost >= 0 ? 'success' : 'warn');
+      if (d.why.startsWith('take profit') && !p.tp1Done) p.tp1Done = true;
+      else if (d.why.startsWith('take profit')) p.tp2Done = true;
+      if (p.tokens > p.entryTokens * 1e-8) left.push(p);
+    }
+    this.state.positions = left;
+    if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
+  }
+}

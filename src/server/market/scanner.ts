@@ -15,6 +15,7 @@
  */
 import type { MarketDef, MarketToken } from '../../live/markets';
 import { bestSetup, checkTestUsd, dailySwing, pickTokens, SCAN_CANDLES, SCAN_EVERY_MS, SCAN_PAGES, TEST_USD, type Opportunity, type Skipped, type TopPool } from '../../market/scan';
+import { feePace } from '../../market/lpFees';
 import { bestLp } from '../../market/lp';
 import { fillGaps, replayCandles, trimSpikes, type Candle, type TF } from '../../market/candles';
 import type { CandleStore } from './candleStore';
@@ -25,11 +26,14 @@ import type { Emit } from '../bot/activity';
 import type { Hub } from '../chains/hub';
 import { sameAddr } from '../dex/types';
 import { lpShareOf } from '../lp/lpShare';
+import { onchainFeePace } from './feePace';
 import { RateLimited } from './gecko';
 
 /** partial: still being scanned (shown as its pools are tested; only when it has no earlier result) */
 export interface ScanChain { chainId: number; name: string; at: number; items: Opportunity[]; tested: number; skipped: Skipped[]; error: string | null; partial?: boolean }
-export interface ScanFile { version: 4; at: number | null; testUsd: number; chains: ScanChain[] }
+/** One V3 fee-growth reading. Strings because JSON has no bigint. The next scan turns two of these into a fee pace. */
+export interface FeeMark { at: number; g0: string; g1: string; liquidity: string }
+export interface ScanFile { version: 4; at: number | null; testUsd: number; chains: ScanChain[]; feeMarks?: Record<string, FeeMark> }
 
 /** `dexes` = GeckoTerminal ids of the DEXes this app trades on the chain (only their pools are read); `lpDexes` = app DEX ids a liquidity bot can use. */
 export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[]; dexes: string[]; lpDexes: string[] }
@@ -45,6 +49,15 @@ export interface ScanDeps {
   storedHourly(def: MarketDef): Candle[];
   /** Share of the swap fee liquidity providers keep in this market's pool; throws when it isn't verified */
   lpShare(def: MarketDef): Promise<number>;
+  /**
+   * Recent on-chain fee pace for a V3 pool. scale multiplies candle volume so it matches fees actually paid.
+   * Missing or null: a wash-flagged pool is not ranked for liquidity (reported volume is not used).
+   */
+  /**
+   * On-chain fee pace for a wash-flagged V3 pool. `scale` is applied to candle volume directly.
+   * `feesUsd` + `windowMs` is turned into a scale from this scan's own candles (quote volume × USD per quote).
+   */
+  feePace?(def: MarketDef): Promise<{ scale?: number; feesUsd?: number; windowMs?: number } | null>;
   /** USD per unit of the market's spend coin */
   usdPerSpend(def: MarketDef): Promise<number>;
   gecko: {
@@ -58,7 +71,7 @@ export interface ScanDeps {
 }
 
 /** Version 3 kept a pool's addresses only for coins not in the app (`add`) */
-type ScanFileV3 = { version: 3; at: number | null; testUsd: number; chains: (Omit<ScanChain, 'items'> & { items: (Omit<Opportunity, 'ref'> & { add: Opportunity['ref'] | null })[] })[] };
+type ScanFileV3 = { version: 3; at: number | null; testUsd: number; feeMarks?: Record<string, FeeMark>; chains: (Omit<ScanChain, 'items'> & { items: (Omit<Opportunity, 'ref'> & { add: Opportunity['ref'] | null })[] })[] };
 function upgradeV3(f: ScanFileV3, existing: ScanDeps['existing']): ScanFile {
   return {
     ...f, version: 4,
@@ -86,6 +99,15 @@ export function localScan(hub: Pick<Hub, 'marketFor'>, src: { status(): unknown;
     },
     run: (testUsd?: number) => src.run(testUsd),
   };
+}
+
+/** Candle volume is in quote units. Scale it so the window matches fees the pool actually paid. */
+function paceScale(pace: { scale?: number; feesUsd?: number; windowMs?: number }, week: Candle[], usdPerQuote: number, feeBps: number, now: number): number | null {
+  if (pace.scale != null) return Number.isFinite(pace.scale) ? pace.scale : null;
+  if (!(pace.feesUsd != null && pace.windowMs != null)) return null;
+  const fromSec = now / 1000 - pace.windowMs / 1000;
+  const quoteVol = week.reduce((s, k) => s + (k.t >= fromSec ? k.v : 0), 0);
+  return feePace({ feesUsd: pace.feesUsd, windowMs: pace.windowMs, feeBps, candleVolumeUsd: quoteVol * usdPerQuote })?.scale ?? null;
 }
 
 const lc = (a: string) => a.toLowerCase();
@@ -152,13 +174,16 @@ export class DailyScanner {
     const usd = checkTestUsd(testUsd);
     if (this.running) throw new Error('A scan is already running.');
     this.running = true;
+    // Fee readings are stored on the scan file while the scan runs. A first install has no file yet, so start one.
+    if (this.d.store.load()?.version !== 4) this.d.store.save(this.file);
     this.d.emit?.({ type: 'info', kind: 'system', msg: `Opportunity scan started ($${usd.toLocaleString('en-US')} test size)` });
     try {
       const chains: ScanChain[] = [];
       this.live = { done: chains, current: null };
       const list = this.d.chains();
       for (const [i, c] of list.entries()) chains.push(await this.scanChain(c, i + 1, list.length, usd));
-      this.file = { version: 4, at: this.now(), testUsd: usd, chains };
+      const feeMarks = this.d.store.load()?.feeMarks ?? this.file.feeMarks;
+      this.file = { version: 4, at: this.now(), testUsd: usd, chains, ...(feeMarks ? { feeMarks } : {}) };
       this.d.store.save(this.file);
       this.d.emit?.({ type: 'info', kind: 'system', level: 'success', msg: `Opportunity scan done: ${chains.map((c) => `${c.name} ${c.items.length} pool${c.items.length === 1 ? '' : 's'}`).join(', ')}` });
       return this.file;
@@ -192,7 +217,7 @@ export class DailyScanner {
       // $0 liquidity), which crowded out the real Uniswap V3 stock pools (NVDA ~6.9k trades/day, SPCX ~12k).
       const pools: TopPool[] = [];
       for (const dex of c.dexes) pools.push(...await this.pools(c, dex));
-      const { picked, skipped } = pickTokens(pools, c.spendable, c.wrapped);
+      const { picked, skipped } = pickTokens(pools, c.spendable, c.wrapped, undefined, this.now());
       out.skipped.push(...skipped);
       const stackOf = (m: MarketDef) => lc(m.base.native ? c.wrapped : m.base.address);
       const spendOf = (m: MarketDef) => lc(m.quote.native ? c.wrapped : m.quote.address);
@@ -248,17 +273,39 @@ export class DailyScanner {
       risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null, liveAllowed: d.safety ? d.safety.liveAllowed : true,
       price: snap.spot, movePct, swingPct: dailySwing(week),
       activity: pool ? { volume24Usd: pool.volume24Usd, liquidityUsd: pool.liquidityUsd, tx24: pool.tx24 } : null,
-      capital, usd, grid: null, gridWhy: null, lp: null, lpWhy: null,
+      capital, usd, grid: null, gridWhy: null, lp: null, lpWhy: null, wash: pool?.wash === true,
     };
-    const s = bestSetup(week, costs, capital);
-    if (s) o.grid = { bandPct: s.bandPct, gridCount: s.gridCount, earnedPct: s.earnedPct, roundTrips: s.roundTrips, returnPct: s.returnPct, maxDrawdownPct: s.maxDrawdownPct };
-    else o.gridWhy = `no grid earned from its trades this week (price ${pct(movePct)})`;
+    const wash = pool?.wash === true;
+    if (wash) o.gridWhy = `volume is ${Math.round((pool?.volume24Usd ?? 0) / Math.max(pool?.liquidityUsd ?? 1, 1))}× its liquidity (wash trading is not a price swing, so no grid)`;
+    else {
+      const s = bestSetup(week, costs, capital);
+      if (s) o.grid = { bandPct: s.bandPct, gridCount: s.gridCount, earnedPct: s.earnedPct, roundTrips: s.roundTrips, returnPct: s.returnPct, maxDrawdownPct: s.maxDrawdownPct };
+      else o.gridWhy = `no grid earned from its trades this week (price ${pct(movePct)})`;
+    }
     if (d.pool.kind !== 'v3' || !c.lpDexes.includes(d.pool.dex)) {
       o.lpWhy = d.pool.kind === 'v3' ? "A liquidity bot can't open positions on this DEX yet (no verified position manager)." : 'A liquidity bot needs a V3 pool; this one is V2.';
       return o;
     }
+    let candles = week;
+    if (wash) {
+      const pace = this.d.feePace ? await this.d.feePace(d) : null;
+      const scale = pace ? paceScale(pace, week, await this.d.usdPerSpend(d), d.pool.feeBps, this.now()) : null;
+      const times = Math.round((pool?.volume24Usd ?? 0) / Math.max(pool?.liquidityUsd ?? 1, 1));
+      // Not measured yet (the first reading only starts the clock, or the read failed): no evidence either way
+      if (scale == null) {
+        o.lpWhy = `volume is ${times}× liquidity and this pool's fees weren't measured on-chain, so it isn't ranked for liquidity`;
+        o.lpFailed = true;
+        return o;
+      }
+      if (!(scale > 0)) {
+        o.lpWhy = `volume is ${times}× liquidity and the pool paid no fees on-chain since the last reading`;
+        return o;
+      }
+      o.feeScale = scale;
+      candles = week.map((k) => ({ ...k, v: k.v * scale }));
+    }
     try {
-      const l = bestLp(week, costs, capital, 'v3', await this.d.lpShare(d));
+      const l = bestLp(candles, costs, capital, 'v3', await this.d.lpShare(d));
       if (l.bandPct == null) throw new Error('a V3 position was tested as full range');
       o.lp = { bandPct: l.bandPct, earnedPct: l.earnedPct, feesPct: l.feesPct, inRangePct: l.inRangePct, poolSharePct: l.poolSharePct, returnPct: l.returnPct };
     } catch (e) { o.lpWhy = msg(e); o.lpFailed = true; }
@@ -291,6 +338,7 @@ export function scanDepsFromHub(hub: Hub, candles: CandleStore, rest: Pick<ScanD
       return replayCandles(candles.get(d.key, '1h'), '1h', nowSec);
     },
     lpShare: (d) => lpShareOf(hub, d),
+    feePace: (d) => onchainFeePace(hub, rest.store, d, (rest.now ?? Date.now)()),
     usdPerSpend: async (d) => {
       if (hub.isStable(d.chainId, d.quote.address)) return 1;
       if (!spends(d.chainId, d.quote)) throw new Error(`${d.quote.symbol} is not the native coin or a stablecoin`);

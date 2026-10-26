@@ -10,6 +10,7 @@ import { ChainBadge, chainOf } from './chains';
 import { errMsg, botView, type AnyObj, type Nav } from './model';
 import { L } from './Tip';
 import { useOpportunities } from './Opportunities';
+import { TokenTraderPanel } from './TokenTrader';
 
 type Risk = 'safe' | 'medium' | 'any';
 interface Opts { grid: boolean; lp: boolean; newTokens: boolean; risk: Risk; slots: number; stopLossPct: number }
@@ -67,6 +68,7 @@ export function SmartTrader({ s, nav }: { s: AnyObj; nav: Nav }) {
       {(a.on || holding) && <OnControls a={a} busy={busy} run={run} />}
       {!a.on && !holding && <Setup s={s} a={a} busy={busy} run={run} />}
       <Decisions log={a.log} s={s} />
+      <TokenTraderPanel s={s} />
     </main>
   );
 }
@@ -175,9 +177,9 @@ function OptionsForm({ opts, setOpts }: { opts: Opts; setOpts: (o: Opts) => void
 
 /** A bot's state as the trader sees it: running, or why it is waiting */
 function botState(b: AnyObj): { tag: string; cls: string; tip: string } | null {
-  if (b.cashedOut) return { tag: 'closed, coming back', cls: 'risk-mid', tip: 'Sold back to its coin; the money returns to the budget on the next check.' };
-  if (b.retiring && b.status !== 'running' && b.status !== 'closed') return { tag: `closing paused: ${b.retiring.why}`, cls: 'risk-high', tip: 'It was stopped (by hand, KILL ALL or a safety pause) before its close to cash finished. Resume it on its page to finish.' };
-  if (b.retiring) return { tag: `closing: ${b.retiring.why}`, cls: 'risk-mid', tip: 'Being closed back to its coin; the money comes back to the budget.' };
+  if (b.cashedOut) return { tag: 'closed, coming back', cls: 'risk-mid', tip: 'Closed: what it held returns to the budget on the next check, and coins other than the budget\'s are swapped back.' };
+  if (b.retiring && b.status !== 'running' && b.status !== 'closed') return { tag: `closing paused: ${b.retiring.why}`, cls: 'risk-high', tip: 'It was stopped (by hand, KILL ALL or a safety pause) before its close finished. Resume it on its page to finish.' };
+  if (b.retiring) return { tag: `closing: ${b.retiring.why}`, cls: 'risk-mid', tip: 'Being closed; its money comes back to the budget.' };
   if (b.status !== 'running') return { tag: b.status ?? 'missing', cls: 'risk-high', tip: 'Not running: it keeps its slot, and the smart trader leaves it alone until you resume it on its page.' };
   return null;
 }

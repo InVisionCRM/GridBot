@@ -87,7 +87,7 @@ export default function App() {
   const prevIds = useRef<Set<string> | null>(null);
   useEffect(() => {
     if (!s) return;
-    const ids = new Set<string>([...s.grids, ...(s.trends ?? []), ...(s.lps ?? [])].map((b: { id: string }) => b.id));
+    const ids = new Set<string>([...s.grids, ...(s.trends ?? []), ...(s.lps ?? [])].filter((b: { archivedAt?: number | null }) => !b.archivedAt).map((b: { id: string }) => b.id));
     if ((view.v === 'grid' || view.v === 'trend' || view.v === 'lp') && !ids.has(view.id) && (prevIds.current === null || prevIds.current.has(view.id))) nav({ v: 'home' });
     prevIds.current = ids;
   }, [s]); // eslint-disable-line react-hooks/exhaustive-deps

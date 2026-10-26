@@ -28,10 +28,11 @@ export interface PlanOptions { grid: boolean; lp: boolean; newTokens: boolean; r
 
 /**
  * A way to use a pool. id = the pool and the way (a grid and a range on one pool are two); expected = its estimate;
- * cost = swapping the budget's coin into the pool's coin and back (0 when it spends the budget's coin); score = the two;
- * maxCapital = the size the scan tested it at, in the budget's coin.
+ * cost = swapping the budget's coin into the pool's coin and back (0 when it spends the budget's coin); entry = the entry
+ * swap's fee, price impact and tax at the size it would open at; score = expected less both; maxCapital = the size the
+ * scan tested it at, in the budget's coin.
  */
-export interface Candidate { id: string; pair: string; how: 'grid' | 'lp'; expected: number; cost: number; score: number; feeBps: number; label: string; maxCapital: number; o: Opportunity }
+export interface Candidate { id: string; pair: string; how: 'grid' | 'lp'; expected: number; cost: number; entry: number; score: number; feeBps: number; label: string; maxCapital: number; o: Opportunity }
 /** A bot the trader runs: id = the bot, pool = its Candidate id, pair = its coins, capital = what it cost in the budget's coin */
 export interface Held { id: string; pool: string; pair: string; label: string; openedAt: number; feeBps: number; capital: number }
 /**
@@ -62,8 +63,10 @@ const way = (how: 'grid' | 'lp') => (how === 'lp' ? 'as a liquidity range' : 'as
  * candidates, with why. A way with no evidence either way (its liquidity test failed to run, or its coin has no price
  * right now) is in neither. reach(coin) = the share lost swapping the budget's coin into `coin` and back (0 for the
  * budget's own coin) and budget coins per unit of it (null: no price yet); null when there is no route.
+ * entryCost(pool, way) = the share the entry swap costs at the size that will actually be deployed, or null when even a
+ * small size can't enter under the price-impact cap: that way is in neither (a bot already on it has paid its entry).
  */
-export function candidates(items: Opportunity[], opt: PlanOptions, reach: (coin: string) => { cost: number; rate: number | null } | null): { cands: Candidate[]; gone: Map<string, string> } {
+export function candidates(items: Opportunity[], opt: PlanOptions, reach: (coin: string) => { cost: number; rate: number | null } | null, entryCost?: (o: Opportunity, how: 'grid' | 'lp') => number | null): { cands: Candidate[]; gone: Map<string, string> } {
   const cands: Candidate[] = [], gone = new Map<string, string>();
   for (const o of items) {
     const r = reach(o.spend);
@@ -79,7 +82,9 @@ export function candidates(items: Opportunity[], opt: PlanOptions, reach: (coin:
         : how === 'lp' && !opt.lp ? 'liquidity ranges are off'
           : e == null ? (how === 'grid' ? o.gridWhy : o.lpWhy) ?? 'it earned nothing in the test week' : null);
       if (why != null) { gone.set(id, why); continue; }
-      cands.push({ id, pair: pairOf(o), how, expected: e!, cost: r!.cost, score: e! - r!.cost, feeBps: o.feeBps, label: o.label, maxCapital: o.capital * r!.rate!, o });
+      const entry = entryCost ? entryCost(o, how) : 0;
+      if (entry == null) continue;
+      cands.push({ id, pair: pairOf(o), how, expected: e!, cost: r!.cost, entry, score: e! - r!.cost - entry, feeBps: o.feeBps, label: o.label, maxCapital: o.capital * r!.rate!, o });
     }
   }
   return { cands: cands.sort((a, b) => b.score - a.score), gone };
@@ -133,7 +138,7 @@ export function planBudget(p: { now: number; budget: number; cash: number; slots
     else for (const c of pick) {
       use.add(c.pair);
       const capital = Math.min(piece, c.maxCapital);
-      opens.push({ kind: 'open', cand: c, capital, why: `#${rank(c.id) + 1} of ${standing.length}: expected ${pc(c.expected)} a week ${way(c.how)}${c.cost ? `, ${pc(c.score)} after ${pc(c.cost)} for swapping into ${c.o.spend} and back` : ''}${capital < piece ? `; ${num(capital)} is the size it was tested at, so the rest waits` : ''}` });
+      opens.push({ kind: 'open', cand: c, capital, why: `#${rank(c.id) + 1} of ${standing.length}: expected ${pc(c.expected)} a week ${way(c.how)}${c.cost || c.entry ? `, ${pc(c.score)} after ${[c.cost ? `${pc(c.cost)} for swapping into ${c.o.spend} and back` : null, c.entry ? `${pc(c.entry)} for the entry swap` : null].filter(Boolean).join(' and ')}` : ''}${capital < piece ? `; ${num(capital)} is the size it was tested at, so the rest waits` : ''}` });
     }
   }
   // A closing bot replaced by nothing frees its slot when its money is back, and that money opens the best way then

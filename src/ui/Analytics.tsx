@@ -162,7 +162,7 @@ function ModeAnalytics({ s, mode }: { s: AnyObj; mode: 'live' | 'paper' }) {
       <div className="card">
         <h3>{paper ? 'Paper journal' : 'Live journal'} <span className="muted small">{j.total} rows</span></h3>
         <div className="form-row">
-          <label>Bot<select value={f.botId} onChange={set('botId')}><option value="">all</option>{botsOfMode.map((b: AnyObj) => <option key={b.id} value={b.id}>{b.name ?? `Grid ${lbl(s, b.stable)}`} ({b.id.slice(0, 8)})</option>)}</select></label>
+          <label>Bot<select value={f.botId} onChange={set('botId')}><option value="">all</option>{botsOfMode.map((b: AnyObj) => <option key={b.id} value={b.id}>{b.name ?? `Grid ${lbl(s, b.stable)}`} ({b.id.slice(0, 8)}){b.archivedAt ? ' (closed)' : ''}</option>)}</select></label>
           <label>Kind<select value={f.kind} onChange={set('kind')}><option value="">all</option><option>grid</option><option>trend</option></select></label>
           <label>Pair<select value={f.pair} onChange={set('pair')}><option value="">all</option><MarketOptions s={s} all /></select></label>
           <label>Side<select value={f.side} onChange={set('side')}><option value="">all</option><option>buy</option><option>sell</option></select></label>

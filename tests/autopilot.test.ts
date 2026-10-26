@@ -17,7 +17,7 @@ function opp(label: string, o: Partial<Opportunity> & { swing?: number; lpEarned
 }
 const cand = (label: string, expected: number, o: Partial<Candidate> = {}): Candidate => {
   const how = o.how ?? 'grid', cost = o.cost ?? 0;
-  return { id: `4663:robinhood:${label}:${how}`, pair: `4663:${label}/USDG`, how, expected, cost, score: expected - cost, feeBps: 30, label, maxCapital: 1e9, o: opp(label), ...o };
+  return { id: `4663:robinhood:${label}:${how}`, pair: `4663:${label}/USDG`, how, expected, cost, entry: 0, score: expected - cost, feeBps: 30, label, maxCapital: 1e9, o: opp(label), ...o };
 };
 /** USDG is the budget's coin; ETH costs 0.1% each way and is 3,000 USDG */
 const reach = (coin: string) => (coin === 'USDG' ? { cost: 0, rate: 1 } : coin === 'ETH' ? { cost: 0.002, rate: 3000 } : null);
@@ -53,6 +53,20 @@ describe('smart trader: which pools and which way', () => {
     expect(gone.get(poolId(items[4], 'grid'))).toBe('it failed its latest safety check');
     expect(gone.get(poolId(items[1], 'lp'))).toBe('it earned nothing in the test week');
     expect(candidates(items, { ...ALL, risk: 'safe' }, reach).gone.get(poolId(items[5], 'grid'))).toBe('its risk is medium, above what you allowed');
+  });
+
+  it('the entry swap at the size it would open at comes off the score; a way too thin to enter at all is neither a candidate nor gone (a bot on it is kept)', () => {
+    const items = [opp('A/USDG', { swing: 0.2, lpEarned: 0.05 }), opp('B/USDG', { swing: 0.5 })];
+    const entry = (o: Opportunity, how: 'grid' | 'lp') => (o.label === 'A/USDG' && how === 'lp' ? null : 0.01);
+    const { cands, gone } = candidates(items, ALL, reach, entry);
+    expect(cands.map((c) => `${c.label}:${c.how}`)).toEqual(['B/USDG:grid', 'A/USDG:grid']);
+    expect(cands[0].entry).toBe(0.01);
+    expect(cands[0].score).toBeCloseTo(GRID_PER_SWING * 0.5 - 0.01, 12);
+    expect(gone.has(poolId(items[0], 'lp'))).toBe(false);
+    const d = plan({ cands, gone, held: [held('A/USDG', WEEK, { pool: poolId(items[0], 'lp') })] });
+    expect(d[0]).toMatchObject({ kind: 'keep' });
+    const o = plan({ cash: 300, slots: 1, cands }).find((x) => x.kind === 'open')!;
+    expect(o.why).toMatch(/after \+1\.0% for the entry swap/);
   });
 });
 
@@ -151,7 +165,7 @@ describe('smart trader: one review of a budget', () => {
     ];
     const { cands: c } = candidates(items, ALL, () => ({ cost: 0, rate: 1 }));
     expect(opens(plan({ cash: 900, cands: c }))).toEqual([['PLS/DAI', 900]]);
-    expect(plan({ cash: 300, cands: c, held: [{ id: 'b', pool: c[0].id, pair: c[0].pair, label: 'PLS/DAI', openedAt: NOW, feeBps: 30 }] }))
+    expect(plan({ cash: 300, cands: c, held: [{ id: 'b', pool: c[0].id, pair: c[0].pair, label: 'PLS/DAI', openedAt: NOW, feeBps: 30, capital: 300 }] }))
       .toEqual([{ kind: 'keep', id: 'b', why: expect.any(String) }, { kind: 'wait', why: 'every pool expected to earn is already run' }]);
   });
 
