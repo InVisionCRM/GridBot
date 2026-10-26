@@ -1,4 +1,4 @@
-/** Backtester UI: trend or grid on stored candles, realistic costs, metrics vs buy & hold, sweep heatmap, "Use these settings". */
+/** Backtester UI: trend or grid on stored candles, realistic costs, what its trades earned, sweep heatmap, "Use these settings". */
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_TREND, type TrendConfig } from '../market/strategy';
 import { SWEEP_AXES, type SweepKey } from '../market/backtest';
@@ -8,7 +8,7 @@ import { Orientation, PairPicker, chainOf, ChainBadge, feeLabel, mk, unflipKey }
 import { Chart, EquityChart } from './Chart';
 import { TrendConfigEditor } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
-import { IND, T, alpha } from './theme';
+import { T, alpha } from './theme';
 import type { AnyObj, BtPrefill } from './model';
 import { cls, dur, num, pct, px, qty, time, usd } from './fmt';
 import { L, Tip } from './Tip';
@@ -59,7 +59,7 @@ function SizeWarning({ m, sym, usdPer, levels }: { m: AnyObj; sym: string; usdPe
     <div className="banner error">
       <span className="grow">
         <b>Too big for this pool.</b> One trade here is {amt(m.tradeSize)}{m.poolDepth != null ? <> and the pool holds about {amt(m.poolDepth)} near the price</> : null}, so each trade moves the price about <b>{pct(m.tradeImpactPct, 1)}</b> against you.
-        {' '}That is where this result comes from: <b>{qty(-m.impact, sym, 4)}</b> lost to price impact. Holding loses {pct(m.bhEntryImpactPct, 1)} the same way, just from its one buy at the start.
+        {' '}That is where this result comes from: <b>{qty(-m.impact, sym, 4)}</b> lost to price impact.
         {ok1 != null && <> Keep one trade under about {amt(ok1)}{levels ? <> (an amount under {amt(ok1 * levels)} with {levels} levels)</> : null} to pay less than 1% impact.</>}
         {tooDeep && <> The real cost would be even higher: most of a V3 pool's coins sit in a narrow band around the price, and a trade this big runs past them.</>}
       </span>
@@ -129,7 +129,6 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
   const sym = pm.quote;
   const series = res ? [
     { name: kind === 'trend' ? 'strategy' : 'grid', data: res.equity.map((e: AnyObj) => [e.t * 1000, e.v]) as [number, number][], color: T.text },
-    { name: `holding ${pm.base}`, data: res.equity.map((e: AnyObj) => [e.t * 1000, e.bh]) as [number, number][], color: IND.slow, dashed: true },
   ] : [];
   // Flipped series are the original's candles inverted: same count / range / source.
   const pairSummary = summary.find((x) => x.pair === unflipKey(pair))?.series.find((x: AnyObj) => x.tf === tf);
@@ -179,10 +178,10 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
             <h3>Result <Tip>Replays the stored candles of this pair as if the bot had run then. Every swap pays this pool's fee, price impact (from the coins the pool holds near today's price), the slippage setting and today's gas. Past results don't promise future ones.</Tip> <span className="muted small"><ChainBadge c={chainOf(s, pm.chainId)} /> {pm.label} ({feeLabel(pm)} LP fee) {res.tf} · {res.candles} candles{res.spikes ? <> · <L tip="One big trade in a thin pool can print a price far from the real one for a moment, and the pool is put straight back. The test clips those prints to the pair's normal range, because no bot could have bought or sold there. The price chart below still shows them as they were printed.">{res.spikes} spike{res.spikes === 1 ? '' : 's'} clipped</L></> : null} · {time(res.from * 1000)} → {time(res.to * 1000)} ({num(m.days, 1)} days) · amount {num(res.capital, 4)} {sym}</span></h3>
             <SizeWarning m={m} sym={sym} usdPer={res.usdPerQuote ?? null} levels={kind === 'grid' ? +grid.count : null} />
             <div className="metrics">
-              <Metric k="Return" tip="Profit or loss at the end as a share of the amount, after every cost. Coins still held at the end are valued at the last price." v={pct(m.totalReturn, 2, true)} c={cls(m.totalReturn)} sub={`holding ${pm.base}: ${pct(m.bhReturn, 2, true)}`} />
-              <Metric k="vs holding" tip={`Return minus what buying ${pm.base} with the whole amount at the start and just holding it would have returned (same fees and impact).`} v={pct(m.totalReturn - m.bhReturn, 2, true)} c={cls(m.totalReturn - m.bhReturn)} />
+              <Metric k="Earned by trading" tip={`What its completed buy → sell trades made after every fee, impact and gas, in ${sym}. Coins a grid still holds at the end aren't in it: their price move isn't a trade.`} v={qty(m.earned, sym, 5)} c={cls(m.earned)} sub={pct(m.earned / res.capital, 2, true) + ' of the amount'} />
+              <Metric k="Return" tip="Profit or loss at the end as a share of the amount, after every cost. Coins still held at the end are valued at the last price, so this one moves with the price." v={pct(m.totalReturn, 2, true)} c={cls(m.totalReturn)} />
               <Metric k="Per year" tip="The return scaled to a year (CAGR). Only shown for tests of 30 days or more: a short test scaled up would exaggerate." v={m.cagr == null ? 'test < 30 days' : pct(m.cagr, 1, true)} />
-              <Metric k="Worst drop" tip="Max drawdown: the biggest fall in the bot's value from a high point to a later low." v={pct(m.maxDrawdown, 2)} c="neg" sub={`holding: ${pct(m.bhMaxDrawdown, 1)}`} />
+              <Metric k="Worst drop" tip="Max drawdown: the biggest fall in the bot's value from a high point to a later low." v={pct(m.maxDrawdown, 2)} c="neg" />
               <Metric k="Trades" tip={kind === 'grid' ? 'Completed buy → sell round trips (one level bought and sold one level higher).' : 'Completed buy → sell round trips. Blocked = signals skipped because the expected move would not cover the costs.'} v={String(m.trades)} sub={m.blockedByCost ? `${m.blockedByCost} blocked by cost` : undefined} />
               <Metric k="Win rate" tip="Share of completed trades that made money after all costs." v={pct(m.winRate, 1)} />
               <Metric k="Profit factor" tip="Money made by winning trades ÷ money lost by losing ones. Above 1 means it made more than it lost; 0 means every trade lost." v={m.profitFactor == null ? '—' : num(m.profitFactor, 2)} />
@@ -196,7 +195,7 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
             <h4 className="muted small">Price · {kind === 'trend' ? 'trade entries (▲) / exits (▼, reason, net %)' : 'grid round-trips'} · latest 1500 candles</h4>
             <Chart status={s} ticks={null} pairs={[res.pair]} pair={res.pair} tf={(res.tf ?? tf) as TF} height={360} compact
               btTrades={res.trades} drawn={res.cfg?.strategy === 'lines' ? res.cfg.lines : undefined} emaFast={kind === 'trend' && res.cfg?.strategy?.startsWith('ema') ? res.cfg.fast : undefined} emaSlow={kind === 'trend' && res.cfg?.strategy?.startsWith('ema') ? res.cfg.slow : undefined} />
-            <h4 className="muted small"><L tip={`The bot's value over time (solid) and the same amount simply bought as ${pm.base} at the start and held (dashed).`}>Value vs holding {pm.base}</L></h4>
+            <h4 className="muted small"><L tip={`The bot's value over time in ${sym}: its ${sym} plus the ${pm.base} it holds, at each candle's price.`}>Value over time</L></h4>
             <EquityChart series={series} height={300} format={(v) => num(v, 3)} />
             <ul className="notes small muted">{res.notes.map((x: string, i: number) => <li key={i}>{x}</li>)}</ul>
             {kind === 'trend' && (

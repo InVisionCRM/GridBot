@@ -15,7 +15,7 @@ import { DEFAULT_GAS_RESERVE } from './live/gasReserve';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS } from './live/recenter';
 import { PAYOUT_MIN_GAS_MULTIPLE } from './live/payout';
 import { LP_BAND, LP_MAX_MOVES_PER_DAY } from './market/lp';
-import { MIN_SELL_HOURS, PICKS_PER_CHAIN, SCAN_CANDLES, SCAN_RULES, SETUP_BANDS, SETUP_LEVELS, TEST_USD } from './market/scan';
+import { MIN_SELL_HOURS, SCAN_CANDLES, SCAN_PAGES, SCAN_RULES, SETUP_BANDS, SETUP_LEVELS, TEST_USD } from './market/scan';
 
 const PLS_DEXES = chainFromNetwork(NETWORKS.mainnet).dexes;
 const dexFee = (d: (typeof PLS_DEXES)[number]) => (d.kind === 'v3' ? d.feeTiers!.map((t) => `${t / 10_000}%`).join(' / ') : `${d.feeBps! / 100}%`);
@@ -29,7 +29,7 @@ export const GUIDE_SECTIONS = [
   ['pnl', 'Wins and losses'],
   ['costs', 'What a trade costs'],
   ['presets', 'Presets'],
-  ['auto', 'Daily picks & follow-up'],
+  ['auto', 'Opportunities & follow-up'],
   ['trend', 'Trend bot'],
   ['lp', 'Liquidity bot'],
   ['safety', 'Paper, live & safety'],
@@ -147,7 +147,7 @@ export function Guide({ onClose }: { onClose: () => void }) {
                 </ul>
               </div>
             </div>
-            <p className="muted small">Each grid shows two numbers separately. <b>Earned by trading</b> is what completed buy → sell trades made, after fees and gas, in the coin the grid spends; price moves no longer change it. <b>Bought, not sold yet</b> is the coins waiting for the next level up, which go up and down with the price until they sell. <b>Result vs holding</b> on a grid's page compares everything it has now with keeping the coins it held right after its start-up buy: positive means its buying and selling beat just holding them.</p>
+            <p className="muted small">Each grid shows two numbers separately. <b>Earned by trading</b> is what completed buy → sell trades made, after fees and gas, in the coin the grid spends; price moves no longer change it. <b>Bought, not sold yet</b> is the coins waiting for the next level up, which go up and down with the price until they sell. Everything is shown in coins first; the <b>$</b> switch in the top bar adds the dollar value beside each amount, at today's price.</p>
           </section>
 
           <section id="g-costs">
@@ -183,16 +183,16 @@ export function Guide({ onClose }: { onClose: () => void }) {
           </section>
 
           <section id="g-auto">
-            <h2>Daily picks & follow-up</h2>
-            <p><b>Today's picks</b> (on Home) are found once a day, or when you press Scan now:</p>
+            <h2>Opportunities & follow-up</h2>
+            <p><b>Opportunities</b> (its own tab) are found once a day, or when you press Scan now:</p>
             <ol className="tight">
-              <li>Take each chain's busiest pools from GeckoTerminal.</li>
-              <li>Drop pools that don't pair a token with PLS/ETH or a stablecoin, hold less than ${SCAN_RULES.minLiquidityUsd.toLocaleString('en-US')} of liquidity, had fewer than {SCAN_RULES.minTx24} trades in 24 hours, or show volume more than {SCAN_RULES.maxVolumeToLiquidity}× their liquidity (fake volume).</li>
-              <li>Run new tokens through the same honeypot and tax check as Markets → Add.</li>
-              <li>Replay the last {SCAN_CANDLES / 24} days of hourly prices through the grid with the pool's real fee, price impact and gas, using about ${TEST_USD.toLocaleString('en-US')} of the coin it spends. Ranges ±{SETUP_BANDS.map((b) => b * 100).join('/')}% and {SETUP_LEVELS.join('/')} levels are tried.</li>
-              <li>Show the {PICKS_PER_CHAIN} setups that made the most per chain. A setup only counts if it made money and sold in at least {MIN_SELL_HOURS} different hours, because one price spike isn't a pattern.</li>
+              <li>Read the busiest pools of every DEX the app trades on each chain from GeckoTerminal ({SCAN_PAGES} pages of 20 per DEX).</li>
+              <li>Drop pools that don't pair a token with PLS/ETH or a stablecoin, hold less than ${SCAN_RULES.minLiquidityUsd.toLocaleString('en-US')} of liquidity, had fewer than {SCAN_RULES.minTx24} trades in 24 hours, or show volume more than {SCAN_RULES.maxVolumeToLiquidity}× their liquidity (fake volume). Up to {SCAN_RULES.maxTokens} coins per chain are kept.</li>
+              <li>Run new tokens through the same honeypot and tax check as Markets → Add. Every result is kept and labelled: <i>safe</i>, <i>risk medium/high</i>, or <i>paper only</i> for a token that failed.</li>
+              <li>Replay the last {SCAN_CANDLES / 24} days of hourly prices with the pool's real fee, price impact and gas, at about ${TEST_USD.toLocaleString('en-US')} (you can change it): as a grid (ranges ±{SETUP_BANDS.map((b) => b * 100).join('/')}% with {SETUP_LEVELS.join('/')} levels) and, on a V3 pool, as a liquidity position.</li>
+              <li>Rank. <b>Liquidity</b> by what the position earned after swap and gas costs. <b>Grids</b> by how much the price swings back and forth, among pools where a grid earned from its trades (sold in at least {MIN_SELL_HOURS} different hours, because one price spike isn't a pattern). Tested on 92 real pools over 4 weeks of October 2026: last week's liquidity earnings predicted the next week's closely; for grids the swing predicted next week's earnings better than last week's grid result, and the price change predicted nothing. The coin's price move is shown but never ranks a pool.</li>
             </ol>
-            <p><b>Use this</b> opens New bot with that pair, width and levels, centred on today's price. You still choose the amount and paper or live. A good last week doesn't promise the next one.</p>
+            <p>Filter by strategy, safety and pool size, or type a coin; the chain buttons in the top bar pick the chain. <b>Try grid</b> or <b>Try liquidity</b> opens New bot with that pool and setting, centred on today's price. You still choose the amount and paper or live. A good last week doesn't promise the next one. Home shows the two safe pools ranked first for each.</p>
             <p><b>Follow the price up</b> is on for new grids and can be switched on any grid's page. When the price has stayed above the range for {RECENTER_AFTER_MS / 3600_000} hours and every level has sold, the range moves up around the price: same width, levels and amount, at most once every {RECENTER_COOLDOWN_MS / 3600_000} hours. It never moves down. Below the range the grid keeps what it bought and waits for the price to come back.</p>
           </section>
 
@@ -214,8 +214,8 @@ export function Guide({ onClose }: { onClose: () => void }) {
               <li><b>Opening:</b> part of your amount is swapped to the other coin (about half; the exact mix depends on where the price sits in the range), then the position is opened. Ranges from ±{LP_BAND.min * 100}% to ±{LP_BAND.max * 100}%. Narrower earns more per coin while the price stays inside, and leaves the range sooner.</li>
               <li><b>Moving the range:</b> when the price leaves the range (up or down), the bot counts the fees the position is missing. Once they pass what a move costs (gas plus the swap back to the range's mix), the position is taken out and reopened around the price with the same width. The wait scales with the cost: a cheap move (low gas, a deep pool) comes soon after the price leaves, a costly one waits longer. A quick dip back into the range doesn't start the count over. At most {LP_MAX_MOVES_PER_DAY} moves in any 24 hours. Each move locks in the coin mix it had. You can turn this off per bot.</li>
               <li><b>Fees:</b> <i>Reinvest</i> (default) rolls them into the next position when the range moves or you close. <i>Send to an address</i> collects them there once they're worth {PAYOUT_MIN_GAS_MULTIPLE}× the collect's gas.</li>
-              <li><b>Before you start:</b> the form replays the pool's real trades from the last 7 days, every range from ±1% to ±20% with moving on and off, using the bot's own rules. It shows the fees, the moves, the result against just holding the opening coins, and on how many of the 7 days each setting came out ahead. Click a row to use it. The first time, reading a busy pool's trades takes a few minutes.</li>
-              <li><b>What the numbers mean:</b> <i>Fees earned</i> is what the position made from trading. <i>Price change and swaps</i> is what price moves did to the coins, plus swap costs. <i>Overall</i> is fees − gas ± price change, in the coin you started with. <i>Result vs holding</i> compares everything it has now with keeping the coins it held right after opening: the coin's own price move cancels out, so it shows whether the fees beat what the range and its moves cost. Fees can look good while this is negative: in October 2026 a ±1% ETH/USDG range on Robinhood that moved with the price earned $28.68 in fees over 50 hours and still ended $15.58 behind holding.</li>
+              <li><b>Before you start:</b> the form replays the pool's real trades from the last 7 days, every range from ±1% to ±20% with moving on and off, using the bot's own rules. For each one it shows what it would have earned after costs (in total and per day), the fees in each coin, the moves and what they lost, the time in range, and the coins and share of the pool a position opened now with your amount would have. Price moves are left out. Click a row to use it. The first time, reading a busy pool's trades takes a few minutes.</li>
+              <li><b>What the numbers mean:</b> <i>Fees earned</i> is the pool's fees it collected, in the coins they were paid in. <i>Costs</i> is gas plus the swaps to the range's mix. <i>Lost to range moves</i>: inside the range the position sells the coin as it rises and buys it as it falls, so it ends up with more of whichever coin fell; taking it out (to move the range, or to close) makes that final, and this is how much less those coins were worth than the ones put in, at the same price. <i>Earned after costs</i> = fees − costs − lost to range moves. A narrow range that moves often can earn the most fees and still lose them to moves: on 9mm V3 HEX/PLS in the week to 26 October 2026, ±1% moving earned the most fees (23.2M PLS) and lost 45.2M PLS to its 27 moves, while ±3% staying put earned 4.4M PLS (about $23 on $1,000) after costs. <i>Liquidity provided</i> is the coins in the position now and its share of the pool, which is its share of every trade's fee.</li>
               <li><b>Pause</b> keeps the position open and earning but stops moving the range and sending fees. <b>Close position</b> takes everything out and the coins go back to your wallet.</li>
             </ul>
           </section>

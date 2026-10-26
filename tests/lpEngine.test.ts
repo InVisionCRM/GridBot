@@ -63,7 +63,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(value(lp)).toBeLessThan(1000);
   });
 
-  it("fees come from the pool's counters, scaled by the share of the pool the position would be", async () => {
+  it("fees come from the pool's counters, scaled by the share of the pool the position would be (its pool share)", async () => {
     const { lp, m, pool } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
     await lp.tick();
@@ -77,6 +77,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s.owed!.base).toBeCloseTo(each, 9);
     expect(s.owed!.quote).toBeCloseTo(each, 9);
     expect(value(lp) - v0).toBeCloseTo(each * PRICE + each, 9);
+    expect(s.poolShare).toBeCloseTo(Number(L) / Number(poolL + L), 12);
   });
 
   it('a stale RPC answer with lower fee counters earns nothing, and fees resume from the highest reading (not ~2^128 × L)', async () => {
@@ -129,6 +130,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n); await lp.tick();
     expect(fees()).toBeCloseTo(each, 9);
     m.movePrice(pool, 0.8); await lp.tick(); // out
+    expect(lp.status().poolShare).toBe(0);
     m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n); await lp.tick(); // earned by others while it was out
     expect(fees()).toBeCloseTo(each, 9);
     m.movePrice(pool, 1 / 0.8); await lp.tick(); // back in
@@ -182,29 +184,34 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(lp.status()).toMatchObject({ reranges: 2, inRange: true });
   });
 
-  it('keeps the coins it opened with: "vs holding" is the fees while the price stays, and moving doesn\'t change the opening', async () => {
+  it('fees per coin; a move locks in what the range did to the coin mix ("lost to moves"); earned after costs adds it up', async () => {
     const { lp, m, pool } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
     await lp.tick();
-    const s0 = lp.status(), o = s0.opening!;
-    expect(o.base).toBeCloseTo(s0.coins!.base + s0.idle.base, 9);
-    expect(o.quote).toBeCloseTo(s0.coins!.quote + s0.idle.quote, 9);
-    expect(o.gas).toBe(s0.totals.gas);
-    expect(s0.pnl!.vsHold).toBeCloseTo(0, 9);
+    const s0 = lp.status(), p0 = s0.pnl!;
+    // the position remembers the coins it went in with
+    expect(s0.position!.putIn!.base).toBeCloseTo(s0.coins!.base, 9);
+    expect(s0.position!.putIn!.quote).toBeCloseTo(s0.coins!.quote, 9);
+    expect(p0).toMatchObject({ moveLoss: 0, feeCoins: { base: 0, quote: 0 } });
+    expect(p0.swapCost).toBeGreaterThan(0); // the opening swap to the range's mix
     m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n);
     await lp.tick();
-    const p1 = lp.status().pnl!;
-    expect(p1.vsHold).toBeGreaterThan(0);
-    expect(p1.vsHold!).toBeCloseTo(p1.fees, 9); // same price: holding is worth what it was, the bot has the fees on top
+    const s1 = lp.status(), p1 = s1.pnl!;
+    expect(p1.feeCoins.base).toBeGreaterThan(0);
+    expect(p1.feeCoins.quote).toBeGreaterThan(0);
+    expect(p1.fees).toBeCloseTo(p1.feeCoins.base * s1.price! + p1.feeCoins.quote, 9); // all still waiting: valued now
     m.movePrice(pool, 1.2);
     await tradeUntilMoved(lp, m, pool);
     const s2 = lp.status(), p2 = s2.pnl!;
     expect(s2.reranges).toBe(1);
-    expect(s2.opening).toEqual(o);
-    expect(p2.hold).toBeCloseTo(o.base * s2.price! + o.quote, 9);
-    expect(p2.vsHold!).toBeCloseTo(p2.equity + o.gas - p2.hold!, 9);
-    // the range sold PLS on the way up and moved with that mix: holding the opening coins did better
-    expect(p2.vsHold!).toBeLessThan(p2.fees);
+    // the range sold PLS on the way up; taken out at that mix, it's worth less than the coins it went in with
+    expect(p2.moveLoss).toBeGreaterThan(0);
+    expect(p2.net).toBeCloseTo(p2.fees - p2.gas - p2.swapCost - p2.moveLoss, 9);
+    // the fees collected at the move are counted per coin
+    expect(s2.totals.feeCoins.base).toBeGreaterThan(0);
+    expect(s2.totals.feeCoins.quote).toBeGreaterThan(0);
+    // the new position remembers what it went in with
+    expect(s2.position!.putIn!.base).toBeCloseTo(s2.coins!.base, 6);
   });
 
   it('a short return into the range barely lowers the missed fees; a long stay earns them back to 0', async () => {
@@ -428,6 +435,9 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(a.status().owed!.quote).toBeCloseTo(0.02, 12);
     expect(asked).toEqual([ME, ME]); // one quote per tick, from the owner
     expect(reads.filter((x) => x === 'ownerOf')).toHaveLength(1); // the owner is looked up once
+    // live, the position is part of the pool's active liquidity (this mock's pool doesn't add it): share = L ÷ active
+    expect(a.status().inRange).toBe(true);
+    expect(a.status().poolShare).toBeCloseTo(1e20 / Math.sqrt(1e10 * 1e18 * (1e10 * PRICE) * 1e18), 15);
   });
 
   it('close: one multicall (remove all, collect via the manager, unwrap PLS, sweep DAI, burn); fees = collected − principal', async () => {
@@ -453,6 +463,8 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     const s = e.status();
     expect(s).toMatchObject({ status: 'closed', position: null });
     expect(s.totals.fees).toBeCloseTo(10 * PRICE + 0.01, 9);
+    expect(s.totals.feeCoins.base).toBeCloseTo(10, 9);
+    expect(s.totals.feeCoins.quote).toBeCloseTo(0.01, 9);
   });
 
   it('a pricey native base (like ETH/USDG): the native side goes in, keeping only gas for the open (bug: 2% of the USDG amount was kept back as ETH)', async () => {
@@ -517,12 +529,13 @@ describe('LP bot funded with coins already in the wallet', () => {
     const s = lp.status();
     expect(s.position).not.toBeNull();
     expect((s.coins!.base * PRICE) / s.value!).toBeCloseTo(share, 2);
-    expect(s.pnl!.profit).toBeCloseTo(s.pnl!.equity - 1000, 9);
+    expect(s.pnl!.net + s.pnl!.price).toBeCloseTo(s.pnl!.equity - 1000, 9); // counted from what it was given
     // the same 1000 given only as DAI swaps ~6× more, so it starts with less (fee + price impact)
     const only = world().lp;
     await only.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
     await only.tick();
     expect(s.value!).toBeGreaterThan(only.status().value!);
+    expect(only.status().pnl!.swapCost).toBeGreaterThan(4 * s.pnl!.swapCost);
   });
   it('only coins, no amount of the spend coin, works too; nothing at all is refused', async () => {
     const { lp } = world();
@@ -619,31 +632,27 @@ describe('LP bot in the app: API, status, restart, money split', () => {
     } finally { await again.close(); }
   });
 
-  it('a bot saved before version 4 gets the coins it opened with worked out once, from what it was given and its range', async () => {
+  it('a bot saved before version 5: earlier fees count in the quote coin, an open position\'s coins are taken at its next reading', async () => {
     const first = await serve();
     let saved: MultiState;
     try {
       await first.call('POST', '/api/bot/lps', { mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
-      await first.call('POST', '/api/bot/lps', { mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 500 });
       await first.bot.tickAll();
       saved = JSON.parse(JSON.stringify(first.store.load()));
     } finally { await first.close(); }
-    const [opened, idle] = saved.lps as unknown as Record<string, any>[]; // eslint-disable-line @typescript-eslint/no-explicit-any
-    Object.assign(opened, { version: 3 });
-    delete opened.opening;
-    // one that never opened: as freshLp saved it
-    Object.assign(idle, { version: 3, status: 'idle', position: null, reranges: 0, config: null, startPrice: null, startedAt: null });
-    delete idle.opening;
+    const [old] = saved.lps as unknown as Record<string, any>[]; // eslint-disable-line @typescript-eslint/no-explicit-any
+    // as version 4 saved it: fees as one amount in the quote coin, the coins it opened with, no per-position coins
+    Object.assign(old, { version: 4, totals: { fees: 12.5, gas: 1, sent: 0 }, opening: { base: 1, quote: 2, gas: 0 } });
+    delete old.position.putIn;
     const store = new MemoryStore<MultiState>();
     store.save(saved);
     const again = await serve(store);
     try {
-      const st = (id: string) => again.bot.status().lps.find((x: { id: string }) => x.id === id)!;
-      const p0 = opened.startPrice, share = rangeBaseShare(p0, p0 * 0.9, p0 * 1.1);
-      expect(st(opened.id).opening!.base).toBeCloseTo((share * 1000) / p0, 6);
-      expect(st(opened.id).opening!.quote).toBeCloseTo((1 - share) * 1000, 9);
-      expect(st(opened.id).opening!.gas).toBe(0);
-      expect(st(idle.id).opening).toBeNull();
+      await again.bot.tickAll();
+      const st = again.bot.status().lps.find((x: { id: string }) => x.id === old.id)!;
+      expect(st.totals).toEqual({ fees: 12.5, gas: expect.any(Number), sent: 0, feeCoins: { base: 0, quote: 12.5 }, swapCost: 0, moveLoss: 0 });
+      expect(st.position!.putIn!.base).toBeCloseTo(st.coins!.base, 9);
+      expect('opening' in st).toBe(false);
     } finally { await again.close(); }
   });
 
@@ -706,7 +715,7 @@ describe('LP bot in the app: API, status, restart, money split', () => {
     } finally { await b.close(); }
   });
 
-  it('profit = fees − gas + price, and the overview counts the bot', async () => {
+  it('earned after costs = fees − gas − swaps − lost to moves; the price part is the rest; the overview counts the bot', async () => {
     const a = await serve();
     try {
       await a.call('POST', '/api/bot/lps', { mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
@@ -717,15 +726,16 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       const st = a.bot.status().lps[0], p = st.pnl!;
       expect(p.fees).toBeGreaterThan(0);
       expect(p.gas).toBeGreaterThan(0);
-      expect(p.profit).toBeCloseTo(p.fees - p.gas + p.price, 9);
+      expect(p.net).toBeCloseTo(p.fees - p.gas - p.swapCost - p.moveLoss, 9);
       expect(p.equity).toBeCloseTo(st.value! + st.totals.sent - st.totals.gas, 9);
+      expect(p.price).toBeCloseTo(p.equity - st.startValue! - p.net, 9);
       const row = a.bot.overview('paper').bots.find((x) => x.kind === 'lp')!;
       expect(a.bot.overview('live').bots).toEqual([]); // a paper bot never shows up in live analytics
       expect((await a.call('GET', '/api/analytics/overview')).status).toBe(400); // a mode is required
       expect((await a.call('GET', '/api/analytics/overview?mode=paper')).body.bots).toHaveLength(1);
       expect(row.capital).toBe(1000);
       expect(row.equity).toBeCloseTo(p.equity, 9);
-      expect(row.realized).toBeCloseTo(p.fees - p.gas, 9);
+      expect(row.realized).toBeCloseTo(p.net, 9);
       expect(row.unrealized).toBeCloseTo(p.price, 9);
     } finally { await a.close(); }
   });

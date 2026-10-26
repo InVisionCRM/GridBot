@@ -162,19 +162,19 @@ export function createApp(o: AppOpts) {
   app.post('/api/tokens/inspect', wrap(async (req) => plain(await bot.hub.inspect(marketReq(req.body ?? {})))));
   app.get('/api/markets', wrap(() => ({ markets: bot.marketList() })));
 
-  // ── Daily picks ──────────────────────────────────────────────────────
+  // ── Opportunities (daily scan) ───────────────────────────────────────
   const scanner = () => { if (!o.scanner) throw new Error('The daily scan is off (CANDLES_GECKO=off).'); return o.scanner; };
-  app.get('/api/picks', wrap(() => scanner().status()));
+  app.get('/api/opportunities', wrap(() => scanner().status()));
   // { testUsd } = test size in USD (checked here so a bad value is an error, not a silently failed background scan).
-  app.post('/api/picks/scan', wrap((req) => {
+  app.post('/api/opportunities/scan', wrap((req) => {
     const sc = scanner();
     const usd = req.body?.testUsd == null ? undefined : checkTestUsd(req.body.testUsd);
     void sc.run(usd).catch(() => undefined);
     return { ok: true };
   }));
-  app.post('/api/picks/use', wrap(async (req) => {
+  app.post('/api/opportunities/use', wrap(async (req) => {
     const b = req.body ?? {};
-    const key = await bot.addPickMarket({ chainId: Number(b.chainId), address: String(b.address ?? ''), quote: String(b.quote ?? ''), pool: String(b.pool ?? '') });
+    const key = await bot.addOpportunityMarket({ chainId: Number(b.chainId), address: String(b.address ?? ''), quote: String(b.quote ?? ''), pool: String(b.pool ?? '') });
     void bot.tickAll();
     return { ok: true, key };
   }));

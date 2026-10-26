@@ -111,7 +111,7 @@ describe('trend backtester: costs and look-ahead', () => {
     if (l.length && w.length) expect(r.metrics.profitFactor).toBeCloseTo(w.reduce((a, t) => a + t.pnl, 0) / -l.reduce((a, t) => a + t.pnl, 0), 9);
     expect(r.metrics.maxDrawdown).toBeCloseTo(maxDrawdown([r.metrics.startEquity, ...r.equity.map((e) => e.v)]), 12);
     expect(r.metrics.exposure).toBeGreaterThan(0); expect(r.metrics.exposure).toBeLessThan(1);
-    expect(r.equity[0].bh).toBeCloseTo(1000 * 0.9971 ** 2 * (r.equity[0].bh / 1000 / 0.9971 ** 2), 9);
+    expect(r.metrics.earned).toBeCloseTo(r.trades.reduce((a, t) => a + t.pnl, 0), 9);
     expect(maxDrawdown([100, 120, 90, 130, 65])).toBe(0.5);
   });
 
@@ -166,9 +166,6 @@ describe('backtest: where the money went (fees, price impact, slippage, gas, pri
   it('10,000 ETH in a pool that holds ~2,600 ETH near the price: price impact, not the market, takes most of it', () => {
     const r = runGridBacktest(week, { lowerPrice: 28.91, upperPrice: 39.113, gridCount: 6, capital: 10_000 }, '1h', POOL);
     const m = r.metrics;
-    // the user's screenshot: holding WBTC −79.05% in a week the price barely moved
-    expect(m.bhReturn).toBeLessThan(-0.75);
-    expect(m.bhEntryImpactPct).toBeGreaterThan(0.75);
     // one level is 1,667 ETH: ~39% impact on a single buy
     expect(m.tradeSize).toBeCloseTo(10_000 / 6, 6);
     expect(m.tradeImpactPct).toBeCloseTo((10_000 / 6) / (2618.5 + 10_000 / 6), 2);
@@ -183,7 +180,6 @@ describe('backtest: where the money went (fees, price impact, slippage, gas, pri
     // the screenshot showed worst drop 0.85% and Sharpe +4.94 next to a −32.54% return
     expect(m.totalReturn).toBeCloseTo(-0.2506, 4); // the start-up buy's impact
     expect(m.maxDrawdown).toBeGreaterThanOrEqual(-m.totalReturn);
-    expect(m.bhMaxDrawdown).toBeGreaterThanOrEqual(-m.bhReturn);
     expect(m.sharpe!).toBeLessThan(0);
     expect(m.sortino!).toBeLessThan(0);
   });
@@ -191,7 +187,6 @@ describe('backtest: where the money went (fees, price impact, slippage, gas, pri
   it('the same grid with 1 ETH pays almost nothing to impact', () => {
     const m = runGridBacktest(week, { lowerPrice: 28.91, upperPrice: 39.113, gridCount: 6, capital: 1 }, '1h', POOL).metrics;
     expect(m.tradeImpactPct).toBeLessThan(0.0001);
-    expect(m.bhEntryImpactPct).toBeLessThan(0.001);
     expect(m.endEquity - m.startEquity).toBeCloseTo(m.priceEffect - m.fees - m.impact - m.slippage - m.gas, 9);
   });
 

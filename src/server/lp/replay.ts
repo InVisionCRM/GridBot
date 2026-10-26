@@ -1,15 +1,16 @@
 /**
  * The liquidity replay behind New bot → Liquidity: the market's pool history (poolHistory) through replayTable at
- * today's gas price, with the pool's fee tier and the share of fees liquidity providers keep. While the history is
- * being read it answers "syncing" with progress; a history synced less than REFRESH_MS ago is used as it is.
+ * today's gas price, with the pool's fee tier and the share of fees liquidity providers keep, plus, for each range, the
+ * coins a position opened now would hold and its share of the pool's active liquidity. While the history is being read
+ * it answers "syncing" with progress; a history synced less than REFRESH_MS ago is used as it is.
  */
 import { DEFAULT_LIMITS } from '../../live/limits';
 import { gasInBase, LP_GAS } from '../../market/lp';
-import { replayTable, type ReplayRow } from '../../market/lpReplay';
+import { positionFor, replayTable, type ReplayRow } from '../../market/lpReplay';
 import type { Hub } from '../chains/hub';
 import { LpPool } from './lpPool';
 import { lpShareOf } from './lpShare';
-import { KEEP_DAYS, type PoolHistories } from './poolHistory';
+import { KEEP_DAYS, type PoolHistories, type SyncState } from './poolHistory';
 
 export const REPLAY_BANDS = [0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2];
 /** Replay size when none is given: this many US dollars of the quote coin */
@@ -27,6 +28,17 @@ export type ReplayAnswer =
     state: 'ready'; from: number; to: number; swaps: number; capital: number; base: string; quote: string;
     feeTier: number; lpShare: number; gasOpen: number; gasMove: number; maxImpact: number; rows: ReplayRow[];
   };
+
+/**
+ * While a pool's history is read: the first full read shows its progress; a top-up of a week already read answers from
+ * it (the new swaps count on the next ask). Before, every visit a minute after the last read showed the first-read
+ * progress screen for the 2–3 s the top-up took (HEX/PLS, 2026-10-26: "syncing 0 of 15 blocks").
+ */
+export function syncAnswer(s: SyncState): Extract<ReplayAnswer, { state: 'syncing' | 'error' }> | null {
+  if (s.syncing && !s.ready) return { state: 'syncing', done: s.done, total: s.total };
+  if (s.error) return { state: 'error', error: s.error };
+  return null;
+}
 
 export class LpReplay {
   private shares = new Map<string, { v: number; at: number }>();
@@ -53,8 +65,8 @@ export class LpReplay {
     if (!s.syncing && (s.at == null || this.now() - s.at > (s.error ? RETRY_MS : REFRESH_MS))) {
       h.sync().catch(() => { /* kept in h.state.error */ });
     }
-    if (s.syncing) return { state: 'syncing', done: s.done, total: s.total };
-    if (s.error) return { state: 'error', error: s.error };
+    const waiting = syncAnswer(s);
+    if (waiting) return waiting;
 
     const all = h.minutes, last = all[all.length - 1];
     const rows = last ? all.filter((m) => m.t > last.t - KEEP_DAYS * DAY_S) : [];
@@ -71,12 +83,14 @@ export class LpReplay {
     const capital = q.capital ?? (usd ? REPLAY_USD / usd : null);
     if (!(capital != null && capital > 0)) throw new Error(`no USD price for ${def.quote.symbol}: enter an amount`);
     const maxImpact = q.maxImpact ?? DEFAULT_LIMITS.maxPriceImpact;
-    const table = replayTable(rows, {
-      baseIs0: v.baseIs0, baseDecimals: def.base.decimals, quoteDecimals: def.quote.decimals, spacing: v.spacing, swapFee: pool.fee / 1e6,
-    }, { capital, gasOpen, gasMove, maxImpact }, REPLAY_BANDS);
+    const sides = { baseIs0: v.baseIs0, baseDecimals: def.base.decimals, quoteDecimals: def.quote.decimals, spacing: v.spacing, swapFee: pool.fee / 1e6 };
+    const table = replayTable(rows, sides, { capital, gasOpen, gasMove, maxImpact }, REPLAY_BANDS);
+    const active = Number(v.liquidity);
+    const now = new Map(REPLAY_BANDS.map((b) => [b, positionFor(capital, b, v.tick, sides)]));
     return {
       state: 'ready', from: rows[0].t, to: rows[rows.length - 1].t, swaps: rows.reduce((a, m) => a + m.n, 0), capital,
-      base: def.base.symbol, quote: def.quote.symbol, feeTier: pool.fee, lpShare, gasOpen, gasMove, maxImpact, rows: table,
+      base: def.base.symbol, quote: def.quote.symbol, feeTier: pool.fee, lpShare, gasOpen, gasMove, maxImpact,
+      rows: table.map((r) => { const at = now.get(r.bandPct)!; return { ...r, coinsNow: at.coins, poolShareNow: at.L / (at.L + active) }; }),
     };
   }
 }

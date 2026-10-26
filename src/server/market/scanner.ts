@@ -1,19 +1,20 @@
 /**
- * Daily pair scan per chain (PulseChain, Ethereum, Robinhood):
- *   GeckoTerminal top pools by 24 h volume → pickTokens (real liquidity, real trades, a native/stable side)
- *   + the markets already in the app → safety check for new tokens (hub.inspect: honeypot / tax simulation)
- *   → last 7 days of hourly candles through the grid backtester with the pool's real fee, depth and gas
- *   → the 3 best setups per chain. Nothing is added or started: "Use this" adds the market and opens New bot.
- * Every tested pair also gets a grid vs liquidity position vs hold comparison over the same week (market/lp.ts),
- * with the LP fee share each DEX really pays (V2: measured constant; V3: read from the pool's slot0).
- * Runs once a day (and on demand) at the test size you last chose; results persist in data/picks.json.
+ * Opportunity scan per chain (PulseChain, Ethereum, Robinhood), once a day and on demand:
+ *   GeckoTerminal top pools of each DEX this app trades (SCAN_PAGES pages) → pickTokens (real liquidity, real trades,
+ *   a native/stable side; up to SCAN_RULES.maxTokens) + the markets already in the app → the safety check for new
+ *   tokens (hub.inspect: honeypot / tax simulation). Every safety level is kept: a token that fails is shown with
+ *   why, and can only be paper traded (like one added under Markets).
+ *   → the last 7 days of hourly candles through the grid backtester and the liquidity-position backtest, with the
+ *   pool's real fee, depth, gas and the share of fees liquidity providers keep.
+ * Each pool gets its best grid and its best liquidity range by what they EARNED: completed trades for a grid, fees −
+ * swap and gas costs for a position, and how far its price swung. The price move is left out (shown separately): it
+ * isn't the bot's doing. The page ranks them (gridRank / lpRank in market/scan.ts).
+ * Nothing is added or started here: "Try it" adds the market and opens New bot. Results persist in data/picks.json.
  */
-import type { MarketDef, MarketToken, SafetyReport } from '../../live/markets';
-import { bestSetup, checkTestUsd, pickTokens, PICKS_PER_CHAIN, SCAN_CANDLES, SCAN_EVERY_MS, TEST_USD, type Setup, type Skipped, type TopPool } from '../../market/scan';
-import { bestLp, type LpSetup } from '../../market/lp';
-import { buyHold } from '../../market/backtest';
-import { simBuy } from '../../market/costs';
-import { replayCandles, trimSpikes, type Candle, type TF } from '../../market/candles';
+import type { MarketDef, MarketToken } from '../../live/markets';
+import { bestSetup, checkTestUsd, dailySwing, pickTokens, SCAN_CANDLES, SCAN_EVERY_MS, SCAN_PAGES, TEST_USD, type Opportunity, type Skipped, type TopPool } from '../../market/scan';
+import { bestLp } from '../../market/lp';
+import { fillGaps, replayCandles, trimSpikes, type Candle, type TF } from '../../market/candles';
 import type { CandleStore } from './candleStore';
 import type { MarketSnapshot } from '../bot/chain';
 import { costModelOf } from '../bot/econ';
@@ -24,65 +25,17 @@ import { sameAddr } from '../dex/types';
 import { lpShareOf } from '../lp/lpShare';
 import { RateLimited } from './gecko';
 
+export interface ScanChain { chainId: number; name: string; at: number; items: Opportunity[]; tested: number; skipped: Skipped[]; error: string | null }
+export interface ScanFile { version: 3; at: number | null; testUsd: number; chains: ScanChain[] }
 
-export interface ScanPick {
-  chainId: number;
-  rank: number;
-  /** Market key when the pair is already in the app (may be a flipped key such as 'HEX~') */
-  key: string | null;
-  /** How to add it otherwise (POST /api/picks/use) */
-  add: { address: string; quote: string; pool: string } | null;
-  label: string;
-  spend: string;
-  stack: string;
-  dex: string;
-  feeBps: number;
-  risk: SafetyReport['risk'] | null;
-  /** Why the safety check gave that risk (shown with the badge) */
-  riskWhy: string | null;
-  /** Spot when scanned; the suggested range is centred on it */
-  price: number;
-  lowerPrice: number;
-  upperPrice: number;
-  gridCount: number;
-  bandPct: number;
-  test: Setup & { capital: number; usd: number };
-  activity: { volume24Usd: number; liquidityUsd: number; tx24: number; change24Pct: number | null } | null;
-}
-
-/** Grid vs liquidity position vs hold for one tested pair, same week, same test size. */
-export interface CompareRow {
-  /** Market key (null = a token the app hasn't added yet) */
-  key: string | null;
-  label: string;
-  dex: string;
-  feeBps: number;
-  holdPct: number;
-  /**
-   * Price impact of putting the whole test amount in at once (what "hold" pays at the start). Shown so a thin pool
-   * explains itself: the 2026-10-17 scan at $25k had PLS/USDT "hold −96%" in a ≈$28k pool while PLS fell ≈38%.
-   */
-  entryImpactPct: number;
-  /** Best grid that made money (null = none did) */
-  grid: { returnPct: number; bandPct: number; gridCount: number } | null;
-  /** Best liquidity position (null = not tested, see lpWhy) */
-  lp: LpSetup | null;
-  /** Share of the pool fee liquidity providers keep on this DEX / pool */
-  lpShare: number | null;
-  lpWhy: string | null;
-}
-
-export interface ScanChain { chainId: number; name: string; at: number; picks: ScanPick[]; compare: CompareRow[]; tested: number; skipped: Skipped[]; error: string | null }
-export interface ScanFile { version: 2; at: number | null; testUsd: number; chains: ScanChain[] }
-
-/** `dexes` = GeckoTerminal ids of the DEXes this app trades on the chain (only their pools are read). */
-export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[]; dexes: string[] }
+/** `dexes` = GeckoTerminal ids of the DEXes this app trades on the chain (only their pools are read); `lpDexes` = app DEX ids a liquidity bot can use. */
+export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[]; dexes: string[]; lpDexes: string[] }
 
 export interface ScanDeps {
   chains(): ScanChainInfo[];
   /** Markets already in the app, oriented to spend the native coin or a stablecoin */
   existing(chainId: number): MarketDef[];
-  /** New token → draft market that passed the safety check; throws the reason otherwise */
+  /** New token → draft market with its safety report (whatever the risk); throws when it can't be priced on a DEX this app trades */
   inspect(chainId: number, token: string, spend: string): Promise<MarketDef>;
   snapshot(def: MarketDef): Promise<MarketSnapshot>;
   /** Saved closed hourly candles of a market in the app (one-off prints clipped, gap-filled, oldest first); [] for a new token */
@@ -102,8 +55,8 @@ export interface ScanDeps {
 }
 
 const lc = (a: string) => a.toLowerCase();
-const sig = (x: number) => +x.toPrecision(6);
 const msg = (e: unknown) => (e as Error).message.slice(0, 200);
+const pct = (x: number) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%`;
 
 /**
  * One retry after a 429 (GeckoSource waits out the back-off before the next request) or a GeckoTerminal 5xx
@@ -116,7 +69,7 @@ async function retryOnce<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** What a running scan is doing now (shown on Home). */
+/** What a running scan is doing now. */
 export interface ScanProgress { chain: string; chainNo: number; chains: number; phase: 'finding pools' | 'checking new tokens' | 'testing pairs'; done: number; total: number }
 
 export class DailyScanner {
@@ -127,7 +80,8 @@ export class DailyScanner {
 
   constructor(private readonly d: ScanDeps) {
     const f = d.store.load();
-    this.file = f?.version === 2 ? f : { version: 2, at: null, testUsd: TEST_USD, chains: [] };
+    // version 2 (3 picks a chain, ranked with the price move) is dropped: the next scan replaces it
+    this.file = f?.version === 3 ? f : { version: 3, at: null, testUsd: f?.testUsd ?? TEST_USD, chains: [] };
   }
 
   private now() { return (this.d.now ?? Date.now)(); }
@@ -150,14 +104,14 @@ export class DailyScanner {
     const usd = checkTestUsd(testUsd);
     if (this.running) throw new Error('A scan is already running.');
     this.running = true;
-    this.d.emit?.({ type: 'info', kind: 'system', msg: `Daily pair scan started ($${usd.toLocaleString('en-US')} test size)` });
+    this.d.emit?.({ type: 'info', kind: 'system', msg: `Opportunity scan started ($${usd.toLocaleString('en-US')} test size)` });
     try {
       const chains: ScanChain[] = [];
       const list = this.d.chains();
       for (const [i, c] of list.entries()) chains.push(await this.scanChain(c, i + 1, list.length, usd));
-      this.file = { version: 2, at: this.now(), testUsd: usd, chains };
+      this.file = { version: 3, at: this.now(), testUsd: usd, chains };
       this.d.store.save(this.file);
-      this.d.emit?.({ type: 'info', kind: 'system', level: 'success', msg: `Daily pair scan done: ${chains.map((c) => `${c.name} ${c.picks.length} pick${c.picks.length === 1 ? '' : 's'}`).join(', ')}` });
+      this.d.emit?.({ type: 'info', kind: 'system', level: 'success', msg: `Opportunity scan done: ${chains.map((c) => `${c.name} ${c.items.length} pool${c.items.length === 1 ? '' : 's'}`).join(', ')}` });
       return this.file;
     } finally {
       this.running = false;
@@ -165,17 +119,28 @@ export class DailyScanner {
     }
   }
 
+  /** Busiest pools of one DEX, SCAN_PAGES pages at most (a short page is the last one). */
+  private async pools(c: ScanChainInfo, dex: string): Promise<TopPool[]> {
+    const out: TopPool[] = [];
+    for (let page = 1; page <= SCAN_PAGES; page++) {
+      const rows = await retryOnce(() => this.d.gecko.topPools(c.slug!, dex, page));
+      out.push(...rows);
+      if (rows.length < 20) break;
+    }
+    return out;
+  }
+
   private async scanChain(c: ScanChainInfo, chainNo: number, chains: number, usd: number): Promise<ScanChain> {
     const step = (phase: ScanProgress['phase'], done: number, total: number) => { this.progress = { chain: c.name, chainNo, chains, phase, done, total }; };
     step('finding pools', 0, 1);
-    const out: ScanChain = { chainId: c.id, name: c.name, at: this.now(), picks: [], compare: [], tested: 0, skipped: [], error: null };
+    const out: ScanChain = { chainId: c.id, name: c.name, at: this.now(), items: [], tested: 0, skipped: [], error: null };
     if (!c.slug) { out.error = 'No GeckoTerminal price history for this chain.'; return out; }
     try {
       // Busiest pools of each DEX this app trades. The chain-wide list is the wrong input: on 2026-10-17, 33 of
       // Robinhood's 40 busiest pools were Uniswap V4 (not tradable here, and GeckoTerminal reports most of them with
       // $0 liquidity), which crowded out the real Uniswap V3 stock pools (NVDA ~6.9k trades/day, SPCX ~12k).
       const pools: TopPool[] = [];
-      for (const dex of c.dexes) pools.push(...await retryOnce(() => this.d.gecko.topPools(c.slug!, dex)));
+      for (const dex of c.dexes) pools.push(...await this.pools(c, dex));
       const { picked, skipped } = pickTokens(pools, c.spendable, c.wrapped);
       out.skipped.push(...skipped);
       const stackOf = (m: MarketDef) => lc(m.base.native ? c.wrapped : m.base.address);
@@ -189,65 +154,64 @@ export class DailyScanner {
         try { markets.push({ def: await this.d.inspect(c.id, t.token, t.spend), pool: t.pool, isNew: true }); } catch (e) { out.skipped.push({ name: t.pool.name, why: msg(e) }); }
       }
       out.tested = markets.length;
-      const picks: ScanPick[] = [];
       for (const [i, m] of markets.entries()) {
         step('testing pairs', i, markets.length);
-        const name = `${m.def.base.symbol}/${m.def.quote.symbol}`;
-        try {
-          const r = await this.test(c, m.def, m.pool, m.isNew, usd);
-          out.compare.push(r.row);
-          if (r.pick) picks.push(r.pick);
-          else out.skipped.push({ name, why: `no range made money over the last 7 days (price ${r.movePct >= 0 ? '+' : ''}${(r.movePct * 100).toFixed(1)}% this week)` });
-        } catch (e) { out.skipped.push({ name, why: msg(e) }); }
+        try { out.items.push(await this.test(c, m.def, m.pool, m.isNew, usd)); } catch (e) { out.skipped.push({ name: `${m.def.base.symbol}/${m.def.quote.symbol}`, why: msg(e) }); }
       }
-      out.picks = picks.sort((a, b) => b.test.returnPct - a.test.returnPct).slice(0, PICKS_PER_CHAIN).map((p, i) => ({ ...p, rank: i + 1 }));
     } catch (e) {
       out.error = msg(e);
     }
     return out;
   }
 
-  /**
-   * Best grid setup for one market over the last 7 days, centred on today's price, plus the grid vs LP vs hold row.
-   * movePct = the pair's price change over the test window (shown when nothing made money).
-   */
-  private async test(c: ScanChainInfo, d: MarketDef, pool: TopPool | null, isNew: boolean, usd: number): Promise<{ pick: ScanPick | null; movePct: number; row: CompareRow }> {
-    const snap = await this.d.snapshot(d);
-    const capital = usd / await this.d.usdPerSpend(d);
+  /** The last SCAN_CANDLES closed hours of a market: the candle sync's series when it is current, else GeckoTerminal's, gap-filled. */
+  private async week(c: ScanChainInfo, d: MarketDef): Promise<Candle[]> {
     // The candle sync keeps every market's hourly series: reuse it when it covers the week up to the last 2 hours
     // (one GeckoTerminal request saved per market in the app; the shared budget can be ~6 requests a minute).
     const saved = this.d.storedHourly(d);
-    const fresh = saved.length >= SCAN_CANDLES && saved[saved.length - 1].t >= this.now() / 1000 - 2 * 3600;
+    const nowSec = Math.floor(this.now() / 1000);
+    if (saved.length >= SCAN_CANDLES && saved[saved.length - 1].t >= nowSec - 2 * 3600) return saved.slice(-SCAN_CANDLES);
     const token = d.base.native ? c.wrapped : d.base.address;
-    const k = fresh ? saved : trimSpikes(await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps })));
-    const week = k.slice(-SCAN_CANDLES);
+    const raw = await retryOnce(() => this.d.gecko.ohlcv(d.candlePool || d.pool.address, token, '1h', undefined, SCAN_CANDLES, { network: c.slug!, feeBps: d.pool.feeBps }));
+    if (!raw.length) throw new Error('no trades in the last 7 days');
+    // GeckoTerminal leaves out hours without trades: 168 candles of a quiet pool can span weeks. Filled up to the
+    // last closed hour, the slice is the last 7 days.
+    const lastClosed = Math.floor(nowSec / 3600) * 3600 - 3600;
+    return trimSpikes(fillGaps(raw.filter((k) => k.t <= lastClosed), '1h', lastClosed)).slice(-SCAN_CANDLES);
+  }
+
+  /** One market over the last 7 days: its best grid and its best liquidity range, by what they earned. */
+  private async test(c: ScanChainInfo, d: MarketDef, pool: TopPool | null, isNew: boolean, usd: number): Promise<Opportunity> {
+    const snap = await this.d.snapshot(d);
+    const capital = usd / await this.d.usdPerSpend(d);
+    const week = await this.week(c, d);
     const costs = costModelOf(snap, d.pool.feeBps, this.d.approval);
-    const s = bestSetup(week, costs, capital);
     const movePct = week[week.length - 1].c / week[0].o - 1;
-    const bh = buyHold(week, 0, capital, costs);
-    const row: CompareRow = {
-      key: isNew ? null : d.key, label: `${d.base.symbol}/${d.quote.symbol}`, dex: d.pool.dex, feeBps: d.pool.feeBps,
-      holdPct: (bh.pls * week[week.length - 1].c + bh.cashLeft) / capital - 1,
-      entryImpactPct: simBuy(capital, week[0].o, costs).impactPct,
-      grid: s ? { returnPct: s.returnPct, bandPct: s.bandPct, gridCount: s.gridCount } : null,
-      lp: null, lpShare: null, lpWhy: null,
-    };
-    try {
-      row.lpShare = await this.d.lpShare(d);
-      row.lp = bestLp(week, costs, capital, d.pool.kind, row.lpShare);
-    } catch (e) { row.lpWhy = msg(e); }
-    if (!s) return { pick: null, movePct, row };
-    return { movePct, row, pick: {
-      chainId: c.id, rank: 0,
+    const o: Opportunity = {
+      chainId: c.id,
       // A new token's draft quote keeps the wrapped address (WPLS / WETH) even though it spends the native coin.
       key: isNew ? null : d.key,
       add: isNew ? { address: d.base.address, quote: d.quote.address, pool: d.pool.address } : null,
       label: `${d.base.symbol}/${d.quote.symbol}`, spend: d.quote.symbol, stack: d.base.symbol,
-      dex: d.pool.dex, feeBps: d.pool.feeBps, risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null,
-      price: snap.spot, lowerPrice: sig(snap.spot * (1 - s.bandPct)), upperPrice: sig(snap.spot * (1 + s.bandPct)), gridCount: s.gridCount, bandPct: s.bandPct,
-      test: { ...s, capital, usd },
-      activity: pool ? { volume24Usd: pool.volume24Usd, liquidityUsd: pool.liquidityUsd, tx24: pool.tx24, change24Pct: pool.change24Pct } : null,
-    } };
+      dex: d.pool.dex, kind: d.pool.kind, feeBps: d.pool.feeBps,
+      risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null, liveAllowed: d.safety ? d.safety.liveAllowed : true,
+      price: snap.spot, movePct, swingPct: dailySwing(week),
+      activity: pool ? { volume24Usd: pool.volume24Usd, liquidityUsd: pool.liquidityUsd, tx24: pool.tx24 } : null,
+      capital, usd, grid: null, gridWhy: null, lp: null, lpWhy: null,
+    };
+    const s = bestSetup(week, costs, capital);
+    if (s) o.grid = { bandPct: s.bandPct, gridCount: s.gridCount, earnedPct: s.earnedPct, roundTrips: s.roundTrips, returnPct: s.returnPct, maxDrawdownPct: s.maxDrawdownPct };
+    else o.gridWhy = `no grid earned from its trades this week (price ${pct(movePct)})`;
+    if (d.pool.kind !== 'v3' || !c.lpDexes.includes(d.pool.dex)) {
+      o.lpWhy = d.pool.kind === 'v3' ? "A liquidity bot can't open positions on this DEX yet (no verified position manager)." : 'A liquidity bot needs a V3 pool; this one is V2.';
+      return o;
+    }
+    try {
+      const l = bestLp(week, costs, capital, 'v3', await this.d.lpShare(d));
+      if (l.bandPct == null) throw new Error('a V3 position was tested as full range');
+      o.lp = { bandPct: l.bandPct, earnedPct: l.earnedPct, feesPct: l.feesPct, inRangePct: l.inRangePct, poolSharePct: l.poolSharePct, returnPct: l.returnPct };
+    } catch (e) { o.lpWhy = msg(e); }
+    return o;
   }
 }
 
@@ -260,13 +224,13 @@ export function scanDepsFromHub(hub: Hub, candles: CandleStore, rest: Pick<ScanD
       id: rt.cfg.id, name: rt.cfg.name, slug: rt.cfg.geckoSlug, wrapped: rt.cfg.wrappedNative.address,
       spendable: [rt.cfg.wrappedNative.address, ...rt.cfg.stables.map((s) => s.address)],
       dexes: rt.cfg.dexes.flatMap((d) => (d.gecko ? [d.gecko] : [])),
+      lpDexes: rt.cfg.dexes.flatMap((d) => (d.kind === 'v3' && d.positionManager ? [d.id] : [])),
     })),
     // PLS/DAI and ETH/USDC spend the stablecoin; PLS/HEX is turned around to HEX/PLS so it spends PLS.
     existing: (chainId) => hub.byChain(chainId).flatMap((d) => (spends(chainId, d.quote) ? [d] : spends(chainId, d.base) ? [hub.def(`${d.key}~`)] : [])),
     inspect: async (chainId, token, spend) => {
       const r = await hub.inspect({ chainId, address: token, quote: spend });
       if (!r.draft) throw new Error('no pool on a DEX this app trades');
-      if (!r.safety?.liveAllowed) throw new Error(`failed the safety check (${r.safety?.risk ?? 'unknown'}): ${(r.safety?.reasons ?? []).join(' ')}`.trim());
       return r.draft;
     },
     snapshot: (d) => (hub.has(d.key) ? hub.quoter(d.key) : hub.draftQuoter(d)).market(),

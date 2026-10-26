@@ -36,6 +36,8 @@ export interface SyncState {
   error: string | null;
   /** When the last sync ended, done or failed (ms) */
   at: number | null;
+  /** A sync has read every swap up to the chain's head in this process: the minutes cover the whole window (a later one only tops them up) */
+  ready: boolean;
 }
 
 type Row = [number, number, number, number, number, number, number, number];
@@ -53,7 +55,7 @@ export function decodeSwap(data: string, t: number): PoolSwap {
 
 export class PoolHistory {
   minutes: PoolMinute[] = [];
-  readonly state: SyncState = { syncing: false, done: 0, total: 0, error: null, at: null };
+  readonly state: SyncState = { syncing: false, done: 0, total: 0, error: null, at: null, ready: false };
   private toBlock: number | null = null;
   private lastTick: number | null = null;
   private span: number;
@@ -149,6 +151,7 @@ export class PoolHistory {
       }
       this.trim();
       this.save();
+      this.state.ready = true;
     } catch (e) {
       this.state.error = (e as Error).message.slice(0, 200);
       this.save();

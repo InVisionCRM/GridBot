@@ -1,9 +1,9 @@
-/** One trend bot: position with stop / take-profit on the chart, profit vs holding, signals, trades, its own log. */
+/** One trend bot: position with stop / take-profit on the chart, profit in the coin it spends, signals, trades, its own log. */
 import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
-import { ago, cls, dur, num, pct, px, qty, time, usd } from './fmt';
+import { ago, cls, dur, num, pct, px, qty, time } from './fmt';
 import { ChainBadge, DexTag, chainOf, dexName } from './chains';
 import { STRATEGIES } from '../market/strategy';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -11,7 +11,8 @@ import { BotLog } from './GridDetail';
 import { strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
 import { T } from './theme';
-import { quoteSym, trendPnlUsd, type AnyObj, type Nav } from './model';
+import { quoteSym, type AnyObj, type Nav } from './model';
+import { Amt, Usd } from './money';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -39,9 +40,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
   const k: number | null = t.usdPerQuote ?? null;
   const q = quoteSym(t), base = t.base ?? 'PLS';
-  const pnl = trendPnlUsd(t);
-  const hold = t.hodl && k ? (t.hodl - t.capital) * k : null;
-  const money = (x: number) => (k ? usd(x * k, true) : qty(x, q, 4));
+  const profit: number = t.pnl.equity - t.capital;
   const running = t.status === 'running';
   const pos = t.position;
   const stratLabel = STRATEGIES.find((x) => x.id === t.cfg.strategy)?.label ?? t.cfg.strategy;
@@ -73,11 +72,10 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="kpi-row">
-        <div className="kpi"><span>Profit</span><div className={`kpi-v ${cls(pnl ?? t.pnl.equity - t.capital)}`}>{pnl != null ? <AnimatedNumber value={pnl} format={(x) => usd(x, true)} /> : qty(t.pnl.equity - t.capital, q, 4)}</div><span className="sub">{pct(t.pnl.returnPct, 2, true)} · {money(t.pnl.realized)} banked</span></div>
-        <div className="kpi"><span>If you'd held {base}</span><div className="kpi-v">{hold != null ? usd(hold, true) : '—'}</div><span className="sub">{hold != null && pnl != null ? (pnl >= hold ? `bot ahead by ${usd(pnl - hold)}` : `holding ahead by ${usd(hold - pnl)}`) : 'buying at the start price'}</span></div>
+        <div className="kpi"><span>Profit</span><div className={`kpi-v ${cls(profit)}`}><AnimatedNumber value={profit} format={(x) => qty(x, q, 5)} /></div><span className="sub">{pct(t.pnl.returnPct, 2, true)}<Usd v={profit} k={k} /> · <Amt v={t.pnl.realized} sym={q} k={null} sig={4} /> banked</span></div>
         <div className="kpi"><span>Trades</span><div className="kpi-v">{t.stats.count}</div><span className="sub">{t.stats.count ? `${pct(t.stats.winRate, 0)} profitable` : 'none closed yet'} · {t.blocked} skipped by the cost check</span></div>
         <div className="kpi"><span>Worst drop</span><div className="kpi-v">{pct(t.stats.maxDrawdown, 1)}</div><span className="sub">from the bot's peak value</span></div>
-        <div className="kpi"><span>Fees + gas</span><div className="kpi-v">{money(-(t.pnl.fees + t.pnl.gas))}</div><span className="sub">paid so far</span></div>
+        <div className="kpi"><span>Fees + gas</span><div className="kpi-v"><Amt v={-(t.pnl.fees + t.pnl.gas)} sym={q} k={k} sig={4} /></div><span className="sub">paid so far</span></div>
       </div>
 
       <div className="split wide-left">
@@ -93,7 +91,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <div className="card">
             <h3>{pos ? `Holding ${base}` : 'Waiting for a signal'}</h3>
             {pos ? <>
-              <p className="small">{num(pos.pls, pos.pls < 10 ? 6 : 2)} {base} bought at {px(pos.entryPrice)} · {pos.bars} candles ago · open {k ? usd(pos.unrealized * k, true) : qty(pos.unrealized, q, 4)} ({pct(pos.unrealizedPct, 2, true)})</p>
+              <p className="small">{num(pos.pls, pos.pls < 10 ? 6 : 2)} {base} bought at {px(pos.entryPrice)} · {pos.bars} candles ago · open <Amt v={pos.unrealized} sym={q} k={k} sig={4} /> ({pct(pos.unrealizedPct, 2, true)})</p>
               <StopGauge pos={pos} price={t.price} />
               <p className="muted small">Stop {px(pos.risk.stop)}{pos.risk.stop > pos.risk.initialStop ? ' (trailing)' : ''} · entry {px(pos.risk.entry)}{pos.risk.tp ? ` · take-profit ${px(pos.risk.tp)}` : ''} · price {px(t.price)}</p>
             </> : (
@@ -120,7 +118,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
               <tr key={x.id} className={x.failed ? 'failed-row' : ''}>
                 <td>{time(x.timestamp)}</td><td className={`side ${x.side}`}>{x.side}</td><td className="txt">{x.reason}</td>
                 <td>{num(x.plsAmount, x.plsAmount < 10 ? 6 : 0)}</td><td>{px(x.execPrice ?? x.price)}</td>
-                <td className={cls(x.side === 'sell' ? x.realizedPnlUsd : null)}>{x.side === 'sell' ? money(x.realizedPnlUsd) : ''}</td>
+                <td className={cls(x.side === 'sell' ? x.realizedPnlUsd : null)}>{x.side === 'sell' ? <Amt v={x.realizedPnlUsd} sym={q} k={k} sig={4} /> : ''}</td>
                 <td>{x.holdMs ? dur(x.holdMs) : ''}</td><td className="txt nowrap">{dexName(s, t.chainId, x.dex)}</td>
               </tr>
             ))}{!t.trades.length && <tr><td colSpan={8} className="txt muted">No trades yet.</td></tr>}</tbody>

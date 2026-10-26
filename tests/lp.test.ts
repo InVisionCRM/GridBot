@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { bestLp, inRangeShare, LP_BANDS, LP_GAS, lpShareFromFeeProtocol, runLpBacktest } from '../src/market/lp';
+import { bestLp, inRangeShare, LP_BAND, LP_BANDS, LP_GAS, lpShareFromFeeProtocol, runLpBacktest } from '../src/market/lp';
 import type { Candle } from '../src/market/candles';
-import type { CostModel } from '../src/market/costs';
+import { simBuy, type CostModel } from '../src/market/costs';
 import { CHAINS } from '../src/live/chains';
 
 const T0 = 1_700_000_000;
@@ -49,10 +49,10 @@ describe('inRangeShare', () => {
 });
 
 describe('runLpBacktest: position maths', () => {
-  it('full range (V2) with no fees or costs follows √price: price ×4 → position ×2 while holding ×4', () => {
+  it('full range (V2) with no fees or costs follows √price: price ×4 → position ×2; it earned nothing apart from the price', () => {
     const r = runLpBacktest(path([1, 2, 4]), { kind: 'v2', capital: 1000, bandPct: null, lpShare: 1 }, FREE);
     expect(r.returnPct).toBeCloseTo(1, 6);
-    expect(r.holdPct).toBeCloseTo(3, 6);
+    expect(r.earnedPct).toBeCloseTo(0, 9);
     expect(r.inRangePct).toBe(1);
   });
 
@@ -63,7 +63,7 @@ describe('runLpBacktest: position maths', () => {
     expect(r.returnPct).toBeCloseTo(top.returnPct, 9);
     expect(r.returnPct).toBeGreaterThan(0);
     expect(r.returnPct).toBeLessThan(0.05);
-    expect(r.holdPct).toBeCloseTo(1, 6);
+    expect(r.earnedPct).toBeCloseTo(0, 9);
   });
 
   it('fees = volume × pool fee × LP share × your share of the pool, only while in range', () => {
@@ -92,6 +92,19 @@ describe('runLpBacktest: position maths', () => {
     const r = runLpBacktest(flat(10), { kind: 'v3', capital: 1000, bandPct: 0.1, lpShare: 1 }, costs);
     const gas = (200_000 + 60_000 + 2 * 60_000 + LP_GAS.v3.open + LP_GAS.v3.close) * gasPricePls;
     expect(r.returnPct * 1000).toBeCloseTo(-gas, 6);
+    expect(r.earnedPct * 1000).toBeCloseTo(-gas, 6); // a flat price: everything is costs
+  });
+
+  it('earned = fees − the opening swap\'s fee and impact − gas; the price move is left out', () => {
+    // 0.3% pool of 100k each side, 50k traded an hour, price up 20% over the window
+    const costs: CostModel = { ...FREE, feeBps: 30, pool: { quoteReserve: 100_000, plsReserve: 100_000 } };
+    const k = path(Array.from({ length: 50 }, (_, i) => 1 + (0.2 * i) / 49), 50_000);
+    const r = runLpBacktest(k, { kind: 'v2', capital: 1000, bandPct: null, lpShare: 1 }, costs);
+    // full range at mid 1/(1−f): half the value is swapped to the base coin
+    const p0 = 1 / 0.997, buy = simBuy(500, k[0].o, costs), swapCost = 500 - buy.pls * p0;
+    expect(swapCost).toBeGreaterThan(500 * 0.003); // the fee plus some impact
+    expect(r.earnedPct).toBeCloseTo(r.feesPct - swapCost / 1000, 9);
+    expect(r.returnPct).toBeGreaterThan(r.earnedPct + 0.05); // the price rise is in the return, not in earned
   });
 
   it('fails fast on inputs it cannot model', () => {
@@ -102,13 +115,14 @@ describe('runLpBacktest: position maths', () => {
 });
 
 describe('bestLp', () => {
-  it('V2 only tries full range; V3 tries every band plus full range and keeps the best', () => {
+  it('V2 only tries full range; V3 tries every band a liquidity bot can open and keeps the one that earned most', () => {
     const k = flat(100, 1, 50_000);
     const costs: CostModel = { ...FREE, feeBps: 30, pool: { quoteReserve: 100_000, plsReserve: 100_000 } };
     expect(bestLp(k, costs, 1000, 'v2', 1).bandPct).toBeNull();
     const best = bestLp(k, costs, 1000, 'v3', 1);
-    expect(best.bandPct).toBe(Math.min(...LP_BANDS.filter((b): b is number => b != null))); // flat price: tightest range earns most
-    for (const b of LP_BANDS) expect(best.returnPct).toBeGreaterThanOrEqual(runLpBacktest(k, { kind: 'v3', capital: 1000, bandPct: b, lpShare: 1 }, costs).returnPct);
+    expect(best.bandPct).toBe(Math.min(...LP_BANDS)); // flat price: tightest range earns most
+    expect(Math.max(...LP_BANDS)).toBe(LP_BAND.max);
+    for (const b of LP_BANDS) expect(best.earnedPct).toBeGreaterThanOrEqual(runLpBacktest(k, { kind: 'v3', capital: 1000, bandPct: b, lpShare: 1 }, costs).earnedPct);
   });
   it('needs 72 hourly candles', () => {
     expect(() => bestLp(flat(71), FREE, 1000, 'v3', 1)).toThrow(/need 72/);

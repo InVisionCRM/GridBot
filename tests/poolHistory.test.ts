@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { decodeSwap, KEEP_DAYS, PoolHistories, type PoolRef } from '../src/server/lp/poolHistory';
 import { V3_SWAP_TOPIC, type LogReader } from '../src/server/market/onchain';
+import { syncAnswer } from '../src/server/lp/replay';
 
 const POOL = '0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca';
 const T0 = 1_790_000_000;
@@ -68,11 +69,17 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
     const c = chain({ days: 1, every: 20, cap: 10_000 });
     let t = (T0 + c.latest) * 1000;
     const h = new PoolHistories(null, () => c.reader, fast(() => t)).get(REF);
+    expect(h.state.ready).toBe(false);
     await h.sync();
+    expect(h.state.ready).toBe(true);
     const n = h.minutes.length, logs = c.calls.logs;
     c.grow(600);
     t += 600_000;
-    await h.sync();
+    const topUp = h.sync();
+    // the week already read stays usable while the new blocks are read
+    expect(h.state).toMatchObject({ syncing: true, ready: true });
+    expect(syncAnswer(h.state)).toBeNull();
+    await topUp;
     expect(h.minutes.length).toBeGreaterThanOrEqual(n + 9);
     expect(h.minutes.length).toBeLessThanOrEqual(n + 10);
     expect(h.state.total).toBe(600);
@@ -93,9 +100,12 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
   it('a request that keeps failing on a single block is a real error, kept for the page to show', async () => {
     const c = chain({ days: 1, every: 1, cap: 0 });
     const h = new PoolHistories(null, () => c.reader, fast(() => (T0 + c.latest) * 1000)).get(REF);
-    await expect(h.sync()).rejects.toThrow(/exceeds limit/);
+    const first = h.sync();
+    expect(syncAnswer(h.state)).toEqual({ state: 'syncing', done: 0, total: 0 }); // a first read shows its progress
+    await expect(first).rejects.toThrow(/exceeds limit/);
     expect(h.state.error).toMatch(/exceeds limit/);
-    expect(h.state.syncing).toBe(false);
+    expect(h.state).toMatchObject({ syncing: false, ready: false });
+    expect(syncAnswer(h.state)).toEqual({ state: 'error', error: h.state.error });
   });
 
   it('a rate-limited RPC (429) is waited out, 1 s then 2 s, without shrinking the requests', async () => {

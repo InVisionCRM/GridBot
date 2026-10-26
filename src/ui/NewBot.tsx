@@ -444,7 +444,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
         <span className="detail">It earns its share of the {feeLabel(m)} fee on every trade while the price is inside the range. Like a grid, it ends up holding more of whichever coin fell. Outside the range it earns nothing until the price comes back or the range moves. Gas: opening is a swap plus about 480k; moving the range is a take-out (about 250k), a swap and a new open; closing is about 250k.</span>
       </div>
       <Rerange on={rerange} set={setRerange} />
-      <LpReplay pair={pair} capital={spot ? q + a * spot : q} maxImpact={impactOk ? impact : null} band={b} rerange={rerange}
+      <LpReplay pair={pair} capital={spot ? q + a * spot : q} maxImpact={impactOk ? impact : null} band={b} rerange={rerange} usdPer={m.usdPerQuote ?? null}
         onPick={(nb, nr) => { setBand(String(+(nb * 100).toFixed(4))); setRerange(nr); }} />
       <ProfitsField p={profits} set={setProfits} kind="lp" />
       <details className="more">
