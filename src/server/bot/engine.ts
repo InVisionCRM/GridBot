@@ -24,6 +24,7 @@ import { pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, type RecenterState } from '../../live/recenter';
 import { noKey } from '../words';
+import { requestHalt, resolveHalt, systemHalt, type Halt } from './audit';
 
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
@@ -89,6 +90,8 @@ export interface BotState {
   closing?: boolean;
   /** Hidden from the active list. The record (trades, PnL) stays for analytics. Absent on older state. */
   archivedAt?: number | null;
+  /** Why this bot last stopped or closed. Absent on state saved before this field existed. */
+  halt?: Halt | null;
 }
 
 
@@ -156,7 +159,7 @@ export function freshState(net: LiveNetwork, id?: string): BotState {
     limits: { ...DEFAULT_LIMITS }, levels: [], intervals: [], usdPerBuy: 0, queue: [], inFlight: null,
     trades: [], paperStartStable: 0, lastPrice: null, lastPriceAt: null, spacingWarn: null,
     profits: { mode: 'reinvest' }, payoutPending: 0, payoutInFlight: null, payouts: [],
-    closing: false, archivedAt: null,
+    closing: false, archivedAt: null, halt: null,
   };
 }
 
@@ -189,11 +192,13 @@ export class GridEngine {
     this.state.intervals = this.state.intervals.map((iv) => (iv.buyAmount == null ? { ...iv, buyAmount: iv.status === 'inactive' ? 0 : this.state.usdPerBuy } : iv));
     if (this.state.mode === 'live' && !this.signer) {
       this.tag('warn', 'LIVE mode but no PRIVATE_KEY — stopped.');
+      if (this.state.status === 'running') this.state.halt = systemHalt('startup', 'No signing key — stopped.', this.now());
       this.state.status = 'stopped';
     }
     this.executor = this.makeExecutor(this.state.mode, this.state.stable);
     if (this.executor instanceof UnavailableExecutor && this.state.status === 'running') {
       this.tag('warn', `${this.state.stable}: ${this.lastError} — stopped.`);
+      this.state.halt = systemHalt('startup', `${this.state.stable}: ${this.lastError ?? 'market unavailable'} — stopped.`, this.now());
       this.state.status = 'stopped';
     }
     if (this.state.status === 'running') this.tag('info', `Resuming ${this.state.mode} ${this.label} from saved state.`);
@@ -311,7 +316,7 @@ export class GridEngine {
       spacingWarn: warn, econ,
       startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalUsd]],
       recenter: { enabled: p.recenter ?? this.state.recenter?.enabled ?? false, aboveSince: null, lastAt: this.state.recenter?.lastAt ?? null, count: this.state.recenter?.count ?? 0 },
-      profits, closing: false, archivedAt: null,
+      profits, closing: false, archivedAt: null, halt: null,
       ...(paperReset ? { payoutPending: 0, payoutInFlight: null, payouts: this.state.payouts.filter((x) => !x.paper) } : {}),
     };
     this.seedUpper(price);
@@ -340,22 +345,26 @@ export class GridEngine {
     this.state.status = 'running';
     this.state.closing = false;
     this.state.archivedAt = null;
+    this.state.halt = null;
     this.closeNote = null;
     this.save();
     this.tag('info', 'Resumed.');
     this.ev('started', `Grid resumed — ${this.label}`);
   }
 
-  stop(why?: string) {
+  stop(why?: string | Halt) {
+    const halt = resolveHalt(why, this.now());
     const dropped = this.state.queue;
     this.state.intervals = dropped.reduce((iv, q) => onTradeSkipped(iv, q), this.state.intervals);
     this.state.queue = [];
     this.state.status = 'stopped';
     this.state.closing = false;
+    this.state.halt = halt;
     this.closeNote = null;
     this.save();
-    this.ev('stopped', `Grid ${this.label} ${why ? `paused — ${why}` : 'stopped'}`, { level: why ? 'error' : 'warn', notify: true });
-    this.tag('warn', `${why ? `PAUSED (${why})` : 'STOPPED'}. ${dropped.length} queued dropped.${this.state.inFlight?.swapTxHash ? ` Swap ${this.state.inFlight.swapTxHash} already broadcast; will reconcile.` : ''}`);
+    const note = typeof why === 'string' ? why : halt.detail;
+    this.ev('stopped', `Grid ${this.label} ${typeof why === 'string' ? `paused — ${why}` : `stopped — ${note}`}`, { level: typeof why === 'string' ? 'error' : 'warn', notify: true, data: { halt } });
+    this.tag('warn', `${typeof why === 'string' ? `PAUSED (${why})` : `STOPPED (${note})`}. ${dropped.length} queued dropped.${this.state.inFlight?.swapTxHash ? ` Swap ${this.state.inFlight.swapTxHash} already broadcast; will reconcile.` : ''}`);
   }
 
   /** Coins this bot's own fills still hold (quote-side inventory is not an on-chain position). */
@@ -368,10 +377,11 @@ export class GridEngine {
    * through the same quote, price-impact cap and slippage as any other trade, one tx at a time on this chain.
    * @returns true when an on-chain unwind still has to run.
    */
-  requestClose(): boolean {
+  requestClose(why?: Halt): boolean {
     if (this.state.archivedAt) return false;
     // Paper never waits on a quote or a poll. A paper bot left `closing` by an old process finishes here too.
     if (this.state.mode !== 'live') {
+      this.noteClose(why);
       this.state.inFlight = null;
       this.finishClose();
       return false;
@@ -379,6 +389,7 @@ export class GridEngine {
     if (this.state.closing) return false;
     const liveWork = this.state.inFlight != null || this.held() > 1e-8;
     if (!liveWork || this.executor instanceof UnavailableExecutor) {
+      this.noteClose(why);
       if (this.executor instanceof UnavailableExecutor && liveWork) {
         this.lastError = this.lastError ?? 'market unavailable';
         this.state.status = 'stopped';
@@ -389,6 +400,7 @@ export class GridEngine {
       this.finishClose();
       return false;
     }
+    this.noteClose(why);
     this.state.closing = true;
     this.state.status = 'running';
     this.closeNote = null;
@@ -426,6 +438,11 @@ export class GridEngine {
     }
   }
 
+  private noteClose(why?: Halt) {
+    if (why) this.state.halt = { ...why, at: this.now() };
+    else if (!this.state.halt) this.state.halt = requestHalt('close', 'Close', this.now());
+  }
+
   private finishClose() {
     this.state.queue = [];
     this.state.status = 'stopped';
@@ -433,7 +450,7 @@ export class GridEngine {
     this.state.archivedAt = this.now();
     this.closeNote = null;
     this.save();
-    this.ev('stopped', `Grid ${this.label} closed`, { level: 'success', notify: true });
+    this.ev('stopped', `Grid ${this.label} closed`, { level: 'success', notify: true, data: { halt: this.state.halt ?? null } });
   }
 
   /** Hide a stopped grid that is not mid-unwind. Coins it bought already sit in the wallet. */
@@ -888,7 +905,7 @@ export class GridEngine {
       gasReserve: m?.quote.native && this.state.config ? gasReserve(this.state.config.totalCapitalUsd, reserveCfg(this.state.limits)) : null,
       dex: m?.pool.dex ?? null, dexName: m ? (c?.dexes.find((x) => x.id === m.pool.dex)?.name ?? m.pool.dex) : null, feeTier: m?.pool.feeTier ?? null, poolMode: m?.poolMode ?? null, custom: !!m?.custom, risk: m?.safety?.risk ?? null, available: !(this.executor instanceof UnavailableExecutor),
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol), stable: this.state.stable,
-      hasSigner: this.hasSigner, status: this.state.status, closing: !!this.state.closing, archivedAt: this.state.archivedAt ?? null, config: this.state.config, limits: this.state.limits,
+      hasSigner: this.hasSigner, status: this.state.status, closing: !!this.state.closing, archivedAt: this.state.archivedAt ?? null, halt: this.state.halt ?? null, config: this.state.config, limits: this.state.limits,
       price: this.state.lastPrice, priceAt: this.state.lastPriceAt, balances: this.balances, walletBalances: this.walletBalances,
       intervals: this.state.intervals, usdPerBuy: this.state.usdPerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
       trades: trades.slice(-100).reverse(),

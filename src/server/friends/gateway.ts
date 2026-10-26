@@ -43,7 +43,7 @@ export interface GatewayDeps {
 
 const PUBLIC = ['/favicon.svg', '/manifest.webmanifest', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png'];
 /** Never passed on: the gateway's cookie, where the request came from, and hop-by-hop headers. */
-const DROP_IN = /^(cookie|origin|referer|forwarded|x-forwarded-.*|x-real-ip|tailscale-.*|connection|keep-alive|proxy-.*|upgrade)$/i;
+const DROP_IN = /^(cookie|origin|referer|forwarded|x-forwarded-.*|x-real-ip|tailscale-.*|x-gridbot-via|connection|keep-alive|proxy-.*|upgrade)$/i;
 const DROP_OUT = /^(connection|keep-alive|transfer-encoding|set-cookie)$/i;
 const DONE: Record<string, string> = {
   key: 'Key saved. Your copy is restarting with it; give it a few seconds.',
@@ -55,6 +55,8 @@ function upstreamHeaders(src: http.IncomingHttpHeaders, port: number, owner: boo
   const headers: http.OutgoingHttpHeaders = {};
   for (const [k, v] of Object.entries(src)) if (!DROP_IN.test(k)) headers[k] = v;
   headers.host = `127.0.0.1:${port}`;
+  // The phone cannot claim to be the Mac. This gateway sets the label after dropping a client-supplied one.
+  headers['x-gridbot-via'] = owner ? 'owner' : 'friend';
   // The host app rejects a non-local Origin. Set one only for a change this gateway already accepted.
   if (owner && method !== 'GET' && method !== 'HEAD') headers.origin = `http://127.0.0.1:${port}`;
   return headers;

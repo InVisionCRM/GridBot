@@ -14,6 +14,7 @@
  * wait ends is settled by its hash later. Values are in the budget's coin at today's prices, gas counted.
  */
 import type { MultiBot } from './multi';
+import { systemHalt } from './audit';
 import type { Store } from './store';
 import type { Emit } from './activity';
 import type { Mode } from './engine';
@@ -306,7 +307,8 @@ export class Autopilot {
         if (!b.retiring) continue;
         if (!b.retiring.started) {
           try {
-            if (b.kind === 'grid') this.d.bot.closeGrid(b.id); else this.d.bot.closeLp(b.id);
+            const halt = systemHalt(b.retiring.why === 'loss limit' ? 'loss-limit' : 'autopilot', b.retiring.why === 'loss limit' ? (a.halted || 'loss limit') : b.retiring.why, this.now());
+            if (b.kind === 'grid') this.d.bot.closeGrid(b.id, halt); else this.d.bot.closeLp(b.id, halt);
             b.retiring.started = true;
           } catch (e) { this.lastError = `${b.label}: ${(e as Error).message}`; }
           continue;

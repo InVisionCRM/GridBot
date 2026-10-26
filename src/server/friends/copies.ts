@@ -6,7 +6,7 @@
  * the copy to the host: when the host stops, even when killed, the channel closes and the copy shuts down.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { closeSync, mkdirSync, openSync, rmSync, statSync, truncateSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, renameSync, rmSync, statSync } from 'node:fs';
 import net from 'node:net';
 import { join } from 'node:path';
 
@@ -78,7 +78,7 @@ export class Copies {
     const dir = this.dir(p.spec.id);
     mkdirSync(dir, { recursive: true });
     const log = join(dir, 'app.log');
-    try { if (statSync(log).size > LOG_MAX) truncateSync(log, 0); } catch { /* no log yet */ }
+    try { if (statSync(log).size > LOG_MAX) renameSync(log, `${log}.1`); } catch { /* no log yet, or the old one is still in use */ }
     const fd = openSync(log, 'a');
     let child: ChildProcess;
     try {

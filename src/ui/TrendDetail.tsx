@@ -8,6 +8,7 @@ import { ChainBadge, DexTag, chainOf, dexName } from './chains';
 import { STRATEGIES } from '../market/strategy';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
+import { showHalt } from './haltText';
 import { strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
 import { T } from './theme';
@@ -49,7 +50,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const closePos = () => { if (confirm(`Sell ${t.name}'s ${base} at market now?`)) act(() => botApi(`trends/${t.id}/sell`, 'POST')); };
   const doClose = () => {
     if (t.mode === 'live' && !confirm(`Close ${t.name}? It sells the open trade, with the same price-impact and slippage limits.`)) return;
-    act(() => botApi(`trends/${t.id}/close`, 'POST'));
+    act(() => botApi(`trends/${t.id}/close`, 'POST', undefined, 'row-close'));
   };
 
   return (
@@ -63,9 +64,10 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {t.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={t.dexName} feeBps={t.feeBps} feeTier={t.feeTier} />
         <span className={`st ${closing ? 'closing' : t.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{t.inFlight ? ' · swap in flight' : ''}</span>
+        {showHalt(t, closing) && <span className="bot-why">{showHalt(t, closing)}</span>}
         <span className="grow" />
         {running
-          ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/stop`, 'POST'))}>Stop</button>
+          ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
           : <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/resume`, 'POST'))}>Resume</button>}
         <button type="button" className="btn" disabled={busy || !pos || !running || closing} onClick={closePos}>Sell now</button>
         <button type="button" className="btn" disabled={busy || closing} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>

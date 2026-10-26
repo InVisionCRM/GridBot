@@ -61,6 +61,22 @@ export default function App() {
   const [guide, setGuide] = useState(false);
   const closeGuide = useCallback(() => setGuide(false), []);
   const [drawer, setDrawer] = useState(false);
+  const scrolling = useRef(false);
+  const scrollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const move = () => { scrolling.current = true; };
+    const end = () => {
+      if (scrollTimer.current) clearTimeout(scrollTimer.current);
+      scrollTimer.current = setTimeout(() => { scrolling.current = false; }, 500);
+    };
+    window.addEventListener('touchmove', move, { passive: true });
+    window.addEventListener('touchend', end);
+    return () => {
+      window.removeEventListener('touchmove', move);
+      window.removeEventListener('touchend', end);
+      if (scrollTimer.current) clearTimeout(scrollTimer.current);
+    };
+  }, []);
   useEffect(() => {
     if (!drawer) return;
     const k = (e: KeyboardEvent) => { if (e.key === 'Escape') setDrawer(false); };
@@ -102,7 +118,12 @@ export default function App() {
   const cs = chains(s);
   const sel = chain === 'all' ? null : chainOf(s, chain);
   const running = [...s.grids, ...(s.trends ?? []), ...(s.lps ?? [])].filter((b: { status: string }) => b.status === 'running').length;
-  const stopAll = () => act(() => (sel ? http(`/api/chains/${sel.id}/stop`, 'POST') : botApi('stop-all', 'POST')));
+  const stopAll = () => {
+    if (scrolling.current) return;
+    const what = sel ? `every bot on ${sel.name}` : 'every bot on every chain';
+    if (!confirm(`Stop ${what}? They keep their coins. This does not sell.`)) return;
+    void act(() => (sel ? http(`/api/chains/${sel.id}/stop`, 'POST', undefined, 'header-chain-stop') : botApi('stop-all', 'POST', undefined, 'header-stop-all')));
+  };
   const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
   return (

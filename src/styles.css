@@ -191,6 +191,7 @@ input:disabled, select:disabled { opacity: 0.55; }
 .bot-row:hover { background: var(--sel); }
 .bot-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-weight: 500; min-width: 0; }
 .bot-meta { grid-column: 1; font-size: 0.78rem; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+.bot-why { display: block; color: var(--warn); }
 .bot-pnl { grid-column: 2; grid-row: 1; font-family: var(--mono); text-align: right; }
 .bot-hold { grid-column: 2; grid-row: 2; font-family: var(--mono); font-size: 0.74rem; color: var(--muted); text-align: right; white-space: nowrap; }
 .bot-act { grid-column: 3; grid-row: 1 / span 2; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; align-content: center; }
@@ -802,6 +803,7 @@ label.wide input { min-width: 180px; }
   .bots-head { flex-wrap: wrap; }
   .ce { overflow-wrap: anywhere; }
   .topbar .pill, .topbar .btn { max-width: 100%; }
-  .topbar .btn { min-height: 40px; }
+  .topbar .btn:not(.kill) { min-height: 40px; }
+  .topbar .btn.kill { min-height: 32px; margin-inline-start: 18px; }
   .tabs { flex-wrap: wrap; overflow-x: visible; }
 }

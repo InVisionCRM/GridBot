@@ -15,6 +15,7 @@ import { buildFeed, LiveFeed, LiveLevels, LivePrice, livePrice, LiveRange } from
 import { nextLevels } from '../live/liveGrid';
 import type { ActivityEvent, Ticks } from './useStream';
 import { L } from './Tip';
+import { showHalt } from './haltText';
 import { isSafe, scanStep, useOpportunities, wayOf } from './Opportunities';
 import type { Opportunity } from '../market/scan';
 
@@ -46,14 +47,14 @@ function BotRow({ s, b, price, nav, act, busy, closing, onClose }: { s: AnyObj; 
       <div className={`bot-pnl ${cls(b.pnl.realized)}`} title="Earned by trading: completed buy → sell trades, after fees and gas">
         <AnimatedNumber value={b.pnl.realized} format={(x) => qty(x, q, 4)} /><Usd v={b.pnl.realized} k={k} />
       </div>
-      <div className="bot-meta">{b.available === false ? <span className="warn-t">Unavailable on this server</span> : b.lastError ? <span className="neg">{b.lastError}</span> : meta.filter(Boolean).join(' · ')}</div>
+      <div className="bot-meta">{b.available === false ? <span className="warn-t">Unavailable on this server</span> : b.lastError ? <span className="neg">{b.lastError}</span> : meta.filter(Boolean).join(' · ')}{showHalt(b, closing) && <span className="bot-why">{showHalt(b, closing)}</span>}</div>
       {grid
         ? <div className="bot-hold" title="Coins bought and not sold yet: their value moves with the price until they sell">{b.pnl.plsHeld > 0 ? `not sold yet: ${qty(b.pnl.unrealized, q, 4)}` : ''}</div>
         : <div className="bot-hold" title="The trade it holds now: its value moves with the price until it sells">{b.position ? `open trade: ${qty(b.position.unrealized, q, 4)}` : ''}</div>}
       {grid && b.status === 'running' && <div className="bot-live"><LiveLevels g={b} price={price} /></div>}
       <div className="bot-act" onClick={(e) => e.stopPropagation()}>
         {b.status === 'running'
-          ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`${path}/stop`, 'POST'))}>Stop</button>
+          ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`${path}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
           : (grid ? b.config : true) && <button type="button" className="btn small-btn" disabled={busy || b.available === false} onClick={() => act(() => botApi(`${path}/resume`, 'POST'))}>Resume</button>}
         <button type="button" className="btn small-btn" disabled={closing || b.available === false} onClick={onClose}>{closing ? 'Closing…' : 'Close'}</button>
       </div>
@@ -86,12 +87,12 @@ function LpRow({ s, b, price, nav, act, busy, closing, onClose }: { s: AnyObj; b
       <div className={`bot-pnl ${cls(pnl?.net)}`} title="Earned after costs: fees (collected + waiting in the position) minus gas, swap costs and what range moves lost">
         {pnl ? <><AnimatedNumber value={pnl.net} format={(x) => qty(x, q, 4)} /><Usd v={pnl.net} k={b.usdPerQuote} /></> : '—'}
       </div>
-      <div className="bot-meta">{b.available === false ? <span className="warn-t">Unavailable on this server</span> : b.lastError ? <span className="neg">{b.lastError}</span> : meta.filter(Boolean).join(' · ')}</div>
+      <div className="bot-meta">{b.available === false ? <span className="warn-t">Unavailable on this server</span> : b.lastError ? <span className="neg">{b.lastError}</span> : meta.filter(Boolean).join(' · ')}{showHalt(b, closing) && <span className="bot-why">{showHalt(b, closing)}</span>}</div>
       <div className="bot-hold" title="Fees earned so far, in the coins they were paid in">{pnl ? `fees ${qty(pnl.feeCoins.base, b.base, 4)} · ${qty(pnl.feeCoins.quote, q, 4)}` : ''}</div>
       {b.status !== 'closed' && <div className="bot-live"><LiveRange b={b} price={price} /></div>}
       <div className="bot-act" onClick={(e) => e.stopPropagation()}>
         {b.status === 'running'
-          ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST'))}>Pause</button>
+          ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST', undefined, 'row-pause'))}>Pause</button>
           : b.status === 'stopped' && <button type="button" className="btn small-btn" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
         <button type="button" className="btn small-btn" disabled={closing || b.available === false} onClick={onClose}>{closing ? 'Closing…' : 'Close'}</button>
       </div>
@@ -226,7 +227,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
     if (b.mode === 'live') setPend((cur) => new Set(cur).add(b.id));
     else setHide((cur) => new Set(cur).add(b.id));
     setRowErr(null);
-    void botApi(closePath(b), 'POST').then(() => refresh()).catch((e: Error) => { forget(b.id); setRowErr(e.message); });
+    void botApi(closePath(b), 'POST', undefined, 'row-close').then(() => refresh()).catch((e: Error) => { forget(b.id); setRowErr(e.message); });
   };
   const closable = bots.filter((b) => !isClosing(b));
   const canClear = bots.some((b) => b.status !== 'running' && !isClosing(b));
@@ -236,7 +237,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
     setHide((cur) => { const n = new Set(cur); for (const b of closable) if (b.mode !== 'live') n.add(b.id); return n; });
     setPend((cur) => { const n = new Set(cur); for (const b of closable) if (b.mode === 'live') n.add(b.id); return n; });
     setRowErr(null);
-    void botApi('close-all', 'POST', chain === 'all' ? {} : { chainId: chain }).then(() => refresh()).catch((e: Error) => {
+    void botApi('close-all', 'POST', chain === 'all' ? {} : { chainId: chain }, 'close-all').then(() => refresh()).catch((e: Error) => {
       setHide(new Set()); setPend(new Set()); setRowErr(e.message);
     });
   };
