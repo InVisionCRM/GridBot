@@ -194,6 +194,8 @@ export class GridEngine {
     // Saved before per-level buy sizes: every funded level spent the grid's one buy size; levels above the old start
     // price never had money (0, so a later re-range spreads only the real capital).
     this.state.intervals = this.state.intervals.map((iv) => (iv.buyAmount == null ? { ...iv, buyAmount: iv.status === 'inactive' ? 0 : this.state.usdPerBuy } : iv));
+    // A close to cash saved before failures were counted
+    if (this.state.cashOut) this.state.cashOut.fails ??= 0;
     if (this.state.mode === 'live' && !this.signer) {
       this.tag('warn', 'LIVE mode but no PRIVATE_KEY — stopped.');
       this.state.status = 'stopped';
@@ -308,8 +310,10 @@ export class GridEngine {
 
     this.executor = executor;
     const paperReset = p.mode === 'paper';
+    // A new start is a new grid: a close to cash it was paused in is dropped, and it is no longer cashed out
+    if (this.state.cashOut) this.ev('info', `Grid ${this.label}: the paused sale back to ${this.quoteSym} is dropped by this start`, { level: 'warn' });
     this.state = {
-      ...this.state, mode: p.mode, stable, limits, status: 'running',
+      ...this.state, mode: p.mode, stable, limits, status: 'running', cashOut: null, cashedOutAt: null,
       config: { lowerPrice: p.lowerPrice, upperPrice: p.upperPrice, gridCount: p.gridCount, totalCapitalUsd: p.totalCapitalUsd },
       levels, intervals, usdPerBuy, queue: [], inFlight: null,
       trades: paperReset ? this.state.trades.filter((t) => !t.paper) : this.state.trades,
@@ -345,6 +349,7 @@ export class GridEngine {
     if (this.state.mode === 'live' && !this.signer) throw new Error(noKey());
     if (this.state.mode === 'live' && this.def?.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
     if (this.state.cashOut) { this.state.cashOut.fails = 0; this.state.cashOut.waitUntil = null; }
+    this.state.cashedOutAt = null; // running again: no longer cashed out
     this.state.status = 'running';
     this.save();
     this.tag('info', 'Resumed.');
@@ -389,18 +394,19 @@ export class GridEngine {
   private queueCashOut(price: number) {
     const c = this.state.cashOut!;
     const held = replay(this.modeTrades()).plsHeld;
-    if (!(held * price > this.state.config!.totalCapitalUsd * CASH_DUST)) {
-      this.state.cashOut = null;
-      this.state.cashedOutAt = this.now();
-      this.state.status = 'stopped';
-      // The levels' coins are sold: each waits to buy again if the grid is ever resumed.
-      this.state.intervals = this.state.intervals.map((iv) => (iv.status === 'holding' ? { ...iv, status: 'waitingBuy', plsAmount: 0, lotCost: undefined, needsRearm: true } : iv));
-      this.ev('stopped', `Grid ${this.label}: sold everything back to ${this.quoteSym}; stopped`, { level: 'success', notify: true });
-      return;
-    }
+    if (!(held * price > this.state.config!.totalCapitalUsd * CASH_DUST)) return this.cashedOut(`sold everything back to ${this.quoteSym}`);
     if (this.state.queue.length || (c.waitUntil != null && c.waitUntil > this.now())) return;
     const amount = Math.min(held, c.size ?? held);
     this.state.queue.push({ id: `${CASH_JOB}${this.now()}`, intervalIndex: -1, side: 'sell', triggerPrice: price, levelPrice: price, amount, createdAt: this.now(), manual: true });
+  }
+
+  /** The close to cash is done: stopped; the levels' coins are sold, so each waits to buy again if it is ever resumed. */
+  private cashedOut(what: string) {
+    this.state.cashOut = null;
+    this.state.cashedOutAt = this.now();
+    this.state.status = 'stopped';
+    this.state.intervals = this.state.intervals.map((iv) => (iv.status === 'holding' ? { ...iv, status: 'waitingBuy', plsAmount: 0, lotCost: undefined, needsRearm: true } : iv));
+    this.ev('stopped', `Grid ${this.label}: ${what}; stopped`, { level: 'success', notify: true });
   }
 
   setLimits(l: Partial<SafetyLimits>) {
@@ -627,8 +633,9 @@ export class GridEngine {
     if (c && job.id.startsWith(CASH_JOB)) {
       const held = replay(this.modeTrades()).plsHeld, min = held / CASH_MIN_PARTS;
       c.why = why;
-      if (/price impact|max transaction/.test(why)) {
-        // Too big to go through in one sale: half as much next time; the smallest piece still too big waits 10 minutes.
+      if (/price impact|max transaction|insufficient balance/.test(why)) {
+        // Too big to go through in one sale (the impact cap, the token's max transaction, what the wallet holds): half as
+        // much next time; the smallest piece still too big waits 10 minutes.
         c.size = Math.max(min, job.amount / 2);
         c.waitUntil = job.amount <= min * 1.000001 ? this.now() + CASH_WAIT_MS : null;
         this.tag('warn', `selling back: ${why}`);
@@ -771,6 +778,16 @@ export class GridEngine {
       const qp = q.poolPrice ?? q.price;
       if (ref > 0 && (qp / ref > 1.5 || qp / ref < 1 / 1.5)) {
         return this.skip(job, `quote price ${qp.toPrecision(6)} inconsistent with spot ${ref.toPrecision(6)} ${this.def?.quote.symbol ?? this.state.stable}/${this.baseSym} — units/decimals mismatch, refusing`);
+      }
+      if (!q.balanceOk && job.id.startsWith(CASH_JOB) && this.def?.base.native && this.state.mode === 'live' && this.balances) {
+        // Selling the chain's own coin back: its gas comes out of the same coin, and the gas the grid paid came out of
+        // the coins it counts. Sell what the wallet can pay for; what can't be sold beyond that went on gas.
+        const fit = this.balances.pls - 2 * q.gasPlsEstimate;
+        if (fit <= 2 * q.gasPlsEstimate) { this.cashedOut(`sold everything back to ${this.quoteSym}; the ${this.baseSym} left in its count went on gas`); this.save(); return; }
+        this.state.cashOut!.size = Math.min(fit, job.amount);
+        this.tag('info', `selling back ${fit.toPrecision(6)} ${this.baseSym}: what the wallet holds less room for the sale's gas`);
+        this.save();
+        return;
       }
       if (!q.balanceOk) return this.skip(job, `insufficient balance (${q.balanceNote})`);
       if (job.side === 'sell' && q.amountInHuman > replay(this.modeTrades()).plsHeld * 1.000001 + 1e-9) {

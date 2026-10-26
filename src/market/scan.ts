@@ -161,6 +161,8 @@ export interface Opportunity {
   /** Best liquidity range by fees − costs (null: not tested, see lpWhy). Only where a liquidity bot can run: a V3 pool on a DEX with a verified position manager */
   lp: { bandPct: number; earnedPct: number; feesPct: number; inRangePct: number; poolSharePct: number; returnPct: number } | null;
   lpWhy: string | null;
+  /** The liquidity test failed to run (a read failed, see lpWhy): no evidence either way, unlike a range that earned nothing */
+  lpFailed?: boolean;
 }
 
 /** The hourly high-low ranges (log) added up, per day: how far the price went back and forth, whichever way it ended. */

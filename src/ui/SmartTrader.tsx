@@ -175,6 +175,7 @@ function OptionsForm({ opts, setOpts }: { opts: Opts; setOpts: (o: Opts) => void
 
 /** A bot's state as the trader sees it: running, or why it is waiting */
 function botState(b: AnyObj): { tag: string; cls: string; tip: string } | null {
+  if (b.cashedOut) return { tag: 'closed, coming back', cls: 'risk-mid', tip: 'Sold back to its coin; the money returns to the budget on the next check.' };
   if (b.retiring && b.status !== 'running' && b.status !== 'closed') return { tag: `closing paused: ${b.retiring.why}`, cls: 'risk-high', tip: 'It was stopped (by hand, KILL ALL or a safety pause) before its close to cash finished. Resume it on its page to finish.' };
   if (b.retiring) return { tag: `closing: ${b.retiring.why}`, cls: 'risk-mid', tip: 'Being closed back to its coin; the money comes back to the budget.' };
   if (b.status !== 'running') return { tag: b.status ?? 'missing', cls: 'risk-high', tip: 'Not running: it keeps its slot, and the smart trader leaves it alone until you resume it on its page.' };
@@ -183,7 +184,7 @@ function botState(b: AnyObj): { tag: string; cls: string; tip: string } | null {
 
 function AccountCard({ s, x, nav, busy, run }: { s: AnyObj; x: AnyObj; nav: Nav; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<void> }) {
   const base = x.amount - x.withdrawn;
-  const v: number | null = x.value, r = v == null ? null : v / base - 1;
+  const v: number | null = x.value, r = v == null || !(base > 0) ? null : v / base - 1;
   const others = Object.entries(x.coins as Record<string, number>).filter(([c, n]) => c !== x.coin && n > 0);
   return (
     <section className="card">
@@ -199,7 +200,7 @@ function AccountCard({ s, x, nav, busy, run }: { s: AnyObj; x: AnyObj; nav: Nav;
       {x.killed && (
         <div className="banner error">
           <span className="grow">Stopped by {x.killed}: nothing is sent for this budget (no swap, close or new bot). Its bots stay stopped until you resume them on their pages.</span>
-          <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/autopilot/on', 'POST'))}>Carry on</button>
+          <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/autopilot/carry-on', 'POST', { chainId: x.chainId }))}>Carry on</button>
         </div>
       )}
       <p className="small muted">
@@ -241,7 +242,7 @@ function OnControls({ a, busy, run }: { a: AnyObj; busy: boolean; run: (fn: () =
           <button type="button" className="btn danger" disabled={busy}
             onClick={() => { if (confirm('Turn off and close every bot it runs back to its coin?')) void run(() => http('/api/autopilot/off', 'POST', { sell: true })); }}>Turn off, close its bots</button>
         </> : <>
-          {a.closeAll
+          {a.closeAll && a.accounts.some((x: AnyObj) => x.bots.length || x.pending)
             ? <span className="small muted">Closing its bots back to their coins; it can be turned on again once they are back.</span>
             : <>
               <button type="button" className="btn primary" disabled={busy} onClick={() => void run(() => http('/api/autopilot/on', 'POST'))}>Turn on again</button>

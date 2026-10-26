@@ -261,7 +261,7 @@ export class DailyScanner {
       const l = bestLp(week, costs, capital, 'v3', await this.d.lpShare(d));
       if (l.bandPct == null) throw new Error('a V3 position was tested as full range');
       o.lp = { bandPct: l.bandPct, earnedPct: l.earnedPct, feesPct: l.feesPct, inRangePct: l.inRangePct, poolSharePct: l.poolSharePct, returnPct: l.returnPct };
-    } catch (e) { o.lpWhy = msg(e); }
+    } catch (e) { o.lpWhy = msg(e); o.lpFailed = true; }
     return o;
   }
 }

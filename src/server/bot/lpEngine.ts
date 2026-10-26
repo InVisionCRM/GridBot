@@ -327,6 +327,8 @@ export class LpEngine {
   close(toCash = false) {
     const cash = toCash || !!this.state.step?.toCash || !!this.state.closeAsked?.toCash;
     if (this.state.status === 'closed' && (!cash || this.state.cashedOutAt != null)) return;
+    // A close already under way (its exit may be confirming) becomes a close to cash when asked
+    if (this.state.step?.action === 'close') { if (cash) this.state.step.toCash = true; this.save(); return; }
     if (this.ticking || this.state.step?.hash || this.state.step?.swap) { this.state.closeAsked = { toCash: cash }; this.save(); return; }
     this.startClose(cash);
   }
@@ -372,7 +374,7 @@ export class LpEngine {
 
   // ── Tick ───────────────────────────────────────────────────────────────
   async tick(): Promise<void> {
-    if (this.ticking || this.state.status === 'idle' || this.state.status === 'closed') return;
+    if (this.ticking || this.state.status === 'idle' || (this.state.status === 'closed' && !this.state.closeAsked)) return;
     this.ticking = true;
     try {
       const pool = this.lp();
@@ -384,7 +386,9 @@ export class LpEngine {
       this.state.seen = { g0: v.global0.toString(), g1: v.global1.toString() };
       this.state.lastPrice = v.price;
       this.state.lastPriceAt = this.now();
-      if (this.state.closeAsked && !this.state.step?.hash && !this.state.step?.swap) this.startClose(this.state.closeAsked.toCash);
+      // A close asked while a transaction was out: once it settled, on a running (or closed) bot. A stopped one keeps
+      // the request until it is resumed: KILL ALL and STOP chain send nothing new.
+      if (this.state.closeAsked && this.state.status !== 'stopped' && !this.state.step?.hash && !this.state.step?.swap) this.startClose(this.state.closeAsked.toCash);
       if (this.state.step) {
         // a sent tx is always settled, even while stopped; new work only while running
         if (this.state.status === 'running' || this.state.step.hash || this.state.step.swap) await this.advance(pool, v);
@@ -549,8 +553,8 @@ export class LpEngine {
     for (let i = 0; i < 8 && this.state.step; i++) {
       const before = key();
       await this.advanceOnce(pool, v);
-      // Stopped: the tx already sent is settled, nothing new starts
-      if (this.state.status !== 'running' || this.state.step?.hash || this.state.step?.swap || key() === before) return;
+      // Stopped: the tx already sent is settled, nothing new starts. A close waiting: the old step goes no further
+      if (this.state.status !== 'running' || this.state.closeAsked || this.state.step?.hash || this.state.step?.swap || key() === before) return;
     }
   }
   private async advanceOnce(pool: LpPool, v: PoolView) {
@@ -594,13 +598,14 @@ export class LpEngine {
   private async send(s: LpStep, req: { to: string; data: string; value: bigint }) {
     if (this.state.status !== 'running') return;
     const run = async () => {
+      if (this.state.status !== 'running') return; // stopped while it waited its turn
       s.hash = await (this.executor as LiveExecutor).sendTx(req);
       s.sentAt = this.now();
       this.save();
     };
     const g = this.gate;
     if (g) await g.run(run); else await run();
-    this.log('info', `sent ${s.action} ${s.stage} ${s.hash}`);
+    if (s.hash) this.log('info', `sent ${s.action} ${s.stage} ${s.hash}`);
   }
 
   /** Remove all liquidity, collect principal + fees, burn the NFT (one multicall). */
@@ -744,7 +749,8 @@ export class LpEngine {
       // The gas this bot paid came out of the same coin: sell what the wallet has, less room for this sale's gas
       const room = (await this.executor.balances()).pls - OPEN_GAS_HEADROOM * q.gasPlsEstimate;
       if (room < amount) {
-        if (!(room * v.price >= 2 * q.gasPlsEstimate * v.price)) return this.waitToSell(s, `the wallet has ${(room + OPEN_GAS_HEADROOM * q.gasPlsEstimate).toPrecision(4)} ${this.baseSym}, not enough to sell the ${idle.base.toPrecision(4)} this bot holds and pay the gas`);
+        // What the wallet can't pay for beyond that went on gas (the bot's value already counts the gas it paid)
+        if (!(room * v.price >= 2 * q.gasPlsEstimate * v.price)) { this.ev('info', `Liquidity ${this.label}: the ${idle.base.toPrecision(4)} ${this.baseSym} left in its count went on gas`); return this.closed(true); }
         amount = room;
         q = await this.executor.quote('sell', amount, this.state.limits);
       }

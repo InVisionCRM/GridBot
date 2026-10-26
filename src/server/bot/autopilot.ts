@@ -19,12 +19,12 @@
  * still unconfirmed when the wait ends is settled by its hash later (dropped after its deadline). Values are in the
  * budget's coin at today's prices; the gas its swaps pay comes out of the account's own coin of the chain.
  */
-import type { Holding, MultiBot } from './multi';
+import { FundsError, type Holding, type MultiBot } from './multi';
 import type { Store } from './store';
 import type { Emit } from './activity';
 import type { Mode } from './engine';
 import { ExecError, LiveExecutor, PaperExecutor, type Executor } from './chain';
-import { candidates, HOLD_MS, MIN_PIECE, planBudget, poolId, type Candidate, type PlanOptions } from '../../market/autopilot';
+import { candidates, HOLD_MS, MIN_PIECE, planBudget, poolId, wayKey, type Candidate, type PlanOptions } from '../../market/autopilot';
 import { findRoute, type CoinId, type Hop, type RouteMarket } from '../../market/convertRoute';
 import { NATIVE } from '../../live/swapMath';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
@@ -94,11 +94,17 @@ export interface AutopilotDeps {
   receiptTimeoutMs?: number;
 }
 
+/** Stopped (KILL ALL, STOP chain, turned off, the loss limit) while something was under way: not the pool's fault */
+class Stopped extends Error {}
+
 const fresh = (): AutopilotState => ({ version: 2, on: false, mode: 'paper', options: { ...DEFAULT_OPTIONS }, budgets: [], accounts: [], closeAll: false, reviewedAt: null, scanAt: null, log: [] });
 const fmt = (x: number) => (Math.abs(x) >= 1000 ? x.toFixed(0) : String(Number(x.toPrecision(4))));
 const msg = (e: unknown) => (e as Error).message;
 
-/** Version 1 (before the kill switch, withdrawals, swap deadlines and kept replacements) gets their defaults. */
+/**
+ * Version 1 (before the kill switch, withdrawals, swap deadlines and kept replacements) gets their defaults; a bot's pool
+ * id becomes its market's (version 1 kept a new token's pool address). Its swaps' gas is taken out in the constructor.
+ */
 function upgrade(raw: AutopilotState | null): AutopilotState {
   if (!raw) return fresh();
   if (raw.version === 2) return raw;
@@ -106,7 +112,7 @@ function upgrade(raw: AutopilotState | null): AutopilotState {
     ...raw, version: 2, closeAll: false,
     accounts: raw.accounts.map((a) => ({
       ...a, killed: null, withdrawn: 0,
-      bots: a.bots.map((b) => ({ ...b, reserve: 0, retiring: b.retiring ? { ...b.retiring, alt: null } : null })),
+      bots: a.bots.map((b) => ({ ...b, pool: `${a.budget.chainId}:${b.market}:${b.kind}`, reserve: 0, retiring: b.retiring ? { ...b.retiring, alt: null } : null })),
       pending: a.pending.map((p) => ({ ...p, deadline: Math.floor(p.at / 1000) + 600, forOpen: false })),
     })),
   };
@@ -127,14 +133,21 @@ export class Autopilot {
   private busy = false;
   /** Budget coins per unit of a coin, per chain ("chainId:SYM"), at today's prices (refreshed every tick) */
   private rates = new Map<string, number>();
-  /** Ways that failed to open (candidate id → until): the planner moves on to other pools meanwhile */
+  /** Ways that failed to open (wayKey → until): the planner moves on to other pools meanwhile */
   private failed = new Map<string, number>();
+  /** A turn-on is under way (its wallet checks take a while): one at a time */
+  private turning = false;
+  /** KILL ALL (null) / STOP chain presses, in order: a turn-on that saw one of its chains meanwhile doesn't turn on */
+  private kills: (number | null)[] = [];
   /** Warnings said in the last tick and this one: a failure repeating every minute is said once */
   private warnedBefore = new Set<string>();
   private warnedNow = new Set<string>();
 
   constructor(private readonly d: AutopilotDeps) {
-    this.state = upgrade(d.store.load());
+    const raw = d.store.load();
+    this.state = upgrade(raw);
+    // Version 1 kept its swaps' gas apart; it now comes out of the account's own coin of the chain
+    if (raw && raw.version !== 2) for (const a of this.state.accounts) if (this.chainOn(a.budget.chainId)) this.add(a, this.nativeSym(a.budget.chainId), -a.gasNative);
     d.bot.holdings = () => this.holdings();
     d.bot.onStop = (chainId) => this.kill(chainId);
   }
@@ -178,24 +191,25 @@ export class Autopilot {
     for (const m of this.hub.byChain(chainId)) for (const t of [m.base, m.quote]) if (!t.native && t.address.toLowerCase() === id) return t.symbol;
     throw new Error(`unknown coin ${id}`);
   }
-  /** The app's markets on the chain that may trade live (swaps only go through those) */
-  private markets(chainId: number): RouteMarket[] {
+  /**
+   * The app's markets on the chain: swaps only go through those that may trade live; prices (what a coin is worth) are
+   * read through any of them, so a coin whose market failed a safety re-check still has a value.
+   */
+  private markets(chainId: number, pricing: boolean): RouteMarket[] {
     const id = (t: { native?: boolean; address: string }) => (t.native ? NATIVE : t.address.toLowerCase());
-    return this.hub.byChain(chainId).filter((m) => !m.safety || m.safety.liveAllowed).map((m) => ({ key: m.key, base: id(m.base), quote: id(m.quote) }));
+    return this.hub.byChain(chainId).filter((m) => pricing || !m.safety || m.safety.liveAllowed).map((m) => ({ key: m.key, base: id(m.base), quote: id(m.quote) }));
   }
-  private route(chainId: number, from: string, to: string): Hop[] | null {
+  private route(chainId: number, from: string, to: string, pricing = false): Hop[] | null {
     const a = this.coinId(chainId, from), b = this.coinId(chainId, to);
-    return a && b ? findRoute(a, b, this.markets(chainId)) : null;
+    return a && b ? findRoute(a, b, this.markets(chainId, pricing)) : null;
   }
-  /** A coin from the budget's: the route's pool fees twice (in and back) and budget coins per unit; null: no route or price */
+  /** A coin from the budget's: the route's pool fees twice (in and back) and budget coins per unit (null: no price yet); null: no route */
   private reach(a: Account) {
     const c = a.budget.chainId;
-    return (coin: string): { cost: number; rate: number } | null => {
-      const rate = this.rate(c, coin);
-      if (rate == null) return null;
-      if (coin === a.budget.coin) return { cost: 0, rate };
+    return (coin: string): { cost: number; rate: number | null } | null => {
+      if (coin === a.budget.coin) return { cost: 0, rate: 1 };
       const hops = this.route(c, a.budget.coin, coin);
-      return hops ? { cost: (2 * hops.reduce((s, h) => s + (this.hub.def(h.key).pool.feeBps ?? 30), 0)) / 10_000, rate } : null;
+      return hops ? { cost: (2 * hops.reduce((s, h) => s + (this.hub.def(h.key).pool.feeBps ?? 30), 0)) / 10_000, rate: this.rate(c, coin) } : null;
     };
   }
   /** Budget coins per unit of `sym` (1 for the budget's own coin) */
@@ -209,7 +223,7 @@ export class Autopilot {
     const syms = new Set([this.nativeSym(c), ...Object.keys(a.coins), ...a.bots.map((b) => b.spend), ...a.pending.flatMap((p) => [p.from, p.to]), ...extra]);
     syms.delete(a.budget.coin);
     for (const sym of syms) {
-      const hops = this.route(c, sym, a.budget.coin);
+      const hops = this.route(c, sym, a.budget.coin, true);
       if (!hops) continue;
       let k = 1;
       try {
@@ -234,7 +248,8 @@ export class Autopilot {
     const out: Holding[] = [];
     for (const a of this.state.accounts) {
       const c = a.budget.chainId;
-      if (!this.chainOn(c)) continue;
+      // Off (or stopped by its loss limit) with nothing left to settle: its money is released (a turn-on checks it again)
+      if (!this.chainOn(c) || ((!this.state.on || a.halted) && !this.holds(a))) continue;
       const put = (sym: string, amount: number) => { const t = this.token(c, sym); if (t && amount > 0) out.push({ chainId: c, token: t, amount, id: 'smart trader' }); };
       for (const [sym, x] of Object.entries(a.coins)) put(sym, x);
       for (const p of a.pending) put(p.from, p.amountIn);
@@ -249,32 +264,48 @@ export class Autopilot {
     if (this.state.mode === 'live') return new LiveExecutor(q, rt.signer!, { approval, receiptTimeoutMs: this.d.receiptTimeoutMs ?? 180_000, sharedNonce: rt.nonce });
     return new PaperExecutor(q, () => (side === 'buy' ? { pls: 0, stable: amount } : { pls: amount, stable: 0 }), approval);
   }
+  /** A quote for one hop that would go through (no block, the coins there, under the impact cap); throws why not */
+  private async quoteHop(a: Account, h: Hop, sym: string, amt: number) {
+    const c = a.budget.chainId, limits = this.d.bot.limits, toSym = this.symOf(c, h.to);
+    const ex = this.executor(c, h.key, h.side, amt);
+    const q = await ex.quote(h.side, amt, limits);
+    if (q.block) throw new Error(q.block);
+    if (!q.balanceOk) throw new Error(`swapping ${sym} to ${toSym}: ${q.balanceNote}`);
+    if (q.priceImpact > limits.maxPriceImpact) throw new Error(`swapping ${fmt(amt)} ${sym} to ${toSym} would move the price ${(q.priceImpact * 100).toFixed(2)}% (cap ${(limits.maxPriceImpact * 100).toFixed(1)}%)`);
+    return { ex, q, toSym };
+  }
+  /** What `amount` of `from` would bring in `to`, every hop quoted and checked as a swap would be (nothing is sent) */
+  private async preview(a: Account, from: string, to: string, amount: number): Promise<number> {
+    const hops = this.route(a.budget.chainId, from, to);
+    if (!hops) throw new Error(`no route from ${from} to ${to} over this app's markets`);
+    let amt = amount, sym = from;
+    for (const h of hops) { const { q, toSym } = await this.quoteHop(a, h, sym, amt); amt = q.quotedOutHuman; sym = toSym; }
+    return amt;
+  }
   /**
    * Swap `amount` of `from` into `to` along the route. Before each swap is sent its input moves to a pending record and is
    * saved (a restart while it confirms finds it); the output is added when it lands. Returns what arrived, or null
-   * when a swap is still unconfirmed (settled by its hash on a later tick). Live, the wallet must hold all that live
-   * bots and the trader count of the coin first.
+   * when a swap is still unconfirmed (settled by its hash on a later tick). Live, in its turn in the chain's queue, the
+   * wallet must hold all that live bots and the trader count of the coin (nothing else is mid-transaction then).
    */
   private async swap(a: Account, from: string, to: string, amount: number, forOpen: boolean): Promise<number | null> {
-    const c = a.budget.chainId, rt = this.hub.rt(c), limits = this.d.bot.limits;
+    const c = a.budget.chainId, rt = this.hub.rt(c);
     const hops = this.route(c, from, to);
     if (!hops) throw new Error(`no route from ${from} to ${to} over this app's markets`);
     let amt = amount, sym = from;
     for (const h of hops) {
-      if (a.killed) throw new Error(`${a.killed}: nothing is sent`);
-      const toSym = this.symOf(c, h.to);
-      if (this.state.mode === 'live') await this.d.bot.assertBooked(c, this.token(c, sym)!);
-      const ex = this.executor(c, h.key, h.side, amt);
-      const q = await ex.quote(h.side, amt, limits);
-      if (q.block) throw new Error(q.block);
-      if (!q.balanceOk) throw new Error(`swapping ${sym} to ${toSym}: ${q.balanceNote}`);
-      if (q.priceImpact > limits.maxPriceImpact) throw new Error(`swapping ${fmt(amt)} ${sym} to ${toSym} would move the price ${(q.priceImpact * 100).toFixed(2)}% (cap ${(limits.maxPriceImpact * 100).toFixed(1)}%)`);
+      if (a.killed) throw new Stopped(`${a.killed}: nothing is sent`);
+      const { ex, q, toSym } = await this.quoteHop(a, h, sym, amt);
       const p: PendingSwap = { hash: null, key: h.key, side: h.side, from: sym, to: toSym, amountIn: amt, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, at: this.now(), deadline: Number(q.call.deadline), forOpen };
       this.add(a, sym, -amt);
       a.pending.push(p);
       this.save();
       try {
-        const f = await rt.gate.run(() => ex.execute(q, { canSend: () => !a.killed, onSent: (stage, hash) => { if (stage === 'swap') { p.hash = hash; this.save(); } } }));
+        const coin = sym;
+        const f = await rt.gate.run(async () => {
+          if (this.state.mode === 'live') await this.d.bot.assertBooked(c, this.token(c, coin)!);
+          return ex.execute(q, { canSend: () => !a.killed, onSent: (stage, hash) => { if (stage === 'swap') { p.hash = hash; this.save(); } } });
+        });
         a.pending = a.pending.filter((x) => x !== p);
         this.gas(a, f.gasNative);
         amt = f.amountOutHuman; sym = toSym;
@@ -294,11 +325,11 @@ export class Autopilot {
   }
   /**
    * Swaps sent and not confirmed: credited when they land, refunded when they reverted or never mined before their
-   * deadline. One never sent (the app stopped before it was) is refunded. true = a swap into a pool's coin landed.
+   * deadline. One never sent (the app stopped before it was) is refunded. A swap into a pool's coin that landed makes a
+   * review due (it opens that bot).
    */
-  private async settleSwaps(a: Account): Promise<boolean> {
+  private async settleSwaps(a: Account) {
     const c = a.budget.chainId;
-    let landed = false;
     for (const p of [...a.pending]) {
       const done = (ok: boolean) => { a.pending = a.pending.filter((x) => x !== p); if (!ok) this.add(a, p.from, p.amountIn); this.save(); };
       if (p.hash == null) { done(false); this.say(`a swap of ${fmt(p.amountIn)} ${p.from} was never sent (the app stopped first); the ${p.from} is back`, 'warn', c); continue; }
@@ -308,11 +339,10 @@ export class Autopilot {
         continue;
       }
       this.gas(a, r.gasNative);
-      if (r.ok) { this.add(a, p.to, r.amountOutHuman); landed ||= p.forOpen; }
+      if (r.ok) { this.add(a, p.to, r.amountOutHuman); if (p.forOpen) this.state.reviewedAt = null; }
       done(r.ok);
       this.say(r.ok ? `swap ${p.hash.slice(0, 10)}… landed: ${fmt(r.amountOutHuman)} ${p.to}` : `swap ${p.hash.slice(0, 10)}… reverted; the ${p.from} is back`, r.ok ? 'info' : 'warn', c);
     }
-    return landed;
   }
   /** Coins other than the budget's (back from a bot that spent them) are swapped back to it. */
   private async sweep(a: Account) {
@@ -332,6 +362,7 @@ export class Autopilot {
   /** Mode and budgets change only while it is off and its accounts hold nothing but their budget's coin; options any time. */
   configure(p: { mode: Mode; options: Partial<AutoOptions>; budgets: Budget[] }) {
     if (this.state.on) throw new Error('Turn it off before changing the mode or the budgets.');
+    if (this.busy || this.turning) throw new Error('It is busy; try again in a moment.');
     const busy = this.state.accounts.find((a) => this.holds(a));
     if (busy) throw new Error(`The ${this.chainName(busy.budget.chainId)} budget still has bots, a swap or coins other than ${busy.budget.coin} to settle. Turn it off with "close its bots" and let it finish first.`);
     if (p.mode !== 'paper' && p.mode !== 'live') throw new Error('Mode must be paper or live.');
@@ -354,46 +385,69 @@ export class Autopilot {
   }
 
   /**
-   * On: the first time (or after new budgets) an account per budget, live only when the wallet holds it beyond what live
-   * bots use; after a turn-off or a stop, the accounts carry on as they are (a budget stopped by its loss limit stays
-   * stopped). Also clears a KILL ALL / STOP chain.
+   * On: the first time (or after new budgets) an account per budget; after a turn-off the accounts carry on as they are
+   * (a budget stopped by its loss limit stays stopped; one stopped by KILL ALL / STOP chain waits for Carry on). Live, the
+   * money it will use must be in the wallet beyond what live bots use (it was released while it was off). A KILL ALL or
+   * STOP of one of its chains pressed meanwhile keeps it off.
    */
   async turnOn() {
+    if (this.turning) throw new Error('It is already turning on.');
     const offs = this.state.accounts.flatMap((a) => a.bots.filter((b) => b.retiring?.why === 'turned off'));
     if (offs.some((b) => b.retiring!.started)) throw new Error('Its bots are still closing to cash from turning it off. Turn it on again once they are back.');
-    for (const b of offs) b.retiring = null; // asked to close but not started (a stopped bot): cancelled
-    if (this.state.on && !this.state.accounts.some((a) => a.killed)) return;
+    if (this.state.on) return;
     if (!this.state.budgets.length) throw new Error('Add a budget first.');
     const live = this.state.mode === 'live';
     if (live) for (const b of this.state.budgets) if (!this.hub.rt(b.chainId).signer) throw new Error(`Live needs a signing key on ${this.hub.chain(b.chainId).name}.`);
-    if (!this.state.accounts.length) {
-      if (live) for (const b of this.state.budgets) await this.d.bot.assertCoin(b.chainId, this.token(b.chainId, b.coin)!, b.amount);
-      this.state.accounts = this.state.budgets.map((b) => ({ budget: b, coins: { [b.coin]: b.amount }, gasNative: 0, bots: [], pending: [], startedAt: this.now(), halted: null, killed: null, withdrawn: 0 }));
-    }
-    for (const a of this.state.accounts) a.killed = null;
-    this.state.on = true;
-    this.state.closeAll = false;
-    this.state.reviewedAt = null; // a review is due: now, or on the next check if one is running
-    this.say(`on (${this.state.mode}): ${this.state.budgets.map((b) => `${fmt(b.amount)} ${b.coin} on ${this.hub.chain(b.chainId).name}`).join(', ')}`);
-    this.save();
+    this.turning = true;
+    try {
+      const k = this.kills.length, coin = (c: number, sym: string) => this.token(c, sym)!;
+      if (live && !this.state.accounts.length) for (const b of this.state.budgets) await this.d.bot.assertCoin(b.chainId, coin(b.chainId, b.coin), b.amount);
+      if (live) for (const a of this.state.accounts) {
+        const x = a.coins[a.budget.coin] ?? 0;
+        if (!a.halted && !this.holds(a) && x > 0) await this.d.bot.assertCoin(a.budget.chainId, coin(a.budget.chainId, a.budget.coin), x);
+      }
+      if (this.kills.slice(k).some((c) => c == null || this.state.budgets.some((b) => b.chainId === c))) throw new Error('KILL ALL or STOP was pressed while it was turning on, so it stays off.');
+      for (const b of offs) b.retiring = null; // asked to close but never started (a stopped bot): cancelled by turning on
+      if (!this.state.accounts.length) this.state.accounts = this.state.budgets.map((b) => ({ budget: b, coins: { [b.coin]: b.amount }, gasNative: 0, bots: [], pending: [], startedAt: this.now(), halted: null, killed: null, withdrawn: 0 }));
+      this.state.on = true;
+      this.state.closeAll = false;
+      this.state.reviewedAt = null; // a review is due: now, or on the next check if one is running
+      this.say(`on (${this.state.mode}): ${this.state.budgets.map((b) => `${fmt(b.amount)} ${b.coin} on ${this.hub.chain(b.chainId).name}`).join(', ')}`);
+      this.save();
+    } finally { this.turning = false; }
     if (this.busy) { this.say('the first review runs with the next check (within a minute)'); return; }
     await this.review(true);
   }
-  /** sell = close every bot to cash (its money comes back to the budget); otherwise the bots keep running unmanaged. */
+  /**
+   * sell = close every bot to cash (its money comes back to the budget; this also lifts a KILL ALL / STOP chain, as an
+   * explicit ask to send those closes); otherwise the bots keep running unmanaged.
+   */
   turnOff(sell: boolean) {
     this.state.on = false;
-    if (sell) this.state.closeAll = true;
+    if (sell) { this.state.closeAll = true; for (const a of this.state.accounts) a.killed = null; }
     this.say(sell ? 'off: closing its bots to cash' : 'off: its bots keep running on their own; turn it on again to manage them');
     this.save();
   }
-  /** KILL ALL (chainId null; also turns it off) or STOP chain: nothing more is sent for those budgets until it is turned on again. */
+  /**
+   * KILL ALL (chainId null) or STOP chain: nothing more is sent for those budgets (no swap, close or new bot) until
+   * Carry on. On or off is left as it was.
+   */
   kill(chainId: number | null) {
+    this.kills.push(chainId);
     const why = chainId == null ? 'KILL ALL' : `STOP ${this.chainName(chainId)}`;
     const hit = this.state.accounts.filter((a) => chainId == null || a.budget.chainId === chainId);
-    if (!hit.length && (chainId != null || !this.state.on)) return; // nothing of the trader's there
+    if (!hit.length) return;
     for (const a of hit) a.killed = why;
-    if (chainId == null) this.state.on = false;
-    this.say(`${why}: nothing more is sent${hit.length ? ` for ${hit.map((a) => this.chainName(a.budget.chainId)).join(', ')}` : ''}; turn it on again to carry on`, 'warn', chainId ?? undefined);
+    this.say(`${why}: nothing more is sent for ${hit.map((a) => this.chainName(a.budget.chainId)).join(', ')} until you carry on`, 'warn', chainId ?? undefined);
+    this.save();
+  }
+  /** After KILL ALL / STOP chain: that budget sends again (closes, swaps back, and new bots while it is on). */
+  carryOn(chainId: number) {
+    const a = this.state.accounts.find((x) => x.budget.chainId === chainId && x.killed);
+    if (!a) throw new Error(`The ${this.chainName(chainId)} budget isn't stopped.`);
+    a.killed = null;
+    this.state.reviewedAt = null;
+    this.say(`${this.chainName(chainId)}: carrying on after the stop`, 'info', chainId);
     this.save();
   }
 
@@ -406,18 +460,19 @@ export class Autopilot {
     this.warnedBefore = this.warnedNow;
     this.warnedNow = new Set();
     try {
-      let landed = false;
       for (const a of this.state.accounts) {
         if (!this.chainOn(a.budget.chainId)) { this.warn(`${this.chainName(a.budget.chainId)}: its budget waits until the chain is on again`); continue; }
-        try { await this.refreshRates(a); if (await this.settleSwaps(a)) landed = true; } catch (e) { this.warn(`${this.chainName(a.budget.chainId)}: ${msg(e)}`, a.budget.chainId); }
+        try { await this.refreshRates(a); await this.settleSwaps(a); } catch (e) { this.warn(`${this.chainName(a.budget.chainId)}: ${msg(e)}`, a.budget.chainId); }
       }
-      const back = this.settle();
+      this.settle();
       if (this.state.on) {
         this.lossLimits();
         let scan: ScanView | null | undefined;
         try { scan = await this.d.scan(); } catch (e) { this.warn(`couldn't read the opportunity scan: ${msg(e)}`); }
+        // Due: a day since the last review, a new scan, money back from a bot, or a swap for a new bot landed (those
+        // set reviewedAt to null, so a review missed now, e.g. the scan unread, still comes on the next check)
         const due = this.state.reviewedAt == null || this.now() - this.state.reviewedAt >= REVIEW_MS || (scan?.at != null && scan.at !== this.state.scanAt);
-        if (scan !== undefined && (due || back || landed)) await this.reviewNow(false, scan);
+        if (scan !== undefined && due) await this.reviewNow(false, scan);
       }
       this.settle(); // closes decided this tick start now
       for (const a of this.state.accounts) if (this.chainOn(a.budget.chainId)) await this.sweep(a);
@@ -430,12 +485,12 @@ export class Autopilot {
   }
 
   /**
-   * Bots back in cash are removed and their value credited (once there is a reading of it); closes asked for start,
-   * except on a bot that is stopped (by hand, KILL ALL or a safety pause: it waits until it runs again) or on a stopped
-   * budget. A liquidity bot closed by hand is closed to cash. true = money came back.
+   * Bots back in cash are removed and their value credited (once there is a reading of it), and a review is due. A bot
+   * to close whose close isn't under way (never asked, or it was started or resumed again since) is asked to close to
+   * cash, except a bot that is stopped (by hand, KILL ALL or a safety pause: it waits until it runs again) or one of a
+   * stopped budget. A liquidity bot closed by hand is closed to cash.
    */
-  private settle(): boolean {
-    let back = false;
+  private settle() {
     for (const a of this.state.accounts) {
       const c = a.budget.chainId;
       if (!this.chainOn(c)) continue;
@@ -455,13 +510,13 @@ export class Autopilot {
           a.bots = a.bots.filter((x) => x !== b);
           const r = value - b.capital;
           this.say(`closed ${b.label} (${b.retiring?.why ?? 'closed to cash by hand'}): ${fmt(value)} ${b.spend} back, ${r >= 0 ? '+' : ''}${fmt(r)} on the ${fmt(b.capital)} it had`, r >= 0 ? 'success' : 'warn', c);
+          this.state.reviewedAt = null;
           this.save();
-          back = true;
           continue;
         }
         const st = this.d.bot.botStatus(b.kind, b.id);
         if (!b.retiring && (this.state.closeAll || st.status === 'closed')) b.retiring = { why: this.state.closeAll ? 'turned off' : 'closed by hand', started: false, alt: null };
-        if (!b.retiring || b.retiring.started || a.killed || (st.status !== 'running' && st.status !== 'closed')) continue;
+        if (!b.retiring || st.closing || a.killed || (st.status !== 'running' && st.status !== 'closed')) continue;
         try {
           if (b.kind === 'grid') this.d.bot.gridToCash(b.id); else this.d.bot.closeLp(b.id, true);
           b.retiring.started = true;
@@ -469,7 +524,6 @@ export class Autopilot {
         } catch (e) { this.warn(`couldn't start closing ${b.label}: ${msg(e)}`, c); }
       }
     }
-    return back;
   }
 
   /** A budget worth stopLossPct less than its amount (less what was taken out by hand) closes every bot to cash and stops. */
@@ -477,7 +531,10 @@ export class Autopilot {
     for (const a of this.state.accounts) {
       if (a.halted || a.killed || !this.chainOn(a.budget.chainId)) continue;
       const v = this.value(a), base = a.budget.amount - a.withdrawn;
-      if (v == null || v > base * (1 - this.state.options.stopLossPct)) continue;
+      // Everything taken out by hand: nothing left to protect
+      if (!(base > a.budget.amount * SWEEP_DUST)) continue;
+      if (v == null) { this.warn(`${this.chainName(a.budget.chainId)}: something in this budget has no price right now, so its loss limit isn't checked`, a.budget.chainId); continue; }
+      if (v > base * (1 - this.state.options.stopLossPct)) continue;
       a.halted = `worth ${fmt(v)} ${a.budget.coin}, ${((1 - v / base) * 100).toFixed(1)}% under the ${fmt(base)} it started with (limit ${(this.state.options.stopLossPct * 100).toFixed(0)}%)`;
       for (const b of a.bots) if (!b.retiring) b.retiring = { why: 'loss limit', started: false, alt: null };
       this.say(`loss limit: ${a.halted}; closing its bots to cash and stopping this budget`, 'warn', a.budget.chainId);
@@ -508,6 +565,7 @@ export class Autopilot {
     this.busy = true;
     try {
       for (const a of this.state.accounts) if (this.chainOn(a.budget.chainId)) await this.refreshRates(a);
+      this.settle(); // bots removed or closed since the last check are settled first
       await this.reviewNow(force);
       this.settle();
     } finally { this.save(); this.busy = false; }
@@ -543,17 +601,20 @@ export class Autopilot {
     const now = this.now();
     for (const [id, until] of this.failed) if (until <= now) this.failed.delete(id);
     const { cands, gone } = candidates(items, o, this.reach(a));
-    const runs = (b: AutoBot) => this.d.bot.botStatus(b.kind, b.id).status === 'running';
-    // Bots closing or not running (stopped by hand, KILL ALL, a safety pause) keep their slot and pair, but aren't judged
-    const held = a.bots.filter((b) => !b.retiring && runs(b)), parked = a.bots.filter((b) => b.retiring || !runs(b));
+    // Bots closing or not running (stopped by hand, KILL ALL, a safety pause) keep their slot and pair, but aren't judged.
+    // One removed by hand since the last check isn't counted (the next settle drops it).
+    const bots = a.bots.filter((b) => this.d.bot.hasBot(b.kind, b.id)), runs = (b: AutoBot) => this.d.bot.botStatus(b.kind, b.id).status === 'running';
+    const held = bots.filter((b) => !b.retiring && runs(b)), parked = bots.filter((b) => b.retiring || !runs(b));
     const plan = planBudget({
-      now, budget: a.budget.amount, cash: this.free(a), slots: o.slots, cands: cands.filter((x) => !this.failed.has(x.id)), gone,
-      held: held.map((b) => ({ id: b.id, pool: b.pool, pair: b.pair, label: b.label, openedAt: b.openedAt, feeBps: b.feeBps })),
-      retiring: parked.map((b) => ({ pool: b.pool, pair: b.pair, alt: b.retiring?.alt ?? null })),
+      now, budget: a.budget.amount, cash: this.free(a), slots: o.slots, cands: cands.filter((x) => !this.failed.has(wayKey(x.o, x.how))), gone,
+      held: held.map((b) => ({ id: b.id, pool: b.pool, pair: b.pair, label: b.label, openedAt: b.openedAt, feeBps: b.feeBps, capital: b.cost })),
+      parked: parked.map((b) => ({ pool: b.pool, pair: b.pair, closing: !!b.retiring, alt: b.retiring?.alt ?? null })),
     });
     let opened = 0, retired = 0;
     for (const d of plan) {
       if (!this.state.on || a.halted || a.killed) break; // turned off or stopped while an open was under way (live, minutes)
+      // A swap for an open still confirming: the other opens wait for the review that follows when it lands
+      if (d.kind === 'open' && a.pending.length) break;
       if (d.kind === 'retire') {
         const b = a.bots.find((x) => x.id === d.id)!;
         b.retiring = { why: d.why, started: false, alt: d.alt };
@@ -572,38 +633,54 @@ export class Autopilot {
 
   /**
    * A new bot with `capital` (in the budget's coin) put into the pool's coin: what the account holds of that coin
-   * first, then swapped from the budget's coin, then from any other coin it holds. Everything that can fail without
-   * the pool's coin (its market, the safety check, a price) is checked before any swap. A way that fails to open is
-   * skipped until the next daily review.
+   * first, then swapped from the budget's coin, then from any other coin it holds. Everything that can fail before a
+   * swap is checked first: its market, the safety check, a price, and every swap into the pool's coin is planned and
+   * quoted (route, impact, the coins in the wallet) before the first is sent. Turned off, stopped (KILL ALL, STOP chain,
+   * the loss limit) or set up anew meanwhile: nothing more is sent, and a bot that started anyway is stopped at once. A
+   * way that fails to open for a reason of its own is skipped until the next daily review.
    */
   private async open(a: Account, c: Candidate, capital: number, why: string): Promise<boolean> {
     const bot = this.d.bot, mode = this.state.mode, chainId = a.budget.chainId, spend = c.o.spend;
+    const alive = () => { if (!this.state.on || a.killed || a.halted || !this.state.accounts.includes(a)) throw new Stopped(`stopped meanwhile (${a.killed ?? (a.halted ? 'the loss limit' : 'turned off')}): nothing more is sent`); };
     try {
       const market = c.o.key ?? await bot.addOpportunityMarket({ chainId, ...c.o.ref });
+      alive();
       const def = this.hub.def(market);
       if (def.quote.symbol !== spend) throw new Error(`its market spends ${def.quote.symbol}, not ${spend}`);
       if (mode === 'live' && def.safety && !def.safety.liveAllowed) throw new Error(`it failed its safety check (${def.safety.risk} risk), so it can only be paper traded`);
       const price = c.how === 'grid' ? (await bot.prices([market]))[market] : null;
       if (c.how === 'grid' && !(price! > 0)) throw new Error('no price for it right now');
+      alive();
       const r = this.rate(chainId, spend);
       if (r == null) throw new Error(`no price for ${spend} yet`);
-      const want = capital / r;
-      let paid = 0, got = 0;
-      for (const from of [a.budget.coin, ...Object.keys(a.coins).filter((s) => s !== a.budget.coin && s !== spend)]) {
-        const short = want - Math.max(0, a.coins[spend] ?? 0), rf = this.rate(chainId, from), have = a.coins[from] ?? 0;
-        if (short <= want * 0.001) break;
-        if (rf == null || !(have > 0) || from === spend) continue;
-        const x = Math.min(have, (short * r) / rf);
-        if (x * rf < a.budget.amount * SWEEP_DUST) continue;
-        const out = await this.swap(a, from, spend, x, true);
-        if (out == null) { this.say(`the swap into ${spend} for ${c.label} is waiting to confirm; it opens once it lands`, 'info', chainId); return false; }
-        paid += x * rf; got += out;
-      }
       // Spending the chain's own coin: the gas reserve a start needs comes out of the same coins and goes with the bot
-      const have = Math.max(0, a.coins[spend] ?? 0), native = spend === this.nativeSym(chainId), cfg = reserveCfg(bot.limits);
-      const amount = native ? Math.max(0, Math.min(want, have / (1 + cfg.pct), have - cfg.fixed)) : Math.min(want, have);
-      const reserve = native ? gasReserve(amount, cfg) : 0;
-      if (!(amount * r >= capital * MIN_PIECE)) throw new Error(`only ${fmt(amount)} ${spend} could be put in, too little of the ${fmt(capital)} ${a.budget.coin} planned`);
+      const native = spend === this.nativeSym(chainId), cfg = reserveCfg(bot.limits), want = capital / r;
+      const sized = (h: number) => (native ? Math.max(0, Math.min(want, h / (1 + cfg.pct), h - cfg.fixed)) : Math.min(want, h));
+      const enough = (h: number) => { if (!(sized(h) * r >= capital * MIN_PIECE)) throw new Error(`only ${fmt(sized(h))} ${spend} could be put in, too little of the ${fmt(capital)} ${a.budget.coin} planned`); };
+      const legs: { from: string; x: number }[] = [];
+      let planned = Math.max(0, a.coins[spend] ?? 0);
+      for (const from of [a.budget.coin, ...Object.keys(a.coins).filter((s) => s !== a.budget.coin && s !== spend)]) {
+        const short = want - planned, rf = this.rate(chainId, from), hold = a.coins[from] ?? 0;
+        if (short <= want * 0.001) break;
+        if (rf == null || !(hold > 0) || from === spend) continue;
+        const x = Math.min(hold, (short * r) / rf);
+        if (x * rf < a.budget.amount * SWEEP_DUST) continue;
+        if (mode === 'live') await bot.assertBooked(chainId, this.token(chainId, from)!);
+        planned += await this.preview(a, from, spend, x);
+        legs.push({ from, x });
+      }
+      enough(planned);
+      alive();
+      let paid = 0, got = 0;
+      for (const l of legs) {
+        const out = await this.swap(a, l.from, spend, l.x, true);
+        if (out == null) { this.say(`the swap into ${spend} for ${c.label} is waiting to confirm; it opens once it lands`, 'info', chainId); return false; }
+        paid += l.x * this.rate(chainId, l.from)!; got += out;
+        alive();
+      }
+      const have = Math.max(0, a.coins[spend] ?? 0);
+      enough(have);
+      const amount = sized(have), reserve = native ? gasReserve(amount, cfg) : 0;
       this.add(a, spend, -(amount + reserve));
       let id: string;
       try {
@@ -617,13 +694,17 @@ export class Autopilot {
         cost: (amount + reserve) * r + Math.max(0, paid - got * r),
         openedAt: this.now(), expected: c.expected, feeBps: c.feeBps, retiring: null,
       });
-      this.failed.delete(c.id);
+      this.failed.delete(wayKey(c.o, c.how));
       this.say(`opened ${c.label} as a ${c.how === 'lp' ? `liquidity range ±${(c.o.lp!.bandPct * 100).toFixed(0)}%` : `grid ±${(c.o.grid!.bandPct * 100).toFixed(0)}%, ${c.o.grid!.gridCount} levels`} with ${fmt(amount)} ${spend}${spend !== a.budget.coin ? ` (≈ ${fmt(amount * r)} ${a.budget.coin})` : ''}: ${why}`, 'success', chainId);
+      // KILL ALL / STOP while it was starting: stopped at once (it keeps its slot; Resume and Carry on bring it back)
+      if (a.killed) { if (c.how === 'grid') bot.stop(id); else bot.stopLp(id); this.say(`${c.label} started as ${a.killed} came: stopped at once`, 'warn', chainId); }
       this.save();
       return true;
     } catch (e) {
-      this.failed.set(c.id, this.now() + REVIEW_MS);
-      this.say(`couldn't open ${c.label}: ${msg(e)}; it is skipped until the next daily review`, 'warn', chainId);
+      // A failure that isn't the pool's (stopped meanwhile, the wallet short) doesn't hold the pool back
+      const own = !(e instanceof Stopped) && !(e instanceof FundsError) && !a.killed && this.state.on;
+      if (own) this.failed.set(wayKey(c.o, c.how), this.now() + REVIEW_MS);
+      this.say(`couldn't open ${c.label}: ${msg(e)}${own ? '; it is skipped until the next daily review' : ''}`, 'warn', chainId);
       return false;
     }
   }
@@ -641,7 +722,7 @@ export class Autopilot {
           bots: a.bots.map((b) => {
             const here = on && this.d.bot.hasBot(b.kind, b.id);
             const v = here ? this.d.bot.botValue(b.kind, b.id) : null, r = this.rate(c, b.spend), st = here ? this.d.bot.botStatus(b.kind, b.id) : null;
-            return { ...b, value: v, valueBudget: v != null && r != null ? (v + b.reserve) * r : null, holdUntil: b.openedAt + HOLD_MS, status: st?.status ?? null, closing: st?.closing ?? false };
+            return { ...b, value: v, valueBudget: v != null && r != null ? (v + b.reserve) * r : null, holdUntil: b.openedAt + HOLD_MS, status: st?.status ?? null, closing: st?.closing ?? false, cashedOut: here ? this.d.bot.botCashedOut(b.kind, b.id) : false };
           }),
         };
       }),

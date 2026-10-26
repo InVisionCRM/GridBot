@@ -456,6 +456,57 @@ describe('GridEngine close to cash', () => {
     expect(engine.paperBalances().pls).toBeCloseTo(held * 0.25, 6);
   });
 
+  it('a new Start drops a paused close to cash (the grid trades again); Resume after a finished close clears "cashed out"', async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'paper', ...grid });
+    chain.setPrice(P0 * 0.935);
+    await engine.tick();
+    engine.closeToCash();
+    engine.stop();
+    await engine.start({ mode: 'paper', lowerPrice: P0 * 0.7, upperPrice: P0 * 0.95, gridCount: 10, totalCapitalUsd: 50 });
+    expect(engine.state).toMatchObject({ status: 'running', cashOut: null, cashedOutAt: null });
+    await engine.tick();
+    expect(engine.state.status).toBe('running');
+    expect(engine.state.trades.some((t) => t.cashOut)).toBe(false);
+    // a close that finished, then Resume: running again, not cashed out
+    engine.closeToCash();
+    for (let i = 0; i < 3; i++) await engine.tick();
+    expect(engine.state.cashedOutAt).not.toBeNull();
+    engine.resume();
+    expect(engine.state.cashedOutAt).toBeNull();
+  });
+
+  it('a close to cash saved before failures were counted gets a count on load (the backoff works)', async () => {
+    let now = 1_800_000_000_000;
+    const store = new MemoryStore<BotState>();
+    const { chain, engine } = make(undefined, store, undefined, { now: () => now });
+    await engine.start({ mode: 'live', ...grid });
+    chain.setPrice(P0 * 0.935);
+    await engine.tick();
+    engine.closeToCash();
+    const { fails: _f, ...old } = engine.state.cashOut!;
+    store.save({ ...engine.state, cashOut: old as never });
+    const again = make(chain, store, undefined, { now: () => now }).engine;
+    expect(again.state.cashOut!.fails).toBe(0);
+    chain.faults = Array(4).fill('revert');
+    await again.tick();
+    expect(again.state.cashOut).toMatchObject({ fails: 1, waitUntil: now + 10 * 60_000 });
+  });
+
+  it("selling the chain's own coin back with only a little more of it in the wallet than the grid holds: halved until it fits with its gas", async () => {
+    let now = 1_800_000_000_000;
+    const { chain, engine } = make(undefined, undefined, undefined, { now: () => now });
+    await engine.start({ mode: 'live', ...grid });
+    chain.setPrice(P0 * 0.935);
+    await engine.tick();
+    const held = engine.status().pnl.plsHeld;
+    chain.pls = BigInt(Math.round((held + 0.05) * 1e18)); // a sale's gas is 0.1 PLS
+    engine.closeToCash();
+    for (let i = 0; i < 20 && engine.state.cashOut; i++) { await engine.tick(); now += 11 * 60_000; }
+    expect(engine.state).toMatchObject({ status: 'stopped', cashOut: null });
+    expect(engine.state.cashedOutAt).not.toBeNull();
+  });
+
   it('a sale that keeps failing (reverts) waits 10, 20, 40, 80 minutes, then stops after 5; Resume tries again', async () => {
     let now = 1_800_000_000_000;
     const { chain, engine } = make(undefined, undefined, undefined, { now: () => now });

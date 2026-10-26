@@ -113,8 +113,8 @@ export interface Fill {
   gasNative?: number;
   /** amountOut parsed from receipt logs or balance change (false = fell back to amountOutMin / paper) */
   fromReceipt: boolean;
-  /** Where amountOut came from: the receipt's net Transfer / Withdrawal logs to the wallet (actual, after tax), amountOutMin, paper sim */
-  outSource?: 'log' | 'minOut' | 'paper';
+  /** Where amountOut came from: the receipt's net Transfer / Withdrawal logs to the wallet (actual, after tax); for a taxed coin the wallet's balance change when smaller (a token may log the gross amount); amountOutMin; paper sim */
+  outSource?: 'log' | 'balance' | 'minOut' | 'paper';
   /** Expected (quoted, after known tax) output */
   expectedOutHuman?: number;
   /** 1 − actual / expected (positive = received less than expected: slippage or a tax increase) */
@@ -429,9 +429,10 @@ export function parseAmountOut(receipt: ReceiptLike, account: string, tokenOut: 
   for (const log of receipt.logs) {
     try {
       if (tokenOut === NATIVE && log.address.toLowerCase() === wrappedNative.toLowerCase()) {
-        if (log.topics[0] === transferTopic && log.topics[2] === ZERO_TOPIC) return ERC20.parseLog(log)!.args.value as bigint;
+        // The router unwraps the wallet's coins last; a taxed token may swap its own tax back to the coin earlier on
+        if (log.topics[0] === transferTopic && log.topics[2] === ZERO_TOPIC) sum = ERC20.parseLog(log)!.args.value as bigint;
         const ev = WPLS_EVENTS.parseLog(log);
-        if (ev?.name === 'Withdrawal') return ev.args.wad as bigint;
+        if (ev?.name === 'Withdrawal') sum = ev.args.wad as bigint;
       } else if (tokenOut !== NATIVE && log.address.toLowerCase() === tokenOut.toLowerCase()) {
         const ev = ERC20.parseLog(log);
         if (ev?.name === 'Transfer' && (ev.args.to as string).toLowerCase() === me) sum = (sum ?? 0n) + (ev.args.value as bigint);
@@ -597,6 +598,11 @@ export class LiveExecutor implements Executor {
     if (!hooks.canSend()) throw fail('stopped between approve and swap', { aborted: true });
 
     const me = await this.address();
+    // A taxed coin may log the gross amount to the wallet and take its tax without a Transfer: what the wallet gained
+    // caps the receipt's figure (another tx landing meanwhile can only make the gain larger, never smaller than ours).
+    const capByBalance = q.tokenOut !== NATIVE && (q.taxOutPct > 0 || q.feeOnTransfer);
+    let pre: bigint | null = null;
+    if (capByBalance) { try { pre = await this.quoter.tokenBalance(me, q.tokenOut); } catch { pre = null; } }
     let tx: SentTx;
     try {
       tx = await this.send({ to: q.call.to, data: q.call.data, value: q.call.value });
@@ -618,6 +624,12 @@ export class LiveExecutor implements Executor {
     let out: bigint, outSource: Fill['outSource'];
     if (parsed != null && parsed > 0n) { out = parsed; outSource = 'log'; }
     else { out = q.walletMin ?? q.call.amountOutMin; outSource = 'minOut'; }
+    if (capByBalance && pre != null && outSource === 'log') {
+      let post: bigint | null = null;
+      try { post = await this.quoter.tokenBalance(me, q.tokenOut); } catch { post = null; }
+      const gain = post != null ? post - pre : null;
+      if (gain != null && gain > 0n && gain < out) { out = gain; outSource = 'balance'; }
+    }
     const outHuman = fromUnits(out, q.decimalsOut);
     return {
       txHash: tx.hash, approvalTxHash, amountInHuman: q.amountInHuman, amountOutHuman: outHuman,

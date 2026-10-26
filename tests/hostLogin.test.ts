@@ -235,7 +235,10 @@ describe('owner gateway', () => {
 
   it('refuses a forged, expired, or old owner cookie, and a friend id signed as the owner', async () => {
     const { gw, hostSeen, ownerCookie, alex } = await setup();
-    const flip = ownerCookie.slice(0, -1) + (ownerCookie.endsWith('a') ? 'b' : 'a');
+    // The signature's first character: every one of its bits is the signature's (the last one's lowest bits are padding,
+    // so changing only those can leave the cookie valid)
+    const at = ownerCookie.lastIndexOf('.') + 1;
+    const flip = ownerCookie.slice(0, at) + (ownerCookie[at] === 'a' ? 'b' : 'a') + ownerCookie.slice(at + 1);
     for (const cookie of [
       flip,
       `gb_session=${signSession(sessionKey, { f: HOST_ID, s: 1, e: Date.now() - 1000, role: 'host' })}`,

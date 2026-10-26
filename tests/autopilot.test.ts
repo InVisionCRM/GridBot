@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { candidates, HOLD_MS, planBudget, poolId, switchCost, type Candidate, type Held, type PlanOptions, type Retiring } from '../src/market/autopilot';
+import { candidates, HOLD_MS, planBudget, poolId, switchCost, type Candidate, type Held, type Parked, type PlanOptions } from '../src/market/autopilot';
 import { GRID_PER_SWING, LP_REPEAT, type Opportunity } from '../src/market/scan';
 
 const NOW = 1_800_000_000_000;
@@ -21,9 +21,9 @@ const cand = (label: string, expected: number, o: Partial<Candidate> = {}): Cand
 };
 /** USDG is the budget's coin; ETH costs 0.1% each way and is 3,000 USDG */
 const reach = (coin: string) => (coin === 'USDG' ? { cost: 0, rate: 1 } : coin === 'ETH' ? { cost: 0.002, rate: 3000 } : null);
-const held = (label: string, ageMs: number, o: Partial<Held> = {}): Held => ({ id: `bot-${label}`, pool: `4663:robinhood:${label}:grid`, pair: `4663:${label}/USDG`, label, openedAt: NOW - ageMs, feeBps: 30, ...o });
-const plan = (p: { cash?: number; slots?: number; cands: Candidate[]; held?: Held[]; retiring?: Retiring[]; gone?: Map<string, string> }) =>
-  planBudget({ now: NOW, budget: 900, cash: p.cash ?? 0, slots: p.slots ?? 3, cands: p.cands, gone: p.gone ?? new Map(), held: p.held ?? [], retiring: p.retiring ?? [] });
+const held = (label: string, ageMs: number, o: Partial<Held> = {}): Held => ({ id: `bot-${label}`, pool: `4663:robinhood:${label}:grid`, pair: `4663:${label}/USDG`, label, openedAt: NOW - ageMs, feeBps: 30, capital: 300, ...o });
+const plan = (p: { cash?: number; slots?: number; cands: Candidate[]; held?: Held[]; parked?: Parked[]; gone?: Map<string, string> }) =>
+  planBudget({ now: NOW, budget: 900, cash: p.cash ?? 0, slots: p.slots ?? 3, cands: p.cands, gone: p.gone ?? new Map(), held: p.held ?? [], parked: p.parked ?? [] });
 const opens = (d: ReturnType<typeof planBudget>) => d.flatMap((x) => (x.kind === 'open' ? [[x.cand.label, x.capital]] : []));
 const WEEK = HOLD_MS + 1;
 
@@ -49,7 +49,7 @@ describe('smart trader: which pools and which way', () => {
     expect(cands[1].id).toBe(poolId(items[6], 'grid'));
     expect(cands[1].id).toBe('4663:0xpoolF:grid');
     expect(cands.find((c) => c.how === 'lp')!.expected).toBeCloseTo(LP_REPEAT * 0.05, 12);
-    expect(gone.get(poolId(items[3], 'grid'))).toMatch(/no route or price .* DAI/);
+    expect(gone.get(poolId(items[3], 'grid'))).toMatch(/no route from the budget's coin to DAI/);
     expect(gone.get(poolId(items[4], 'grid'))).toBe('it failed its latest safety check');
     expect(gone.get(poolId(items[1], 'lp'))).toBe('it earned nothing in the test week');
     expect(candidates(items, { ...ALL, risk: 'safe' }, reach).gone.get(poolId(items[5], 'grid'))).toBe('its risk is medium, above what you allowed');
@@ -88,24 +88,24 @@ describe('smart trader: one review of a budget', () => {
     const gone = new Map([['4663:robinhood:Z:grid', 'it earned nothing in the test week']]);
     const d = plan({ cands, gone, held: [held('A', WEEK), held('Z', WEEK), held('Y', WEEK)] });
     expect(d[1]).toEqual({ kind: 'retire', id: 'bot-Z', alt: cands[1].id, why: expect.stringMatching(/^it earned nothing in the test week; B is expected/) });
-    expect(d[2]).toEqual({ kind: 'keep', id: 'bot-Y', why: expect.stringMatching(/isn't in today's scan/) });
+    expect(d[2]).toEqual({ kind: 'keep', id: 'bot-Y', why: expect.stringMatching(/isn't measured in today's scan/) });
   });
 
   it('a bot being closed keeps its slot and its pool (not reopened); the way it was replaced for waits for its money', () => {
     // 300 waiting, slots 3: A held, Z closing (replaced for B) → one free slot, and it goes to C, not B
-    const z: Retiring = { pool: '4663:robinhood:Z:grid', pair: '4663:Z/USDG', alt: cands[1].id };
-    expect(opens(plan({ cash: 300, cands: [...cands, cand('Z', 0.06)], held: [held('A', WEEK)], retiring: [z] }))).toEqual([['C', 300]]);
+    const z: Parked = { pool: '4663:robinhood:Z:grid', pair: '4663:Z/USDG', closing: true, alt: cands[1].id };
+    expect(opens(plan({ cash: 300, cands: [...cands, cand('Z', 0.06)], held: [held('A', WEEK)], parked: [z] }))).toEqual([['C', 300]]);
     // no free slot while it closes: nothing opens, Z's own pool included
-    expect(opens(plan({ cash: 300, cands: [...cands, cand('Z', 0.06)], held: [held('A', WEEK), held('C', WEEK)], retiring: [z] }))).toEqual([]);
+    expect(opens(plan({ cash: 300, cands: [...cands, cand('Z', 0.06)], held: [held('A', WEEK), held('C', WEEK)], parked: [z] }))).toEqual([]);
     // and no other bot is replaced for B meanwhile
-    const d = plan({ cands, held: [held('A', WEEK), held('D', WEEK)], retiring: [z] });
+    const d = plan({ cands, held: [held('A', WEEK), held('D', WEEK)], parked: [z] });
     expect(d[1]).toEqual({ kind: 'retire', id: 'bot-D', alt: cands[2].id, why: expect.stringMatching(/^C is expected/) });
   });
 
   it("ranks with the slots set, not those left while another bot closes (a #3 of 3 isn't pushed out)", () => {
     // slots 3: A in its first week, B past it (#3), R closing. Before: planned with 2 slots, B was replaced for C.
     const cs = [cand('A', 0.05), cand('C', 0.04), cand('B', 0.03)];
-    const d = plan({ cash: 0, cands: cs, held: [held('A', HOLD_MS - 1), held('B', WEEK)], retiring: [{ pool: '4663:robinhood:R:grid', pair: '4663:R/USDG', alt: null }] });
+    const d = plan({ cash: 0, cands: cs, held: [held('A', HOLD_MS - 1), held('B', WEEK)], parked: [{ pool: '4663:robinhood:R:grid', pair: '4663:R/USDG', closing: true, alt: null }] });
     expect(d[1]).toEqual({ kind: 'keep', id: 'bot-B', why: expect.stringMatching(/still among the best: #3/) });
   });
 
@@ -141,7 +141,7 @@ describe('smart trader: one review of a budget', () => {
   it('more bots than the slots now set: the weakest past their first week are closed', () => {
     const d = plan({ slots: 1, cands: [cand('A', 0.05), cand('B', 0.04), cand('C', 0.021)], held: [held('A', WEEK), held('B', WEEK), held('C', WEEK)] });
     expect(d.map((x) => x.kind)).toEqual(['keep', 'retire', 'retire']);
-    expect(d[2]).toMatchObject({ alt: null, why: expect.stringMatching(/more bots than the 1 per budget now set; it is the weakest/) });
+    expect(d[2]).toMatchObject({ alt: null, why: expect.stringMatching(/more bots than the 1 per budget now set; it is among the weakest/) });
   });
 
   it('one bot per coin pair: the best pool of a pair, and never a second pool of a pair it runs', () => {
@@ -161,5 +161,59 @@ describe('smart trader: one review of a budget', () => {
     expect(plan({ cash: 900, cands: [cand('L', 0.001, { cost: 0.002 })] })).toEqual([{ kind: 'wait', why: 'no pool is expected to earn with these options' }]);
     // fewer good pools than slots: all of the money goes to the ones there are
     expect(opens(plan({ cash: 900, cands: cands.slice(0, 1) }))).toEqual([['A', 900]]);
+  });
+
+  // ── Round 2 ──
+  const P = (label: string, alt: string | null, closing = true): Parked => ({ pool: `4663:robinhood:${label}:grid`, pair: `4663:${label}/USDG`, closing, alt });
+
+  it("a closing bot's replacement keeps its pair: neither idle cash nor another replacement takes that pair's other way", () => {
+    const ql = cand('Q', 0.05, { how: 'lp' }), qg = cand('Q', 0.04), d = cand('D', 0.025);
+    // slots 3, cash 300: Q is spoken for (R is replaced for Q's grid), so the cash opens D, not Q's range
+    expect(opens(plan({ cash: 300, cands: [ql, qg, d], parked: [P('R', qg.id)] }))).toEqual([['D', 300]]);
+    // slots 2: H isn't replaced for Q's range either
+    const x = plan({ slots: 2, cands: [ql, qg, d], held: [held('H', WEEK, { capital: 300 })], parked: [P('R', qg.id)] });
+    expect(x[0]).toMatchObject({ kind: 'keep' });
+  });
+
+  it("while a bot with no replacement closes, a held bot is compared with what will be left, not with the pool that bot's money opens", () => {
+    // slots 3: A in its first week, B past it (3%), R closing with no replacement. Its money will open C (4%): B is
+    // compared with D (3.5%), +0.5%, under the 0.6% switching costs: kept (as it is once R's money is back)
+    const cs = [cand('A', 0.05), cand('C', 0.04), cand('D', 0.035), cand('B', 0.03)];
+    const d = plan({ cands: cs, held: [held('A', HOLD_MS - 1), held('B', WEEK)], parked: [P('R', null)] });
+    expect(d[1]).toEqual({ kind: 'keep', id: 'bot-B', why: expect.stringMatching(/only \+0\.5% more/) });
+  });
+
+  it('lowering the slots closes only bots outside the best that fit, never the best one (a first-week bot goes after its week)', () => {
+    const d = plan({ slots: 1, cands: [cand('F', 0.005), cand('A', 0.05), cand('B', 0.01)], held: [held('F', HOLD_MS - 1), held('A', WEEK), held('B', WEEK)] });
+    expect(d.map((x) => [x.kind, (x as { id: string }).id])).toEqual([['keep', 'bot-F'], ['keep', 'bot-A'], ['retire', 'bot-B']]);
+  });
+
+  it('a replacement that can take only part of the money (tested at a smaller size) is compared on what it would earn in all', () => {
+    // B holds 10,000 at 3%; C earns 4% but was tested at 1,000: 4% × 1,000 / 10,000 = 0.4%, far under staying
+    const d = plan({ slots: 1, cands: [cand('C', 0.04, { maxCapital: 1000 }), cand('B', 0.03)], held: [held('B', WEEK, { capital: 10_000 })] });
+    expect(d).toEqual([{ kind: 'keep', id: 'bot-B', why: expect.stringMatching(/expected \+3\.0% a week; nothing better|still among the best/) }]);
+  });
+
+  it('a stopped bot keeps its slot, so the running bots are ranked on the slots left to them', () => {
+    // slots 2: P stopped, B (2%) is the only running bot; C (3%) beats it by 1 point, over the 0.6% switching costs
+    const d = plan({ slots: 2, cands: [cand('C', 0.03), cand('B', 0.02)], held: [held('B', WEEK)], parked: [P('P', null, false)] });
+    expect(d).toEqual([{ kind: 'retire', id: 'bot-B', alt: '4663:robinhood:C:grid', why: expect.stringMatching(/C is expected to earn \+3\.0%/) }]);
+  });
+
+  it("says when the pools left are kept for a closing bot's money", () => {
+    const d = plan({ cash: 300, cands: [cand('C', 0.03), cand('A', 0.02)], held: [held('A', WEEK)], parked: [P('R', '4663:robinhood:C:grid')] });
+    expect(d[1]).toEqual({ kind: 'wait', why: "the pools expected to earn are run, or kept for a closing bot's money" });
+  });
+
+  it("a liquidity test that failed to run, or a coin with no price right now, is no evidence: a held bot there is kept", () => {
+    const o = opp('X/USDG', { swing: 0.2, lpEarned: null, lpWhy: 'timeout reading slot0', lpFailed: true });
+    const { cands: c1, gone: g1 } = candidates([o], ALL, reach);
+    expect(g1.has(poolId(o, 'lp'))).toBe(false);
+    expect(c1.map((x) => x.how)).toEqual(['grid']);
+    const e = opp('E/ETH', { spend: 'ETH', swing: 0.2 });
+    const { cands: c2, gone: g2 } = candidates([e], ALL, (coin) => (coin === 'ETH' ? { cost: 0.002, rate: null } : { cost: 0, rate: 1 }));
+    expect([c2.length, g2.size]).toEqual([0, 0]);
+    const lpBot = held('X/USDG', WEEK, { pool: poolId(o, 'lp'), pair: `4663:USDG/X` });
+    expect(plan({ cands: c1, gone: g1, held: [lpBot] })[0]).toMatchObject({ kind: 'keep', why: expect.stringMatching(/isn't measured in today's scan/) });
   });
 });

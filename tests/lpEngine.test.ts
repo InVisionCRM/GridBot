@@ -625,6 +625,104 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(e.state.idle.base).toBeCloseTo(110, 9);
   });
 
+  /** A live bot with its position open (minted as id 5) */
+  async function opened(w: ReturnType<typeof live>) {
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    expect(e.state.position).toMatchObject({ id: '5' });
+    return e;
+  }
+  const exitLogs = (w: ReturnType<typeof live>) => [w.ev('DecreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n]), w.ev('Collect', [5n, '0x0000000000000000000000000000000000000000', 1010n * 10n ** 18n, 4n * 10n ** 16n])];
+
+  it('a close asked while a transaction confirms, then KILL ALL: nothing is sent until it is resumed', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick(); // the mint is sent
+    e.close(true);
+    expect(e.state.closeAsked).toEqual({ toCash: true });
+    e.stop('KILL ALL');
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick(); await e.tick(); await e.tick();
+    expect(w.sent).toHaveLength(1);
+    expect(e.state).toMatchObject({ status: 'stopped', closeAsked: { toCash: true } });
+    e.resume();
+    await e.tick();
+    expect(w.sent).toHaveLength(2); // the exit, now
+    expect(e.state.step).toMatchObject({ action: 'close', stage: 'exit', toCash: true });
+  });
+
+  it('"to cash" asked while a plain Close\'s exit confirms turns that close into a close to cash', async () => {
+    const w = live();
+    const e = await opened(w);
+    e.close();
+    await e.tick();
+    const exit = w.sent[1];
+    e.close(true);
+    expect(e.state.step).toMatchObject({ action: 'close', toCash: true });
+    expect(e.state.closeAsked).toBeNull();
+    w.ok(exit.hash, exitLogs(w));
+    await e.tick(); await e.tick();
+    expect(e.state.status).toBe('closed');
+    expect(e.state.cashedOutAt).not.toBeNull();
+  });
+
+  it('a close asked during a range move takes the coins out with the move and sends no new mint', async () => {
+    const w = live();
+    const e = await opened(w);
+    e.state.step = { action: 'rerange', stage: 'exit', tries: 0 };
+    await e.tick(); // the move's exit is sent
+    const exit = w.sent[1];
+    e.close(true);
+    w.ok(exit.hash, exitLogs(w));
+    await e.tick(); // the exit settles: the move goes no further
+    expect(w.sent).toHaveLength(2);
+    await e.tick(); await e.tick();
+    expect(w.sent).toHaveLength(2); // no new mint, no second exit: the close sold the idle coins
+    expect(e.state.status).toBe('closed');
+    expect(e.state.cashedOutAt).not.toBeNull();
+  });
+
+  it('stopped while its transaction waits its turn in the chain queue: not sent', async () => {
+    const w = live();
+    const e = await opened(w);
+    const gate = w.hub.rt(369).gate;
+    let release!: () => void;
+    const holding = gate.run(() => new Promise<void>((ok) => { release = ok; }));
+    e.close(true);
+    const ticking = e.tick(); // the exit waits for the queue
+    await new Promise((ok) => setTimeout(ok, 10));
+    e.stop('KILL ALL');
+    release();
+    await holding; await ticking;
+    expect(w.sent).toHaveLength(1); // only the mint
+  });
+
+  it("selling a native base back when the wallet can't pay for all of it: what it can't sell went on gas, and the close finishes", async () => {
+    const wallet = { pls: 900, stable: 1e9 };
+    const w = live({ balances: wallet });
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    const ex = (w.make() as unknown as { executor: Record<string, (...a: never[]) => Promise<Record<string, unknown>>> }).executor;
+    const quote = ex.quote, execute = ex.execute;
+    ex.quote = async (side: never, amount: never) => ({ ...(await quote(side, amount)), gasPlsEstimate: 5 });
+    ex.execute = async (q: never) => { const f = await execute(q); wallet.pls -= (q as { amountInHuman: number }).amountInHuman + 5; return f; };
+    (e as unknown as { executor: unknown }).executor = ex;
+    e.state.idle = { base: 1000, quote: 10 };
+    e.state.status = 'running';
+    e.state.step = { action: 'close', stage: 'swap', tries: 0, toCash: true };
+    for (let i = 0; i < 3; i++) await e.tick();
+    expect(e.state.status).toBe('closed');
+    expect(e.state.cashedOutAt).not.toBeNull();
+  });
+
   it('a step that keeps reverting stops the bot after 3 tries (nothing lost)', async () => {
     const w = live();
     const e = w.make();

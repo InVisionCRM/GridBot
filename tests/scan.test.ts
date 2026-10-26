@@ -379,14 +379,14 @@ describe('DailyScanner: opportunities', () => {
 });
 
 describe("A scanned pool in this app (Hub.marketFor)", () => {
-  it("is the market on that pool, turned to spend the scanned coin; null when the pool isn't in the app", () => {
+  it("is the market on that pool (or, its pool switched since the scan, the market for the same coins), turned to spend the scanned coin; null when the coins aren't in the app", () => {
     const chain = new MockChain(0.00001);
     const hub = new MultiBot({ net: NET, reader: chain, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true) }).hub;
     const d = hub.def('DAI'), ref = { address: d.base.address, quote: d.quote.address, pool: d.pool.address };
     expect(hub.marketFor(d.chainId, d.pool.dex, ref)).toBe('DAI'); // PLS spending DAI
     expect(hub.marketFor(d.chainId, d.pool.dex, { ...ref, address: d.quote.address, quote: d.base.address })).toBe('DAI~'); // DAI spending PLS
     expect(hub.marketFor(d.chainId, d.pool.dex, { ...ref, address: '0x' + '1'.repeat(40) })).toBeNull();
-    expect(hub.marketFor(d.chainId, 'some-other-dex', ref)).toBeNull();
+    expect(hub.marketFor(d.chainId, 'some-other-dex', ref)).toBe('DAI'); // the market moved to another pool since the scan
   });
 });
 

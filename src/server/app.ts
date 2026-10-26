@@ -299,8 +299,9 @@ export function createApp(o: AppOpts) {
     return plain(ap().status());
   }));
   app.put('/api/autopilot/options', wrap((req) => { ap().setOptions(req.body ?? {}); return plain(ap().status()); }));
-  // Also carries on after KILL ALL / STOP chain
   app.post('/api/autopilot/on', wrap(async () => { await ap().turnOn(); void bot.tickAll(); return plain(ap().status()); }));
+  // { chainId }: that budget sends again after KILL ALL / STOP chain
+  app.post('/api/autopilot/carry-on', wrap((req) => { ap().carryOn(Number(req.body?.chainId)); void ap().tick(); return plain(ap().status()); }));
   // { sell: true } closes every bot it runs to cash; false leaves them running unmanaged
   app.post('/api/autopilot/off', wrap((req) => { ap().turnOff(req.body?.sell === true); void ap().tick(); return plain(ap().status()); }));
   app.post('/api/autopilot/review', wrap(async () => { await ap().review(true); void bot.tickAll(); return plain(ap().status()); }));

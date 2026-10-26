@@ -301,6 +301,198 @@ describe('smart trader (paper, mock chain)', () => {
   });
 });
 
+describe('smart trader: stops, races and settling (paper, mock chain)', () => {
+  it('KILL ALL during an open: nothing more is started, and after Carry on the pool is tried again (not held back a day)', async () => {
+    const { bot, ap, acct, log } = setup({ scan: view(1, [daiOpp(0.3, HEX_PLS)]) });
+    const gate = bot.hub.rt(NET.chainId).gate, run = gate.run.bind(gate);
+    let once = true;
+    gate.run = async (fn) => { const r = await run(fn); if (once) { once = false; bot.stopAll(); } return r; };
+    await ap.turnOn();
+    expect(acct().killed).toBe('KILL ALL');
+    expect(acct().bots).toHaveLength(0);
+    expect(bot.status().grids).toHaveLength(0);
+    expect(log()).toMatch(/couldn't open HEX\/PLS: stopped meanwhile \(KILL ALL\): nothing more is sent/);
+    expect(log()).not.toMatch(/skipped until the next daily review/);
+    ap.carryOn(NET.chainId);
+    await ap.tick();
+    expect(acct().bots.map((b) => b.market)).toEqual(['HEX~']);
+  });
+
+  it('KILL ALL while a new bot is starting: it is stopped at once and kept', async () => {
+    const { bot, ap, acct } = setup();
+    const add = bot.add.bind(bot);
+    bot.add = async (p) => { bot.stopAll(); return add(p); };
+    await ap.turnOn();
+    expect(acct().bots).toHaveLength(1);
+    expect(bot.status().grids[0].status).toBe('stopped');
+  });
+
+  it('money back from a bot opens its replacement even when it was credited after the review step, or that check could not read the scan', async () => {
+    const { bot, ap, acct, setScan, later } = setup({ scan: view(1, [daiOpp(0.3)]) });
+    await ap.turnOn();
+    await bot.tickAll();
+    later(HOLD_MS + 1);
+    const s2 = view(2, [notEarning(daiOpp(0.3)), opp('USDC', 0.3)]);
+    setScan(s2);
+    await ap.tick(); // retired for PLS/USDC, its close asked
+    expect(acct().bots[0].retiring).toMatchObject({ started: true });
+    // the next check: the grid sells out while the scan is read, so the second settle credits it; and the scan fails
+    setScan(async () => { for (let i = 0; i < 3; i++) await bot.tickAll(); throw new Error('host HTTP 502'); });
+    await ap.tick();
+    expect(acct().bots).toHaveLength(0);
+    setScan(s2);
+    await ap.tick();
+    expect(acct().bots.map((b) => b.market)).toEqual(['USDC']);
+  });
+
+  it("after KILL ALL, 'close its bots' still closes them (once a stopped bot is resumed); Carry on doesn't turn it on", async () => {
+    const { bot, ap, acct } = setup();
+    await ap.turnOn();
+    await bot.tickAll();
+    const id = acct().bots[0].id;
+    bot.stopAll();
+    ap.turnOff(true);
+    expect(acct().killed).toBeNull();
+    await ap.tick();
+    expect(acct().bots[0].retiring).toMatchObject({ why: 'turned off', started: false }); // stopped by KILL ALL: waits
+    bot.resume(id);
+    await ap.tick();
+    expect(acct().bots[0].retiring).toMatchObject({ started: true });
+    for (let i = 0; i < 3; i++) await bot.tickAll();
+    await ap.tick();
+    expect(acct().bots).toHaveLength(0);
+    // off, then KILL ALL, then Carry on: still off
+    bot.stopAll();
+    ap.carryOn(NET.chainId);
+    expect(ap.state.on).toBe(false);
+  });
+
+  it('Carry on resumes only its own budget', () => {
+    const { bot, ap } = setup();
+    ap.state.accounts = [
+      { budget: { chainId: NET.chainId, coin: 'DAI', amount: 300 }, coins: { DAI: 300 }, gasNative: 0, bots: [], pending: [], startedAt: 0, halted: null, killed: null, withdrawn: 0 },
+      { budget: { chainId: 4663, coin: 'USDG', amount: 300 }, coins: { USDG: 300 }, gasNative: 0, bots: [], pending: [], startedAt: 0, halted: null, killed: null, withdrawn: 0 },
+    ];
+    bot.stopAll();
+    ap.carryOn(NET.chainId);
+    expect(ap.state.accounts.map((a) => a.killed)).toEqual([null, 'KILL ALL']);
+  });
+
+  it("budgets can't be set up anew while a check is running (an open under way would be left behind)", async () => {
+    const { bot, ap, acct } = setup({ scan: view(1, []) });
+    await ap.turnOn();
+    ap.turnOff(false);
+    acct().coins = { DAI: 0, PLS: 3e7 }; // the check swaps it back; the swap waits its turn
+    const gate = bot.hub.rt(NET.chainId).gate, run = gate.run.bind(gate);
+    let release!: () => void;
+    gate.run = async (fn) => { await new Promise<void>((ok) => { release = ok; }); return run(fn); };
+    const ticking = ap.tick();
+    await new Promise((ok) => setTimeout(ok, 10));
+    expect(() => ap.configure({ mode: 'paper', options: {}, budgets: [{ chainId: NET.chainId, coin: 'DAI', amount: 500 }] })).toThrow(/busy/);
+    release();
+    await ticking;
+  });
+
+  it('every swap to fund a bot is planned and quoted first: one leg over the impact cap sends nothing at all', async () => {
+    const { chain, bot, ap, acct, setScan, log } = setup({ scan: view(1, []) });
+    chain.pool('USDC').rQ = 5000n * 10n ** 6n; // a shallow PLS/USDC pool
+    chain.setPrice(P0, 'USDC');
+    await ap.turnOn();
+    acct().coins = { DAI: 100, PLS: 2e7 }; // 100 DAI, and 200 DAI worth of PLS
+    const gate = bot.hub.rt(NET.chainId).gate, run = gate.run.bind(gate);
+    let sent = 0;
+    gate.run = (fn) => { sent++; return run(fn); };
+    setScan(view(2, [opp('USDC', 0.3, { capital: 1e6 })]));
+    await ap.tick();
+    expect(log()).toMatch(/couldn't open PLS\/USDC: swapping 20000000 PLS to USDC would move the price/);
+    expect(acct().coins.USDC).toBeUndefined(); // the DAI leg (which would have gone through) wasn't sent either
+    expect(acct().coins.DAI).toBeGreaterThanOrEqual(100);
+    void sent;
+  });
+
+  it("a pool that failed to open is held back by its pool's addresses, also once its coin's market was added (its key changed)", async () => {
+    const { bot, ap, acct, setScan, log } = setup({ scan: view(1, []) });
+    await ap.turnOn();
+    const ref = { address: NET.pulsex.wpls, quote: DAI.address, pool: '0x' + '77'.repeat(20) };
+    bot.addOpportunityMarket = async () => 'DAI';
+    bot.prices = async () => ({});
+    setScan(view(2, [daiOpp(0.3, { key: null, ref })]));
+    await ap.tick();
+    setScan(view(3, [daiOpp(0.3, { key: 'DAI', ref })])); // the next scan finds it in the app
+    await ap.tick();
+    expect(acct().bots).toHaveLength(0);
+    expect(log().match(/couldn't open PLS\/DAI/g)).toHaveLength(1);
+  });
+
+  it('every bot removed by hand: nothing is left to protect, so no loss limit', async () => {
+    const { bot, ap, acct } = setup();
+    await ap.turnOn();
+    bot.remove(acct().bots[0].id);
+    await ap.tick();
+    expect(acct()).toMatchObject({ withdrawn: 300, halted: null });
+  });
+
+  it('a review asked by hand right after a bot was removed by hand settles it first and reviews the rest', async () => {
+    const { bot, ap, acct, setScan, later } = setup({ slots: 2, scan: view(1, [daiOpp(0.3), opp('USDC', 0.25)]) });
+    await ap.turnOn();
+    await bot.tickAll();
+    later(HOLD_MS + 1);
+    bot.remove(acct().bots[0].id);
+    setScan(view(2, [daiOpp(0.3), notEarning(opp('USDC', 0.25))]));
+    await ap.review(true);
+    expect(ap.lastError).toBeNull();
+    expect(acct().bots.map((b) => [b.market, b.retiring?.why])).toEqual([['USDC', expect.stringMatching(/^no grid earned from its trades this week/)]]);
+  });
+
+  it("a coin whose only market failed a safety re-check is still priced (after a restart too): the budget keeps a value", async () => {
+    const { bot, ap, store } = setup({ scan: view(1, [daiOpp(0.3, HEX_PLS)]) });
+    await ap.turnOn();
+    await bot.tickAll();
+    (bot.hub.def('DAI') as { safety: unknown }).safety = { risk: 'unknown', liveAllowed: false, reasons: [] };
+    const again = new Autopilot({ bot, store, emit: () => undefined, scan: async () => view(1, []) });
+    await again.tick();
+    expect(again.value(again.state.accounts[0])).toBeGreaterThan(280);
+  });
+
+  it("state from the first version: its swaps' gas comes out of the coins, and a bot's pool goes by its market", () => {
+    const { bot, store } = setup();
+    store.save({ version: 1, on: false, mode: 'paper', options: DEFAULT_OPTIONS, budgets: [], closeAll: false, reviewedAt: null, scanAt: null, log: [], accounts: [{
+      budget: { chainId: NET.chainId, coin: 'DAI', amount: 300 }, coins: { DAI: 0, PLS: 3e7 }, gasNative: 2e6, pending: [], startedAt: 0, halted: null,
+      bots: [{ id: 'g1', kind: 'grid', pool: `${NET.chainId}:0xpoolFOO:grid`, pair: 'x', label: 'FOO/PLS', market: 'DAI', spend: 'PLS', capital: 1, cost: 1, openedAt: 0, expected: 0, feeBps: 30, retiring: null }],
+    }] } as never);
+    const ap = new Autopilot({ bot, store, emit: () => undefined, scan: async () => null });
+    expect(ap.state.accounts[0].coins.PLS).toBe(2.8e7);
+    expect(ap.state.accounts[0].bots[0].pool).toBe(`${NET.chainId}:DAI:grid`);
+  });
+
+  it('the page can tell a grid that sold out (coming back) from one paused part way', async () => {
+    const { bot, ap, acct, setScan, later } = setup();
+    await ap.turnOn();
+    await bot.tickAll();
+    later(HOLD_MS + 1);
+    setScan(view(2, [notEarning(daiOpp(0.3))]));
+    await ap.tick();
+    for (let i = 0; i < 3; i++) await bot.tickAll();
+    expect(ap.status().accounts[0].bots[0]).toMatchObject({ status: 'stopped', closing: false, cashedOut: true });
+    void acct;
+  });
+
+  it('a retiring grid resumed after it sold out is running again: not credited, and asked to close again', async () => {
+    const { bot, ap, acct, setScan, later } = setup();
+    await ap.turnOn();
+    await bot.tickAll();
+    const id = acct().bots[0].id;
+    later(HOLD_MS + 1);
+    setScan(view(2, [notEarning(daiOpp(0.3))]));
+    await ap.tick();
+    for (let i = 0; i < 3; i++) await bot.tickAll();
+    bot.resume(id);
+    await ap.tick();
+    expect(acct().bots).toHaveLength(1);
+    expect(bot.status().grids[0].cashOut).not.toBeNull(); // its close to cash is asked again
+  });
+});
+
 describe('smart trader (live, mock chain)', () => {
   it('a budget must be in the wallet beyond what live bots use; its money not in a bot is counted as in use', async () => {
     const t = setup({ mode: 'live', amount: 300, scan: view(1, []) });
@@ -347,20 +539,72 @@ describe('smart trader (live, mock chain)', () => {
     expect(t.log()).toMatch(/never mined before its deadline; the DAI is back/);
   });
 
-  it('KILL ALL stops the trader: nothing more is sent (no swap, no close) until it is turned on again', async () => {
+  it("profit a live grid sent away isn't counted as in use in the wallet (the trader's swaps aren't refused for it)", async () => {
+    const t = setup({ mode: 'live', amount: 300, scan: view(1, []) });
+    const id = await t.bot.add({ mode: 'live', stable: 'DAI', lowerPrice: P0 * 0.8, upperPrice: P0, gridCount: 10, totalCapitalUsd: 50, profits: { mode: 'send', to: '0x' + 'be'.repeat(20) } });
+    t.chain.setPrice(P0 * 0.975); await t.bot.tickAll();
+    t.chain.setPrice(P0 * 1.005); await t.bot.tickAll();
+    await t.bot.tickAll(); await t.bot.tickAll();
+    const g = t.bot.status().grids.find((x) => x.id === id)!;
+    expect(g.payout.sent).toBeGreaterThan(0);
+    const row = t.bot.allocations().rows.find((r) => r.token === 'DAI')!;
+    expect(row.bots.find((b) => b.id === id)!.amount).toBeCloseTo(50 + g.pnl.realized - g.pnl.costUsd - g.payout.sent, 9);
+  });
+
+  it('its money is released while it is off and settled, and checked again in the wallet when it is turned on', async () => {
+    const t = setup({ mode: 'live', amount: 300, scan: view(1, []) });
+    await t.ap.turnOn();
+    expect(t.bot.allocations().rows.find((r) => r.token === 'DAI')!.bots).toEqual([{ id: 'smart trader', kind: 'trader', amount: 300 }]);
+    t.ap.turnOff(false);
+    expect(t.bot.allocations().rows.find((r) => r.token === 'DAI')).toBeUndefined();
+    await t.bot.add({ mode: 'live', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 4, totalCapitalUsd: 800 }); // the wallet has 1000 DAI
+    await expect(t.ap.turnOn()).rejects.toThrow(/Not enough DAI in your wallet\. This needs 1100 DAI/);
+  });
+
+  it('a swap for an open still confirming holds back the other opens until it lands (no refusal for coins on their way)', async () => {
+    const t = setup({ mode: 'live', amount: 1000, slots: 2, scan: view(1, [daiOpp(0.3, HEX_PLS), opp('USDC', 0.25)]), receiptTimeoutMs: 1 });
+    t.chain.faults = [undefined as never, 'timeout'];
+    await t.ap.turnOn();
+    expect(t.acct().pending).toHaveLength(1);
+    expect(t.log()).not.toMatch(/couldn't open PLS\/USDC/);
+    await t.ap.tick(); // it landed: the review opens both
+    expect(t.acct().bots.map((b) => b.market).sort()).toEqual(['HEX~', 'USDC']);
+  });
+
+  it('KILL ALL stops the budget: nothing more is sent (no swap, no close) until Carry on; on or off is left as it was', async () => {
     const t = setup({ mode: 'live', amount: 300, scan: view(1, []) });
     await t.ap.turnOn();
     t.acct().coins = { DAI: 0, PLS: 300 / P0 }; // PLS to swap back
     t.bot.stopAll();
-    expect(t.ap.state.on).toBe(false);
+    expect(t.ap.state.on).toBe(true);
     expect(t.acct().killed).toBe('KILL ALL');
     const sends = t.chain.sent.length;
     await t.ap.tick();
     expect(t.chain.sent.length).toBe(sends);
-    await t.ap.turnOn();
+    t.ap.carryOn(NET.chainId);
     expect(t.acct().killed).toBeNull();
     await t.ap.tick();
     expect(t.chain.sent.length).toBeGreaterThan(sends); // the PLS is swapped back now
+  });
+
+  it('KILL ALL pressed while it turns on (its wallet check) keeps it off', async () => {
+    const t = setup({ mode: 'live', amount: 300 });
+    const check = t.bot.assertCoin.bind(t.bot);
+    t.bot.assertCoin = async (...a) => { await check(...a); t.bot.stopAll(); };
+    await expect(t.ap.turnOn()).rejects.toThrow(/KILL ALL or STOP was pressed while it was turning on/);
+    expect(t.ap.state.on).toBe(false);
+    expect(t.bot.status().grids).toHaveLength(0);
+  });
+
+  it('two turn-ons at once: the second is refused, the first opens its bot in the account it keeps', async () => {
+    const t = setup({ mode: 'live', amount: 300, scan: view(1, [daiOpp(0.3, HEX_PLS)]) });
+    const check = t.bot.assertCoin.bind(t.bot);
+    t.bot.assertCoin = async (...a) => { await new Promise((ok) => setTimeout(ok, 20)); return check(...a); };
+    const [r1, r2] = await Promise.allSettled([t.ap.turnOn(), t.ap.turnOn()]);
+    expect([r1.status, r2.status]).toEqual(['fulfilled', 'rejected']);
+    expect((r2 as PromiseRejectedResult).reason.message).toMatch(/already turning on/);
+    expect(t.ap.state.accounts).toHaveLength(1);
+    expect(t.acct().bots.map((b) => b.market)).toEqual(['HEX~']);
   });
 });
 
