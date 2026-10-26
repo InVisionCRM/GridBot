@@ -28,6 +28,7 @@ import { sameAddr } from '../dex/types';
 import { costModelOf, gridEconomics, type EconCfg, type EconSummary } from './econ';
 import { capGridEntry } from '../../market/poolSize';
 import { ActivityBus } from './activity';
+import { requestHalt, systemHalt, type Halt } from './audit';
 import { CandleStore } from '../market/candleStore';
 import { closedOnly, fillGaps, isTF, replayCandles, sliceRange, type Candle, type TF } from '../../market/candles';
 import { atr, ema, efficiencyRatio, rsi } from '../../market/indicators';
@@ -244,9 +245,10 @@ export class MultiBot {
   /** Pause every running bot on a market (tax rise / honeypot / paused). Returns how many were running. */
   pauseMarket(key: string, why: string): number {
     let n = 0;
+    const halt = systemHalt('safety-pause', why, this.now());
     const k0 = unflipKey(key); // both orientations share the token and its tax
-    for (const e of this.engines.values()) if (unflipKey(e.state.stable) === k0 && e.state.status === 'running') { e.stop(why); n++; }
-    for (const e of this.trendEngines.values()) if (unflipKey(e.state.quote) === k0 && e.state.status === 'running') { e.stop(why); n++; }
+    for (const e of this.engines.values()) if (unflipKey(e.state.stable) === k0 && e.state.status === 'running') { e.stop(halt); n++; }
+    for (const e of this.trendEngines.values()) if (unflipKey(e.state.quote) === k0 && e.state.status === 'running') { e.stop(halt); n++; }
     return n;
   }
 
@@ -330,14 +332,14 @@ export class MultiBot {
     await eng.start(p);
   }
   resume(id: string) { this.engine(id).resume(); }
-  stop(id: string) { this.engine(id).stop(); }
+  stop(id: string, why?: Halt) { this.engine(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/grids/:id/stop', this.now())); }
   setLimits(id: string, l: Partial<SafetyLimits>) { this.engine(id).setLimits(l); }
   setRecenter(id: string, enabled: boolean) { this.engine(id).setRecenter(enabled); }
   setProfits(id: string, p: ProfitMode) { return this.engine(id).setProfits(p); }
   /** End a grid. Paper leaves the list immediately; a live grid that holds coins is marked closing and sold. */
-  closeGrid(id: string) {
+  closeGrid(id: string, why?: Halt) {
     const e = this.engine(id);
-    const live = e.requestClose();
+    const live = e.requestClose(why ?? requestHalt('close', 'POST /api/bot/grids/:id/close', this.now()));
     if (live) this.kick(() => e.tick());
     this.activity.emit('status');
     return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
@@ -349,20 +351,21 @@ export class MultiBot {
    */
   closeAll(chainId?: number) {
     let closed = 0, closing = 0;
+    const halt = requestHalt('close-all', chainId == null ? 'POST /api/bot/close-all' : `POST /api/bot/close-all chain ${chainId}`, this.now());
     const on = (cid: number) => chainId == null || cid === chainId;
     for (const e of this.engines.values()) {
       if (!on(e.chainId) || e.state.archivedAt) continue;
-      if (e.requestClose()) { closing++; this.kick(() => e.tick()); }
+      if (e.requestClose(halt)) { closing++; this.kick(() => e.tick()); }
       else if (e.state.archivedAt) closed++;
     }
     for (const e of this.trendEngines.values()) {
       if (!on(e.chainId) || e.state.archivedAt) continue;
-      if (e.requestClose()) { closing++; this.kick(() => e.tick(this.spots[e.state.quote])); }
+      if (e.requestClose(halt)) { closing++; this.kick(() => e.tick(this.spots[e.state.quote])); }
       else if (e.state.archivedAt) closed++;
     }
     for (const e of this.lpEngines.values()) {
       if (!on(e.chainId) || e.state.archivedAt) continue;
-      if (e.close()) { closing++; this.kick(() => e.tick()); }
+      if (e.close(halt)) { closing++; this.kick(() => e.tick()); }
       else if (e.state.archivedAt) closed++;
     }
     this.activity.emit('status');
@@ -401,7 +404,7 @@ export class MultiBot {
 
   remove(id: string) {
     const eng = this.engines.get(id);
-    if (eng && eng.state.status === 'running') eng.stop();
+    if (eng && eng.state.status === 'running') eng.stop(systemHalt('remove', 'Removed', this.now()));
     if (eng?.state.inFlight) throw new Error('Cannot remove a grid with a tx in flight — wait for reconcile or STOP and wait.');
     this.engines.delete(id);
     this.multi.grids = this.multi.grids.filter((g) => g.id !== id);
@@ -421,7 +424,7 @@ export class MultiBot {
     return slot.id;
   }
   resumeTrend(id: string) { this.trend(id).resume(); }
-  stopTrend(id: string) { this.trend(id).stop(); }
+  stopTrend(id: string, why?: Halt) { this.trend(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/trends/:id/stop', this.now())); }
   /** Sell the open trend position and keep watching for the next signal. */
   sellTrend(id: string) {
     const e = this.trend(id);
@@ -430,9 +433,9 @@ export class MultiBot {
     return { ok: true };
   }
   /** End the trend bot. Paper settles immediately; live sells through the normal cap and slippage. */
-  closeTrend(id: string) {
+  closeTrend(id: string, why?: Halt) {
     const e = this.trend(id);
-    const live = e.requestClose();
+    const live = e.requestClose(why ?? requestHalt('close', 'POST /api/bot/trends/:id/close', this.now()));
     if (live) this.kick(() => e.tick(this.spots[e.state.quote]));
     this.activity.emit('status');
     return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
@@ -441,7 +444,7 @@ export class MultiBot {
   setTrendLines(id: string, lines: DrawnLine[]) { this.trend(id).setLines(lines); }
   removeTrend(id: string, force = false) {
     const eng = this.trendEngines.get(id);
-    if (eng && eng.state.status === 'running') eng.stop();
+    if (eng && eng.state.status === 'running') eng.stop(systemHalt('remove', 'Removed', this.now()));
     if (eng?.state.inFlight) throw new Error('Cannot remove a bot with a tx in flight.');
     if (eng?.state.position && eng.state.mode === 'live' && !force) throw new Error('Live bot still holds a position — close it first (resume → Close position).');
     this.trendEngines.delete(id);
@@ -463,11 +466,11 @@ export class MultiBot {
     try { await eng.start(p); } catch (e) { this.removeLp(slot.id, true); throw e; }
     return slot.id;
   }
-  stopLp(id: string) { this.lp(id).stop(); }
+  stopLp(id: string, why?: Halt) { this.lp(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/lps/:id/stop', this.now())); }
   resumeLp(id: string) { this.lp(id).resume(); }
-  closeLp(id: string) {
+  closeLp(id: string, why?: Halt) {
     const e = this.lp(id);
-    const live = e.close();
+    const live = e.close(why ?? requestHalt('close', 'POST /api/bot/lps/:id/close', this.now()));
     if (live) this.kick(() => e.tick());
     this.activity.emit('status');
     return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
@@ -513,23 +516,25 @@ export class MultiBot {
 
   /** KILL ALL: stop every grid and trend bot; queued jobs dropped, nothing new is sent. */
   stopAll() {
+    const halt = requestHalt('stop-all', 'POST /api/bot/stop-all', this.now());
     let n = 0;
-    for (const e of this.engines.values()) if (e.state.status === 'running') { e.stop(); n++; }
-    for (const e of this.trendEngines.values()) if (e.state.status === 'running') { e.stop('KILL ALL'); n++; }
-    for (const e of this.lpEngines.values()) if (e.state.status === 'running') { e.stop('KILL ALL'); n++; }
+    for (const e of this.engines.values()) if (e.state.status === 'running') { e.stop(halt); n++; }
+    for (const e of this.trendEngines.values()) if (e.state.status === 'running') { e.stop(halt); n++; }
+    for (const e of this.lpEngines.values()) if (e.state.status === 'running') { e.stop(halt); n++; }
     this.d.log.warn(`KILL ALL — ${n} bot(s) stopped (grids, trend and liquidity bots).`);
-    this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'error', notify: true, msg: `KILL ALL — ${n} bot(s) stopped` });
+    this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'error', notify: true, msg: `KILL ALL — ${n} bot(s) stopped`, data: { halt } });
   }
 
   /** Stop every bot on one chain (other chains keep running). */
   stopChain(chainId: number) {
     const c = this.hub.chain(chainId);
+    const halt = requestHalt('chain-stop', `POST /api/chains/${c.id}/stop`, this.now());
     let n = 0;
-    for (const e of this.engines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(); n++; }
-    for (const e of this.trendEngines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(`STOP ${c.short}`); n++; }
-    for (const e of this.lpEngines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(`STOP ${c.short}`); n++; }
+    for (const e of this.engines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(halt); n++; }
+    for (const e of this.trendEngines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(halt); n++; }
+    for (const e of this.lpEngines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(halt); n++; }
     this.d.log.warn(`STOP ${c.name} — ${n} bot(s) stopped.`);
-    this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'warn', notify: true, chainId: c.id, msg: `STOP ${c.name} — ${n} bot(s) stopped` });
+    this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'warn', notify: true, chainId: c.id, msg: `STOP ${c.name} — ${n} bot(s) stopped`, data: { halt } });
     return n;
   }
 

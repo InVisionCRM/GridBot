@@ -1,8 +1,11 @@
 /** Fetch helper for the local API (JSON in/out). */
-export async function http<T = any>(path: string, method = 'GET', body?: unknown): Promise<T> { // eslint-disable-line @typescript-eslint/no-explicit-any
+export async function http<T = any>(path: string, method = 'GET', body?: unknown, from?: string): Promise<T> { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const headers: Record<string, string> = {};
+  if (method !== 'GET') headers['Content-Type'] = 'application/json';
+  if (from) headers['X-GridBot-From'] = from;
   const r = await fetch(path, {
     method,
-    headers: method !== 'GET' ? { 'Content-Type': 'application/json' } : undefined,
+    headers: Object.keys(headers).length ? headers : undefined,
     body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
   });
   const j = await r.json().catch(() => ({}));
@@ -11,4 +14,4 @@ export async function http<T = any>(path: string, method = 'GET', body?: unknown
   if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
   return j as T;
 }
-export const botApi = (p: string, method = 'GET', body?: unknown) => http(`/api/bot/${p}`, method, body);
+export const botApi = (p: string, method = 'GET', body?: unknown, from?: string) => http(`/api/bot/${p}`, method, body, from);

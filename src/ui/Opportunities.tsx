@@ -119,6 +119,7 @@ export function Opportunities({ s, nav, act, busy }: { s: AnyObj; nav: Nav; act:
   const [usd, setUsd] = useState<string | null>(null);
 
   const all = useMemo(() => ((p?.chains ?? []) as AnyObj[]).filter((c) => chain === 'all' || c.chainId === chain).flatMap((c) => c.items as Opportunity[]), [p, chain]);
+  const best = useMemo(() => all.filter(isSafe).flatMap((o) => { const w = wayOf(o, 'best'); return w ? [{ o, w }] : []; }).sort((a, b) => b.w.expected - a.w.expected).slice(0, 3), [all]);
   const list = useMemo(() => {
     const q = f.q.trim().toLowerCase();
     return all
@@ -135,6 +136,18 @@ export function Opportunities({ s, nav, act, busy }: { s: AnyObj; nav: Nav; act:
 
   return (
     <main className="stack opps">
+      {!!best.length && (
+        <section className="plain" aria-label="Best this week">
+          <h2 className="plain-h">Best this week</h2>
+          {best.map(({ o, w }) => (
+            <button key={`${o.chainId}-${o.add?.pool ?? o.key}`} type="button" className="line" onClick={() => tryIt(o, w.how, nav, act)}>
+              <span>{o.label}</span>
+              <span className="muted">{w.how === 'lp' ? 'Liquidity' : 'Grid'}</span>
+              <b className="pos">{pct(w.expected, 1, true)}</b>
+            </button>
+          ))}
+        </section>
+      )}
       <section className="card opp-head">
         <div className="card-head">
           <h2>Opportunities</h2>

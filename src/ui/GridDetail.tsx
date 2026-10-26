@@ -16,6 +16,7 @@ import { recenterAt } from '../live/recenter';
 import { LiveLevels, livePrice } from './live';
 import { L, Tip } from './Tip';
 import { Amt, Usd } from './money';
+import { showHalt } from './haltText';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -196,7 +197,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const remove = () => act(async () => { if (confirm(`Remove the ${gridName(g)} grid and its history? ${g.base} it still holds stays in your wallet.`)) { await botApi(`grids/${g.id}`, 'DELETE'); nav({ v: 'home' }); } });
   const doClose = () => {
     if (g.mode === 'live' && !confirm(`Close ${gridName(g)}? It sells what it holds, with the same price-impact and slippage limits.`)) return;
-    act(() => botApi(`grids/${g.id}/close`, 'POST'));
+    act(() => botApi(`grids/${g.id}/close`, 'POST', undefined, 'row-close'));
   };
 
   return (
@@ -210,9 +211,10 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {g.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={g.dexName} feeBps={g.feeBps} feeTier={g.feeTier} />
         <span className={`st ${closing ? 'closing' : g.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{g.inFlight ? ' · swap in flight' : ''}</span>
+        {showHalt(g, closing) && <span className="bot-why">{showHalt(g, closing)}</span>}
         <span className="grow" />
         {running
-          ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST'))}>Stop</button>
+          ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
           : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => botApi(`grids/${g.id}/resume`, 'POST'))}>Resume</button>}
         <button type="button" className="btn" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
         <button type="button" className="btn danger" disabled={busy || running || !!g.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>

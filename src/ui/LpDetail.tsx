@@ -13,6 +13,7 @@ import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { Usd } from './money';
+import { showHalt } from './haltText';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -152,7 +153,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const days = b.startedAt ? (Date.now() - b.startedAt) / 86_400_000 : null;
   const close = () => {
     if (b.mode === 'live' && !confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
-    act(() => botApi(`lps/${b.id}/close`, 'POST'));
+    act(() => botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close'));
   };
   const remove = () => act(async () => { if (confirm(`Remove the ${b.label} liquidity bot and its history?`)) { await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' }); } });
 
@@ -167,9 +168,10 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
         <span className={`st ${closing ? 'closing' : b.status}`}>{closing ? 'Closing…' : closed ? 'Closed' : running ? 'Running' : 'Paused'}{step && !closing ? ` · ${ACTION[step.action].toLowerCase()}` : ''}</span>
+        {showHalt(b, closing) && <span className="bot-why">{showHalt(b, closing)}</span>}
         {prices.base != null && <span className="pill mono" title={`Today's prices in dollars${prices.quote != null ? ` (${q} at ${usd(prices.quote)})` : ''}`}>{base} {usd(prices.base)}{prices.quote != null && Math.abs(prices.quote - 1) > 0.02 ? ` · ${q} ${usd(prices.quote)}` : ''}</span>}
         <span className="grow" />
-        {running && <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST'))}>Pause</button>}
+        {running && <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST', undefined, 'row-pause'))}>Pause</button>}
         {b.status === 'stopped' && <button type="button" className="btn primary" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
         {!closed && <button type="button" className="btn" disabled={busy || closing || b.available === false} title={step?.hash ? 'A transaction is still being confirmed' : 'Take everything out and end the bot'} onClick={close}>{closing ? 'Closing…' : 'Close'}</button>}
         <button type="button" className="btn danger" disabled={busy || !!pos || !!step} title={pos || step ? 'Close the position first' : ''} onClick={remove}>Remove</button>

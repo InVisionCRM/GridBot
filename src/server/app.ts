@@ -23,6 +23,9 @@ import type { GeckoRelay } from './friends/relay';
 import type { Autopilot, AutoOptions, Budget } from './bot/autopilot';
 import type { TokenTrader, TraderOptions } from './bot/tokenTrader';
 import { noKey } from './words';
+import { fetchJson } from './fetchJson';
+import { holdingsSnapshot } from './holdings/read';
+import { requestStore, type HaltOrigin } from './bot/audit';
 
 export interface AppOpts {
   bot: MultiBot;
@@ -51,6 +54,13 @@ export interface AppOpts {
   statusThrottleMs?: number;
   /** Version check + self-test (server only: needs the git checkout and the build stamp; a friend's copy has no version check) */
   system?: { version: VersionCheck | null; pollMs: number };
+  /** This process is a friend's copy. Its requests are labeled as such even if a via header says otherwise. */
+  copy?: boolean;
+}
+
+function headerOne(v: string | string[] | undefined): string | null {
+  const s = Array.isArray(v) ? v[0] : v;
+  return s ? s : null;
 }
 
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
@@ -67,7 +77,15 @@ export function createApp(o: AppOpts) {
       if (origin && !LOCAL_ORIGIN.test(origin)) return res.status(403).json({ error: 'forbidden origin' });
       if (!req.is('application/json')) return res.status(415).json({ error: 'JSON body required' });
     }
-    next();
+    const via = headerOne(req.headers['x-gridbot-via']);
+    const fromRaw = headerOne(req.headers['x-gridbot-from']);
+    const origin: HaltOrigin = o.copy ? 'friend-copy' : via === 'owner' ? 'gateway-owner' : 'localhost';
+    requestStore.run({
+      origin,
+      endpoint: `${req.method} ${req.path}`,
+      ua: headerOne(req.headers['user-agent'])?.slice(0, 180) ?? null,
+      from: fromRaw && /^[a-z0-9-]{1,40}$/.test(fromRaw) ? fromRaw : null,
+    }, () => next());
   });
   app.use(express.json({ limit: '64kb' }));
 
@@ -123,6 +141,7 @@ export function createApp(o: AppOpts) {
 
   // ── Meta / grids (unchanged API) ─────────────────────────────────────
   app.get('/api/health', (_req, res) => res.json({ ok: true, chainId: net.chainId, chains: bot.hub.runtimes().map((r) => r.cfg.id) }));
+  app.get('/api/holdings', wrap(async (req) => holdingsSnapshot(bot, fetchJson, req.query.refresh === '1')));
   app.get('/api/bot/meta', (_req, res) => res.json({
     maxGridCount: MAX_GRID_COUNT, densePresets: DENSE_PRESETS, feeBps: net.pulsex.feeBps, presets: listPresets(),
     strategies: STRATEGIES, trendDefaults: DEFAULT_TREND, timeframes: TFS, sweepAxes: SWEEP_AXES,

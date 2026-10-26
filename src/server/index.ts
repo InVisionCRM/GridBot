@@ -36,12 +36,13 @@ const copy = readCopy();
 
 // Every configured chain gets a fallback RPC reader; signers come from PRIVATE_KEY / PRIVATE_KEY_<SLUG> (env.ts only).
 const dataDir = path.dirname(cfg.stateFile);
+log.attach(path.join(dataDir, 'server.log'));
 const { hub, readers } = buildHub({
   net: cfg.net, env: process.env, signerFactory: createSigners,
   custom: new JsonStore<CustomFile>(path.join(dataDir, 'custom.json')),
 });
 const legacyReader = readers.get(cfg.net.chainId)!;
-const activity = new ActivityBus();
+const activity = new ActivityBus(400, Date.now, path.join(dataDir, 'activity.log'));
 const candles = new CandleStore(path.join(dataDir, 'candles'), 5000);
 const bot = new MultiBot({
   net: cfg.net, reader: legacyReader, signer: hub.rt(cfg.net.chainId).signer, store: new JsonStore<MultiState>(cfg.stateFile), log,
@@ -118,7 +119,7 @@ const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
   lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader,
+  friends, autopilot, tokenTrader, copy: !!copy,
 });
 if (isProd) {
   app.use(express.static(clientDir));
