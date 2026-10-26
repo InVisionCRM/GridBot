@@ -132,7 +132,7 @@ export default function App() {
       <div className="app">
         <Header
           s={s} view={view} nav={nav} chain={chain} setChain={setChain} showUsd={showUsd} setShowUsd={usdCtx.set}
-          connected={connected} ver={ver.v} holdings={holdings.data} onActivity={() => setDrawer(true)}
+          connected={connected} ver={ver.v} holdings={holdings.data} onActivity={() => setDrawer(true)} onGuide={() => setGuide(true)}
         />
 
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}

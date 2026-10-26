@@ -39,6 +39,8 @@ export interface ChartProps {
   btTrades?: { entryT: number; exitT: number; pnlPct: number; reason: string }[];
   /** Lines drawn for a trend bot, shown on the chart */
   drawn?: DrawnLine[];
+  /** Detail desk: candles, dashed levels, range edges, sparse fills. Hides indicator toggles. */
+  desk?: boolean;
   /** Drawing: the next click(s) on the chart make a level (one click) or a trend line (two clicks) */
   drawMode?: 'level' | 'trend' | null;
   /** A finished drawing (points exactly where clicked), with the latest candle for context */
@@ -56,7 +58,7 @@ export function Chart(p: ChartProps) {
   const candles = loaded.k;
   const [meta, setMeta] = useState<AnyObj | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [ov, setOv] = useState({ ema: true, dc: false, bb: false, vol: true, rsi: !p.compact, macd: false, bots: true });
+  const [ov, setOv] = useState({ ema: !p.desk, dc: false, bb: false, vol: !p.desk, rsi: !p.compact && !p.desk, macd: false, bots: true });
   const [legend, setLegend] = useState<Candle | null>(null);
   const [backfill, setBackfill] = useState('');
   const el = useRef<HTMLDivElement>(null);
@@ -108,7 +110,7 @@ export function Chart(p: ChartProps) {
     // each series registers how it fills from the candles (and their closes)
     const feeds: ((k: Candle[], closes: number[]) => void)[] = [];
     const values = (k: Candle[], vals: (number | null)[]) => vals.map((v, i) => (v == null ? { time: ts(k[i].t) } : { time: ts(k[i].t), value: v }));
-    const c = ch.addSeries(CandlestickSeries, { upColor: C.up, downColor: C.down, borderUpColor: C.up, borderDownColor: C.down, wickUpColor: C.up, wickDownColor: C.down, priceFormat }, 0);
+    const c = ch.addSeries(CandlestickSeries, { upColor: C.up, downColor: C.down, borderUpColor: C.up, borderDownColor: C.down, wickUpColor: C.up, wickDownColor: C.down, priceLineVisible: true, lastValueVisible: true, priceLineColor: T.warn, priceFormat }, 0);
     feeds.push((k) => c.setData(k.map((x) => ({ time: ts(x.t), open: x.o, high: x.h, low: x.l, close: x.c, ...(x.f ? { color: C.flat, wickColor: C.flat, borderColor: C.flat } : {}) }))));
     cs.current = c;
     markers.current = createSeriesMarkers(c, []);
@@ -213,15 +215,22 @@ export function Chart(p: ChartProps) {
     const snap = (ms: number) => Math.floor(ms / 1000 / tfs) * tfs;
     const mk: SeriesMarker<Time>[] = [];
     for (const g of botsHere.grids) {
+      if (g.config?.lowerPrice != null && g.config?.upperPrice != null) {
+        lines.current.push(c.createPriceLine({ price: g.config.lowerPrice, color: T.text, lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: false, title: '' }));
+        lines.current.push(c.createPriceLine({ price: g.config.upperPrice, color: T.text, lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: false, title: '' }));
+      }
       if (g.status === 'running') {
         const lv = new Set<number>();
         for (const iv of g.intervals ?? []) { lv.add(iv.buyPrice); lv.add(iv.sellPrice); }
-        for (const price of lv) lines.current.push(c.createPriceLine({ price, color: C.grid, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' }));
+        for (const price of lv) lines.current.push(c.createPriceLine({ price, color: C.grid, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' }));
       }
-      for (const t of g.trades ?? []) {
-        if (t.failed || snap(t.timestamp) < s0) continue;
-        mk.push({ time: ts(snap(t.timestamp)), position: t.side === 'buy' ? 'belowBar' : 'aboveBar', color: t.side === 'buy' ? C.up : C.down, shape: t.side === 'buy' ? 'arrowUp' : 'arrowDown', size: 0.6, text: '' });
-      }
+      const fills = ((g.trades ?? []) as AnyObj[]).filter((t) => !t.failed && snap(t.timestamp) >= s0);
+      const step = Math.max(1, Math.ceil(fills.length / 16));
+      fills.forEach((t, i) => {
+        if (i % step !== 0 && i !== fills.length - 1) return;
+        const buy = t.side === 'buy';
+        mk.push({ time: ts(snap(t.timestamp)), position: buy ? 'belowBar' : 'aboveBar', color: buy ? C.up : C.down, shape: 'circle', size: 0.6, text: buy ? 'B' : 'S' });
+      });
     }
     for (const t of botsHere.trends) {
       for (const tr of t.trades ?? []) {
@@ -267,11 +276,11 @@ export function Chart(p: ChartProps) {
           : p.pairs.length > 1 ? <div className="seg">{p.pairs.map((x) => { const k = orientedKey(x, isFlipKey(pair)); return <button key={x} type="button" className={unflipKey(x) === unflipKey(pair) ? 'on' : ''} onClick={() => changePair(k)}>{mk(p.status ?? {}, k).legacy ? mk(p.status ?? {}, k).label : mk(p.status ?? {}, k).label.replace(/·.*/, '')}</button>; })}</div> : null}
         {!p.compact && <button type="button" className={`flip-btn ${isFlipKey(pair) ? 'on' : ''}`} aria-pressed={isFlipKey(pair)} aria-label="flip base and quote" title={`Flip → ${mk(p.status ?? {}, flipKey(pair)).label} (inverted OHLC: high ↔ 1/low)`} onClick={() => changePair(flipKey(pair))}>⇄</button>}
         <div className="seg">{TFS.map((x) => <button key={x} type="button" className={x === tf ? 'on' : ''} onClick={() => setTf(x)}>{x}</button>)}</div>
-        <div className="seg">
+        {!p.desk && <div className="seg">
           {([['ema', `EMA ${fast}/${slow}`], ['dc', 'Donchian'], ['bb', 'Bollinger'], ['vol', 'Vol'], ['rsi', 'RSI'], ['macd', 'MACD'], ['bots', 'Bots']] as const).map(([k, l]) => (
             <button key={k} type="button" className={ov[k] ? 'on' : ''} onClick={() => toggle(k)}>{l}</button>
           ))}
-        </div>
+        </div>}
       </div>
       <div className="chart-legend">
         <ChainBadge c={chainOf(p.status ?? {}, pm.chainId)} testnet={false} /><strong>{pm.label.replace(/·.*/, '')}</strong> <span className="muted">{tf}</span>

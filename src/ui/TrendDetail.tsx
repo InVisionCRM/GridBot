@@ -70,7 +70,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
           : <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/resume`, 'POST'))}>Resume</button>}
         <button type="button" className="btn" disabled={busy || !pos || !running || closing} onClick={closePos}>Sell now</button>
-        <button type="button" className="btn" disabled={busy || closing} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
+        <button type="button" className="btn danger" disabled={busy || closing} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
         <button type="button" className="btn danger" disabled={busy || running || !!t.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
       </div>
 
@@ -91,7 +91,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           {t.cfg.strategy === 'lines'
             ? <LinesEditor s={s} ticks={ticks} pair={t.quote} tf={t.tf} lines={t.cfg.lines} busy={busy} height={400}
                 onChange={(lines) => act(() => botApi(`trends/${t.id}/lines`, 'PUT', { lines }))} />
-            : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact height={400}
+            : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact desk height={400}
                 emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
           <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
         </div>

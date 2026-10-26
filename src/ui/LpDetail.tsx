@@ -173,7 +173,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <span className="grow" />
         {running && <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST', undefined, 'row-pause'))}>Pause</button>}
         {b.status === 'stopped' && <button type="button" className="btn primary" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
-        {!closed && <button type="button" className="btn" disabled={busy || closing || b.available === false} title={step?.hash ? 'A transaction is still being confirmed' : 'Take everything out and end the bot'} onClick={close}>{closing ? 'Closing…' : 'Close'}</button>}
+        {!closed && <button type="button" className="btn danger" disabled={busy || closing || b.available === false} title={step?.hash ? 'A transaction is still being confirmed' : 'Take everything out and end the bot'} onClick={close}>{closing ? 'Closing…' : 'Close'}</button>}
         <button type="button" className="btn danger" disabled={busy || !!pos || !!step} title={pos || step ? 'Close the position first' : ''} onClick={remove}>Remove</button>
       </div>
 
@@ -216,7 +216,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <div className="split wide-left">
         <div className="card">
-          <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact height={400} />
+          <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact desk height={400} />
           <p className="muted small">The amber lines are the position's range. It earns fees while the price is between them.</p>
         </div>
         <div className="stack">

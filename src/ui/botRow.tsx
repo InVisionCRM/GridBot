@@ -1,12 +1,13 @@
 /** One bot, at a glance. The Bots page can open the range, fees, and levels under the row. */
 import { useContext, useEffect, useRef, useState } from 'react';
 import { botApi } from './api';
-import { RangeBar } from './charts';
+import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
 import { cls, pct, px, qty, usd } from './fmt';
-import { TokenMark } from './icons';
+import { ChainMark, TokenMark } from './icons';
 import { useShowUsd } from './money';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
+import { bookUsd, botSpark } from './series';
 
 export function listBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
   return [
@@ -201,7 +202,16 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
   );
 }
 
-export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle }: {
+function BotRange({ b }: { b: AnyObj }) {
+  if (b.kind === 'lp' && b.position) return <RangeBar wide lower={b.position.lower} upper={b.position.upper} price={b.price} inRange={b.inRange} />;
+  if (b.kind === 'grid' && b.config) {
+    const rs = rangeState(b);
+    return <RangeBar wide lower={b.config.lowerPrice} upper={b.config.upperPrice} price={b.price} inRange={rs == null ? null : rs === 'in'} />;
+  }
+  return <span className="muted">—</span>;
+}
+
+export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, columns }: {
   s: AnyObj;
   b: AnyObj;
   nav: Nav;
@@ -210,6 +220,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle }: 
   expandable?: boolean;
   open?: boolean;
   onToggle?: () => void;
+  columns?: boolean;
 }) {
   const { on: showUsd } = useShowUsd();
   const pair = pairOf(b);
@@ -220,6 +231,35 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle }: 
   const on = b.status === 'running' && !bad;
   const money = showUsd && pnl.usd != null ? usd(pnl.usd, true) : pnl.quote != null ? qty(pnl.quote, pair.quote, 4) : '—';
   const pos = b.position;
+  const value = bookUsd(b);
+  if (columns) {
+    return (
+      <div className={`bot-block${open ? ' open' : ''}`}>
+        <div className="desk-row">
+          <button type="button" className="desk-pair" onClick={() => (expandable ? onToggle?.() : nav(botView(b.kind, b.id)))} aria-expanded={expandable ? !!open : undefined}>
+            <span className="pair-marks">
+              <TokenMark symbol={pair.base} size={22} />
+              <TokenMark symbol={pair.quote} size={22} />
+              {chain && <span className="chain-coin"><ChainMark short={chain.short} color={chain.color} size={14} /></span>}
+            </span>
+            <span className="bot-title">{pair.title}</span>
+          </button>
+          <span className="kind-tag">{kindWord(b)}</span>
+          <span className="desk-status"><i className={`status-dot${on ? ' on' : ''}${bad ? ' bad' : ''}`} />{statusWord(b)}</span>
+          <span className="desk-spark"><Sparkline points={botSpark(b)} width={84} height={28} /></span>
+          <span className="desk-range"><BotRange b={b} /></span>
+          <span className="desk-val">{value == null ? '—' : usd(value)}</span>
+          <span className="desk-pnl">
+            <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
+            <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>
+          </span>
+          <RowMenu b={b} nav={nav} pause={pause} close={close} />
+        </div>
+        {bad && <p className="line-note">{b.lastError}</p>}
+        {open && <Expanded b={b} nav={nav} />}
+      </div>
+    );
+  }
   return (
     <div className={`bot-block${open ? ' open' : ''}`}>
       <div className="bot-row">

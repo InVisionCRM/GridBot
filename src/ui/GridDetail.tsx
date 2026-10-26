@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { formatPrice } from '../lib/format';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
+import { RangeBar } from './charts';
 import { Chart, EquityChart } from './Chart';
 import { ago, cls, num, pct, px, qty, time } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
@@ -216,7 +217,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {running
           ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
           : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => botApi(`grids/${g.id}/resume`, 'POST'))}>Resume</button>}
-        <button type="button" className="btn" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
+        <button type="button" className="btn danger" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
         <button type="button" className="btn danger" disabled={busy || running || !!g.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
       </div>
 
@@ -230,7 +231,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       {running && <div className="card live-strip"><LiveLevels g={g} price={livePrice(ticks, g.stable, g.price)} /></div>}
 
-      <div className="kpi-row">
+      <div className="kpi-row detail-stats">
         <div className="kpi">
           <span><L tip="Every completed buy then sell: what the sell brought in minus what that buy cost, after pool fees and gas. This is money the grid has made; the coin's price no longer changes it.">Earned by trading</L></span>
           <div className={`kpi-v ${cls(earned)}`}><AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} /></div>
@@ -248,11 +249,19 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
         <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg <Amt v={g.stats.avgNet} sym={q} k={k} sig={4} /> each · {g.stats.wins} profitable</span></div>
         <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>
+        <div className="kpi"><span><L tip="Pool fees paid on this grid's fills, in the quote coin.">Fees</L></span><div className="kpi-v">{qty(((g.trades ?? []) as AnyObj[]).reduce((a, t) => a + (typeof t.feeQuote === 'number' ? t.feeQuote : 0), 0), q, 4, false)}</div><span className="sub">paid on fills</span></div>
       </div>
 
       <div className="card">
-        <Chart status={s} ticks={ticks} pairs={[g.stable]} pair={g.stable} compact height={380} />
-        <p className="muted small"><Orientation m={{ base: g.base ?? 'PLS', quote: q, flipped: g.flipped, label: g.label }} compact /> · dotted lines are the grid levels · arrows are fills · pool fee {feeLabel(mk(s, g.stable))} per swap</p>
+        <Chart status={s} ticks={ticks} pairs={[g.stable]} pair={g.stable} compact desk height={380} />
+        {g.config && (
+          <div className="detail-range">
+            <span className="k">Range</span>
+            <RangeBar wide lower={g.config.lowerPrice} upper={g.config.upperPrice} price={g.price} inRange={rs == null ? null : rs === 'in'} />
+            <span className="mono small">{px(g.config.lowerPrice)} – {px(g.config.upperPrice)}</span>
+          </div>
+        )}
+        <p className="muted small"><Orientation m={{ base: g.base ?? 'PLS', quote: q, flipped: g.flipped, label: g.label }} compact /> · dashed lines are the grid levels · solid lines are the range · B and S mark fills · pool fee {feeLabel(mk(s, g.stable))} per swap</p>
       </div>
 
       {g.config && (
