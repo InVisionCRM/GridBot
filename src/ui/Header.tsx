@@ -278,6 +278,7 @@ export function Header({
     closeMenus();
     if (section) setSecs((xs) => (xs.includes(section) ? xs : [...xs, section]));
     setDrawer(true);
+    if (section) window.setTimeout(() => document.getElementById(`nav-sec-${section}`)?.scrollIntoView({ block: 'start' }), 40);
   };
 
   const active = tabs.find((t) => t.id === open) ?? null;
@@ -408,7 +409,7 @@ export function Header({
           {tabs.map((tab) => {
             const shown = secs.includes(tab.id);
             return (
-              <div key={tab.id} className="nav-sec-block">
+              <div key={tab.id} id={`nav-sec-${tab.id}`} className="nav-sec-block">
                 <button type="button" className="nav-sec" aria-expanded={shown} onClick={() => setSecs((xs) => shown ? xs.filter((id) => id !== tab.id) : [...xs, tab.id])}>
                   <span>{tab.label}</span>
                   <span className="nav-chev" aria-hidden="true">{shown ? '−' : '+'}</span>
