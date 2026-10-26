@@ -143,7 +143,7 @@ function BestThisWeek({ s, chain, nav }: { s: AnyObj; chain: number | 'all'; nav
         <button type="button" className="btn small-btn primary" onClick={() => nav({ v: 'opps' })}>See all</button>
       </div>
       {rows.map(({ o, w }) => (
-        <div key={`${o.chainId}-${o.add?.pool ?? o.key}`} className="best-row">
+        <div key={`${o.chainId}-${o.key ?? o.ref.pool}`} className="best-row">
           <span className="best-name"><ChainBadge c={chainOf(s, o.chainId)} testnet={false} /><b>{o.label}</b><span className="small muted">{w.how === 'lp' ? `liquidity ±${num(o.lp!.bandPct * 100, 0)}%` : `grid ±${num(o.grid!.bandPct * 100, 0)}%`}</span></span>
           <span className="n"><b className="pos">≈ {pct(w.expected, 1, true)}</b> <span className="small muted">a week</span></span>
         </div>

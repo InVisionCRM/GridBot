@@ -409,7 +409,7 @@ describe('taxes 0 / 1 / 5 / 10 %: round trip, max-tx, live V3 block, PnL from ac
     return { w, signer };
   }
 
-  it('live buy books the ACTUAL received (balance change), not the gross Transfer log; FOT method used', async () => {
+  it('live buy books the ACTUAL received (the receipt transfers in less out), not the gross Transfer log; FOT method used', async () => {
     const { LiveExecutor } = await import('../src/server/bot/chain');
     const { w, signer } = liveRig(0.05);
     const ex = new LiveExecutor(w.q, signer, { approval: 'max', receiptTimeoutMs: 1000 });
@@ -417,7 +417,7 @@ describe('taxes 0 / 1 / 5 / 10 %: round trip, max-tx, live V3 block, PnL from ac
     expect(q.call.method).toBe('swapExactTokensForTokensSupportingFeeOnTransferTokens');
     expect(q.balanceOk).toBe(true);
     const f = await ex.execute(q, { canSend: () => true, onSent: () => undefined });
-    expect(f.outSource).toBe('balance');
+    expect(f.outSource).toBe('log');
     const gross = fromUnits(q.routerOut, q.decimalsOut);
     expect(f.amountOutHuman / gross).toBeCloseTo(0.95, 4); // net, not gross
     expect(Math.abs(f.shortfallPct!)).toBeLessThan(0.001);

@@ -269,6 +269,52 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(third.lp.status()).toMatchObject({ status: 'closed', lastError: null });
   });
 
+  it('close to cash: a plain Close asked meanwhile keeps it a sale; on a bot closed plainly it sells the base left; only then is it cashed out', async () => {
+    const { lp } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
+    await lp.tick();
+    lp.close(); // plain Close: both coins stay
+    await lp.tick();
+    expect(lp.state).toMatchObject({ status: 'closed', cashedOutAt: null });
+    expect(lp.state.idle.base).toBeGreaterThan(0);
+    lp.close(true); // then to cash: the base left is sold, and on the next check it is closed
+    await lp.tick();
+    await lp.tick();
+    expect(lp.state.status).toBe('closed');
+    expect(lp.state.cashedOutAt).toBeGreaterThan(0);
+    expect(lp.state.idle.base * lp.state.lastPrice!).toBeLessThan(lp.state.idle.quote * 1e-4);
+    const b = world();
+    await b.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
+    await b.lp.tick();
+    b.lp.close(true);
+    b.lp.close(); // a plain Close while closing to cash
+    expect(b.lp.state.step).toMatchObject({ action: 'close', toCash: true });
+  });
+
+  it('a close to cash whose smallest piece is over the impact cap waits 10 minutes (one notice), and its swaps go through the chain queue', async () => {
+    const { lp, hub, at } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
+    await lp.tick();
+    const gate = hub.rt(369).gate, run = gate.run.bind(gate);
+    let queued = 0;
+    gate.run = (fn) => { queued++; return run(fn); };
+    lp.state.limits.maxPriceImpact = 1e-12;
+    lp.close(true);
+    await lp.tick();
+    expect(lp.state.step).toMatchObject({ stage: 'swap', waitUntil: 1_800_000_000_000 + 10 * 60_000 });
+    expect(lp.lastError).toBeNull();
+    at(60_000);
+    await lp.tick();
+    expect(lp.lastError).toBeNull();
+    lp.state.limits.maxPriceImpact = 0.05;
+    expect(queued).toBe(0);
+    at(10 * 60_000);
+    await lp.tick();
+    await lp.tick();
+    expect(lp.state.status).toBe('closed');
+    expect(queued).toBe(1); // the sale went through the queue
+  });
+
   it("doesn't start a move whose swap would go over the price-impact cap (it would stop halfway, out of the position)", async () => {
     const { lp, m, pool, hub, store } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
@@ -505,6 +551,80 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(bot.status().lps).toHaveLength(0);
   });
 
+  it('KILL ALL during a close to cash: the exit already sent is settled, but nothing new (no sale) is sent until it is resumed', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    const ex = (w.make() as unknown as { executor: { execute: (...a: unknown[]) => unknown } }).executor;
+    let sales = 0;
+    const execute = ex.execute;
+    ex.execute = (...a) => { sales++; return execute(...a); };
+    (e as unknown as { executor: unknown }).executor = ex;
+    w.approve();
+    await e.tick(); // swap to the mix + mint sent
+    sales = 0;
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    e.close(true);
+    await e.tick();
+    const exit = w.sent[1];
+    e.stop('KILL ALL');
+    w.ok(exit.hash, [w.ev('DecreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n]), w.ev('Collect', [5n, '0x0000000000000000000000000000000000000000', 1010n * 10n ** 18n, 4n * 10n ** 16n])]);
+    await e.tick();
+    expect(e.state).toMatchObject({ status: 'stopped', position: null, step: { action: 'close', stage: 'swap', toCash: true } });
+    expect(sales).toBe(0);
+    expect(e.state.idle.base).toBeGreaterThan(0);
+    e.resume();
+    await e.tick();
+    await e.tick();
+    expect(sales).toBe(1);
+    expect(e.state).toMatchObject({ status: 'closed' });
+    expect(e.state.cashedOutAt).not.toBeNull();
+  });
+
+  it("a close asked while a step's transaction is being sent waits for it (the transaction is never lost)", async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    const ex = (w.make() as unknown as { executor: { sendTx: (r: unknown) => Promise<string> } }).executor;
+    (e as unknown as { executor: unknown }).executor = ex;
+    w.approve();
+    let release!: () => void;
+    const send = ex.sendTx;
+    ex.sendTx = async (r) => { await new Promise<void>((ok) => { release = ok; }); return send(r); };
+    const ticking = e.tick(); // the mint waits to be sent
+    await new Promise((ok) => setTimeout(ok, 10));
+    e.close(true);
+    release();
+    await ticking;
+    ex.sendTx = send;
+    const mint = w.sent[0];
+    expect(e.state.step).toMatchObject({ action: 'open', stage: 'mint', hash: mint.hash });
+    expect(e.state.closeAsked).toEqual({ toCash: true });
+    w.ok(mint.hash, [w.ev('IncreaseLiquidity', [9n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick(); // the mint settles: the position is recorded
+    expect(e.state.position).toMatchObject({ id: '9' });
+    await e.tick(); // then the close starts: one exit for that position
+    expect(e.state.closeAsked).toBeNull();
+    expect(e.state.step).toMatchObject({ action: 'close', stage: 'exit', toCash: true, hash: w.sent[1].hash });
+  });
+
+  it("selling a native base back leaves room for the sale's gas when the wallet holds less than the bot counts", async () => {
+    const w = live({ balances: { pls: 900, stable: 1e9 } });
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    const ex = (w.make() as unknown as { executor: { quote: (s: 'buy' | 'sell', a: number) => Promise<Record<string, unknown>> } }).executor;
+    const quote = ex.quote, asked: number[] = [];
+    ex.quote = async (side, amount) => { asked.push(amount); return { ...(await quote(side, amount)), gasPlsEstimate: 5 }; };
+    (e as unknown as { executor: unknown }).executor = ex;
+    e.state.idle = { base: 1000, quote: 10 };
+    e.state.status = 'running';
+    e.state.step = { action: 'close', stage: 'swap', tries: 0, toCash: true };
+    await e.tick();
+    expect(asked).toEqual([1000, 890]); // 900 in the wallet less twice the gas
+    expect(e.state.idle.base).toBeCloseTo(110, 9);
+  });
+
   it('a step that keeps reverting stops the bot after 3 tries (nothing lost)', async () => {
     const w = live();
     const e = w.make();
@@ -576,6 +696,22 @@ describe('LP bot in the app: API, status, restart, money split', () => {
     });
     return { ...w, bot, store, call, close: () => new Promise((r) => server.close(r)) };
   }
+
+  it('a bot closed to cash is worth its coins after a restart too (it is never read again once closed)', async () => {
+    const store = new MemoryStore<MultiState>();
+    const a = await serve(store);
+    const id = await a.bot.addLp({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
+    await a.bot.tickAll();
+    a.bot.closeLp(id, true);
+    for (let i = 0; i < 4 && !a.bot.botCashedOut('lp', id); i++) await a.bot.tickAll();
+    expect(a.bot.botCashedOut('lp', id)).toBe(true);
+    const worth = a.bot.botValue('lp', id)!;
+    expect(worth).toBeGreaterThan(990);
+    await a.close();
+    const b = await serve(store); // restarted: the closed bot has no reading
+    expect(b.bot.botValue('lp', id)).toBeCloseTo(worth, 9);
+    await b.close();
+  });
 
   it('a paper bot saved before the fee fix drops its old fee checkpoint and value history (the 10^48 spike); a live bot keeps its history', async () => {
     const first = await serve();
