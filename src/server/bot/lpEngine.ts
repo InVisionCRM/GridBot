@@ -30,7 +30,7 @@ import { ERC20, V3_NPM } from '../dex/abis';
 import { readCall, sameAddr } from '../dex/types';
 import { LpPool, type Coins, type PoolView } from '../lp/lpPool';
 import { collectAllData, collectData, exitData, mintTx } from '../lp/npmCalls';
-import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type ReceiptLike, type TxSender } from './chain';
+import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type Quote, type ReceiptLike, type TxSender } from './chain';
 import { checkProfitMode, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
@@ -72,6 +72,8 @@ export interface LpStep {
   tries: number;
   /** close: after taking the position out, sell the base coin back to the quote coin ("close to cash") */
   toCash?: boolean;
+  /** close to cash: even the smallest piece of the sale was over the price-impact cap; the next try is not before this */
+  waitUntil?: number;
 }
 
 export interface LpState {
@@ -110,6 +112,10 @@ export interface LpState {
   lastPriceAt: number | null;
   /** [ms, value in quote] */
   equity: [number, number][];
+  /** When its last close to cash finished: closed with its base coin sold (a plain close leaves it null) */
+  cashedOutAt: number | null;
+  /** A close asked while a transaction was being sent or confirmed: it starts once that settles */
+  closeAsked: { toCash: boolean } | null;
 }
 
 export interface LpStartParams {
@@ -140,6 +146,8 @@ export interface LpDeps {
 const MAX_TRIES = 3;
 /** A native base side keeps this many times the open's estimated gas out of the position, so the open can pay for itself. */
 const OPEN_GAS_HEADROOM = 2;
+/** A close to cash whose smallest sale is over the price-impact cap tries again after this long (as a grid's) */
+const CASH_WAIT_MS = 10 * 60_000;
 const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
@@ -147,6 +155,7 @@ export function freshLp(net: LiveNetwork, id?: string): LpState {
     kind: 'lp', version: 6, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
     outSince: null, lastRerangeAt: null, reranges: 0, seen: null, totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
+    cashedOutAt: null, closeAsked: null,
   };
 }
 
@@ -310,15 +319,22 @@ export class LpEngine {
     this.save();
     this.ev('started', `Liquidity ${this.label} resumed`);
   }
-  /** Take everything out: the coins go back to the wallet and the bot ends. */
-  /** Take the position out; with toCash, then sell its base coin back to the quote coin. */
+  /**
+   * Take the position out: the coins go back to the wallet and the bot ends; with toCash, its base coin is then sold
+   * back to the quote coin (also on a bot already closed with base left). A close to cash asked before stays one. Asked
+   * while a transaction is being sent or confirmed, it starts once that settles (replacing the step then would lose it).
+   */
   close(toCash = false) {
-    if (this.state.status === 'closed') return;
-    if (this.state.step?.hash || this.state.step?.swap) throw new Error('A transaction is still being confirmed. Try again in a minute.');
-    const sell = toCash && this.state.idle.base > 0;
-    if (!this.state.position && !sell) { this.state.status = 'closed'; this.state.step = null; this.save(); this.ev('stopped', `Liquidity ${this.label} closed`); return; }
+    const cash = toCash || !!this.state.step?.toCash || !!this.state.closeAsked?.toCash;
+    if (this.state.status === 'closed' && (!cash || this.state.cashedOutAt != null)) return;
+    if (this.ticking || this.state.step?.hash || this.state.step?.swap) { this.state.closeAsked = { toCash: cash }; this.save(); return; }
+    this.startClose(cash);
+  }
+  private startClose(cash: boolean) {
+    this.state.closeAsked = null;
+    if (!this.state.position && !(cash && this.state.idle.base > 0)) { this.closed(cash); this.save(); return; }
     this.state.status = 'running';
-    this.state.step = { action: 'close', stage: this.state.position ? 'exit' : 'swap', tries: 0, ...(toCash ? { toCash } : {}) };
+    this.state.step = { action: 'close', stage: this.state.position ? 'exit' : 'swap', tries: 0, ...(cash ? { toCash: true } : {}) };
     this.save();
   }
   setRerange(enabled: boolean) {
@@ -368,6 +384,7 @@ export class LpEngine {
       this.state.seen = { g0: v.global0.toString(), g1: v.global1.toString() };
       this.state.lastPrice = v.price;
       this.state.lastPriceAt = this.now();
+      if (this.state.closeAsked && !this.state.step?.hash && !this.state.step?.swap) this.startClose(this.state.closeAsked.toCash);
       if (this.state.step) {
         // a sent tx is always settled, even while stopped; new work only while running
         if (this.state.status === 'running' || this.state.step.hash || this.state.step.swap) await this.advance(pool, v);
@@ -532,7 +549,8 @@ export class LpEngine {
     for (let i = 0; i < 8 && this.state.step; i++) {
       const before = key();
       await this.advanceOnce(pool, v);
-      if (this.state.step?.hash || this.state.step?.swap || key() === before) return;
+      // Stopped: the tx already sent is settled, nothing new starts
+      if (this.state.status !== 'running' || this.state.step?.hash || this.state.step?.swap || key() === before) return;
     }
   }
   private async advanceOnce(pool: LpPool, v: PoolView) {
@@ -572,7 +590,9 @@ export class LpEngine {
     this.ev('info', `Liquidity ${this.label}: ${s.stage} reverted; trying again`, { level: 'warn' });
     return null;
   }
+  /** Send a step's tx through the chain's queue; nothing is sent while the bot isn't running (KILL ALL, paused). */
   private async send(s: LpStep, req: { to: string; data: string; value: bigint }) {
+    if (this.state.status !== 'running') return;
     const run = async () => {
       s.hash = await (this.executor as LiveExecutor).sendTx(req);
       s.sentAt = this.now();
@@ -640,7 +660,7 @@ export class LpEngine {
       s.stage = 'swap'; s.tries = 0;
       this.ev('filled', `Liquidity ${this.label}: took the position out (${f}); selling the ${this.baseSym} back to ${this.quoteSym}`, { level: 'success' });
     } else if (s.action === 'close') {
-      this.closed();
+      this.closed(false);
     } else {
       s.stage = 'swap'; s.tries = 0; s.range = undefined;
       this.ev('filled', `Liquidity ${this.label}: took out ${p.lower.toPrecision(6)}–${p.upper.toPrecision(6)} (${f})`, { level: 'success' });
@@ -671,28 +691,38 @@ export class LpEngine {
       if (!q.balanceOk) throw new Error(`can't swap to the range's mix: ${q.balanceNote}`);
       if (q.priceImpact > this.state.limits.maxPriceImpact) throw new Error(`the swap to the range's mix would move the price ${(q.priceImpact * 100).toFixed(2)}% (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%)`);
       try {
-        const f = await this.executor.execute(q, { canSend: () => true, onSent: (_stage, hash) => this.log('info', `sent swap ${hash}`) });
+        const f = await this.execute(q, 'swap');
         this.state.totals.gas += f.gasPls * v.price;
         this.applySwap(side, f.amountInHuman, f.amountOutHuman, v.price);
       } catch (e) {
         const o = e instanceof ExecError ? e.opts : {};
         if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
+        if (o.aborted) return;
         if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price }; return; }
         throw e;
       }
     }
     s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
   }
-  private closed() {
+  /** Swaps go through the chain's queue (one at a time per chain, as the bots' and the smart trader's); only while running. */
+  private async execute(q: Quote, what: string) {
+    const run = () => this.executor.execute(q, { canSend: () => this.state.status === 'running', onSent: (_stage, hash) => this.log('info', `sent ${what} ${hash}`) });
+    const g = this.gate;
+    return g ? g.run(run) : run();
+  }
+  /** cash = it was a close to cash: the base coin is sold (what is left is dust) */
+  private closed(cash: boolean) {
     this.state.step = null;
     this.state.status = 'closed';
+    this.state.cashedOutAt = cash ? this.now() : null;
     this.ev('stopped', `Liquidity ${this.label}: closed; ${this.state.idle.base.toPrecision(6)} ${this.baseSym} + ${this.state.idle.quote.toPrecision(6)} ${this.quoteSym} back in the wallet`, { level: 'success', notify: true });
   }
 
   /**
    * Close to cash: sell the idle base coin back to the quote coin, in pieces when all of it would go over the
-   * price-impact cap (halved down to 1/64); then closed. A broadcast sell is settled by hash like the range swap.
-   * Dust is left: base worth under twice the sale's gas, or under 0.01% of what the bot holds.
+   * price-impact cap (halved down to 1/64; when even that is over, the next try is in 10 minutes); then closed. A sale
+   * of the chain's own coin leaves room for its gas. A broadcast sell is settled by hash like the range swap. Dust is
+   * left: base worth under twice the sale's gas, or under 0.01% of what the bot holds.
    */
   private async sellToCash(v: PoolView, s: LpStep) {
     if (s.swap) {
@@ -703,28 +733,48 @@ export class LpEngine {
       s.swap = undefined;
       return;
     }
+    if (s.waitUntil != null && this.now() < s.waitUntil) return;
     const idle = this.state.idle;
     // What is left is dust: under 0.01% of what the bot holds (checked first: a quote for a few wei of a coin fails
     // with "rounds to zero"), or worth under twice the sale's gas.
-    if (!(idle.base * v.price >= (idle.base * v.price + idle.quote) * 1e-4)) return this.closed();
+    if (!(idle.base * v.price >= (idle.base * v.price + idle.quote) * 1e-4)) return this.closed(true);
     let amount = idle.base, q = await this.executor.quote('sell', amount, this.state.limits);
-    if (idle.base * v.price < 2 * q.gasPlsEstimate * v.price) return this.closed();
-    while (q.priceImpact > this.state.limits.maxPriceImpact && amount > idle.base / 64) {
+    if (idle.base * v.price < 2 * q.gasPlsEstimate * v.price) return this.closed(true);
+    if (this.state.mode === 'live' && this.def!.base.native) {
+      // The gas this bot paid came out of the same coin: sell what the wallet has, less room for this sale's gas
+      const room = (await this.executor.balances()).pls - OPEN_GAS_HEADROOM * q.gasPlsEstimate;
+      if (room < amount) {
+        if (!(room * v.price >= 2 * q.gasPlsEstimate * v.price)) return this.waitToSell(s, `the wallet has ${(room + OPEN_GAS_HEADROOM * q.gasPlsEstimate).toPrecision(4)} ${this.baseSym}, not enough to sell the ${idle.base.toPrecision(4)} this bot holds and pay the gas`);
+        amount = room;
+        q = await this.executor.quote('sell', amount, this.state.limits);
+      }
+    }
+    const all = amount;
+    while (q.priceImpact > this.state.limits.maxPriceImpact && amount > all / 64) {
       amount /= 2;
       q = await this.executor.quote('sell', amount, this.state.limits);
     }
     if (!q.balanceOk) throw new Error(`can't sell the ${this.baseSym} back: ${q.balanceNote}`);
-    if (q.priceImpact > this.state.limits.maxPriceImpact) throw new Error(`selling the ${this.baseSym} back would move the price ${(q.priceImpact * 100).toFixed(2)}% even in 1/64 pieces (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%); trying again on the next check`);
+    if (q.priceImpact > this.state.limits.maxPriceImpact) return this.waitToSell(s, `selling the ${this.baseSym} back would move the price ${(q.priceImpact * 100).toFixed(2)}% even in 1/64 pieces (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%)`);
+    s.waitUntil = undefined;
     try {
-      const f = await this.executor.execute(q, { canSend: () => true, onSent: (_stage, hash) => this.log('info', `sent sell ${hash}`) });
+      const f = await this.execute(q, 'sell');
       this.state.totals.gas += f.gasPls * v.price;
       this.applySwap('sell', f.amountInHuman, f.amountOutHuman, v.price);
     } catch (e) {
       const o = e instanceof ExecError ? e.opts : {};
       if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
+      if (o.aborted) return;
       if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price }; return; }
       throw e;
     }
+  }
+
+  /** The sale back can't go now: the next try in 10 minutes, said once (not on every check) */
+  private waitToSell(s: LpStep, why: string) {
+    const first = s.waitUntil == null;
+    s.waitUntil = this.now() + CASH_WAIT_MS;
+    this.ev('info', `Liquidity ${this.label}: ${why}; trying again every ${CASH_WAIT_MS / 60_000} minutes`, { level: 'warn', notify: first });
   }
 
   /** A swap to the range's mix landed; its cost is what went in less what came out, at the mid price. */

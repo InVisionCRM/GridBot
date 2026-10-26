@@ -3,7 +3,7 @@ import { bestSetup, bestWay, dailySwing, expectedGrid, expectedLp, GRID_PER_SWIN
 import { DEFAULT_COSTS } from '../src/market/costs';
 import { runGridBacktest } from '../src/market/backtest';
 import type { Candle } from '../src/market/candles';
-import { DailyScanner, type ScanDeps, type ScanFile } from '../src/server/market/scanner';
+import { DailyScanner, localScan, type ScanDeps, type ScanFile } from '../src/server/market/scanner';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, recenterAt } from '../src/live/recenter';
 import { MultiBot, type MultiState } from '../src/server/bot/multi';
 import { Logger } from '../src/server/bot/logger';
@@ -204,8 +204,8 @@ describe('DailyScanner: opportunities', () => {
     expect(c.items.map((x) => x.label)).toEqual(['ETH/USDC', `${WBTC.slice(0, 6)}/USDT`, '0xdead/USDT']);
     const [eth, wbtc, dead] = c.items;
     // New token → added on "Try it"; existing market → its key.
-    expect(wbtc).toMatchObject({ key: null, add: { address: WBTC, quote: USDT, pool: `0xpoolethereum:${WBTC}/USDT` }, risk: 'low', liveAllowed: true, activity: { tx24: 1000 } });
-    expect(eth).toMatchObject({ key: 'ethereum:ETH/USDC', add: null, activity: null, kind: 'v3', capital: TEST_USD, usd: TEST_USD });
+    expect(wbtc).toMatchObject({ key: null, ref: { address: WBTC, quote: USDT, pool: `0xpoolethereum:${WBTC}/USDT` }, risk: 'low', liveAllowed: true, activity: { tx24: 1000 } });
+    expect(eth).toMatchObject({ key: 'ethereum:ETH/USDC', ref: { address: WETH, quote: USDC, pool: '0xpoolethereum:ETH/USDC' }, activity: null, kind: 'v3', capital: TEST_USD, usd: TEST_USD });
     // a token that fails the safety check is shown with why, paper only
     expect(dead).toMatchObject({ risk: 'blocked', liveAllowed: false, riskWhy: 'Honeypot: the simulated sell reverted.' });
     // both ways, ranked by the better of the two
@@ -221,7 +221,7 @@ describe('DailyScanner: opportunities', () => {
     expect(calls.filter((x) => x.startsWith('top:'))).toEqual(['top:eth/uniswap_v3/1', 'top:eth/uniswap_v2/1']);
     // Native base asks GeckoTerminal for the wrapped token's price.
     expect(calls).toContain(`0xpoolethereum:ETH/USDC:${WETH}`);
-    expect(store.load()).toMatchObject({ version: 3, chains: [{ items: [{}, {}, {}] }] });
+    expect(store.load()).toMatchObject({ version: 4, chains: [{ items: [{}, {}, {}] }] });
     expect(sc.status()).toMatchObject({ running: false, nextAt: NOW + SCAN_EVERY_MS });
   });
 
@@ -344,12 +344,49 @@ describe('DailyScanner: opportunities', () => {
     expect(new DailyScanner(deps).status()).toMatchObject({ at: null, chains: [], testUsd: 5000 });
   });
 
+  it('a saved scan from version 3 keeps its pools: addresses from the market (in the app) or from `add` (not yet); a removed market is dropped', () => {
+    const { deps, store } = fakeDeps();
+    const item = (o: Record<string, unknown>) => ({ chainId: 1, label: 'X', spend: 'USDC', stack: 'X', dex: 'uniswap-v3', kind: 'v3', feeBps: 30, ...o });
+    store.save({ version: 3, at: 123, testUsd: 1000, chains: [{ chainId: 1, name: 'Ethereum', at: 123, tested: 3, skipped: [], error: null, items: [
+      item({ key: 'ethereum:ETH/USDC', add: null }), item({ key: null, add: { address: WBTC, quote: USDT, pool: '0xp' } }), item({ key: 'ethereum:GONE/USDC', add: null }),
+    ] }] } as unknown as ScanFile);
+    const st = new DailyScanner(deps).status();
+    expect(st).toMatchObject({ version: 4, at: 123 });
+    expect(st.chains[0].items.map((o) => [o.key, o.ref])).toEqual([
+      ['ethereum:ETH/USDC', { address: WETH, quote: USDC, pool: '0xpoolethereum:ETH/USDC' }], [null, { address: WBTC, quote: USDT, pool: '0xp' }],
+    ]);
+    expect(st.chains[0].items[0]).not.toHaveProperty('add');
+  });
+
+  it("is read with this app's market keys, found by the pool's addresses (a friend's copy reads its host's scan)", async () => {
+    const { deps } = fakeDeps();
+    await new DailyScanner(deps).run();
+    const sc = new DailyScanner(deps);
+    // this app has ETH/USDC under another key, and WBTC/USDT (new in the scan) is in it now
+    const keys: Record<string, string> = { '0xpoolethereum:ETH/USDC': 'ethereum:ETH/USDC#2', [`0xpoolethereum:${WBTC}/USDT`]: 'ethereum:WBTC/USDT' };
+    const local = localScan({ marketFor: (_c, _d, ref) => keys[ref.pool] ?? null }, sc);
+    const items = (await local.status()).chains[0].items;
+    expect(items.map((o) => o.key)).toEqual(['ethereum:ETH/USDC#2', 'ethereum:WBTC/USDT', null]);
+  });
+
   it('runs one scan at a time', async () => {
     const { deps } = fakeDeps();
     const sc = new DailyScanner(deps);
     const first = sc.run();
     await expect(sc.run()).rejects.toThrow('A scan is already running.');
     await first;
+  });
+});
+
+describe("A scanned pool in this app (Hub.marketFor)", () => {
+  it("is the market on that pool, turned to spend the scanned coin; null when the pool isn't in the app", () => {
+    const chain = new MockChain(0.00001);
+    const hub = new MultiBot({ net: NET, reader: chain, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true) }).hub;
+    const d = hub.def('DAI'), ref = { address: d.base.address, quote: d.quote.address, pool: d.pool.address };
+    expect(hub.marketFor(d.chainId, d.pool.dex, ref)).toBe('DAI'); // PLS spending DAI
+    expect(hub.marketFor(d.chainId, d.pool.dex, { ...ref, address: d.quote.address, quote: d.base.address })).toBe('DAI~'); // DAI spending PLS
+    expect(hub.marketFor(d.chainId, d.pool.dex, { ...ref, address: '0x' + '1'.repeat(40) })).toBeNull();
+    expect(hub.marketFor(d.chainId, 'some-other-dex', ref)).toBeNull();
   });
 });
 
@@ -387,6 +424,24 @@ describe('Auto-recenter: follows the price up only', () => {
     expect(g.trades[0]).toMatchObject({ side: 'buy', seed: [5, 6, 7, 8, 9] });
     expect(g.recenter).toMatchObject({ enabled: true, count: 1, aboveSince: null });
     expect(bot.activity.recent(50).some((e) => e.type === 'range' && /moved up/.test(e.msg))).toBe(true);
+  });
+
+  it('a close to cash asked while the range is being moved wins: no move, no start-up buy', async () => {
+    const { chain, bot, at } = make();
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30, recenter: true });
+    chain.setPrice(P0 * 0.97); await bot.tickAll();
+    chain.setPrice(P0 * 1.15); await bot.tickAll();
+    const trades = grid(bot, id).trades.length;
+    at(RECENTER_AFTER_MS + 60_000);
+    // the move reads its costs (gridEconomics → market()); the close to cash arrives during that read
+    const q = bot.hub.quoter('DAI'), market = q.market.bind(q);
+    let asked = false;
+    q.market = async () => { const m = await market(); if (!asked) { asked = true; bot.gridToCash(id); } return m; };
+    await bot.tickAll();
+    expect(asked).toBe(true);
+    const g = grid(bot, id);
+    expect(g.trades.length).toBe(trades);
+    expect(g.config.upperPrice).toBeCloseTo(P0 * 1.1, 12);
   });
 
   it(`at most once per ${RECENTER_COOLDOWN_MS / 3600_000}h`, async () => {

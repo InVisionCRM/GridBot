@@ -182,26 +182,37 @@ Give it an amount on a chain and turn it on; it runs that money as grid and liqu
   - A pool that trades against another coin than the budget's (an ETH pool for a USDG budget) is reached by swapping into that coin over the app's markets. Routes are `findRoute`: one swap, or two through the chain's own coin. When the bot closes, the coins are swapped back.
   - Those swaps' pool fees, twice (in and out), are taken off the pool's estimate, so a USDG pool beats an equally good ETH pool.
   - **One bot per coin pair:** PLS/DAI on PulseX V1 and DAI/PLS on V2 are the same bet on one price.
+  - Pools are matched to this app's markets by their addresses (`localScan`, `Hub.marketFor`), so a friend's copy reading its host's scan uses its own markets, and a new token keeps its place once added.
+  - **A bot is at most the size its pool was tested at** (the scan's test size, $1,000 by default): the estimate is for that size. The rest waits; scan at a larger test size for bigger bots.
 - **Decisions** (`planBudget`), at turn-on, after each daily scan, and when money comes back from a bot:
   - The best pools by expected week after swap costs (the Opportunities estimate), up to the bots per budget. Free money is split evenly over the bots it opens; a piece under a quarter of an even share waits.
   - **A week's hold:** a bot keeps its first 7 days, because the estimates are about a week and switching costs money.
-  - **After that:** a bot whose pool is still among the best stays. Otherwise it is replaced when a pool it doesn't run is expected to earn more than it by more than switching costs (the two pools' fees), or when its pool no longer has an estimate.
+  - **After that:** a bot whose pool is still among the best stays. Otherwise it is replaced when a way it doesn't run (another pool, or its own pool's other way) is expected to earn more than it by more than switching costs (the two pools' fees). Staying is worth its estimate: its swap in is paid, and the swap back is paid either way.
+  - A pool **tested and found not earning** (or no longer allowed) is replaced after the week. A pool **missing from the scan** (its test failed) is kept, and a chain whose scan failed or is still running isn't reviewed at all: no evidence either way.
+  - The way a replaced bot is replaced for waits for that bot's money; idle money never takes it meanwhile.
+  - Lowering *bots per budget* closes the weakest bots past their first week.
+  - A way that fails to open fails before any swap and is skipped until the next daily review.
   - Every decision is in *What it did, and why*, with its numbers.
 - **Closing a bot ("close to cash", also on the API):**
-  - A grid sells everything it holds through its normal checks, then stops. A sell over the price-impact cap is halved each check down to 1/64, then waits 10 min. `POST /api/bot/grids/:id/cash`.
-  - A liquidity bot takes its position out and sells the base coin the same way. `POST /api/bot/lps/:id/close {toCash: true}`.
+  - A grid sells everything it holds through its normal checks, then stops. A sell too big to go through (over the price-impact cap, or the token's max transaction) is halved each check down to 1/64, then waits 10 min. A sell failing for another reason (a revert) waits 10, 20, 40, 80 min, and after 5 failures in a row the grid stops for a look. Its levels follow what it still holds, and the sale shows as *close to cash*, not as a grid round trip. `POST /api/bot/grids/:id/cash`.
+  - A liquidity bot takes its position out and sells the base coin the same way (an impact-blocked sale waits 10 min; selling the chain's own coin leaves room for its gas). `POST /api/bot/lps/:id/close {toCash: true}`; a plain Close asked meanwhile keeps it a sale, and a close asked while a transaction is being sent starts once that settles.
+  - **A stopped bot (by hand, KILL ALL, a safety pause) only settles what it already sent.** Its close to cash is paused, and resuming it carries on.
   - Dust (under 0.01% of the bot, or worth under twice the sale's gas) is left.
   - The bot is then removed and what it was worth goes back to the budget.
-- **Loss limit:** when a budget is worth that much less than it started with, its bots are closed to cash and the budget stops.
-- **Values:** in the budget's coin at today's prices, gas counted (`MultiBot.botValue`: a grid's capital + realized + unrealized, a liquidity bot's equity).
-- **Swaps:** every swap goes through the chain's transaction queue and nonce. One still unconfirmed when the wait ends is settled by its hash later, and refunded if it reverted.
-- **Turning it off:** *keep its bots* (they run on their own) or *close its bots* (all back to the budget's coin). Mode and budgets change only once it runs nothing; the other settings change any time.
+- **Bots it leaves alone:** a bot that isn't running keeps its slot; no close starts on it until it runs again. A bot closed to cash by hand is credited back; a liquidity bot closed by hand is closed to cash; a bot removed by hand leaves the budget (what it cost comes off the loss limit's baseline).
+- **Loss limit:** when a budget is worth that much less than it started with (less what was removed by hand), its bots are closed to cash and the budget stops.
+- **KILL ALL / STOP chain** stop it too: nothing more is sent for those budgets (no swap, no close, no new bot) until it is turned on again (*Carry on*).
+- **Live money:** a budget must be in the wallet beyond what live bots use to turn it on. Its money not in a bot (and its swaps' inputs) counts as in use in the wallet's allocations, so no bot or Convert takes it. Before each live swap the wallet must hold all that bots and the trader count of the coin.
+- **Values:** in the budget's coin at today's prices (`MultiBot.botValue`: a grid's capital + realized + unrealized less the profit it sent away; a liquidity bot's coins less gas, also once closed after a restart). The gas its own swaps pay comes out of its own coin of the chain.
+- **Swaps:** every swap goes through the chain's transaction queue and nonce, and is saved before it is sent (a restart mid-swap finds it). One still unconfirmed when the wait ends is settled by its hash later: credited when it lands (a swap for a new bot then opens it), refunded if it reverted or never mined by its deadline. A swap's output is the receipt's own transfers to the wallet (in less out), never the wallet's balance change, which could include another transaction landing meanwhile.
+- **Turning it off:** *keep its bots* (they run on their own) or *close its bots* (all back to the budget's coin, also a bot that opens after the click). Mode and budgets change only once its accounts hold nothing but their budget's coin; the other settings change any time.
 - **API:**
   - `GET /api/autopilot`
   - `PUT /api/autopilot {mode, options, budgets}` · `PUT /api/autopilot/options`
   - `POST /api/autopilot/on` · `POST /api/autopilot/off {sell}` · `POST /api/autopilot/review`
 - **Checked:**
   - `tests/autopilot.test.ts` (the planner) and `tests/autopilotEngine.test.ts`: on the mock chain with the real MultiBot. Covered: opening, the week's hold, retiring to cash, a pool in another coin (swapped in, valued, swapped back), the loss limit, and turning off.
+  - A 52-finding review of the first version (2026-10-26): each fix has a test that fails on the code before it (engine, liquidity, planner, trader and MultiBot tests).
   - In a sandbox, in paper, on a copy of a real scan (179 pools), budgets of 1,000 USDG on Robinhood and 500 DAI on PulseChain:
     - It opened 3 liquidity ranges (one USDG pool, two ETH pools swapped into) and 3 grids (two in PLS, swapped into).
     - Turned off with *close*, all six came back and the PLS and ETH were swapped back: 992.79 USDG and 495.89 DAI, after ~10 minutes of opening and closing costs.

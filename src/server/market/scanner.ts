@@ -27,8 +27,9 @@ import { sameAddr } from '../dex/types';
 import { lpShareOf } from '../lp/lpShare';
 import { RateLimited } from './gecko';
 
-export interface ScanChain { chainId: number; name: string; at: number; items: Opportunity[]; tested: number; skipped: Skipped[]; error: string | null }
-export interface ScanFile { version: 3; at: number | null; testUsd: number; chains: ScanChain[] }
+/** partial: still being scanned (shown as its pools are tested; only when it has no earlier result) */
+export interface ScanChain { chainId: number; name: string; at: number; items: Opportunity[]; tested: number; skipped: Skipped[]; error: string | null; partial?: boolean }
+export interface ScanFile { version: 4; at: number | null; testUsd: number; chains: ScanChain[] }
 
 /** `dexes` = GeckoTerminal ids of the DEXes this app trades on the chain (only their pools are read); `lpDexes` = app DEX ids a liquidity bot can use. */
 export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[]; dexes: string[]; lpDexes: string[] }
@@ -54,6 +55,37 @@ export interface ScanDeps {
   approval: 'exact' | 'max';
   now?: () => number;
   emit?: Emit;
+}
+
+/** Version 3 kept a pool's addresses only for coins not in the app (`add`) */
+type ScanFileV3 = { version: 3; at: number | null; testUsd: number; chains: (Omit<ScanChain, 'items'> & { items: (Omit<Opportunity, 'ref'> & { add: Opportunity['ref'] | null })[] })[] };
+function upgradeV3(f: ScanFileV3, existing: ScanDeps['existing']): ScanFile {
+  return {
+    ...f, version: 4,
+    chains: f.chains.map((c) => ({
+      ...c,
+      // A pool in the app gets its addresses from its market; one whose market was removed since is dropped.
+      items: c.items.flatMap(({ add, ...o }) => {
+        const d = add ? null : existing(c.chainId).find((m) => m.key === o.key);
+        const ref = add ?? (d ? { address: d.base.address, quote: d.quote.address, pool: d.pool.address } : null);
+        return ref ? [{ ...o, ref }] : [];
+      }),
+    })),
+  };
+}
+
+/**
+ * The scan as this app reads it: each pool's `key` is this app's market on that pool (by its addresses), or null.
+ * The scan may come from another app (a friend's copy shows its host's), and keys differ between apps.
+ */
+export function localScan(hub: Pick<Hub, 'marketFor'>, src: { status(): unknown; run(testUsd?: number): Promise<unknown> }) {
+  return {
+    async status() {
+      const s = (await src.status()) as ReturnType<DailyScanner['status']>;
+      return { ...s, chains: s.chains.map((c) => ({ ...c, items: c.items.map((o) => ({ ...o, key: hub.marketFor(o.chainId, o.dex, o.ref) })) })) };
+    },
+    run: (testUsd?: number) => src.run(testUsd),
+  };
 }
 
 const lc = (a: string) => a.toLowerCase();
@@ -83,9 +115,9 @@ export class DailyScanner {
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly d: ScanDeps) {
-    const f = d.store.load();
+    const f = d.store.load() as ScanFile | ScanFileV3 | { version: 2; testUsd?: number } | null;
     // version 2 (3 picks a chain, ranked with the price move) is dropped: the next scan replaces it
-    this.file = f?.version === 3 ? f : { version: 3, at: null, testUsd: f?.testUsd ?? TEST_USD, chains: [] };
+    this.file = f?.version === 4 ? f : f?.version === 3 ? upgradeV3(f, d.existing) : { version: 4, at: null, testUsd: f?.testUsd ?? TEST_USD, chains: [] };
   }
 
   private now() { return (this.d.now ?? Date.now)(); }
@@ -102,7 +134,7 @@ export class DailyScanner {
   private chainsNow(): ScanChain[] {
     if (!this.live) return this.file.chains;
     const { done, current } = this.live, old = this.file.chains;
-    const fresh = current && !old.some((c) => c.chainId === current.chainId) ? [...done, current] : done;
+    const fresh = current && !old.some((c) => c.chainId === current.chainId) ? [...done, { ...current, partial: true }] : done;
     return [...fresh, ...old.filter((c) => !fresh.some((f) => f.chainId === c.chainId))];
   }
 
@@ -126,7 +158,7 @@ export class DailyScanner {
       this.live = { done: chains, current: null };
       const list = this.d.chains();
       for (const [i, c] of list.entries()) chains.push(await this.scanChain(c, i + 1, list.length, usd));
-      this.file = { version: 3, at: this.now(), testUsd: usd, chains };
+      this.file = { version: 4, at: this.now(), testUsd: usd, chains };
       this.d.store.save(this.file);
       this.d.emit?.({ type: 'info', kind: 'system', level: 'success', msg: `Opportunity scan done: ${chains.map((c) => `${c.name} ${c.items.length} pool${c.items.length === 1 ? '' : 's'}`).join(', ')}` });
       return this.file;
@@ -210,7 +242,7 @@ export class DailyScanner {
       chainId: c.id,
       // A new token's draft quote keeps the wrapped address (WPLS / WETH) even though it spends the native coin.
       key: isNew ? null : d.key,
-      add: isNew ? { address: d.base.address, quote: d.quote.address, pool: d.pool.address } : null,
+      ref: { address: d.base.address, quote: d.quote.address, pool: d.pool.address },
       label: `${d.base.symbol}/${d.quote.symbol}`, spend: d.quote.symbol, stack: d.base.symbol,
       dex: d.pool.dex, kind: d.pool.kind, feeBps: d.pool.feeBps,
       risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null, liveAllowed: d.safety ? d.safety.liveAllowed : true,

@@ -113,8 +113,8 @@ export interface Fill {
   gasNative?: number;
   /** amountOut parsed from receipt logs or balance change (false = fell back to amountOutMin / paper) */
   fromReceipt: boolean;
-  /** Where amountOut came from: wallet balance change (actual, after tax), Transfer/Withdrawal log, amountOutMin, paper sim */
-  outSource?: 'balance' | 'log' | 'minOut' | 'paper';
+  /** Where amountOut came from: the receipt's net Transfer / Withdrawal logs to the wallet (actual, after tax), amountOutMin, paper sim */
+  outSource?: 'log' | 'minOut' | 'paper';
   /** Expected (quoted, after known tax) output */
   expectedOutHuman?: number;
   /** 1 − actual / expected (positive = received less than expected: slippage or a tax increase) */
@@ -154,7 +154,8 @@ export interface ExecHooks {
 export class ExecError extends Error {
   constructor(
     message: string,
-    public readonly opts: { gasPls?: number; approvalTxHash?: string; swapTxHash?: string; aborted?: boolean; pending?: boolean; retryable?: boolean } = {},
+    /** gasPls: gas paid, in base units; gasNative: the same in the chain's own coin */
+    public readonly opts: { gasPls?: number; gasNative?: number; approvalTxHash?: string; swapTxHash?: string; aborted?: boolean; pending?: boolean; retryable?: boolean } = {},
   ) {
     super(message);
   }
@@ -168,7 +169,7 @@ export interface Executor {
   quote(side: Side, amount: number, limits: SafetyLimits): Promise<Quote>;
   execute(q: Quote, hooks: ExecHooks): Promise<Fill>;
   /** Look up a swap sent before a restart. null = not mined (yet). */
-  recover(swapTxHash: string, tokenOut: string, decimalsOut: number): Promise<{ ok: boolean; amountOutHuman: number; gasPls: number } | null>;
+  recover(swapTxHash: string, tokenOut: string, decimalsOut: number): Promise<{ ok: boolean; amountOutHuman: number; gasPls: number; gasNative: number } | null>;
   /** Gas (base units) of one transfer of the spend coin, for the profit payout threshold */
   transferGasPls(): Promise<number>;
   /** Send `amountHuman` of the spend coin to `to`; returns the tx hash without waiting for it (paper: a simulated id) */
@@ -421,7 +422,9 @@ const ZERO_TOPIC = '0x' + '0'.repeat(64);
 export function parseAmountOut(receipt: ReceiptLike, account: string, tokenOut: string, wrappedNative: string): bigint | null {
   const me = account.toLowerCase();
   const transferTopic = ERC20.getEvent('Transfer')!.topicHash;
-  // ERC-20 out: SUM of Transfer(* → me) — a taxed token sends the tax elsewhere and the net to us (sometimes in parts).
+  // ERC-20 out: Transfer(* → me) less Transfer(me → *) in this receipt. A taxed token sends the tax elsewhere and the net
+  // to us (sometimes in parts), or the gross to us and the tax back out of our wallet. Only this tx's own logs count:
+  // another tx landing meanwhile (a bot's exit on the same chain) never does.
   let sum: bigint | null = null;
   for (const log of receipt.logs) {
     try {
@@ -432,6 +435,7 @@ export function parseAmountOut(receipt: ReceiptLike, account: string, tokenOut: 
       } else if (tokenOut !== NATIVE && log.address.toLowerCase() === tokenOut.toLowerCase()) {
         const ev = ERC20.parseLog(log);
         if (ev?.name === 'Transfer' && (ev.args.to as string).toLowerCase() === me) sum = (sum ?? 0n) + (ev.args.value as bigint);
+        else if (ev?.name === 'Transfer' && (ev.args.from as string).toLowerCase() === me && sum != null) sum -= ev.args.value as bigint;
       }
     } catch { /* other event */ }
   }
@@ -567,7 +571,7 @@ export class LiveExecutor implements Executor {
     let swapTxHash: string | undefined;
     const k = q.basePerNative || 1;
     const fail = (msg: string, extra: Partial<ExecError['opts']> = {}) =>
-      new ExecError(msg, { gasPls: fromUnits(gasWei, 18) * k, approvalTxHash, swapTxHash, ...extra });
+      new ExecError(msg, { gasPls: fromUnits(gasWei, 18) * k, gasNative: fromUnits(gasWei, 18), approvalTxHash, swapTxHash, ...extra });
 
     if (!hooks.canSend()) throw fail('stopped before sending', { aborted: true });
 
@@ -592,13 +596,7 @@ export class LiveExecutor implements Executor {
 
     if (!hooks.canSend()) throw fail('stopped between approve and swap', { aborted: true });
 
-    // Actual received = balance change of the output token (sends are serialized per chain by the TxGate, so the
-    // delta is this swap's). Native out uses the WETH Withdrawal log (native balance also moves by gas).
     const me = await this.address();
-    const ercOut = q.tokenOut !== NATIVE;
-    let pre: bigint | null = null;
-    if (ercOut) { try { pre = await this.quoter.tokenBalance(me, q.tokenOut); } catch { pre = null; } }
-
     let tx: SentTx;
     try {
       tx = await this.send({ to: q.call.to, data: q.call.data, value: q.call.value });
@@ -614,13 +612,11 @@ export class LiveExecutor implements Executor {
     }
     gasWei += gasOf(r) + q.l1FeeWei;
     if (r.status !== 1) throw fail(`swap reverted (price moved past slippage, deadline passed${q.taxInPct || q.taxOutPct || this.quoter.def.custom ? ', or the token tax changed' : ''})`, { retryable: true });
+    // Actual received: this receipt's own transfers to the wallet, net (parseAmountOut; a wallet balance change could
+    // include another tx that landed meanwhile). Native out: the wrapped coin's Withdrawal log.
     const parsed = parseAmountOut(r, me, q.tokenOut, this.quoter.chain.wrappedNative.address);
-    let post: bigint | null = null;
-    if (ercOut && pre != null) { try { post = await this.quoter.tokenBalance(me, q.tokenOut); } catch { post = null; } }
-    const delta = pre != null && post != null ? post - pre : null;
     let out: bigint, outSource: Fill['outSource'];
-    if (delta != null && delta > 0n) { out = delta; outSource = 'balance'; }
-    else if (parsed != null) { out = parsed; outSource = 'log'; }
+    if (parsed != null && parsed > 0n) { out = parsed; outSource = 'log'; }
     else { out = q.walletMin ?? q.call.amountOutMin; outSource = 'minOut'; }
     const outHuman = fromUnits(out, q.decimalsOut);
     return {
@@ -634,10 +630,10 @@ export class LiveExecutor implements Executor {
   async recover(hash: string, tokenOut: string, decimalsOut: number) {
     const r = await this.quoter.reader.getTransactionReceipt(hash);
     if (!r) return null;
-    const gasPls = fromUnits(gasOf(r), 18) * this.quoter.lastBasePerNative;
-    if (r.status !== 1) return { ok: false, amountOutHuman: 0, gasPls };
+    const gasNative = fromUnits(gasOf(r), 18), gasPls = gasNative * this.quoter.lastBasePerNative;
+    if (r.status !== 1) return { ok: false, amountOutHuman: 0, gasPls, gasNative };
     const out = parseAmountOut(r, await this.address(), tokenOut, this.quoter.chain.wrappedNative.address);
-    return { ok: true, amountOutHuman: out != null ? fromUnits(out, decimalsOut) : 0, gasPls };
+    return { ok: true, amountOutHuman: out != null ? fromUnits(out, decimalsOut) : 0, gasPls, gasNative };
   }
 }
 

@@ -127,10 +127,13 @@ export function pickTokens(pools: TopPool[], spendable: string[], wrapped: strin
 /** One pool, tested both ways over the same week at the same test size. */
 export interface Opportunity {
   chainId: number;
-  /** Market key when the pair is already in the app (may be a flipped key such as 'HEX~') */
+  /**
+   * This app's market key when the pool is already in it (may be a flipped key such as 'HEX~'); null otherwise. Set from
+   * `ref` each time the scan is read (server/market/scanner.ts localScan): another app's keys are never used here.
+   */
   key: string | null;
-  /** How to add it otherwise (POST /api/opportunities/use) */
-  add: { address: string; quote: string; pool: string } | null;
+  /** The pool: its coin (address), the coin it spends (quote) and the pool's address. Adding it: POST /api/opportunities/use */
+  ref: { address: string; quote: string; pool: string };
   label: string;
   spend: string;
   stack: string;

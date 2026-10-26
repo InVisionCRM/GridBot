@@ -84,9 +84,11 @@ export interface BotState {
   payouts: Payout[];
   /**
    * Selling everything back to the spend coin (closeToCash). size = the next sell (null = all it holds), halved when a
-   * sell would go over the price-impact cap; waitUntil = paused 10 min once even the smallest piece is over the cap.
+   * sell is too big to go through (price-impact cap, the token's max transaction); waitUntil = the next try after a
+   * wait; fails = sells in a row that failed for another reason (a revert, a failed quote). Kept while stopped: resuming
+   * carries on selling.
    */
-  cashOut?: { at: number; size: number | null; waitUntil: number | null; why: string | null } | null;
+  cashOut?: { at: number; size: number | null; waitUntil: number | null; why: string | null; fails: number } | null;
   /** When the last close to cash finished (everything sold, stopped) */
   cashedOutAt?: number | null;
 }
@@ -151,6 +153,8 @@ const CASH_JOB = 'cash-';
 const CASH_DUST = 1e-4;
 const CASH_MIN_PARTS = 64;
 const CASH_WAIT_MS = 10 * 60_000;
+/** A close to cash whose sells failed this many times in a row (10, 20, 40, 80 min apart) stops and asks for a look */
+const CASH_MAX_FAILS = 5;
 
 function newId() {
   return `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -340,14 +344,15 @@ export class GridEngine {
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
     if (this.state.mode === 'live' && !this.signer) throw new Error(noKey());
     if (this.state.mode === 'live' && this.def?.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
+    if (this.state.cashOut) { this.state.cashOut.fails = 0; this.state.cashOut.waitUntil = null; }
     this.state.status = 'running';
     this.save();
     this.tag('info', 'Resumed.');
-    this.ev('started', `Grid resumed — ${this.label}`);
+    this.ev('started', `Grid resumed — ${this.label}${this.state.cashOut ? `: selling back to ${this.quoteSym}` : ''}`);
   }
 
   stop(why?: string) {
-    if (this.state.cashOut) { this.state.cashOut = null; this.ev('info', `Grid ${this.label}: stopped selling back to ${this.quoteSym}`, { level: 'warn' }); }
+    if (this.state.cashOut) this.ev('info', `Grid ${this.label}: selling back to ${this.quoteSym} is paused; resume the grid to carry on`, { level: 'warn' });
     const dropped = this.state.queue;
     this.state.intervals = dropped.reduce((iv, q) => onTradeSkipped(iv, q), this.state.intervals);
     this.state.queue = [];
@@ -365,10 +370,14 @@ export class GridEngine {
     if (!this.state.config) throw new Error('No grid to close.');
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
     if (this.state.mode === 'live' && !this.signer) throw new Error(noKey());
-    if (this.state.cashOut) return;
+    if (this.state.cashOut) {
+      // Asked again while paused (stopped): carry on, the next sell straight away
+      if (this.state.status !== 'running') { this.state.cashOut.waitUntil = null; this.state.cashOut.fails = 0; this.state.status = 'running'; this.save(); this.ev('info', `Grid ${this.label}: selling back to ${this.quoteSym} again`); }
+      return;
+    }
     this.state.intervals = this.state.queue.reduce((iv, q) => onTradeSkipped(iv, q), this.state.intervals);
     this.state.queue = [];
-    this.state.cashOut = { at: this.now(), size: null, waitUntil: null, why: null };
+    this.state.cashOut = { at: this.now(), size: null, waitUntil: null, why: null, fails: 0 };
     this.state.cashedOutAt = null;
     this.state.status = 'running';
     this.save();
@@ -427,6 +436,8 @@ export class GridEngine {
     const band = (c.upperPrice - c.lowerPrice) / (c.upperPrice + c.lowerPrice);
     const next: GridConfig = { ...c, lowerPrice: +(price * (1 - band)).toPrecision(6), upperPrice: +(price * (1 + band)).toPrecision(6) };
     const { summary: econ } = await gridEconomics(this.hub.quoter(this.state.stable), next, this.d.approval ?? 'exact');
+    // Anything that changed while the costs were read (a close to cash, a stop, a trade) wins over the move
+    if (this.state.cashOut || this.state.status !== 'running' || this.state.config !== c || this.state.inFlight || this.state.queue.length) return;
     const levels = calculateGridLevels(next.lowerPrice, next.upperPrice, next.gridCount);
     // Everything is sold at this point: the levels' buy sizes (start size + reinvested profit) carry over, spread evenly.
     const perLevel = this.state.intervals.reduce((a, i) => a + i.buyAmount, 0) / next.gridCount;
@@ -614,13 +625,24 @@ export class GridEngine {
   private skip(job: QueuedTrade, why: string) {
     const c = this.state.cashOut;
     if (c && job.id.startsWith(CASH_JOB)) {
-      // Too big for the price-impact cap: half as much next time; the smallest piece too big waits 10 minutes.
       const held = replay(this.modeTrades()).plsHeld, min = held / CASH_MIN_PARTS;
-      const impact = /price impact/.test(why);
-      c.size = impact ? Math.max(min, job.amount / 2) : c.size;
-      c.waitUntil = impact && job.amount <= min * 1.000001 ? this.now() + CASH_WAIT_MS : null;
       c.why = why;
-      this.tag('warn', `selling back: ${why}`);
+      if (/price impact|max transaction/.test(why)) {
+        // Too big to go through in one sale: half as much next time; the smallest piece still too big waits 10 minutes.
+        c.size = Math.max(min, job.amount / 2);
+        c.waitUntil = job.amount <= min * 1.000001 ? this.now() + CASH_WAIT_MS : null;
+        this.tag('warn', `selling back: ${why}`);
+      } else if (++c.fails >= CASH_MAX_FAILS) {
+        // Failing for another reason (a revert, a quote): each try costs gas, so after a few it stops for a look.
+        this.tag('error', `selling back failed ${c.fails} times in a row (${why}); stopped`);
+        this.ev('stopped', `Grid ${this.label}: selling back to ${this.quoteSym} failed ${c.fails} times in a row (${why}); stopped. Resume it to try again.`, { level: 'error', notify: true });
+        c.waitUntil = null;
+        this.state.status = 'stopped';
+      } else {
+        c.waitUntil = this.now() + CASH_WAIT_MS * 2 ** (c.fails - 1);
+        this.tag('warn', `selling back: ${why}; trying again in ${CASH_WAIT_MS * 2 ** (c.fails - 1) / 60_000} min`);
+        this.ev('skipped', `Grid ${this.label}: selling back to ${this.quoteSym}: ${why}; trying again in ${CASH_WAIT_MS * 2 ** (c.fails - 1) / 60_000} min`, { level: 'warn' });
+      }
       this.save();
       return;
     }
@@ -660,19 +682,21 @@ export class GridEngine {
     let lotCost: number | undefined;
     let roundTripNet: number | undefined;
     let realized = 0;
+    // A sale of a close to cash: in the position and its profit, but not a grid round trip
+    const cash = job.id.startsWith(CASH_JOB);
     if (job.side === 'buy') {
       lotCost = stableAmount + gasQuote;
     } else {
       const pos = replay(this.modeTrades());
       lotCost = iv?.lotCost ?? (pos.plsHeld > 0 ? (pos.costUsd / pos.plsHeld) * plsAmount : undefined);
       realized = applySell(pos, plsAmount, stableAmount, gasQuote, lotCost).realized;
-      roundTripNet = realized;
+      roundTripNet = cash ? undefined : realized;
     }
     this.state.trades.push({
       id: f.txHash, network: this.netKey, side: job.side, intervalIndex: job.intervalIndex, stable: this.state.stable,
       plsAmount, stableAmount, price: execPrice, gasPls, gasUsd: gasQuote, txHash: f.txHash, approvalTxHash: f.approvalTxHash,
       timestamp: this.now(), realizedPnlUsd: realized, paper: this.state.mode === 'paper',
-      triggerPrice: job.triggerPrice, levelPrice: job.levelPrice, quotedPrice: f.quotedPrice, execPrice, slippagePct,
+      triggerPrice: job.triggerPrice, ...(cash ? { cashOut: true } : { levelPrice: job.levelPrice }), quotedPrice: f.quotedPrice, execPrice, slippagePct,
       fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.seed ? { seed: job.seed } : {}),
       ...(f.taxPct ? { taxPct: f.taxPct } : {}), ...(f.outSource ? { outSource: f.outSource } : {}), ...(f.expectedOut != null ? { expectedOut: f.expectedOut } : {}),
       ...(this.def ? { dex: this.def.pool.dex, feeBps: this.def.pool.feeBps, ...(this.def.pool.feeTier != null ? { feeTier: this.def.pool.feeTier } : {}) } : {}),
@@ -684,12 +708,35 @@ export class GridEngine {
       else if (realized > 0) this.state.payoutPending += realized;
     }
     this.state.intervals = onTradeFilled(this.state.intervals, job, job.side === 'buy' ? plsAmount : 0, job.side === 'buy' ? lotCost : undefined, nextBuy);
+    if (cash) {
+      this.levelsFollowHolding();
+      if (this.state.cashOut) { this.state.cashOut.fails = 0; this.state.cashOut.why = null; }
+    }
     const sym = this.def?.quote.symbol ?? this.state.stable, bs = this.baseSym;
     this.ev('filled', `Grid ${this.label}: ${job.side === 'buy' ? 'BOUGHT' : 'SOLD'} ${plsAmount.toPrecision(6)} ${bs} @ ${execPrice.toPrecision(6)}${job.seed ? ` for the ${job.seed.length} levels above the price` : ''}${roundTripNet != null ? ` — RT net ${roundTripNet >= 0 ? '+' : ''}${roundTripNet.toPrecision(4)} ${sym}` : ''}`, {
       level: job.side === 'sell' ? (realized >= 0 ? 'success' : 'warn') : 'success', notify: true,
       data: { side: job.side, price: execPrice, pls: plsAmount, level: job.levelPrice, pnl: roundTripNet },
     });
     this.tag('info', `FILLED ${job.side} ${plsAmount.toPrecision(6)} ${bs} ↔ ${stableAmount.toPrecision(6)} ${sym} | trig ${job.triggerPrice.toPrecision(6)} lvl ${job.levelPrice.toPrecision(6)} quote ${f.quotedPrice.toPrecision(6)} exec ${execPrice.toPrecision(6)} slip ${(slippagePct * 100).toFixed(3)}%${f.fromReceipt ? '' : ' (no receipt log)'} | gas ${gasQuote.toPrecision(3)} ${sym} | tx ${f.txHash}${roundTripNet != null ? ` | RT net ${roundTripNet.toPrecision(4)} ${sym}` : ''}`);
+  }
+
+  /**
+   * After a sale to cash: the levels keep only coins the grid still holds (lowest sell price first; the others wait to
+   * buy again), so a close stopped part way leaves levels that match what it holds.
+   */
+  private levelsFollowHolding() {
+    let left = replay(this.modeTrades()).plsHeld;
+    const next = [...this.state.intervals];
+    const holding = next.map((iv, i) => ({ iv, i })).filter(({ iv }) => iv.status === 'holding').sort((a, b) => a.iv.sellPrice - b.iv.sellPrice);
+    for (const { iv, i } of holding) {
+      const keep = Math.min(iv.plsAmount, left);
+      left -= keep;
+      if (keep >= iv.plsAmount) continue;
+      next[i] = keep > 0
+        ? { ...iv, plsAmount: keep, lotCost: iv.lotCost != null ? (iv.lotCost * keep) / iv.plsAmount : undefined }
+        : { ...iv, status: 'waitingBuy', plsAmount: 0, lotCost: undefined, needsRearm: true };
+    }
+    this.state.intervals = next;
   }
 
   private async runJob(job: QueuedTrade): Promise<void> {
@@ -712,6 +759,11 @@ export class GridEngine {
         await sleep(this.d.retryDelayMs ?? 5000);
         continue;
       }
+      // Over the impact cap first: a big sale's quote price includes its own impact, which the units guard would
+      // otherwise report as a units mismatch (and a close to cash halves a sale only for impact).
+      if (q.priceImpact > this.state.limits.maxPriceImpact) {
+        return this.skip(job, `price impact ${(q.priceImpact * 100).toFixed(2)}% > cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%${q.priceImpact > 0.5 ? ' (over half the price: a very thin pool for this size, or a units/decimals mismatch in the quote)' : ''}`);
+      }
       // Units guard: the router quote's effective price must be in the same units/direction as the trigger
       // (quote per PLS). A decimals or inversion bug shows up as orders-of-magnitude divergence.
       const ref = this.state.lastPrice ?? job.triggerPrice;
@@ -719,9 +771,6 @@ export class GridEngine {
       const qp = q.poolPrice ?? q.price;
       if (ref > 0 && (qp / ref > 1.5 || qp / ref < 1 / 1.5)) {
         return this.skip(job, `quote price ${qp.toPrecision(6)} inconsistent with spot ${ref.toPrecision(6)} ${this.def?.quote.symbol ?? this.state.stable}/${this.baseSym} — units/decimals mismatch, refusing`);
-      }
-      if (q.priceImpact > this.state.limits.maxPriceImpact) {
-        return this.skip(job, `price impact ${(q.priceImpact * 100).toFixed(2)}% > cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%`);
       }
       if (!q.balanceOk) return this.skip(job, `insufficient balance (${q.balanceNote})`);
       if (job.side === 'sell' && q.amountInHuman > replay(this.modeTrades()).plsHeld * 1.000001 + 1e-9) {

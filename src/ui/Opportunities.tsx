@@ -64,7 +64,7 @@ export function useOpportunities() {
 /** Opens New bot with the pool and its setting; a token not in the app yet is added first (safety re-checked). */
 export function tryIt(o: Opportunity, how: 'grid' | 'lp', nav: Nav, act: (fn: () => Promise<unknown>) => void) {
   act(async () => {
-    const key: string = o.key ?? (await http<{ key: string }>('/api/opportunities/use', 'POST', { chainId: o.chainId, ...o.add })).key;
+    const key: string = o.key ?? (await http<{ key: string }>('/api/opportunities/use', 'POST', { chainId: o.chainId, ...o.ref })).key;
     if (how === 'grid') nav({ v: 'new', kind: 'grid', gridPrefill: { pair: key, bandPct: o.grid!.bandPct, gridCount: o.grid!.gridCount, nonce: Date.now() } });
     else nav({ v: 'new', kind: 'lp', lpPrefill: { pair: key, bandPct: o.lp!.bandPct, nonce: Date.now() } });
   });
@@ -102,7 +102,7 @@ function Row({ s, o, w, rank, nav, act, busy }: { s: AnyObj; o: Opportunity; w: 
           <span>Last week it would have earned <b>{pct(last, 2, true)}</b> ({dollars(last * o.usd)})</span>
           {o.activity && <span>{money(o.activity.liquidityUsd)} in the pool · {money(o.activity.volume24Usd)} traded today</span>}
           <span>Price {pct(o.movePct, 1, true)} this week (not counted: that isn't the bot's doing)</span>
-          <span className="inline"><DexTag name={dexName} feeBps={o.feeBps} />{o.add && <span className="mono muted" title="A coin not in the app yet: two coins can share a name, this is the one at this address">{o.add.address.slice(0, 6)}…{o.add.address.slice(-4)}</span>}</span>
+          <span className="inline"><DexTag name={dexName} feeBps={o.feeBps} />{o.key == null && <span className="mono muted" title="A coin not in the app yet: two coins can share a name, this is the one at this address">{o.ref.address.slice(0, 6)}…{o.ref.address.slice(-4)}</span>}</span>
           {!o.liveAllowed && o.riskWhy && <span className="neg">Failed the safety check: {o.riskWhy}</span>}
         </div>
       )}
@@ -157,7 +157,7 @@ export function Opportunities({ s, nav, act, busy }: { s: AnyObj; nav: Nav; act:
       {errors.map((c) => <div key={c.chainId} className="banner error"><span className="grow">{c.name}: {c.error}</span></div>)}
       {p.running && !list.length && <p className="small muted">Checking the busiest pools on each chain. GeckoTerminal allows only a few requests a minute, so a full check takes up to an hour; pools appear here as they're checked.</p>}
       <div className="opp-list">
-        {list.slice(0, shown).map(({ o, w }, i) => <Row key={`${o.chainId}-${o.add?.pool ?? o.key}-${w.how}`} s={s} o={o} w={w} rank={i + 1} nav={nav} act={act} busy={busy} />)}
+        {list.slice(0, shown).map(({ o, w }, i) => <Row key={`${o.chainId}-${o.key ?? o.ref.pool}-${w.how}`} s={s} o={o} w={w} rank={i + 1} nav={nav} act={act} busy={busy} />)}
       </div>
       {list.length > shown && <button type="button" className="btn" onClick={() => setShown((n) => n + PAGE)}>Show {Math.min(PAGE, list.length - shown)} more</button>}
       {!p.running && p.at && !list.length && <p className="small muted">No pool matches. {f.safeOnly ? 'Turn off Safe only to see riskier ones.' : ''}</p>}
