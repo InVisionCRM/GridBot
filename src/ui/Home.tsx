@@ -1,114 +1,114 @@
-/** Home: net worth, what changed today, and the bots that are running. */
-import { usd, cls } from './fmt';
-import { useChainFilter } from './chains';
+/** Home: net worth, a short summary, the bots, then the two cards that used to live only under More. */
+import { useEffect, useState } from 'react';
+import { http } from './api';
+import { BotRow, feesTodayUsd, listBots, todaySeries, totalPnlUsd, useRowActions } from './botRow';
+import { Meter, Sparkline } from './charts';
+import { chainOf, useChainFilter } from './chains';
+import { cls, pct, usd } from './fmt';
 import { formatUsdAmount, type HoldingsSnapshot } from '../live/holdingsMath';
-import { botView, gridName, quoteSym, type AnyObj, type Nav } from './model';
+import { AnimatedNumber } from './motion';
+import type { Opportunity } from '../market/scan';
+import { isSafe, tryIt, useOpportunities, wayOf } from './Opportunities';
+import type { AnyObj, Nav } from './model';
 
-function titleOf(b: AnyObj) {
-  if (b.kind === 'grid') return gridName(b);
-  if (b.kind === 'lp') return b.label ? String(b.label) : 'Liquidity';
-  return String(b.name ?? 'Trend');
-}
-function kindOf(b: AnyObj) {
-  return b.kind === 'lp' ? 'Liquidity' : b.kind === 'trend' ? 'Trend' : 'Grid';
-}
-function pnlOf(b: AnyObj): { text: string; n: number | null } {
-  const n = b.kind === 'lp' ? (b.pnl?.net ?? null) : (b.pnl?.realized ?? null);
-  if (n == null || !Number.isFinite(n)) return { text: '—', n: null };
-  const k = b.usdPerQuote as number | null;
-  if (k != null && Number.isFinite(k)) return { text: usd(n * k, true), n: n * k };
-  const sym = quoteSym(b);
-  const sign = n > 0 ? '+' : n < 0 ? '−' : '';
-  return { text: `${sign}${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 4 })} ${sym}`, n };
+function useJson(path: string) {
+  const [data, setData] = useState<AnyObj | null>(null);
+  useEffect(() => {
+    let dead = false;
+    const load = () => http<AnyObj>(path).then((d) => { if (!dead) setData(d); }).catch(() => undefined);
+    void load();
+    const t = setInterval(load, 15_000);
+    return () => { dead = true; clearInterval(t); };
+  }, [path]);
+  return data;
 }
 
-/** Closed trades since local midnight, as a running total in dollars. Live bots only. */
-function todaySeries(bots: AnyObj[]): number[] {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  const from = start.getTime();
-  const ev: { t: number; usd: number }[] = [];
-  for (const b of bots) {
-    if (b.mode === 'paper') continue;
-    const k = b.usdPerQuote as number | null;
-    if (!(typeof k === 'number' && k > 0)) continue;
-    for (const tr of (b.trades ?? []) as AnyObj[]) {
-      if (tr.failed || tr.side === 'buy' || !(tr.timestamp >= from)) continue;
-      const pnl = tr.roundTripNet ?? tr.realizedPnlUsd;
-      if (typeof pnl === 'number' && Number.isFinite(pnl)) ev.push({ t: tr.timestamp, usd: pnl * k });
-    }
-  }
-  ev.sort((a, b) => a.t - b.t);
-  const pts = [0];
-  let acc = 0;
-  for (const e of ev) { acc += e.usd; pts.push(acc); }
-  return pts;
-}
-
-function Spark({ points }: { points: number[] }) {
-  const w = 96, h = 36;
-  const p = points.length > 1 ? points : [0, 0];
-  const min = Math.min(...p), max = Math.max(...p), span = max - min || 1;
-  const d = p.map((y, i) => {
-    const x = (i / (p.length - 1)) * w;
-    const yy = h - 3 - ((y - min) / span) * (h - 6);
-    return `${i ? 'L' : 'M'}${x.toFixed(1)} ${yy.toFixed(1)}`;
-  }).join(' ');
-  const last = p[p.length - 1];
-  const tone = last > 0 ? 'var(--profit)' : last < 0 ? 'var(--loss)' : 'var(--muted)';
-  return (
-    <svg className="sparkline" width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true">
-      <path d={d} fill="none" stroke={tone} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-export function BotLine({ b, nav }: { b: AnyObj; nav: Nav }) {
-  const pnl = pnlOf(b);
-  const bad = !!b.lastError;
-  const on = b.status === 'running' && !bad;
-  return (
-    <button type="button" className="line" onClick={() => nav(botView(b.kind, b.id))}>
-      <i className={`status-dot${on ? ' on' : ''}${bad ? ' bad' : ''}`} />
-      <span className="line-name">{titleOf(b)}<span>{kindOf(b)}</span></span>
-      <b className={cls(pnl.n)}>{pnl.text}</b>
-    </button>
-  );
-}
-
-export function Home({ s, nav, holdings }: { s: AnyObj; nav: Nav; holdings: HoldingsSnapshot | null }) {
+export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings: HoldingsSnapshot | null; act: (fn: () => Promise<unknown>) => void }) {
   const { chain } = useChainFilter();
-  const all: AnyObj[] = [
-    ...s.grids.map((g: AnyObj) => ({ ...g, kind: 'grid' })),
-    ...(s.trends ?? []).map((t: AnyObj) => ({ ...t, kind: 'trend' })),
-    ...(s.lps ?? []).map((t: AnyObj) => ({ ...t, kind: 'lp' })),
-  ].filter((b) => !b.archivedAt && (chain === 'all' || (b.chainId ?? s.legacyChainId) === chain));
-  const bots = all.filter((b) => b.status === 'running');
+  const { err, pause, close } = useRowActions();
+  const bots = listBots(s, chain).sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
+  const running = bots.filter((b) => b.status === 'running').length;
+  const paused = bots.filter((b) => b.status === 'stopped').length;
+  const live = bots.filter((b) => b.mode === 'live').length;
+  const paper = bots.length - live;
   const worth = !holdings || !holdings.hasSigner ? null
     : chain === 'all' ? (holdings.netWorthExDustUsd ?? holdings.netWorthUsd)
     : (holdings.chains.find((c) => c.chainId === chain)?.usd ?? null);
-  const series = todaySeries(all);
+  const series = todaySeries(bots, holdings?.hasSigner === false);
   const today = series[series.length - 1] ?? 0;
-  const traded = series.length > 2 || (series.length === 2 && series[1] !== 0);
+  const pnl = totalPnlUsd(bots);
+  const fees = feesTodayUsd(bots);
+  const { p } = useOpportunities();
+  const picks = ((p?.chains ?? []) as AnyObj[])
+    .filter((c) => chain === 'all' || c.chainId === chain)
+    .flatMap((c) => (c.items ?? []) as Opportunity[])
+    .filter((o) => isSafe(o))
+    .flatMap((o) => { const w = wayOf(o, 'best'); return w ? [{ o, w }] : []; })
+    .sort((a, b) => b.w.expected - a.w.expected)
+    .slice(0, 3);
+  const auto = useJson('/api/autopilot');
+  const trader = useJson('/api/token-trader');
+  const best = picks[0]?.w.expected ?? 0;
 
   return (
     <main className="home">
       <section className="home-fig" aria-label="Net worth">
         <div>
-          <p className="home-num">{worth == null ? '—' : formatUsdAmount(worth)}</p>
-          <p className={`home-day ${holdings?.hasSigner && traded ? cls(today) : 'muted'}`}>
-            {holdings?.hasSigner === false && 'Paper mode'}
-            {holdings?.hasSigner && (traded ? `Today ${usd(today, true)}` : 'Today $0.00')}
+          <p className="home-k">Net worth</p>
+          <p className="home-num">{worth == null ? '—' : <AnimatedNumber value={worth} format={formatUsdAmount} />}</p>
+          <p className={`home-day ${holdings?.hasSigner === false || !holdings ? 'muted' : cls(today)}`}>
             {holdings == null && 'Reading…'}
+            {holdings?.hasSigner === false && 'Paper · '}
+            {holdings && <>Today {usd(today, true)}</>}
           </p>
         </div>
-        {holdings?.hasSigner && <Spark points={series} />}
+        {holdings && <Sparkline points={series} />}
       </section>
-      <section aria-label="Running">
-        <h2 className="plain-h">Running</h2>
-        {bots.map((b) => <BotLine key={b.id} b={b} nav={nav} />)}
-        {!bots.length && <p className="muted home-empty">Nothing is running. <button type="button" className="text-link" onClick={() => nav({ v: 'bots' })}>Bots</button></p>}
+
+      <section className="strip" aria-label="Summary">
+        <div><span>P&amp;L</span><b className={cls(pnl)}>{pnl == null ? '—' : <AnimatedNumber value={pnl} format={(x) => usd(x, true)} />}</b></div>
+        <div><span>Fees today</span><b>{<AnimatedNumber value={fees} format={(x) => usd(x, true)} />}</b></div>
+        <div><span>Bots</span><b>{running} running · {paused} paused</b></div>
+        <div><span>Live / paper</span><b>{live} live · {paper} paper</b></div>
       </section>
+
+      {err && <p className="note bad">{err}</p>}
+      <section aria-label="Bots">
+        {bots.map((b) => <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} />)}
+        {!bots.length && <p className="muted home-empty">No bots{chain !== 'all' ? ' on this chain' : ''}. <button type="button" className="text-link" onClick={() => nav({ v: 'bots' })}>Start one</button></p>}
+      </section>
+
+      <details className="glance" open>
+        <summary>Best this week</summary>
+        {picks.map(({ o, w }) => (
+          <button key={`${o.chainId}-${o.key ?? o.add?.pool}`} type="button" className="pick" onClick={() => tryIt(o, w.how, nav, act)}>
+            <span className="pick-name">{o.label}<small>{chainOf(s, o.chainId)?.short} · {w.how === 'lp' ? 'Liquidity' : 'Grid'}</small></span>
+            <Meter value={best > 0 ? w.expected / best : 0} />
+            <b className="pos">{pct(w.expected, 1, true)}</b>
+          </button>
+        ))}
+        {!picks.length && <p className="muted home-empty">{p ? 'No safe pools in this check.' : 'Checking pools…'}</p>}
+      </details>
+
+      <details className="glance" open>
+        <summary>Smart trader</summary>
+        <button type="button" className="pick" onClick={() => nav({ v: 'auto' })}>
+          <span className="pick-name">
+            {auto ? (auto.on ? `On · ${auto.mode}` : 'Off') : '…'}
+            <small>
+              {auto ? `${(auto.accounts ?? []).reduce((n: number, a: AnyObj) => n + (a.bots?.length ?? 0), 0)} bots · ${auto.budgets?.length ? auto.budgets.map((b: AnyObj) => `${b.amount} ${b.coin}`).join(', ') : 'no budget'}` : ' '}
+            </small>
+          </span>
+          <b>{auto?.on ? 'Open' : 'Set up'}</b>
+        </button>
+        <button type="button" className="pick" onClick={() => nav({ v: 'auto' })}>
+          <span className="pick-name">
+            Token trader
+            <small>{trader ? `${trader.on ? 'On' : 'Off'} · sniper ${trader.options?.sniper?.on ? 'on' : 'off'}` : '…'}</small>
+          </span>
+          <b>Open</b>
+        </button>
+      </details>
     </main>
   );
 }

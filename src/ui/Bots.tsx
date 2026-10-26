@@ -1,30 +1,31 @@
-/** Every bot, one line each. Stop, close, and the details live here or on the bot’s own page. */
+/** Every bot. A row opens its range, fees, and levels; the full page is one tap further. */
 import { useContext, useState } from 'react';
 import { botApi } from './api';
 import { humanAmount } from '../live/amount';
+import { BotRow, listBots, useRowActions } from './botRow';
 import { RefreshCtx, chains, useChainFilter } from './chains';
-import { BotLine } from './Home';
-import { botView, type AnyObj, type Nav } from './model';
+import type { AnyObj, Nav } from './model';
 
 export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: boolean; onStopAll: () => void }) {
   const { chain } = useChainFilter();
   const refresh = useContext(RefreshCtx);
+  const { err, pause, close } = useRowActions();
+  const [rowErr, setRowErr] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
   const [hide, setHide] = useState<Set<string>>(new Set());
   const [pend, setPend] = useState<Set<string>>(new Set());
-  const [rowErr, setRowErr] = useState<string | null>(null);
   const here = (b: AnyObj) => chain === 'all' || (b.chainId ?? s.legacyChainId) === chain;
   const all: AnyObj[] = [
     ...s.grids.map((g: AnyObj) => ({ ...g, kind: 'grid' })),
     ...(s.trends ?? []).map((t: AnyObj) => ({ ...t, kind: 'trend' })),
     ...(s.lps ?? []).map((t: AnyObj) => ({ ...t, kind: 'lp' })),
   ].filter(here);
-  const kept = all.filter((b) => b.archivedAt);
-  const bots = all.filter((b) => !b.archivedAt && !hide.has(b.id)).sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
+  const kept = all.filter((b) => b.archivedAt).length;
+  const bots = listBots(s, chain).filter((b) => !hide.has(b.id)).sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
   const running = bots.filter((b) => b.status === 'running').length;
   const isClosing = (b: AnyObj) => !!b.closing || pend.has(b.id) || b.step?.action === 'close';
   const closable = bots.filter((b) => !isClosing(b));
   const canClear = bots.some((b) => b.status !== 'running' && !isClosing(b));
-  const nameOf = (b: AnyObj) => (b.kind === 'grid' ? String(b.label ?? b.stable ?? 'Grid') : b.kind === 'lp' ? `Liquidity ${b.label ?? ''}`.trim() : String(b.name ?? 'Trend'));
 
   const closeAll = () => {
     if (!closable.length) return;
@@ -40,7 +41,6 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
     setRowErr(null);
     void botApi('archive-closed', 'POST', chain === 'all' ? {} : { chainId: chain }).then(() => refresh()).catch((e: Error) => setRowErr(e.message));
   };
-
   const short = s.allocations?.ok === false
     ? s.allocations.rows.filter((r: AnyObj) => r.ok === false).map((r: AnyObj) => `${humanAmount(r.allocated)} ${r.token} booked, ${r.wallet == null ? 'balance unknown' : humanAmount(r.wallet)} in the wallet`).join('. ')
     : '';
@@ -58,19 +58,16 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
       </div>
       {short && <p className="note bad">{short}. Stop a bot or add funds.</p>}
       {low.map((c) => <p key={c.id} className="note">Low gas on {c.name}.</p>)}
-      {rowErr && <p className="note bad">{rowErr}</p>}
+      {(err || rowErr) && <p className="note bad">{err || rowErr}</p>}
       {bots.map((b) => (
-        <span key={b.id} className="line-wrap">
-          <BotLine b={b} nav={nav} />
-          {b.lastError && <button type="button" className="line-note" onClick={() => nav(botView(b.kind, b.id))}>{nameOf(b)}: {b.lastError}</button>}
-        </span>
+        <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} expandable open={open === b.id} onToggle={() => setOpen((id) => id === b.id ? null : b.id)} />
       ))}
       {!bots.length && <p className="muted home-empty">No bots{chain !== 'all' ? ' on this chain' : ''}. Start a grid above, in paper, to watch it with live prices.</p>}
       <p className="foot-links">
         <button type="button" className="text-stop" disabled={busy || running === 0} onClick={onStopAll}>Stop all</button>
         {closable.length > 0 && <button type="button" onClick={closeAll}>Close all</button>}
         {canClear && <button type="button" onClick={clearClosed}>Clear closed</button>}
-        {kept.length > 0 && <button type="button" onClick={() => nav({ v: 'tools', tab: 'analytics' })}>{kept.length} closed in Analytics</button>}
+        {kept > 0 && <button type="button" onClick={() => nav({ v: 'tools', tab: 'analytics' })}>{kept} closed in Analytics</button>}
       </p>
     </main>
   );

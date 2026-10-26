@@ -138,7 +138,7 @@ export default function App() {
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}
 
         <ViewError key={`${view.v}:${'id' in view ? view.id : ''}:${'tab' in view ? view.tab : ''}:${view.v === 'holdings' ? view.focus ?? '' : ''}`} onHome={() => nav({ v: 'home' })}>
-          {view.v === 'home' && <Home s={s} nav={nav} holdings={holdings.data} />}
+          {view.v === 'home' && <Home s={s} nav={nav} holdings={holdings.data} act={act} />}
           {view.v === 'bots' && <Bots s={s} nav={nav} busy={busy} onStopAll={stopAll} />}
           {view.v === 'more' && <More s={s} nav={nav} onGuide={() => setGuide(true)} onActivity={() => setDrawer(true)} />}
           {view.v === 'opps' && <Opportunities s={s} nav={nav} act={act} busy={busy} />}

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { http } from './api';
 import { ago } from './fmt';
 import { useChainFilter, type ChainInfo } from './chains';
+import { TokenMark, ChainMark } from './icons';
 import {
   formatTokenAmount, formatUsdAmount, HOW_HOLDINGS, type FeeRow, type HoldingsSnapshot, type PositionRow,
 } from '../live/holdingsMath';
@@ -118,25 +119,40 @@ export function Holdings({ s, snap, loading, error, reload, nav }: {
         const name = info?.name ?? snap?.chains.find((c) => c.chainId === id)?.name ?? 'Chain';
         return (
           <section key={id} className="chain-group">
-            <h2 className="plain-h"><span>{name}</span><b>{money(part.net)}</b></h2>
+            <h2 className="chain-head">
+              {info && <ChainMark short={info.short} color={info.color} size={22} />}
+              <span>{name}</span>
+              <b>{money(part.net)}</b>
+            </h2>
             {part.wallet.map((row) => (
               <div key={`${id}-${row.coin.address ?? 'native'}`} className="line static">
+                <TokenMark symbol={row.coin.symbol} address={row.coin.address} size={22} />
                 <span className="line-name">{row.coin.symbol}<span>{formatTokenAmount(row.coin.amount)}{row.bots.length ? ' · in a bot' : ''}</span></span>
                 <b>{money(row.coin.usd)}</b>
               </div>
             ))}
-            {!!part.positions.length && (
+            {part.positions.filter((r) => (r.usd ?? 0) > 1).map((row) => (
+              <div key={`${row.pool}-${row.tokenId ?? ''}`} className="fold-row open-pos">
+                <span>
+                  {row.token0.symbol}/{row.token1.symbol}
+                  <small>{row.dexName} {row.feeLabel}{row.range ? ` · ${RANGE[row.range]}` : ''}{row.stranded ? ' · still in the position' : ''}</small>
+                  <small>{amounts(row)}</small>
+                </span>
+                <b>{money(row.usd)}</b>
+                {row.bot && <button type="button" className="text-link" onClick={() => nav(botView(row.bot!.kind, row.bot!.id))}>{row.bot.name}</button>}
+              </div>
+            ))}
+            {!!part.positions.filter((r) => (r.usd ?? 0) <= 1).length && (
               <details className="fold">
-                <summary>Liquidity <span>{part.positions.length}</span> <b>{money(part.positions.reduce((s, r) => s + (r.usd ?? 0), 0))}</b></summary>
-                {part.positions.map((row) => (
+                <summary>Smaller positions <span>{part.positions.filter((r) => (r.usd ?? 0) <= 1).length}</span></summary>
+                {part.positions.filter((r) => (r.usd ?? 0) <= 1).map((row) => (
                   <div key={`${row.pool}-${row.tokenId ?? ''}`} className="fold-row">
                     <span>
                       {row.token0.symbol}/{row.token1.symbol}
-                      <small>{row.dexName} {row.feeLabel}{row.range ? ` · ${RANGE[row.range]}` : ''}{row.stranded ? ' · still in the position' : ''}</small>
+                      <small>{row.dexName} {row.feeLabel}{row.range ? ` · ${RANGE[row.range]}` : ''}</small>
                       <small>{amounts(row)}</small>
                     </span>
                     <b>{money(row.usd)}</b>
-                    {row.bot && <button type="button" className="text-link" onClick={() => nav(botView(row.bot!.kind, row.bot!.id))}>{row.bot.name}</button>}
                   </div>
                 ))}
               </details>
