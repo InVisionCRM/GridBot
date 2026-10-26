@@ -8,10 +8,8 @@
  *    folded into minutes, within about 5%.
  *  - Fees: in range, the position earns L / (L + pool liquidity) of what one unit earned, for the share of the minute's
  *    ticks (low to high) inside its range.
- *  - Moves (rerange on): out of range, the fees missed build up and fees earned back in range lower them (tally); once
- *    they reach what moving costs (gas plus the swap to the new range's mix) the position comes out at the minute's last
- *    price and opens ±band around it. At most LP_MAX_MOVES_PER_DAY in any 24 hours; a swap over the price-impact cap
- *    blocks the move. Fees are added back in at each move.
+ *  - Moves (rerange on): like the bot, as soon as a minute ends outside the range the position comes out at that price
+ *    and opens ±band around it; a swap over the price-impact cap blocks the move. Fees are added back in at each move.
  *  - Swaps pay the pool fee and a price impact worked out from the minute's active liquidity (inside one tick range,
  *    so a thin pool's impact is understated); a gap under LP_MIN_SWAP_SHARE of the value isn't swapped.
  *  - Fees are counted in the coin they were paid in (and their worth in the quote coin when earned).
@@ -24,7 +22,7 @@
  * The timing of a move decides a lot: in a 12-day check a move a minute later put the next range 29 ticks lower and
  * changed that setup's result by $15. So one replay is one path.
  */
-import { LP_MAX_MOVES_PER_DAY, LP_MIN_SWAP_SHARE } from './lp';
+import { LP_MIN_SWAP_SHARE } from './lp';
 import { amountsForLiquidity, coinsOfRaw, liquidityForAmounts, marketPrice, rangeTicks, rawOfCoins, sqrtPriceAt, type PoolSides } from '../live/v3Liquidity';
 
 /** One minute of a V3 pool's trading. */
@@ -159,12 +157,11 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     return { gap, cost: Math.abs(gap) * (pool.swapFee + imp / 2), impact: imp, share, value };
   };
 
-  let gas = 0, swapCost = 0, fees = 0, moves = 0, blocked = 0, missed = 0, inTime = 0, moveLoss = 0;
+  let gas = 0, swapCost = 0, fees = 0, moves = 0, blocked = 0, inTime = 0, moveLoss = 0;
   let pos = { tl: 0, tu: 0, L: 0 }, idle: Coins = { base: 0, quote: 0 }, owed: Coins = { base: 0, quote: 0 };
   const feeCoins: Coins = { base: 0, quote: 0 };
   /** The coins the open position went in with */
   let putIn: Coins = { base: 0, quote: 0 };
-  const recent: number[] = [];
   /** Swap `have` to the range's mix around `tick`, pay `gasQuote`, open the position; the rest stays idle. */
   const open = (have: Coins, tick: number, liq: number, gasQuote: number) => {
     const p = price(tick);
@@ -200,27 +197,21 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     owed = { base: owed.base + earned.base, quote: owed.quote + earned.quote };
     feeCoins.base += earned.base; feeCoins.quote += earned.quote;
     fees += val(earned, p);
-    missed = Math.max(0, missed - val(earned, p)) + val(could, p) * (1 - r);
 
     const out = m.c < pos.tl || m.c >= pos.tu;
     if (!out) heldBack = false;
     if (!o.rerange || !out) continue;
-    while (recent.length && m.t - recent[0] >= DAY_S) recent.shift();
-    if (recent.length >= LP_MAX_MOVES_PER_DAY) continue;
     const c = held(pos.L, pos.tl, pos.tu, m.c);
     const have = { base: c.base + idle.base + owed.base, quote: c.quote + idle.quote + owed.quote };
     const next = rangeTicks(p * (1 - o.bandPct), p * (1 + o.bandPct), pool.spacing, pool);
     const s = plan(have, next.tickLower, next.tickUpper, m.c, m.liq);
-    // like the bot: a swap over the impact cap blocks the move whatever was missed
+    // like the bot: a swap over the impact cap blocks the move
     if (s.impact > o.maxImpact) { if (!heldBack) blocked++; heldBack = true; continue; }
     heldBack = false;
-    if (missed < o.gasMove + s.cost) continue;
     moveLoss += val(putIn, p) - val(c, p);
     owed = { base: 0, quote: 0 };
     open(have, m.c, m.liq, o.gasMove);
-    missed = 0;
     moves++;
-    recent.push(m.t);
   }
 
   const lastRow = rows[rows.length - 1];

@@ -500,6 +500,11 @@ label.wide input { min-width: 180px; }
 .tag.risk-mid { color: var(--warn); border-color: var(--warn-line); }
 .tag.risk-bad { color: var(--loss); border-color: var(--loss-line); }
 .risk-wrap { display: inline-flex; align-items: center; gap: 2px; }
+.range-ctl { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.range-ctl p { margin: 0; }
+.range-w { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.range-w input { width: 70px; font-family: var(--mono); }
+.range-ctl > .btn { align-self: flex-start; }
 @keyframes opp-in { from { opacity: 0; transform: translateY(6px); } }
 @media (max-width: 640px) {
   .opp { grid-template-columns: 28px minmax(0, 1fr); padding: 11px 12px; }

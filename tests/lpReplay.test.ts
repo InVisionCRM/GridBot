@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { addSwaps, positionFor, replayLp, replayTable, type PoolMinute, type ReplayOpts, type ReplayPool } from '../src/market/lpReplay';
-import { LP_MAX_MOVES_PER_DAY } from '../src/market/lp';
 import { sqrtPriceAt } from '../src/live/v3Liquidity';
 
 /** WETH/USDG-like pool: base = token0 (18 decimals), quote = token1 (6), tick spacing 1, 0.01 % swaps. */
@@ -89,36 +88,20 @@ function rawUpper(band: number) { return sqrtPriceAt(T) ** 2 * (1 + band); }
 describe('replayLp: moving the range (the live bot\'s rule)', () => {
   const away = [T, ...repeat(T + 2000, 300)]; // jumps above a ±5% range and trades there
 
-  it('moves once the fees missed reach what moving costs; never with moves off', () => {
-    const cheap = replayLp(minutes(away), POOL, { ...BASE, bandPct: 0.05, rerange: true, gasMove: 0.001 });
-    expect(cheap.moves).toBe(1);
+  it('moves as soon as a minute ends outside the range, whatever moving costs; never with moves off', () => {
+    const on = replayLp(minutes(away), POOL, { ...BASE, bandPct: 0.05, rerange: true, gasMove: 0.001 });
+    expect(on.moves).toBe(1);
     const off = replayLp(minutes(away), POOL, { ...BASE, bandPct: 0.05, rerange: false, gasMove: 0.001 });
     expect(off.moves).toBe(0);
-    // a costlier move waits for more missed fees: too costly to be worth it in 300 minutes, so no move
-    const dear = replayLp(minutes(away), POOL, { ...BASE, bandPct: 0.05, rerange: true, gasMove: 1e6 });
-    expect(dear.moves).toBe(0);
     // after the move the price is inside the new range
-    expect(cheap.inRange).toBeGreaterThan(0.9);
+    expect(on.inRange).toBeGreaterThan(0.9);
   });
 
-  it('a minute back in range only earns back that minute: the tally keeps most of what was missed', () => {
-    const free = { ...POOL, swapFee: 0 };
-    // one minute's fees in range = what the position misses per minute out of range (quote fees, so the price doesn't matter)
-    const c = replayLp(minutes([T, T]), free, { ...BASE, bandPct: 0.05, rerange: false }).fees;
-    const o = { ...BASE, bandPct: 0.05, rerange: true, gasMove: 24.5 * c };
-    // 20 minutes out (20c missed), 1 back in (19c), then 10 out: 19c + 6c passes 24.5c
-    const r = replayLp(minutes([T, ...repeat(T + 2000, 20), T, ...repeat(T + 2000, 10)]), free, o);
-    expect(r.moves).toBe(1);
-    // the last 10 minutes out alone don't reach it: the move came from the tally kept through the dip
-    expect(replayLp(minutes([T, ...repeat(T + 2000, 10)]), free, o).moves).toBe(0);
-  });
-
-  it(`at most ${LP_MAX_MOVES_PER_DAY} moves in any 24 hours`, () => {
-    // the price flips 20% each minute for a day and a bit: every minute is a move that's due
+  it('no daily limit: a price flipping in and out of the range moves every time it is out', () => {
+    // the price flips 20% each minute for a day and a bit: every other minute ends outside the range
     const ticks = Array.from({ length: 1500 }, (_, i) => (i % 2 ? T + 2000 : T));
     const r = replayLp(minutes(ticks, 1e-6), POOL, { ...BASE, bandPct: 0.05, rerange: true });
-    // minutes 1–8 move, then nothing until 24 h after the first move (minute 1441), which allows 8 more by minute 1500
-    expect(r.moves).toBe(2 * LP_MAX_MOVES_PER_DAY);
+    expect(r.moves).toBe(1499); // each minute ends 20% from the last move's centre
   });
 
   it('a swap over the price-impact cap holds the move back, counted once per stretch out of range', () => {

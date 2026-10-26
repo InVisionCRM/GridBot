@@ -5,7 +5,6 @@
  */
 import { useEffect, useState } from 'react';
 import type { ReplayRow } from '../market/lpReplay';
-import { LP_MAX_MOVES_PER_DAY } from '../market/lp';
 import { http } from './api';
 import { L, Tip } from './Tip';
 import { cls, num, pct, qty, time } from './fmt';
@@ -82,7 +81,7 @@ function Ready({ a, band, rerange, usdPer, onPick }: { a: Ready; band: number; r
       <div className="table-wrap tall"><table className="replay-table">
         <thead><tr>
           <th>Range</th>
-          <th>Moves <Tip>On: out of range, it moves the range to the price once the fees it's missing pass what moving costs, at most {LP_MAX_MOVES_PER_DAY} times a day (like the bot). Off: the range stays where it opened.</Tip></th>
+          <th>Moves <Tip>On: as soon as the price leaves the range, it moves the range to the price (like the bot's Auto-move). Off: the range stays where it opened.</Tip></th>
           <th>Earned <Tip>Fees minus gas, the swaps to the range's mix, and what range moves lost, in {q}.</Tip></th>
           <th>Per day</th>
           <th className="narrow-hide">In range <Tip>Share of the time the price was inside the range, so it was earning.</Tip></th>

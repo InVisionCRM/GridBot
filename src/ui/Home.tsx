@@ -228,7 +228,7 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
     if (b.available === false) notices.push({ key: `na-${b.id}`, level: 'warn', text: <><b>{name}</b> trades on a chain or token this server doesn't load (removed, or turned off in .env). It is stopped; open it to remove it.</>, open });
     else if (b.lastError) notices.push({ key: `err-${b.id}`, level: 'error', text: <><b>{name}:</b> {b.lastError}</>, open });
     else if (b.kind === 'lp' && b.status === 'running' && b.position && b.inRange === false && !b.config?.rerange) {
-      notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is out of range</b> and isn't earning. Moving the range is off, so it waits for the price to come back. Open it to turn moving on or close it.</>, open });
+      notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is out of range</b> and isn't earning. Auto-move is off, so it waits for the price to come back. Open it to move the range or turn Auto-move on.</>, open });
     } else if (b.kind === 'grid' && b.status === 'running') {
       const rs = rangeState(b);
       if (rs === 'above' && !b.recenter?.enabled) notices.push({ key: `rng-${b.id}`, level: 'warn', text: <><b>{name} is above its range.</b> Everything is sold and it waits for the price to come back. Open it to move the range or turn on Follow the price up.</>, open });

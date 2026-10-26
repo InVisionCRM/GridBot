@@ -58,7 +58,7 @@ export function botChecks(b: AnyObj, kind: 'grid' | 'trend' | 'lp', now: number,
   if (kind === 'grid') gridChecks(b, now, add);
   if (kind === 'lp') {
     if (b.step?.hash && b.step.sentAt && now - b.step.sentAt > 10 * 60_000) add('tx', 'warn', `A transaction has waited ${mins(now - b.step.sentAt)} to confirm.`, 'Check it on the explorer; the bot settles it by hash when it lands.');
-    if (b.status === 'running' && b.position && b.inRange === false && !b.config?.rerange) add('range', 'warn', "The price is outside the range and moving the range is off, so it isn't earning.", 'Turn on "Move the range with the price", or close the position.');
+    if (b.status === 'running' && b.position && b.inRange === false && !b.config?.rerange) add('range', 'warn', "The price is outside the range and moving the range is off, so it isn't earning.", 'Turn on Auto-move or move it to the price on the bot\'s page, or close the position.');
   }
   if (!out.length) add('ok', 'pass', kind === 'lp' ? (b.position ? (b.inRange ? 'In range and earning.' : 'Out of range; the range moves if it stays out.') : 'Opening…') : 'Running and reading prices.');
   return out;

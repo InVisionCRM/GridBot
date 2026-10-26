@@ -244,6 +244,13 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
   app.post('/api/bot/lps/:id/close', wrap((req) => { bot.closeLp(req.params.id); void bot.tickAll(); }));
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
+  // { bandPct? }: move the range to the price now (a new width, or the same one)
+  app.post('/api/bot/lps/:id/move', wrap(async (req) => {
+    const b = req.body?.bandPct;
+    await bot.moveLp(req.params.id, b == null ? undefined : Number(b));
+    void bot.tickAll();
+    return { ok: true };
+  }));
   app.put('/api/bot/lps/:id/profits', wrap((req) => bot.setLpProfits(req.params.id, profitsBody(req.body) ?? (() => { throw new Error('profits required'); })())));
   app.delete('/api/bot/lps/:id', wrap((req) => bot.removeLp(req.params.id)));
   app.get('/api/lp/replay', wrap((req) => {

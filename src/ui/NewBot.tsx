@@ -6,7 +6,7 @@ import { STRATEGY_PRESETS } from '../live/presets';
 import { DEFAULT_GAS_RESERVE, parseGasRes, type GasReserveCfg } from '../live/gasReserve';
 import { humanAmount } from '../live/amount';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
-import { LP_BAND, LP_MAX_MOVES_PER_DAY, LP_MIN_SWAP_SHARE } from '../market/lp';
+import { LP_BAND, LP_MIN_SWAP_SHARE } from '../market/lp';
 import { rangeBaseShare } from '../live/v3Liquidity';
 import { L } from './Tip';
 import { botApi } from './api';
@@ -380,7 +380,7 @@ function Rerange({ on, set }: { on: boolean; set: (v: boolean) => void }) {
   return (
     <label className="check follow">
       <input type="checkbox" checked={on} onChange={(e) => set(e.target.checked)} />
-      <span><b>Move the range with the price</b> <span className="muted">When the price leaves the range (up or down), take the position out and open the same width around the price as soon as the fees it's missing pass what the move costs (gas plus the swap back to the range's mix). A quick dip back into the range doesn't start the count over. At most {LP_MAX_MOVES_PER_DAY} moves in any 24 hours. Each move locks in the coin mix it had.</span></span>
+      <span><b>Auto-move the range</b> <span className="muted">As soon as the price leaves the range (up or down), take the position out and open the same width around the price. Each move locks in the coin mix it had. You can turn it off, move it yourself or change the width later on the bot's page.</span></span>
     </label>
   );
 }

@@ -341,6 +341,8 @@ export class MultiBot {
   resumeLp(id: string) { this.lp(id).resume(); }
   closeLp(id: string) { this.lp(id).close(); }
   setLpRerange(id: string, enabled: boolean) { this.lp(id).setRerange(enabled); }
+  /** Move a liquidity bot's range to the price now, at a new width or the same one; it starts on the next tick. */
+  moveLp(id: string, bandPct?: number) { return this.lp(id).move(bandPct); }
   setLpProfits(id: string, p: ProfitMode) { return this.lp(id).setProfits(p); }
   /** Only a closed bot (or one that never opened) can be removed: a live position must be closed first. */
   removeLp(id: string, force = false) {

@@ -3,7 +3,8 @@ import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
-import { ago, cls, dur, num, pct, px, qty } from './fmt';
+import { ago, cls, num, pct, px, qty } from './fmt';
+import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
@@ -20,12 +21,47 @@ const STAGE: Record<string, string> = { exit: 'taking the position out', swap: "
 
 /** Out of range: when the range moves, or why it doesn't. */
 function moveNote(b: AnyObj): string {
-  const m = b.move, q = b.quote;
-  if (!b.config?.rerange) return 'Moving the range is off: it waits for the price to come back.';
-  if (m.block) return `It won't move the range now: ${m.block}.`;
-  if (m.cappedUntil) return `It already moved ${m.perDay} times in 24 hours; the next move can come in ${dur(m.cappedUntil - Date.now())}.`;
-  if (m.cost == null) return "It moves the range around the price once the fees it's missing pass what moving costs (working out the cost).";
-  return `It moves the range around the price once the fees it's missing pass what moving costs: ${qty(m.missed, q, 3, false)} missed so far, the move costs ≈${qty(m.cost, q, 3, false)}.`;
+  if (!b.config?.rerange) return 'Auto-move is off: it waits for the price to come back, or move it yourself below.';
+  if (b.move.block) return `It can't move the range now: ${b.move.block}.`;
+  return 'Auto-move is on: it moves the range to the price on its next check.';
+}
+
+const WIDTHS = [0.01, 0.02, 0.05, 0.08, 0.12, 0.2];
+
+/** Auto-move on or off, and a move now: to the price at the same width, or at a new one. */
+function RangeControls({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boolean }) {
+  const cur: number = b.config.bandPct;
+  const [w, setW] = useState(String(+(cur * 100).toFixed(2)));
+  const band = Number(w) / 100, ok = band >= LP_BAND.min && band <= LP_BAND.max, same = ok && Math.abs(band - cur) < 1e-9;
+  const why = b.status !== 'running' ? 'Resume it first' : b.step ? 'Busy with a step' : !ok ? `Range must be ±${LP_BAND.min * 100}% to ±${LP_BAND.max * 100}%` : '';
+  const move = () => act(async () => {
+    if (b.mode === 'live' && !confirm(`${same ? 'Move the range to the price' : `Change the range to ±${+(band * 100).toFixed(2)}%`}? The position is taken out and opened again around ${px(b.price)}: gas, a swap to the new mix, and the coin mix it has now becomes final.`)) return;
+    await botApi(`lps/${b.id}/move`, 'POST', { bandPct: band });
+  });
+  return (
+    <div className="range-ctl">
+      <div className="seg-field">
+        <span className="k"><L tip="On: as soon as the price leaves the range, the position is taken out and opened again around the price, same width. Off: it waits for the price to come back. Each move makes the coin mix it had final (lost to range moves).">Auto-move</L></span>
+        <div className="seg" role="radiogroup" aria-label="Auto-move">
+          {([[true, 'On'], [false, 'Off']] as const).map(([v, t]) => (
+            <button key={t} type="button" role="radio" aria-checked={!!b.config.rerange === v} className={!!b.config.rerange === v ? 'on' : ''} disabled={busy}
+              onClick={() => act(() => botApi(`lps/${b.id}/rerange`, 'PUT', { enabled: v }))}>{t}</button>
+          ))}
+        </div>
+      </div>
+      <div className="seg-field">
+        <span className="k"><L tip="The range's width around the price. Pick another and press Change to take the position out and open it again at that width, around today's price.">Range ±%</L></span>
+        <div className="range-w">
+          {WIDTHS.map((x) => <button key={x} type="button" className={`btn small-btn ${Math.abs(band - x) < 1e-9 ? 'primary' : ''}`} onClick={() => setW(String(x * 100))}>±{x * 100}%</button>)}
+          <input value={w} inputMode="decimal" aria-label="Range ± %" onChange={(e) => setW(e.target.value.replace(/[^\d.]/g, ''))} />
+        </div>
+      </div>
+      <button type="button" className="btn primary" disabled={busy || !!why} title={why} onClick={move}>
+        {same ? 'Move to the price now' : ok ? `Change to ±${+(band * 100).toFixed(2)}%` : 'Change range'}
+      </button>
+      <p className="muted small">Moved {b.reranges} time{b.reranges === 1 ? '' : 's'}{b.lastRerangeAt ? `, last ${ago(b.lastRerangeAt)}` : ''}.</p>
+    </div>
+  );
 }
 
 /** Range on a line: the band is the position, the marker is the price (the line reaches 25% of the width past each end). */
@@ -49,10 +85,6 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
   return (
     <div className="card">
       <h3>Settings</h3>
-      <label className="check follow">
-        <input type="checkbox" checked={!!b.config?.rerange} disabled={busy || b.status === 'closed'} onChange={(e) => act(() => botApi(`lps/${b.id}/rerange`, 'PUT', { enabled: e.target.checked }))} />
-        <span><b>Move the range with the price</b> <span className="muted">Moved {b.reranges} time{b.reranges === 1 ? '' : 's'}{b.lastRerangeAt ? `, last ${ago(b.lastRerangeAt)}` : ''}. Outside the range it moves once the fees it's missing pass what the move costs (gas plus the swap back to the range's mix), at most {b.move.perDay} times in any 24 hours.</span></span>
-      </label>
       <div className="follow-row">
         <ProfitsField p={p} set={setP} kind="lp" />
         {changed && <button type="button" className="btn small-btn primary" disabled={busy || (p.mode === 'send' && !isAddress(p.to))}
@@ -142,6 +174,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
             {pos ? <>
               <p className="small">{px(pos.lower)} – {px(pos.upper)} {q}/{base} · price {px(b.price)}</p>
               <RangeGauge lower={pos.lower} upper={pos.upper} price={b.price} />
+              {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
               <p className="small">In the position: <b>{num(b.coins?.base, 6)} {base}</b> + <b>{num(b.coins?.quote, 6)} {q}</b></p>
               <p className="small">Fees waiting: {num(b.owed?.base, 8)} {base} + {num(b.owed?.quote, 8)} {q}</p>
               <p className="muted small">Opened {ago(pos.openedAt)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>

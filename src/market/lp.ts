@@ -26,8 +26,6 @@ import { MIN_SCAN_CANDLES, SETUP_BANDS } from './scan';
  */
 /** A swap to the range's mix smaller than this share of the value isn't worth its fee and gas: the leftover stays idle. */
 export const LP_MIN_SWAP_SHARE = 0.01;
-/** A liquidity bot moves its range at most this many times in any 24 hours: a guard in case the cost or the missed fees are misjudged in a choppy market. */
-export const LP_MAX_MOVES_PER_DAY = 8;
 /** Ranges a liquidity bot allows: ±1% … ±50% around the price. */
 export const LP_BAND = { min: 0.01, max: 0.5 };
 export const LP_GAS = { v3: { open: 480_000, close: 250_000 }, v2: { open: 170_000, close: 215_000 } } as const;
