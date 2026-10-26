@@ -335,61 +335,34 @@ describe('Grids saved before per-level sizes', () => {
 });
 
 
-describe('GridEngine close to cash', () => {
-  it('sells everything the grid holds back to the spend coin, then stops; the levels wait to buy again', async () => {
+describe('GridEngine close', () => {
+  it('paper close archives immediately and does not sell; the coins stay where the fills left them', async () => {
     const { chain, engine } = make();
     await engine.start({ mode: 'paper', ...grid });
     chain.setPrice(P0 * 0.935); // buys at 0.98, 0.96, 0.94
     await engine.tick();
     const bought = engine.paperBalances().pls;
     expect(bought).toBeGreaterThan(0);
-    engine.closeToCash();
-    expect(engine.status()).toMatchObject({ status: 'running', cashOut: { size: null } });
-    await engine.tick();
-    expect(engine.paperBalances().pls).toBeCloseTo(0, 6);
-    await engine.tick(); // nothing left: done
+    expect(engine.requestClose()).toBe(false);
     const s = engine.status();
-    expect(s).toMatchObject({ status: 'stopped', cashOut: null });
-    expect(s.cashedOutAt).toBeGreaterThan(0);
-    expect(engine.state.intervals.some((i) => i.status === 'holding')).toBe(false);
-    // the sale is in the ledger: with nothing left, what it realized is what came back minus what went in, minus all gas
-    const sells = engine.state.trades.filter((t) => t.side === 'sell'), buys = engine.state.trades.filter((t) => t.side === 'buy');
-    expect(sells).toHaveLength(1);
-    expect(sells[0].plsAmount).toBeCloseTo(bought, 6);
-    const sum = (xs: typeof sells, f: (t: (typeof sells)[0]) => number) => xs.reduce((a, t) => a + f(t), 0);
-    expect(sum(engine.state.trades, (t) => t.realizedPnlUsd)).toBeCloseTo(sum(sells, (t) => t.stableAmount) - sum(buys, (t) => t.stableAmount) - sum(engine.state.trades, (t) => t.gasUsd), 9);
+    expect(s).toMatchObject({ status: 'stopped', closing: false });
+    expect(s.archivedAt).toBeGreaterThan(0);
+    expect(engine.paperBalances().pls).toBeCloseTo(bought, 6);
+    await engine.tick(); // archived: a later tick does not sell
+    expect(engine.paperBalances().pls).toBeCloseTo(bought, 6);
+    expect(engine.state.trades.filter((t) => t.side === 'sell')).toHaveLength(0);
   });
 
-  it('a sale over the price-impact cap is halved each check, down to 1/64, then waits 10 minutes', async () => {
-    let now = 1_800_000_000_000;
-    const { chain, engine } = make(undefined, undefined, undefined, { now: () => now });
-    await engine.start({ mode: 'paper', ...grid });
-    chain.setPrice(P0 * 0.935);
-    await engine.tick();
-    const held = engine.paperBalances().pls;
-    engine.setLimits({ maxPriceImpact: 1e-12 }); // nothing passes
-    engine.closeToCash();
-    const sizes: number[] = [];
-    for (let i = 0; i < 8; i++) { await engine.tick(); sizes.push(engine.state.cashOut!.size!); }
-    expect(sizes.slice(0, 6).map((x) => x / held)).toEqual([1 / 2, 1 / 4, 1 / 8, 1 / 16, 1 / 32, 1 / 64].map((x) => expect.closeTo(x, 9)));
-    expect(engine.state.cashOut!.waitUntil).toBe(now + 10 * 60_000);
-    expect(engine.state.cashOut!.why).toMatch(/price impact/);
-    expect(engine.paperBalances().pls).toBeCloseTo(held, 9); // nothing sold
-    engine.setLimits({ maxPriceImpact: 0.05 });
-    now += 10 * 60_000;
-    await engine.tick();
-    expect(engine.paperBalances().pls).toBeCloseTo(held * (1 - 1 / 64), 6); // the waiting piece goes first
-  });
-
-  it('Stop ends the selling; the grid keeps what it still holds', async () => {
+  it('Stop pauses without archiving; the grid keeps what it still holds', async () => {
     const { chain, engine } = make();
     await engine.start({ mode: 'paper', ...grid });
     chain.setPrice(P0 * 0.935);
     await engine.tick();
-    engine.closeToCash();
     engine.stop();
-    expect(engine.state.cashOut).toBeNull();
+    expect(engine.state.archivedAt).toBeNull();
+    expect(engine.state.closing).toBe(false);
     await engine.tick();
     expect(engine.paperBalances().pls).toBeGreaterThan(0);
+    expect(engine.status().archivedAt).toBeNull();
   });
 });

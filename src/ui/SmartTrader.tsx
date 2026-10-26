@@ -10,6 +10,7 @@ import { ChainBadge, chainOf } from './chains';
 import { errMsg, botView, type AnyObj, type Nav } from './model';
 import { L } from './Tip';
 import { useOpportunities } from './Opportunities';
+import { TokenTraderPanel } from './TokenTrader';
 
 type Risk = 'safe' | 'medium' | 'any';
 interface Opts { grid: boolean; lp: boolean; newTokens: boolean; risk: Risk; slots: number; stopLossPct: number }
@@ -67,6 +68,7 @@ export function SmartTrader({ s, nav }: { s: AnyObj; nav: Nav }) {
         <OnControls a={a} busy={busy} run={run} />
       </>}
       <Decisions log={a.log} s={s} />
+      <TokenTraderPanel s={s} />
     </main>
   );
 }

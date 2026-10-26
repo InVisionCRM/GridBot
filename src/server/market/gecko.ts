@@ -97,6 +97,16 @@ export class GeckoSource {
     return parseTopPools(await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${network}/dexes/${dex}/pools?sort=h24_volume_usd_desc&page=${page}`));
   }
 
+  /** Newly created pools on a network (one page). Same row shape as the top-pool list, including pool_created_at. */
+  async newPools(network: string, page = 1): Promise<TopPool[]> {
+    return parseTopPools(await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${network}/new_pools?page=${page}`));
+  }
+
+  /** Trending pools on a network (one page). */
+  async trendingPools(network: string, page = 1): Promise<TopPool[]> {
+    return parseTopPools(await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${network}/trending_pools?page=${page}`));
+  }
+
   /** `token` = base token address (price is quoted per base); o.network / o.feeBps override the defaults per market. */
   async ohlcv(pool: string, wpls: string, tf: TF, beforeSec?: number, limit = 1000, o: { network?: string; feeBps?: number } = {}): Promise<Candle[]> {
     const [unit, agg] = GECKO_TF[tf];

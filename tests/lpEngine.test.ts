@@ -235,38 +235,23 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s2.positionFees!.coins.quote).toBeCloseTo(p2.feeCoins.quote - s2.totals.feeCoins.quote, 12);
   });
 
-  it('close to cash: takes the position out, sells the base coin back to the quote coin, then closed', async () => {
+  it('paper close takes the position out from the last reading and keeps both coins', async () => {
     const { lp, m, pool } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
     await lp.tick();
     m.movePrice(pool, 0.95); // in range, holding more PLS now
     await lp.tick();
     expect(lp.status().coins!.base).toBeGreaterThan(0);
-    lp.close(true);
-    for (let i = 0; i < 4 && lp.status().status !== 'closed'; i++) await lp.tick();
+    const base = lp.status().coins!.base, quote = lp.status().coins!.quote;
+    expect(lp.close()).toBe(false);
     const st = lp.status();
-    expect(st.status).toBe('closed');
-    expect(st.position).toBeNull();
-    expect(st.idle.base * st.price!).toBeLessThan(st.idle.quote * 1e-4); // at most dust left
-    expect(st.idle.quote).toBeGreaterThan(900);
-    // plain Close keeps both coins
-    const other = world();
-    await other.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
-    await other.lp.tick();
-    other.lp.close();
-    for (let i = 0; i < 4 && other.lp.status().status !== 'closed'; i++) await other.lp.tick();
-    expect(other.lp.status().idle.base).toBeGreaterThan(0);
-    // a few wei of the base coin left (float rounding) is dust: closed without asking for a quote that would fail
-    const third = world();
-    await third.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
-    await third.lp.tick();
-    third.lp.close(true);
-    await third.lp.tick();
-    third.lp.state.idle.base = 1e-17; // 10 wei: its output rounds to zero, so a quote for it throws
-    third.lp.state.status = 'running';
-    third.lp.state.step = { action: 'close', stage: 'swap', tries: 0, toCash: true };
-    await third.lp.tick();
-    expect(third.lp.status()).toMatchObject({ status: 'closed', lastError: null });
+    expect(st).toMatchObject({ status: 'closed', position: null, closing: false });
+    expect(st.archivedAt).toBeGreaterThan(0);
+    expect(st.idle.base).toBeGreaterThan(0);
+    expect(st.idle.base).toBeCloseTo(base, 6);
+    expect(st.idle.quote).toBeGreaterThan(quote * 0.5);
+    await lp.tick(); // already archived: no further pool work
+    expect(lp.status().status).toBe('closed');
   });
 
   it("doesn't start a move whose swap would go over the price-impact cap (it would stop halfway, out of the position)", async () => {
@@ -331,8 +316,8 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
     await lp.tick();
     m.addFees(pool, Q128 / 10n ** 6n, 0n);
+    await lp.tick(); // fees land in the cached reading; close then settles from that, with no further tick
     lp.close();
-    await lp.tick();
     const s = lp.status();
     expect(s).toMatchObject({ status: 'closed', position: null, step: null });
     expect(s.totals.fees).toBeGreaterThan(0);

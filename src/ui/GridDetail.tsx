@@ -192,23 +192,29 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const rs = rangeState(g);
   const earned: number = g.pnl.realized, open: number = g.pnl.unrealized, held: number = g.pnl.plsHeld;
   const running = g.status === 'running';
+  const closing = !!g.closing;
   const remove = () => act(async () => { if (confirm(`Remove the ${gridName(g)} grid and its history? ${g.base} it still holds stays in your wallet.`)) { await botApi(`grids/${g.id}`, 'DELETE'); nav({ v: 'home' }); } });
+  const doClose = () => {
+    if (g.mode === 'live' && !confirm(`Close ${gridName(g)}? It sells what it holds, with the same price-impact and slippage limits.`)) return;
+    act(() => botApi(`grids/${g.id}/close`, 'POST'));
+  };
 
   return (
     <main className="stack">
       <button type="button" className="back" onClick={() => nav({ v: 'home' })}>← Home</button>
       <div className="detail-head">
-        <StatusDot beat={g.priceAt} state={g.lastError ? 'error' : g.status} />
+        <StatusDot beat={g.priceAt} state={closing ? 'closing' : g.lastError ? 'error' : g.status} />
         <ChainBadge c={chainOf(s, g.chainId ?? s.legacyChainId)} testnet={false} />
         <h2>{gridName(g)}</h2>
         <span className="tag">Grid</span>
         {g.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={g.dexName} feeBps={g.feeBps} feeTier={g.feeTier} />
-        <span className={`st ${g.status}`}>{running ? 'Running' : 'Stopped'}{g.inFlight ? ' · swap in flight' : ''}</span>
+        <span className={`st ${closing ? 'closing' : g.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{g.inFlight ? ' · swap in flight' : ''}</span>
         <span className="grow" />
         {running
           ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST'))}>Stop</button>
           : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => botApi(`grids/${g.id}/resume`, 'POST'))}>Resume</button>}
+        <button type="button" className="btn" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
         <button type="button" className="btn danger" disabled={busy || running || !!g.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
       </div>
 

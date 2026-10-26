@@ -44,8 +44,10 @@ const allowed = (o: Opportunity, risk: Risk) =>
 /**
  * Every way to use the chain's pools that the options allow, best score first. convertCost(coin) = the share lost
  * swapping the budget's coin into `coin` and back (0 for the budget's own coin), null when there is no route.
+ * entryCost(pool, way) = the share the entry swap costs at the size that will actually be deployed, or null when
+ * even a small size cannot enter under the price-impact cap (that way is dropped).
  */
-export function candidates(items: Opportunity[], opt: PlanOptions, convertCost: (coin: string) => number | null): Candidate[] {
+export function candidates(items: Opportunity[], opt: PlanOptions, convertCost: (coin: string) => number | null, entryCost?: (o: Opportunity, how: 'grid' | 'lp') => number | null): Candidate[] {
   const out: Candidate[] = [];
   for (const o of items) {
     if (!allowed(o, opt.risk) || (!opt.newTokens && o.key == null)) continue;
@@ -53,7 +55,10 @@ export function candidates(items: Opportunity[], opt: PlanOptions, convertCost: 
     if (cost == null) continue;
     const g = opt.grid ? expectedGrid(o) : null, l = opt.lp ? expectedLp(o) : null;
     for (const [how, e] of [['grid', g], ['lp', l]] as const) {
-      if (e != null && e - cost > 0) out.push({ id: poolId(o, how), pair: pairOf(o), how, expected: e, cost, score: e - cost, feeBps: o.feeBps, label: o.label, o });
+      if (e == null) continue;
+      const entry = entryCost?.(o, how) ?? 0;
+      if (entry == null) continue;
+      if (e - cost - entry > 0) out.push({ id: poolId(o, how), pair: pairOf(o), how, expected: e, cost, score: e - cost - entry, feeBps: o.feeBps, label: o.label, o });
     }
   }
   // one per coin pair (the best pool and way): two pools of one pair are one bet on one price

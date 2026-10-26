@@ -83,12 +83,12 @@ export interface BotState {
   payoutInFlight: { hash: string; amount: number; to: string; at: number } | null;
   payouts: Payout[];
   /**
-   * Selling everything back to the spend coin (closeToCash). size = the next sell (null = all it holds), halved when a
-   * sell would go over the price-impact cap; waitUntil = paused 10 min once even the smallest piece is over the cap.
+   * Live unwind in progress. The bot stays out of new entries and sells what it holds through the normal
+   * quote, price-impact cap and slippage. Absent on state saved before this field existed.
    */
-  cashOut?: { at: number; size: number | null; waitUntil: number | null; why: string | null } | null;
-  /** When the last close to cash finished (everything sold, stopped) */
-  cashedOutAt?: number | null;
+  closing?: boolean;
+  /** Hidden from the active list. The record (trades, PnL) stays for analytics. Absent on older state. */
+  archivedAt?: number | null;
 }
 
 
@@ -146,12 +146,6 @@ function econWarning(e: EconSummary): string | null {
   return `${e.netPerRoundTrip <= 0 ? 'Each completed trade is expected to lose money at this size' : 'Each completed trade is expected to make very little at this size'}: ${e.reasons.join(' ')}`;
 }
 
-/** Close to cash: job id prefix; held coins worth under this share of the capital count as sold; smallest piece; pause */
-const CASH_JOB = 'cash-';
-const CASH_DUST = 1e-4;
-const CASH_MIN_PARTS = 64;
-const CASH_WAIT_MS = 10 * 60_000;
-
 function newId() {
   return `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
@@ -162,6 +156,7 @@ export function freshState(net: LiveNetwork, id?: string): BotState {
     limits: { ...DEFAULT_LIMITS }, levels: [], intervals: [], usdPerBuy: 0, queue: [], inFlight: null,
     trades: [], paperStartStable: 0, lastPrice: null, lastPriceAt: null, spacingWarn: null,
     profits: { mode: 'reinvest' }, payoutPending: 0, payoutInFlight: null, payouts: [],
+    closing: false, archivedAt: null,
   };
 }
 
@@ -173,6 +168,8 @@ export class GridEngine {
   private executor: Executor;
   private draining = false;
   private ticking = false;
+  /** Why the last close sell was skipped (price impact, slippage quote, …). Shown while closing. */
+  private closeNote: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
   readonly hub: Hub;
@@ -314,7 +311,7 @@ export class GridEngine {
       spacingWarn: warn, econ,
       startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalUsd]],
       recenter: { enabled: p.recenter ?? this.state.recenter?.enabled ?? false, aboveSince: null, lastAt: this.state.recenter?.lastAt ?? null, count: this.state.recenter?.count ?? 0 },
-      profits,
+      profits, closing: false, archivedAt: null,
       ...(paperReset ? { payoutPending: 0, payoutInFlight: null, payouts: this.state.payouts.filter((x) => !x.paper) } : {}),
     };
     this.seedUpper(price);
@@ -341,57 +338,111 @@ export class GridEngine {
     if (this.state.mode === 'live' && !this.signer) throw new Error(noKey());
     if (this.state.mode === 'live' && this.def?.safety && !this.def.safety.liveAllowed) throw new Error(`LIVE blocked — safety ${this.def.safety.risk}`);
     this.state.status = 'running';
+    this.state.closing = false;
+    this.state.archivedAt = null;
+    this.closeNote = null;
     this.save();
     this.tag('info', 'Resumed.');
     this.ev('started', `Grid resumed — ${this.label}`);
   }
 
   stop(why?: string) {
-    if (this.state.cashOut) { this.state.cashOut = null; this.ev('info', `Grid ${this.label}: stopped selling back to ${this.quoteSym}`, { level: 'warn' }); }
     const dropped = this.state.queue;
     this.state.intervals = dropped.reduce((iv, q) => onTradeSkipped(iv, q), this.state.intervals);
     this.state.queue = [];
     this.state.status = 'stopped';
+    this.state.closing = false;
+    this.closeNote = null;
     this.save();
     this.ev('stopped', `Grid ${this.label} ${why ? `paused — ${why}` : 'stopped'}`, { level: why ? 'error' : 'warn', notify: true });
     this.tag('warn', `${why ? `PAUSED (${why})` : 'STOPPED'}. ${dropped.length} queued dropped.${this.state.inFlight?.swapTxHash ? ` Swap ${this.state.inFlight.swapTxHash} already broadcast; will reconcile.` : ''}`);
   }
 
-  /**
-   * Sell everything this grid holds back to its spend coin, then stop (paper and live). Each sell goes through the
-   * normal checks (quote, units guard, price-impact cap); one too big for the cap is halved on the next check.
-   */
-  closeToCash() {
-    if (!this.state.config) throw new Error('No grid to close.');
-    if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
-    if (this.state.mode === 'live' && !this.signer) throw new Error(noKey());
-    if (this.state.cashOut) return;
-    this.state.intervals = this.state.queue.reduce((iv, q) => onTradeSkipped(iv, q), this.state.intervals);
-    this.state.queue = [];
-    this.state.cashOut = { at: this.now(), size: null, waitUntil: null, why: null };
-    this.state.cashedOutAt = null;
-    this.state.status = 'running';
-    this.save();
-    this.ev('info', `Grid ${this.label}: selling everything back to ${this.quoteSym}`);
-  }
-  private get quoteSym() { return this.def?.quote.symbol ?? this.state.stable; }
+  /** Coins this bot's own fills still hold (quote-side inventory is not an on-chain position). */
+  private held() { return replay(this.modeTrades()).plsHeld; }
+  private flat() { return !this.state.inFlight && this.state.queue.length === 0 && this.held() <= 1e-8; }
 
-  /** One piece of the close to cash, or the end of it once nothing worth selling is left. */
-  private queueCashOut(price: number) {
-    const c = this.state.cashOut!;
-    const held = replay(this.modeTrades()).plsHeld;
-    if (!(held * price > this.state.config!.totalCapitalUsd * CASH_DUST)) {
-      this.state.cashOut = null;
-      this.state.cashedOutAt = this.now();
-      this.state.status = 'stopped';
-      // The levels' coins are sold: each waits to buy again if the grid is ever resumed.
-      this.state.intervals = this.state.intervals.map((iv) => (iv.status === 'holding' ? { ...iv, status: 'waitingBuy', plsAmount: 0, lotCost: undefined, needsRearm: true } : iv));
-      this.ev('stopped', `Grid ${this.label}: sold everything back to ${this.quoteSym}; stopped`, { level: 'success', notify: true });
-      return;
+  /**
+   * End the bot. Paper (and a live grid with nothing held and nothing in flight) leaves the active list now,
+   * with no chain calls. A live grid that holds coins, or has a tx in flight, is marked closing: the sells go
+   * through the same quote, price-impact cap and slippage as any other trade, one tx at a time on this chain.
+   * @returns true when an on-chain unwind still has to run.
+   */
+  requestClose(): boolean {
+    if (this.state.archivedAt) return false;
+    // Paper never waits on a quote or a poll. A paper bot left `closing` by an old process finishes here too.
+    if (this.state.mode !== 'live') {
+      this.state.inFlight = null;
+      this.finishClose();
+      return false;
     }
-    if (this.state.queue.length || (c.waitUntil != null && c.waitUntil > this.now())) return;
-    const amount = Math.min(held, c.size ?? held);
-    this.state.queue.push({ id: `${CASH_JOB}${this.now()}`, intervalIndex: -1, side: 'sell', triggerPrice: price, levelPrice: price, amount, createdAt: this.now(), manual: true });
+    if (this.state.closing) return false;
+    const liveWork = this.state.inFlight != null || this.held() > 1e-8;
+    if (!liveWork || this.executor instanceof UnavailableExecutor) {
+      if (this.executor instanceof UnavailableExecutor && liveWork) {
+        this.lastError = this.lastError ?? 'market unavailable';
+        this.state.status = 'stopped';
+        this.state.closing = false;
+        this.save();
+        return false;
+      }
+      this.finishClose();
+      return false;
+    }
+    this.state.closing = true;
+    this.state.status = 'running';
+    this.closeNote = null;
+    this.lastError = null;
+    // Drop queued buys. A swap already broadcast is reconciled, never resent.
+    this.state.queue = [];
+    if (!this.state.inFlight) this.queueUnwindSells();
+    this.save();
+    this.ev('info', `Grid ${this.label}: closing…`, { level: 'warn' });
+    return true;
+  }
+
+  /** Sell each held lot (and any coins not on a level) through the normal executor. Idempotent. */
+  private queueUnwindSells() {
+    if (this.state.inFlight || this.held() <= 1e-8) return;
+    const price = this.state.lastPrice ?? 0;
+    const queued = new Set(this.state.queue.map((q) => q.intervalIndex));
+    for (const iv of this.state.intervals) {
+      if (iv.status !== 'holding' || !(iv.plsAmount > 1e-12) || queued.has(iv.index)) continue;
+      this.state.queue.push({
+        id: `close-${this.state.id}-${iv.index}-${this.now().toString(36)}`,
+        intervalIndex: iv.index, side: 'sell', triggerPrice: price, levelPrice: iv.sellPrice,
+        amount: iv.plsAmount, createdAt: this.now(), manual: true,
+      });
+      queued.add(iv.index);
+    }
+    const onLevels = this.state.intervals.reduce((a, iv) => a + (iv.status === 'holding' ? iv.plsAmount : 0), 0);
+    const free = this.held() - onLevels;
+    if (free > 1e-8 && !queued.has(-1)) {
+      this.state.queue.push({
+        id: `close-free-${this.state.id}-${this.now().toString(36)}`,
+        intervalIndex: -1, side: 'sell', triggerPrice: price, levelPrice: price,
+        amount: free, createdAt: this.now(), manual: true,
+      });
+    }
+  }
+
+  private finishClose() {
+    this.state.queue = [];
+    this.state.status = 'stopped';
+    this.state.closing = false;
+    this.state.archivedAt = this.now();
+    this.closeNote = null;
+    this.save();
+    this.ev('stopped', `Grid ${this.label} closed`, { level: 'success', notify: true });
+  }
+
+  /** Hide a stopped grid that is not mid-unwind. Coins it bought already sit in the wallet. */
+  archiveIfSettled(): boolean {
+    if (this.state.archivedAt || this.state.closing || this.state.status === 'running') return false;
+    if (this.state.inFlight || this.state.payoutInFlight) return false;
+    this.state.archivedAt = this.now();
+    this.save();
+    return true;
   }
 
   setLimits(l: Partial<SafetyLimits>) {
@@ -560,8 +611,9 @@ export class GridEngine {
           }
         } catch { /* keep last */ }
       }
-      if (this.state.status === 'running' && !this.state.inFlight && this.state.cashOut) this.queueCashOut(price);
-      else if (this.state.status === 'running' && !this.state.inFlight) {
+      if (this.state.closing && !this.state.inFlight) this.queueUnwindSells();
+      // A close only sells what is already held. New buys and follow-the-price wait until it isn't closing.
+      if (this.state.status === 'running' && !this.state.inFlight && !this.state.closing) {
         const { intervals, queued } = evaluateTick(this.state.intervals, price, this.now());
         this.state.intervals = intervals;
         if (queued.length) {
@@ -580,9 +632,11 @@ export class GridEngine {
       }
       this.save();
       await this.drain();
+      if (this.state.closing && this.flat()) this.finishClose();
       await this.payOut(price);
       // A tick that got through means the last error (often one RPC timeout) is over; the Activity log keeps it.
-      this.lastError = null;
+      // A close that could not sell (price-impact cap, quote failed) keeps that reason on the row.
+      this.lastError = this.state.closing ? this.closeNote : null;
     } catch (e) {
       this.lastError = (e as Error).message;
       this.tag('error', `tick: ${this.lastError}`);
@@ -612,19 +666,8 @@ export class GridEngine {
   }
 
   private skip(job: QueuedTrade, why: string) {
-    const c = this.state.cashOut;
-    if (c && job.id.startsWith(CASH_JOB)) {
-      // Too big for the price-impact cap: half as much next time; the smallest piece too big waits 10 minutes.
-      const held = replay(this.modeTrades()).plsHeld, min = held / CASH_MIN_PARTS;
-      const impact = /price impact/.test(why);
-      c.size = impact ? Math.max(min, job.amount / 2) : c.size;
-      c.waitUntil = impact && job.amount <= min * 1.000001 ? this.now() + CASH_WAIT_MS : null;
-      c.why = why;
-      this.tag('warn', `selling back: ${why}`);
-      this.save();
-      return;
-    }
     this.state.intervals = onTradeSkipped(this.state.intervals, job);
+    if (this.state.closing) this.closeNote = why;
     this.tag('warn', `Skipped ${job.side}@${job.levelPrice}: ${why}`);
     this.ev('skipped', `Grid ${this.label}: skipped ${job.side} @ ${job.levelPrice.toPrecision(5)} — ${why}`, { level: 'warn' });
   }
@@ -845,8 +888,7 @@ export class GridEngine {
       gasReserve: m?.quote.native && this.state.config ? gasReserve(this.state.config.totalCapitalUsd, reserveCfg(this.state.limits)) : null,
       dex: m?.pool.dex ?? null, dexName: m ? (c?.dexes.find((x) => x.id === m.pool.dex)?.name ?? m.pool.dex) : null, feeTier: m?.pool.feeTier ?? null, poolMode: m?.poolMode ?? null, custom: !!m?.custom, risk: m?.safety?.risk ?? null, available: !(this.executor instanceof UnavailableExecutor),
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol), stable: this.state.stable,
-      hasSigner: this.hasSigner, status: this.state.status, config: this.state.config, limits: this.state.limits,
-      cashOut: this.state.cashOut ?? null, cashedOutAt: this.state.cashedOutAt ?? null,
+      hasSigner: this.hasSigner, status: this.state.status, closing: !!this.state.closing, archivedAt: this.state.archivedAt ?? null, config: this.state.config, limits: this.state.limits,
       price: this.state.lastPrice, priceAt: this.state.lastPriceAt, balances: this.balances, walletBalances: this.walletBalances,
       intervals: this.state.intervals, usdPerBuy: this.state.usdPerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
       trades: trades.slice(-100).reverse(),

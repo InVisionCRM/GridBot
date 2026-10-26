@@ -19,6 +19,7 @@ import type { Emit } from './activity';
 import type { Mode } from './engine';
 import { ExecError, LiveExecutor, PaperExecutor, type Executor } from './chain';
 import { candidates, HOLD_MS, planBudget, type Candidate, type PlanOptions } from '../../market/autopilot';
+import { entryCostFraction, capGridEntry, capLpEntry } from '../../market/poolSize';
 import { findRoute, type CoinId, type Hop, type RouteMarket } from '../../market/convertRoute';
 import { NATIVE } from '../../live/swapMath';
 import type { Opportunity } from '../../market/scan';
@@ -305,7 +306,7 @@ export class Autopilot {
         if (!b.retiring) continue;
         if (!b.retiring.started) {
           try {
-            if (b.kind === 'grid') this.d.bot.gridToCash(b.id); else this.d.bot.closeLp(b.id, true);
+            if (b.kind === 'grid') this.d.bot.closeGrid(b.id); else this.d.bot.closeLp(b.id);
             b.retiring.started = true;
           } catch (e) { this.lastError = `${b.label}: ${(e as Error).message}`; }
           continue;
@@ -373,7 +374,18 @@ export class Autopilot {
     for (const a of this.state.accounts) {
       if (a.halted) continue;
       const items = scan.chains.find((c) => c.chainId === a.budget.chainId)?.items ?? [];
-      const cands = candidates(items, o, this.convertCost(a.budget.chainId, a.budget.coin));
+      const piece = a.budget.amount / Math.max(1, o.slots);
+      const cands = candidates(items, o, this.convertCost(a.budget.chainId, a.budget.coin), (opp, how) => {
+        const liq = opp.activity?.liquidityUsd ?? 0;
+        if (!(liq > 0) || !(opp.capital > 0)) return 0;
+        const usdPer = opp.usd / opp.capital;
+        const rate = this.rate(a.budget.chainId, opp.spend) ?? (opp.spend === a.budget.coin ? 1 : null);
+        if (!(usdPer > 0) || rate == null) return 0;
+        return entryCostFraction({
+          capital: piece / rate, quoteReserve: (liq / 2) / usdPer, feeBps: opp.feeBps, maxImpact: 0.03,
+          baseShare: how === 'lp' ? 0.5 : Math.min(1, 0.5), maxPoolShare: 0.1,
+        });
+      });
       const live = a.bots.filter((b) => !b.retiring), retiring = a.bots.length - live.length;
       const plan = planBudget({
         now: this.now(), budget: a.budget.amount, cash: this.free(a), slots: o.slots - retiring, cands,
@@ -405,9 +417,24 @@ export class Autopilot {
    * A new bot with `capital` (in the budget's coin) put into the pool's coin: what the account already holds of that
    * coin first, the rest swapped from the budget's coin. A token not in the app yet is added first (safety re-checked).
    */
-  private async open(a: Account, c: Candidate, capital: number, why: string): Promise<boolean> {
+  private async open(a: Account, c: Candidate, capitalIn: number, why: string): Promise<boolean> {
     const bot = this.d.bot, mode = this.state.mode, chainId = a.budget.chainId, spend = c.o.spend;
+    let capital = capitalIn;
     try {
+      const liq = c.o.activity?.liquidityUsd ?? 0;
+      const usdPer = c.o.capital > 0 ? c.o.usd / c.o.capital : 0;
+      const rate = this.rate(chainId, spend) ?? (spend === a.budget.coin ? 1 : null);
+      if (liq > 0 && usdPer > 0 && rate) {
+        const ask = capital / rate;
+        const fit = c.how === 'lp'
+          ? capLpEntry({ capital: ask, quoteReserve: (liq / 2) / usdPer, feeBps: c.feeBps, maxImpact: 0.03 })
+          : capGridEntry({ capital: ask, quoteReserve: (liq / 2) / usdPer, feeBps: c.feeBps, maxImpact: 0.03, gridCount: c.o.grid?.gridCount ?? 10 });
+        if (fit.why && fit.amount < ask * 0.98) {
+          capital = fit.amount * rate;
+          this.say(`${c.label}: ${fit.why}`, 'info', chainId);
+        }
+      }
+      if (!(capital > 0)) throw new Error('the pool is too thin for the price-impact cap');
       const market = c.o.key ?? await bot.addOpportunityMarket({ chainId: c.o.chainId, ...c.o.add! });
       const r = this.rate(chainId, spend) ?? (spend === a.budget.coin ? 1 : null);
       if (r == null) throw new Error(`no price for ${spend} yet`);

@@ -57,8 +57,9 @@ describe('smart trader (paper, mock chain)', () => {
     setScan({ at: 3, chains: [{ chainId: NET.chainId, items: [] }] });
     await ap.tick();
     expect(ap.status().accounts[0].bots[0].retiring).toEqual({ why: 'its pool no longer earns', started: true });
-    expect(bot.status().grids.find((x) => x.id === id)!.cashOut).not.toBeNull();
-    for (let i = 0; i < 3; i++) await bot.tickAll(); // sells what it holds, then stops
+    // Paper close archives in the request. The coins stay; the next review counts them back.
+    expect(bot.status().grids.find((x) => x.id === id)!.archivedAt).not.toBeNull();
+    expect(bot.status().grids.find((x) => x.id === id)!.closing).toBe(false);
     expect(bot.botCashedOut('grid', id)).toBe(true);
     const worth = bot.botValue('grid', id)!;
     await ap.tick();

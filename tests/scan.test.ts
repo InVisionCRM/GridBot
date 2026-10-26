@@ -19,7 +19,7 @@ const WBTC = '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599';
 const SPEND = [WETH, USDC, USDT];
 
 const pool = (o: Partial<TopPool> & { name: string; base: string; quote: string }): TopPool => ({
-  address: `0x${o.name.length.toString(16).padStart(40, '0')}`, dex: 'uniswap_v3', liquidityUsd: 5e6, volume24Usd: 1e6, tx24: 1000, change24Pct: 1, ...o,
+  address: `0x${o.name.length.toString(16).padStart(40, '0')}`, dex: 'uniswap_v3', liquidityUsd: 5e6, volume24Usd: 1e6, tx24: 1000, change24Pct: 1, createdAt: null, basePriceUsd: null, quotePriceUsd: null, ...o,
 });
 
 describe('parseTopPools (GeckoTerminal /networks/{slug}/pools)', () => {
@@ -29,7 +29,7 @@ describe('parseTopPools (GeckoTerminal /networks/{slug}/pools)', () => {
         relationships: { base_token: { data: { id: `eth_${NATIVE_ZERO}` } }, quote_token: { data: { id: 'eth_0xdAC17F958D2ee523a2206206994597C13D831ec7' } }, dex: { data: { id: 'uniswap-v4-ethereum' } } } },
       { attributes: { address: '0xdef', name: 'X / WETH', reserve_in_usd: null, volume_usd: {}, transactions: {}, price_change_percentage: {} }, relationships: {} },
     ] });
-    expect(rows[0]).toEqual({ address: '0xabc', name: 'ETH / USDT 0.3%', dex: 'uniswap-v4-ethereum', base: NATIVE_ZERO, quote: USDT, liquidityUsd: 96365925.1, volume24Usd: 26787487.5, tx24: 688, change24Pct: -0.738 });
+    expect(rows[0]).toEqual({ address: '0xabc', name: 'ETH / USDT 0.3%', dex: 'uniswap-v4-ethereum', base: NATIVE_ZERO, quote: USDT, liquidityUsd: 96365925.1, volume24Usd: 26787487.5, tx24: 688, change24Pct: -0.738, createdAt: null, basePriceUsd: null, quotePriceUsd: null });
     expect(rows[1]).toMatchObject({ liquidityUsd: 0, volume24Usd: 0, tx24: 0, change24Pct: null, base: '', quote: '' });
     expect(() => parseTopPools({ status: { error_code: 429 } })).toThrow(/unexpected/);
   });
@@ -73,7 +73,8 @@ describe('pickTokens: real activity, something the bot can spend', () => {
       pool({ name: 'WBTC / WETH', base: WBTC, quote: WETH, volume24Usd: 2e7 }),
       pool({ name: 'USDC / PEPE', base: USDC, quote: '0xf1', volume24Usd: 1e7 }),
     ], SPEND, WETH);
-    expect(r.picked.map((p) => [p.pool.name, p.token, p.spend])).toEqual([['WBTC / USDT', WBTC, USDT], ['USDC / PEPE', '0xf1', USDC]]);
+    expect(r.picked.map((p) => [p.pool.name, p.token, p.spend])).toEqual([['WBTC / USDT', WBTC, USDT], ['USDC / PEPE', '0xf1', USDC], ['WASH / USDC', '0xe1', USDC]]);
+    expect(r.picked.find((p) => p.pool.name === 'WASH / USDC')!.pool.wash).toBe(true);
     const why = Object.fromEntries(r.skipped.map((s) => [s.name, s.why]));
     expect(why['BIS / WETH']).toMatch(/liquidity \$45 is below \$10,000/);
     expect(why['USDC / USDT']).toBe('both sides are the native coin or stablecoins');
@@ -81,7 +82,7 @@ describe('pickTokens: real activity, something the bot can spend', () => {
     expect(why['USDC / ETH (0xEeee)']).toBe('both sides are the native coin or stablecoins');
     expect(why['cirBTC / WBTC']).toBe('neither side is the native coin or a stablecoin');
     expect(why['PONS / USDG']).toBe('only 19 trades in 24h');
-    expect(why['WASH / USDC']).toBe('volume is 50× its liquidity (likely wash trading)');
+    expect(why['WASH / USDC']).toBeUndefined(); // kept: liquidity is ranked on fees, not this volume
     expect(why['WBTC / WETH']).toBeUndefined(); // same token as a busier pool: tested once
   });
 
@@ -90,6 +91,17 @@ describe('pickTokens: real activity, something the bot can spend', () => {
     const r = pickTokens(many, SPEND, WETH);
     expect(r.picked).toHaveLength(SCAN_RULES.maxTokens);
     expect(r.picked.every((p) => p.spend === WETH)).toBe(true);
+  });
+
+  it('a pool younger than the minimum age is skipped; an unknown age is kept', () => {
+    const now = 1_800_000_000_000;
+    const r = pickTokens([
+      pool({ name: 'NEW / WETH', base: '0xa1', quote: WETH, createdAt: now - 60 * 60_000 }),
+      pool({ name: 'OLD / WETH', base: '0xa2', quote: WETH, createdAt: now - 48 * 3600_000 }),
+      pool({ name: 'UNK / WETH', base: '0xa3', quote: WETH, createdAt: null }),
+    ], SPEND, WETH, SCAN_RULES, now);
+    expect(r.picked.map((p) => p.pool.name)).toEqual(['OLD / WETH', 'UNK / WETH']);
+    expect(r.skipped.map((s) => s.why).join(' ')).toMatch(/1h old/);
   });
 });
 
@@ -342,6 +354,45 @@ describe('DailyScanner: opportunities', () => {
     const { deps, store } = fakeDeps();
     store.save({ version: 2, at: 123, testUsd: 5000, chains: [{ picks: [] }] } as unknown as ScanFile);
     expect(new DailyScanner(deps).status()).toMatchObject({ at: null, chains: [], testUsd: 5000 });
+  });
+
+  it('a wash pool is not a grid, and liquidity waits until fees are measured on-chain', async () => {
+    const WASH = '0x' + 'ab'.repeat(20);
+    const { deps } = fakeDeps({ candles: { [WASH]: wave(168, 2, 0.03) } });
+    deps.gecko.topPools = async (_n, dex) => dex === 'uniswap_v3'
+      ? [pool({ name: 'WASH / USDC', base: WASH, quote: USDC, liquidityUsd: 100_000, volume24Usd: 5e6, tx24: 800 })]
+      : [];
+    const item = (await new DailyScanner(deps).run()).chains[0].items.find((x) => x.wash);
+    expect(item).toMatchObject({ grid: null });
+    expect(item!.gridWhy).toMatch(/wash/);
+    expect(item!.lp).toBeNull();
+    expect(item!.lpWhy).toMatch(/weren't measured/);
+  });
+
+  it('a wash pool whose on-chain fees were measured is ranked for liquidity, still not as a grid', async () => {
+    const WASH = '0x' + 'cd'.repeat(20);
+    const { deps } = fakeDeps({ candles: { [WASH]: wave(168, 2, 0.03) } });
+    deps.gecko.topPools = async (_n, dex) => dex === 'uniswap_v3'
+      ? [pool({ name: 'WASH / USDC', base: WASH, quote: USDC, liquidityUsd: 100_000, volume24Usd: 5e6, tx24: 800 })]
+      : [];
+    const item = (await new DailyScanner({ ...deps, feePace: async () => ({ scale: 0.1 }) }).run()).chains[0].items.find((x) => x.wash);
+    expect(item!.grid).toBeNull();
+    expect(item!.feeScale).toBe(0.1);
+    expect(item!.lp).not.toBeNull();
+    expect(item!.lp!.feesPct).toBeGreaterThan(0);
+  });
+
+  it('fees in USD over a window scale the candles, and the fee mark survives the save', async () => {
+    const WASH = '0x' + 'ef'.repeat(20);
+    const { deps, store } = fakeDeps({ candles: { [WASH]: wave(168, 2, 0.03) } });
+    store.save({ version: 3, at: null, testUsd: 1000, chains: [], feeMarks: { keep: { at: 1, g0: '1', g1: '2', liquidity: '3' } } });
+    deps.gecko.topPools = async (_n, dex) => dex === 'uniswap_v3'
+      ? [pool({ name: 'WASH / USDC', base: WASH, quote: USDC, liquidityUsd: 100_000, volume24Usd: 5e6, tx24: 800 })]
+      : [];
+    const item = (await new DailyScanner({ ...deps, feePace: async () => ({ feesUsd: 30, windowMs: 48 * 3600_000 }) }).run()).chains[0].items.find((x) => x.wash);
+    expect(item!.feeScale).toBeGreaterThan(0);
+    expect(item!.lp).not.toBeNull();
+    expect(store.load()!.feeMarks!.keep.g0).toBe('1');
   });
 
   it('runs one scan at a time', async () => {

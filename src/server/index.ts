@@ -23,6 +23,7 @@ import type { CustomFile } from './chains/hub';
 import { FriendsHost } from './friends/host';
 import { GeckoRelay, hostScan, relayFetch } from './friends/relay';
 import { Autopilot, type AutopilotState, type ScanView } from './bot/autopilot';
+import { createTokenTrader, tokenTraderStore } from './market/tokenFeed';
 
 loadEnv();
 const friendsSecret = takeFriendsSecret();
@@ -109,11 +110,15 @@ const autopilot = new Autopilot({
   bot, store: new JsonStore<AutopilotState>(path.join(dataDir, 'autopilot.json')), emit: activity.emitEvent,
   scan: async () => (scanner ? (await scanner.status()) as ScanView : null),
 });
+const tokenTrader = copy ? undefined : createTokenTrader({
+  hub, gecko, store: tokenTraderStore(path.join(dataDir, 'token-trader.json')), emit: activity.emitEvent,
+  approval: cfg.approval, receiptTimeoutMs: 120_000,
+});
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
   lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot,
+  friends, autopilot, tokenTrader,
 });
 if (isProd) {
   app.use(express.static(clientDir));
@@ -132,6 +137,7 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   sync.start();
   dailyScan?.start();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
+  tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
   if (friends instanceof FriendsHost) {
     for (const rt of hub.runtimes()) if (rt.signer) hostAddresses.push(await rt.signer.getAddress());
     await friends.start().catch((e: Error) => { log.error(e.message); process.exit(1); });
@@ -146,8 +152,10 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 let autopilotTimer: ReturnType<typeof setInterval> | null = null;
+let tokenTimer: ReturnType<typeof setInterval> | null = null;
 const shutdown = () => {
   if (autopilotTimer) clearInterval(autopilotTimer);
+  if (tokenTimer) clearInterval(tokenTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
   if (friends instanceof FriendsHost) friends.stop();
   process.exit(0);
