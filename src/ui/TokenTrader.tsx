@@ -26,7 +26,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
   const save = (patch: AnyObj) => run(() => http('/api/token-trader', 'PUT', patch));
 
   return (
-    <section className="card">
+    <section className="card" id="token-trader">
       <div className="card-head">
         <h2>Token trader</h2>
         <span className={`tag ${t.on ? (o.mode === 'live' ? 'live' : 'pos') : ''}`}>{t.on ? `On · ${o.mode}` : 'Off'}</span>

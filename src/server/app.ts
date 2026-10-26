@@ -23,6 +23,8 @@ import type { GeckoRelay } from './friends/relay';
 import type { Autopilot, AutoOptions, Budget } from './bot/autopilot';
 import type { TokenTrader, TraderOptions } from './bot/tokenTrader';
 import { noKey } from './words';
+import { fetchJson } from './fetchJson';
+import { holdingsSnapshot } from './holdings/read';
 import { requestStore, type HaltOrigin } from './bot/audit';
 
 export interface AppOpts {
@@ -139,6 +141,7 @@ export function createApp(o: AppOpts) {
 
   // ── Meta / grids (unchanged API) ─────────────────────────────────────
   app.get('/api/health', (_req, res) => res.json({ ok: true, chainId: net.chainId, chains: bot.hub.runtimes().map((r) => r.cfg.id) }));
+  app.get('/api/holdings', wrap(async (req) => holdingsSnapshot(bot, fetchJson, req.query.refresh === '1')));
   app.get('/api/bot/meta', (_req, res) => res.json({
     maxGridCount: MAX_GRID_COUNT, densePresets: DENSE_PRESETS, feeBps: net.pulsex.feeBps, presets: listPresets(),
     strategies: STRATEGIES, trendDefaults: DEFAULT_TREND, timeframes: TFS, sweepAxes: SWEEP_AXES,

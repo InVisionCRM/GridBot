@@ -100,36 +100,6 @@ function LpRow({ s, b, price, nav, act, busy, closing, onClose }: { s: AnyObj; b
   );
 }
 
-/** What the signing wallet holds on each chain, and how much of each coin running live bots already use. */
-function WalletPanel({ s, chain }: { s: AnyObj; chain: number | 'all' }) {
-  const wallets: AnyObj[] = (s.wallets ?? []).filter((w: AnyObj) => chain === 'all' || w.chainId === chain);
-  if (!s.hasSigner) {
-    return s.copy
-      ? <div className="banner info"><span className="grow"><b>No key added yet</b>, so every bot runs in paper mode with practice trades. To trade live, add your key under <a href="/account">Account</a>.</span></div>
-      : <div className="banner info"><span className="grow"><b>No signing key in .env</b>, so every bot runs in paper mode with simulated trades. Add your key to .env and restart to trade live.</span></div>;
-  }
-  if (!wallets.length) return null;
-  const inUse = (w: AnyObj, c: AnyObj) => (s.allocations?.rows ?? []).find((r: AnyObj) => r.chainId === w.chainId && (c.native ? r.native : String(r.address).toLowerCase() === c.address))?.allocated ?? 0;
-  const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
-  return (
-    <section className="card" aria-label="Your wallet">
-      <div className="card-head"><h3>Your wallet</h3>{wallets[0]?.address && <span className="muted small mono" title={wallets[0].address}>{short(wallets[0].address)}</span>}</div>
-      {wallets.map((w) => (
-        <div key={w.chainId} className="wallet-row">
-          <span className="wallet-chain"><ChainBadge c={chainOf(s, w.chainId)} testnet={false} />{w.name}</span>
-          {w.error && !w.coins.length ? <span className="small neg">Couldn't read balances: {w.error}</span>
-            : !w.coins.length ? <span className="small muted">Loading…</span>
-            : <span className="coins">{w.coins.map((c: AnyObj) => {
-              const used = inUse(w, c);
-              if (c.error) return <span key={c.address} className="coin neg" title={c.error}><b>?</b> {c.symbol} <small>couldn't read: {c.error}</small></span>;
-              return <span key={c.address ?? 'native'} className="coin" title={`${c.amount.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${c.symbol}`}><b>{humanAmount(c.amount)}</b> {c.symbol}{used > 0 ? <small> · {humanAmount(used)} in live bots</small> : null}</span>;
-            })}</span>}
-        </div>
-      ))}
-    </section>
-  );
-}
-
 /** Home's glance at Opportunities: the 3 safe pools expected to earn the most next week, on the chain shown. */
 function BestThisWeek({ s, chain, nav }: { s: AnyObj; chain: number | 'all'; nav: Nav }) {
   const { p, err } = useOpportunities();
@@ -138,7 +108,7 @@ function BestThisWeek({ s, chain, nav }: { s: AnyObj; chain: number | 'all'; nav
     .filter(isSafe).flatMap((o) => { const w = wayOf(o, 'best'); return w ? [{ o, w }] : []; })
     .sort((a, b) => b.w.expected - a.w.expected).slice(0, 3);
   return (
-    <section className="card" aria-label="Best this week">
+    <section className="card" id="best-week" aria-label="Best this week">
       <div className="card-head">
         <h3><L tip="The safe pools expected to earn the most next week, from the last 7 days of their real trades (Opportunities has the full list).">Best this week</L></h3>
         <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `updated ${ago(p.at)}` : 'not checked yet'}</span>
@@ -351,8 +321,6 @@ export function Home({ s, events, ticks, ver, nav, act, busy }: HomeProps) {
           <LiveFeed s={s} items={feed} nav={nav} />
         </section>
       </div>
-
-      <WalletPanel s={s} chain={chain} />
 
       <BestThisWeek s={s} chain={chain} nav={nav} />
     </main>
