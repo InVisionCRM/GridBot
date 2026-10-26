@@ -22,6 +22,7 @@ type Mode = 'paper' | 'live';
 interface Econ {
   ok: boolean; reasons: string[]; levelSize: number; buyLevels: number; spacingPct: number; roundTripFeePct: number;
   impactPct: number; gasQuote: number; netPerRoundTrip: number; netPct: number; buyTaxPct?: number; sellTaxPct?: number;
+  entry?: { amount: number; why: string | null };
 }
 interface Leg { quote: string; label?: string; pool?: { dexName: string; feeBps: number; feeTier?: number; switchTo: boolean }; lowerPrice: number; upperPrice: number; gridCount: number; capital: number | null; bandPct: number; econ: Econ | null }
 interface Limits { impact: string; slippage: string; deadline: string; gasRes: string }
@@ -81,7 +82,7 @@ export function fundsProblem(f: Funds, amount: number, mode: Mode): string | nul
 /** Paper/Live switch + start button. Live is disabled with the reason when it isn't allowed. */
 function StartRow({ s, pairKey, mode, setMode, label, disabled, problem, onStart, busy }: { s: AnyObj; pairKey: string; mode: Mode; setMode: (m: Mode) => void; label: string; disabled: boolean; problem: string | null; onStart: () => void; busy: boolean }) {
   const m = mk(s, pairKey), c = chainOf(s, m.chainId);
-  const why = !(c?.hasSigner ?? s.hasSigner) ? 'Live needs a signing key in .env' : !m.liveAllowed ? 'Live blocked: this token failed the safety check' : null;
+  const why = !(c?.hasSigner ?? s.hasSigner) ? (s.copy ? 'Live needs your key: add it under Account' : 'Live needs a signing key in .env') : !m.liveAllowed ? 'Live blocked: this token failed the safety check' : null;
   useEffect(() => { if (why && mode === 'live') setMode('paper'); }, [why, mode, setMode]);
   return (
     <div className="start-row">
@@ -105,6 +106,7 @@ function Verdict({ e, quote, fee }: { e: Econ; quote: string; fee: string }) {
         ? <span>Each completed buy-then-sell nets about <b>{amt(e.netPerRoundTrip, quote, true)}</b> ({pct(e.netPct, 2)} of a {amt(e.levelSize, quote)} level) after fees, price impact and gas. Levels are {pct(e.spacingPct, 2)} apart.</span>
         : <span><b className="neg">Each completed buy-then-sell {e.netPerRoundTrip < 0 ? `loses about ${amt(-e.netPerRoundTrip, quote)}` : `nets only ${amt(e.netPerRoundTrip, quote)}`} at this size.</b> You can still start it. A bigger amount, fewer levels or a wider range usually fixes this.</span>}
       <span className="detail">{e.ok ? '' : `${e.reasons.join(' ')} · `}Worst level: pool fee {fee} each way ({pct(e.roundTripFeePct, 3)} round trip) · impact {pct(e.impactPct, 3)} · gas {amt(e.gasQuote, quote)}{e.buyTaxPct || e.sellTaxPct ? ` · token tax ${pct(e.buyTaxPct ?? 0, 1)} buy / ${pct(e.sellTaxPct ?? 0, 1)} sell` : ''} · every level trades: the ones below the price wait to buy, the ones above are bought at the start</span>
+      {e.entry?.why && <span className="detail">{e.entry.why}. Suggested size {amt(e.entry.amount, quote)}.</span>}
     </div>
   );
 }
@@ -441,7 +443,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
           ? plan.side == null ? <>Your {m.base} and {m.quote} already match the range's mix, so <b>nothing is swapped</b>.</>
             : <>The range needs about {pct(plan.share, 0)} of the value in {m.base}, so it first swaps about <b>{plan.side === 'buy' ? `${humanAmount(plan.amount)} ${m.quote} → ${m.base}` : `${humanAmount(plan.amount)} ${m.base} → ${m.quote}`}</b>{a > 0 ? '' : `. Add ${m.base} you already hold above to swap less`}.</>
           : <>The range needs both coins: what's missing is swapped first. {m.base} you already hold can go in too, so less is swapped.</>}</span>
-        <span className="detail">It earns its share of the {feeLabel(m)} fee on every trade while the price is inside the range. Like a grid, it ends up holding more of whichever coin fell. Outside the range it earns nothing until the price comes back or the range moves. Gas: opening is a swap plus about 480k; moving the range is a take-out (about 250k), a swap and a new open; closing is about 250k.</span>
+        <span className="detail">It earns its share of the {feeLabel(m)} fee on every trade while the price is inside the range. Like a grid, it ends up holding more of whichever coin fell. Outside the range it earns nothing until the price comes back or the range moves. The open is cut to what this pool can take under the price-impact cap and 10% of its active liquidity; the rest is set aside and not swapped in. Gas: opening is a swap plus about 480k; moving the range is a take-out (about 250k), a swap and a new open; closing is about 250k.</span>
       </div>
       <Rerange on={rerange} set={setRerange} />
       <LpReplay pair={pair} capital={spot ? q + a * spot : q} maxImpact={impactOk ? impact : null} band={b} rerange={rerange} usdPer={m.usdPerQuote ?? null}

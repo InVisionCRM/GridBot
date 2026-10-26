@@ -216,6 +216,8 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(p1.feeCoins.base).toBeGreaterThan(0);
     expect(p1.feeCoins.quote).toBeGreaterThan(0);
     expect(p1.fees).toBeCloseTo(p1.feeCoins.base * s1.price! + p1.feeCoins.quote, 9); // all still waiting: valued now
+    expect(s1.positionFees!.coins).toEqual(p1.feeCoins); // the first position: every fee is its own
+    expect(s1.positionFees!.since).toBe(s1.position!.openedAt);
     m.movePrice(pool, 1.2);
     await tradeUntilMoved(lp, m, pool);
     const s2 = lp.status(), p2 = s2.pnl!;
@@ -226,8 +228,30 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     // the fees collected at the move are counted per coin
     expect(s2.totals.feeCoins.base).toBeGreaterThan(0);
     expect(s2.totals.feeCoins.quote).toBeGreaterThan(0);
-    // the new position remembers what it went in with
+    // the new position remembers what it went in with, and starts its own fee history from the fees before it
     expect(s2.position!.putIn!.base).toBeCloseTo(s2.coins!.base, 6);
+    expect(s2.position!.feesBefore).toEqual(s2.totals.feeCoins);
+    expect(s2.positionFees!.coins.base).toBeCloseTo(p2.feeCoins.base - s2.totals.feeCoins.base, 12);
+    expect(s2.positionFees!.coins.quote).toBeCloseTo(p2.feeCoins.quote - s2.totals.feeCoins.quote, 12);
+  });
+
+  it('paper close takes the position out from the last reading and keeps both coins', async () => {
+    const { lp, m, pool } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
+    await lp.tick();
+    m.movePrice(pool, 0.95); // in range, holding more PLS now
+    await lp.tick();
+    expect(lp.status().coins!.base).toBeGreaterThan(0);
+    const base = lp.status().coins!.base, quote = lp.status().coins!.quote;
+    expect(lp.close()).toBe(false);
+    const st = lp.status();
+    expect(st).toMatchObject({ status: 'closed', position: null, closing: false });
+    expect(st.archivedAt).toBeGreaterThan(0);
+    expect(st.idle.base).toBeGreaterThan(0);
+    expect(st.idle.base).toBeCloseTo(base, 6);
+    expect(st.idle.quote).toBeGreaterThan(quote * 0.5);
+    await lp.tick(); // already archived: no further pool work
+    expect(lp.status().status).toBe('closed');
   });
 
   it("doesn't start a move whose swap would go over the price-impact cap (it would stop halfway, out of the position)", async () => {
@@ -625,6 +649,8 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       const st = again.bot.status().lps.find((x: { id: string }) => x.id === old.id)!;
       expect(st.totals).toEqual({ fees: 12.5, gas: expect.any(Number), sent: 0, feeCoins: { base: 0, quote: 12.5 }, swapCost: 0, moveLoss: 0 });
       expect(st.position!.putIn!.base).toBeCloseTo(st.coins!.base, 9);
+      // version 6: fees collected before the upgrade came before the open position
+      expect(st.position!.feesBefore).toEqual({ base: 0, quote: 12.5 });
       expect('opening' in st).toBe(false);
       // the earlier move rule's tally and moves-per-day list are dropped
       const kept = again.store.load()!.lps.find((x) => x.id === old.id) as unknown as Record<string, unknown>;

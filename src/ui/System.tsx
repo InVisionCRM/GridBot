@@ -27,7 +27,7 @@ export function VersionPill({ v, nav }: { v: AnyObj | null; nav: Nav }) {
   );
 }
 
-function Copy({ text }: { text: string }) {
+export function Copy({ text }: { text: string }) {
   const [ok, setOk] = useState(false);
   return <button type="button" className="btn ghost small-btn" onClick={() => { void navigator.clipboard?.writeText(text).then(() => { setOk(true); setTimeout(() => setOk(false), 1200); }); }}>{ok ? 'Copied' : 'Copy'}</button>;
 }
@@ -118,10 +118,11 @@ function SelfTest() {
   );
 }
 
-export function SystemTab({ ver }: { ver: ReturnType<typeof useVersion> }) {
+/** A friend's copy has no version card: the host keeps it up to date. */
+export function SystemTab({ ver, copy }: { ver: ReturnType<typeof useVersion>; copy: boolean }) {
   return (
     <>
-      <VersionCard v={ver.v} err={ver.err} reload={ver.reload} />
+      {!copy && <VersionCard v={ver.v} err={ver.err} reload={ver.reload} />}
       <SelfTest />
     </>
   );

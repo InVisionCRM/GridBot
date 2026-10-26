@@ -49,6 +49,13 @@ export interface TopPool {
   volume24Usd: number;
   tx24: number;
   change24Pct: number | null;
+  /** When the pool was created, ms. null = the source didn't say (not treated as new). */
+  createdAt: number | null;
+  /** USD price of each side, when the source sent one. */
+  basePriceUsd: number | null;
+  quotePriceUsd: number | null;
+  /** 24h volume ÷ liquidity is above the wash line. Kept for liquidity; a grid does not use it. */
+  wash?: boolean;
 }
 
 const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
@@ -64,6 +71,8 @@ export function parseTopPools(json: unknown): TopPool[] {
     const a = r.attributes ?? {};
     const tx = (a.transactions as Record<string, { buys?: number; sells?: number }> | undefined)?.h24;
     const chg = (a.price_change_percentage as Record<string, unknown> | undefined)?.h24;
+    const created = a.pool_created_at;
+    const createdMs = created == null || created === '' ? NaN : Date.parse(String(created));
     return {
       address: String(a.address ?? '').toLowerCase(),
       name: String(a.name ?? ''),
@@ -74,6 +83,9 @@ export function parseTopPools(json: unknown): TopPool[] {
       volume24Usd: num((a.volume_usd as Record<string, unknown> | undefined)?.h24),
       tx24: num(tx?.buys) + num(tx?.sells),
       change24Pct: chg == null || chg === '' ? null : num(chg),
+      createdAt: Number.isFinite(createdMs) ? createdMs : null,
+      basePriceUsd: a.base_token_price_usd == null || a.base_token_price_usd === '' ? null : num(a.base_token_price_usd),
+      quotePriceUsd: a.quote_token_price_usd == null || a.quote_token_price_usd === '' ? null : num(a.quote_token_price_usd),
     };
   });
 }
@@ -83,10 +95,18 @@ export const SCAN_RULES = {
   minLiquidityUsd: 10_000,
   /** Buys + sells in 24 h */
   minTx24: 50,
-  /** 24 h volume ÷ liquidity above this is wash trading */
+  /**
+   * 24 h volume ÷ liquidity above this is flagged as wash trading. The pool is still tested for liquidity
+   * (ranked on fees the pool actually paid, not this volume). A grid skips it: wash trades don't make swings.
+   */
   maxVolumeToLiquidity: 20,
   /** Tokens tested per chain (each costs one candle request) */
   maxTokens: 100,
+  /**
+   * Pools newer than this are left out of the opportunity scan (ms). Unknown age is kept.
+   * The token trader has its own setting; snipes ignore age.
+   */
+  minPoolAgeMs: 24 * 3600_000,
 };
 
 export interface TokenCandidate { token: string; spend: string; pool: TopPool }
@@ -101,7 +121,7 @@ export const NATIVE_EEEE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
  * Tokens to test, best volume first, one pool per token. `spendable` = native wrapper + stablecoins; `wrapped` = the
  * native wrapper, which also stands for the native coin (zero / 0xEeee… address) since the app trades through it.
  */
-export function pickTokens(pools: TopPool[], spendable: string[], wrapped: string, rules = SCAN_RULES): { picked: TokenCandidate[]; skipped: Skipped[] } {
+export function pickTokens(pools: TopPool[], spendable: string[], wrapped: string, rules = SCAN_RULES, now = Number.POSITIVE_INFINITY): { picked: TokenCandidate[]; skipped: Skipped[] } {
   const sp = new Set(spendable.map((a) => a.toLowerCase()));
   const native = (a: string) => (a === NATIVE_ZERO || a === NATIVE_EEEE ? wrapped.toLowerCase() : a);
   const picked: TokenCandidate[] = [], skipped: Skipped[] = [];
@@ -109,17 +129,19 @@ export function pickTokens(pools: TopPool[], spendable: string[], wrapped: strin
   for (const p0 of [...pools].sort((a, b) => b.volume24Usd - a.volume24Usd)) {
     const p = { ...p0, base: native(p0.base), quote: native(p0.quote) };
     const b = sp.has(p.base), q = sp.has(p.quote);
+    const ageMs = p.createdAt == null ? null : now - p.createdAt;
+    const wash = p.liquidityUsd > 0 && p.volume24Usd / p.liquidityUsd > rules.maxVolumeToLiquidity;
     const why = b && q ? 'both sides are the native coin or stablecoins'
       : !b && !q ? 'neither side is the native coin or a stablecoin'
         : p.liquidityUsd < rules.minLiquidityUsd ? `liquidity $${Math.round(p.liquidityUsd).toLocaleString('en-US')} is below $${rules.minLiquidityUsd.toLocaleString('en-US')}`
           : p.tx24 < rules.minTx24 ? `only ${p.tx24} trades in 24h`
-            : p.volume24Usd / p.liquidityUsd > rules.maxVolumeToLiquidity ? `volume is ${Math.round(p.volume24Usd / p.liquidityUsd)}× its liquidity (likely wash trading)`
+            : ageMs != null && rules.minPoolAgeMs > 0 && ageMs < rules.minPoolAgeMs ? `pool is ${Math.max(0, Math.round(ageMs / 3600_000))}h old (minimum ${Math.round(rules.minPoolAgeMs / 3600_000)}h)`
               : null;
     if (why) { skipped.push({ name: p.name, why }); continue; }
     const token = b ? p.quote : p.base, spend = b ? p.base : p.quote;
     if (seen.has(token)) continue;
     seen.add(token);
-    if (picked.length < rules.maxTokens) picked.push({ token, spend, pool: p });
+    if (picked.length < rules.maxTokens) picked.push({ token, spend, pool: { ...p, wash } });
   }
   return { picked, skipped };
 }
@@ -158,6 +180,10 @@ export interface Opportunity {
   /** Best liquidity range by fees − costs (null: not tested, see lpWhy). Only where a liquidity bot can run: a V3 pool on a DEX with a verified position manager */
   lp: { bandPct: number; earnedPct: number; feesPct: number; inRangePct: number; poolSharePct: number; returnPct: number } | null;
   lpWhy: string | null;
+  /** Reported volume looks like wash trading. Liquidity is ranked on on-chain fees instead, when they were measured. */
+  wash?: boolean;
+  /** Candle volume was multiplied by this so it matches fees read on chain. */
+  feeScale?: number;
 }
 
 /** The hourly high-low ranges (log) added up, per day: how far the price went back and forth, whichever way it ended. */
@@ -167,14 +193,24 @@ export function dailySwing(k: Candle[]): number {
 }
 
 /**
- * Grid ranking: pools where a grid earned from its trades last week, by how much the price swings. Walk-forward over
- * 90 pools × 4 weeks (Oct 2026, README): the swing predicted next week's grid earnings best (rank correlation 0.53;
- * last week's own grid earnings 0.36, last week's total return −0.08), and came out ahead on each half of the pools
- * separately (0.50 / 0.54 against 0.34 / 0.37).
+ * What a pool is expected to earn next week, as a share of the money put in: the one number Opportunities shows and
+ * sorts by. Fitted on the walk-forward (Oct 2026, 92 pools × 4 weeks; `scripts/walkForward.ts analyze` prints it),
+ * among pools where the strategy earned last week:
+ *  grid       GRID_PER_SWING × the daily swing: rank correlation 0.43 with next week; the top tenth was expected to
+ *             earn 7.2% and earned 7.4%. Last week's own grid earnings ranked worse (0.20) and over-promised (9.7% for 6.0%).
+ *  liquidity  LP_REPEAT × last week's earnings after costs: 0.73; the top tenth was expected to earn 14.1% and earned 12.5%.
+ * null = no estimate: the strategy didn't earn at this size last week (or wasn't tested).
  */
-export const gridRank = (o: Pick<Opportunity, 'grid' | 'swingPct'>): number | null => (o.grid ? o.swingPct : null);
-/** Liquidity ranking: what the position earned after costs last week (walk-forward: rank correlation 0.85 with the next week). */
-export const lpRank = (o: Pick<Opportunity, 'lp'>): number | null => o.lp?.earnedPct ?? null;
+export const GRID_PER_SWING = 0.0686;
+export const LP_REPEAT = 0.77;
+export const expectedGrid = (o: Pick<Opportunity, 'grid' | 'swingPct'>): number | null => (o.grid ? GRID_PER_SWING * o.swingPct : null);
+export const expectedLp = (o: Pick<Opportunity, 'lp'>): number | null => (o.lp && o.lp.earnedPct > 0 ? LP_REPEAT * o.lp.earnedPct : null);
+/** The better way to use a pool next week, or null when neither has an estimate. */
+export function bestWay(o: Pick<Opportunity, 'grid' | 'swingPct' | 'lp'>): { how: 'grid' | 'lp'; expected: number } | null {
+  const g = expectedGrid(o), l = expectedLp(o);
+  if (g == null && l == null) return null;
+  return l != null && (g == null || l > g) ? { how: 'lp', expected: l } : { how: 'grid', expected: g! };
+}
 
 /** Ranges (± around the start price) and level counts tried for every pair. */
 export const SETUP_BANDS = [0.05, 0.08, 0.12, 0.18, 0.25];

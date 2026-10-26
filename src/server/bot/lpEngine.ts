@@ -21,6 +21,7 @@ import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { feesOwed } from '../../live/v3Liquidity';
 import { gasInBase, LP_BAND, LP_GAS, LP_MIN_SWAP_SHARE } from '../../market/lp';
+import { DEFAULT_MAX_POOL_SHARE } from '../../market/poolSize';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
 import { fromUnits } from '../../live/swapMath';
@@ -36,6 +37,7 @@ import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
 import type { Logger } from './logger';
 import type { Store } from './store';
+import { noKey } from '../words';
 
 export interface LpPosition {
   /** NFT id (live) or a paper id */
@@ -50,6 +52,8 @@ export interface LpPosition {
   openedAt: number;
   /** The coins it went in with (null: opened before version 5, set at its next reading) */
   putIn: Coins | null;
+  /** The bot's fees in each coin (collected) when this position opened: what came before it */
+  feesBefore: Coins;
   /** Paper: the pool's global fee growth and whether the price was in range at the last reading; fees earned (raw, token order) */
   paper?: { g0: string; g1: string; inRange: boolean; owed0: string; owed1: string };
 }
@@ -67,6 +71,8 @@ export interface LpStep {
   /** A swap that was broadcast but not confirmed when the executor gave up waiting */
   swap?: { hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number };
   tries: number;
+  /** close: after taking the position out, sell the base coin back to the quote coin ("close to cash") */
+  toCash?: boolean;
 }
 
 export interface LpState {
@@ -86,6 +92,11 @@ export interface LpState {
   position: LpPosition | null;
   /** The bot's coins outside the position (leftovers of the mix, coins between steps) */
   idle: Coins;
+  /**
+   * Capital that could not enter without taking too much of the pool or crossing the price-impact cap.
+   * It stays out of the next swap. Old saves omit it.
+   */
+  aside?: Coins;
   step: LpStep | null;
   outSince: number | null;
   lastRerangeAt: number | null;
@@ -143,7 +154,7 @@ const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
   return {
-    kind: 'lp', version: 5, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
+    kind: 'lp', version: 6, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
     outSince: null, lastRerangeAt: null, reranges: 0, seen: null, totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
     closing: false, archivedAt: null,
@@ -188,6 +199,11 @@ export function upgradeLp(s: LpState): LpState {
       position: t.position ? { ...t.position, putIn: null } : null, seen: t.seen ? { g0: t.seen.g0, g1: t.seen.g1 } : null,
     };
   }
+  if (t.version < 6) {
+    // A position open at the upgrade: what was collected until now came before it. Exact when fees are reinvested
+    // (they stay in the position until it is taken out); with Send, fees it sent before the upgrade aren't counted as its.
+    t = { ...t, version: 6, position: t.position ? { ...t.position, feesBefore: { ...t.totals.feeCoins } } : null };
+  }
   return t;
 }
 
@@ -208,6 +224,8 @@ export class LpEngine {
   private npmOwner: { id: string; addr: string } | null = null;
   /** The last time a move was blocked by the price-impact cap, and why (see moveBlock) */
   private blockMemo: { at: number; block: string } | null = null;
+  /** Sized-down entry, logged once per reason */
+  private noted = new Set<string>();
   private ticking = false;
   private readonly now: () => number;
 
@@ -244,7 +262,7 @@ export class LpEngine {
       const q = this.hub.quoter(this.state.market);
       if (this.state.mode === 'live') {
         const rt = this.hub.chainOf(this.state.market);
-        if (!rt.signer) throw new Error('Live mode needs PRIVATE_KEY in .env');
+        if (!rt.signer) throw new Error(noKey());
         return new LiveExecutor(q, rt.signer, { approval: this.d.approval ?? 'exact', receiptTimeoutMs: this.d.receiptTimeoutMs ?? 180_000, sharedNonce: rt.nonce });
       }
       return new PaperExecutor(q, () => ({ pls: this.state.idle.base, stable: this.state.idle.quote }), this.d.approval ?? 'exact');
@@ -369,6 +387,15 @@ export class LpEngine {
     this.markArchived();
   }
   private markArchived(quiet = false) {
+    const aside = this.state.aside;
+    if (aside && (aside.base > 0 || aside.quote > 0)) {
+      this.addIdle(aside);
+      this.state.aside = { base: 0, quote: 0 };
+      if (this.view) {
+        const price = this.view.v.price;
+        this.view = { ...this.view, value: this.state.idle.base * price + this.state.idle.quote };
+      }
+    }
     this.state.step = null;
     this.state.status = 'closed';
     this.state.closing = false;
@@ -484,9 +511,14 @@ export class LpEngine {
     let block: string | null = null;
     if (gap > value * LP_MIN_SWAP_SHARE) {
       const side: 'buy' | 'sell' = wantBase > haveBase ? 'buy' : 'sell';
-      const q = await this.executor.quote(side, side === 'buy' ? gap : gap / v.price, this.state.limits);
+      const full = side === 'buy' ? gap : gap / v.price;
+      const q = await this.executor.quote(side, full, this.state.limits);
       if (q.priceImpact > this.state.limits.maxPriceImpact) {
-        block = `the swap to the new range's mix would move the price ${(q.priceImpact * 100).toFixed(2)}% (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%)`;
+        const minIn = side === 'buy' ? value * LP_MIN_SWAP_SHARE : (value * LP_MIN_SWAP_SHARE) / v.price;
+        const mq = minIn < full ? await this.executor.quote(side, minIn, this.state.limits) : q;
+        if (mq.priceImpact > this.state.limits.maxPriceImpact) {
+          block = `the swap to the new range's mix would move the price ${(q.priceImpact * 100).toFixed(2)}% (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%)`;
+        }
       }
     }
     this.blockMemo = block ? { at: now, block } : null;
@@ -546,7 +578,8 @@ export class LpEngine {
     const o = p ? await this.owed(pool, p) : null;
     const owedCoins = o ? pool.coinsFromRaw(o.raw0, o.raw1, v) : { base: 0, quote: 0 };
     const val = (c: Coins) => c.base * v.price + c.quote;
-    const value = val(coins) + val(owedCoins) + val(this.state.idle);
+    const aside = this.state.aside ?? { base: 0, quote: 0 };
+    const value = val(coins) + val(owedCoins) + val(this.state.idle) + val(aside);
     this.view = { v, inRange: !!p && v.tick >= p.tickLower && v.tick < p.tickUpper, coins, owed: owedCoins, value };
     const eq = this.state.equity, pnl = this.pnl();
     if (pnl && (!eq.length || this.now() - eq[eq.length - 1][0] >= 60_000)) pushCapped(eq, [this.now(), pnl.equity], 3000);
@@ -570,6 +603,12 @@ export class LpEngine {
       equity, feeCoins: { base: t.feeCoins.base + vw.owed.base, quote: t.feeCoins.quote + vw.owed.quote }, fees,
       gas: t.gas, swapCost: t.swapCost, moveLoss: t.moveLoss, net, price: equity - start - net,
     };
+  }
+  /** What the open position has earned in fees since it opened (collected + waiting), per coin: its own history. */
+  positionFees(): { coins: Coins; since: number } | null {
+    const p = this.state.position, pnl = this.pnl();
+    if (!p || !pnl) return null;
+    return { coins: { base: pnl.feeCoins.base - p.feesBefore.base, quote: pnl.feeCoins.quote - p.feesBefore.quote }, since: p.openedAt };
   }
   /**
    * The position's share of the liquidity trading at the price, which is its share of each trade's fee; 0 out of range.
@@ -601,7 +640,7 @@ export class LpEngine {
   private async advanceOnce(pool: LpPool, v: PoolView) {
     const s = this.state.step!;
     if (s.stage === 'exit') return this.exit(pool, v, s);
-    if (s.stage === 'swap') return this.swap(pool, v, s);
+    if (s.stage === 'swap') return s.action === 'close' ? this.sellToCash(v, s) : this.swap(pool, v, s);
     if (s.stage === 'approve') return this.approve(pool, s);
     if (s.stage === 'mint') return this.mint(pool, v, s);
     return this.collect(pool, v, s);
@@ -622,6 +661,41 @@ export class LpEngine {
     return fromUnits(r.gasUsed * (r.gasPrice ?? 0n), 18) * (await this.hub.quoter(this.state.market).basePerNative()) * v.price;
   }
   private addIdle(c: Coins) { this.state.idle = { base: this.state.idle.base + c.base, quote: this.state.idle.quote + c.quote }; }
+
+  private noteOnce(msg: string) {
+    if (this.noted.has(msg)) return;
+    this.noted.add(msg);
+    this.log('warn', msg);
+    this.ev('info', `Liquidity ${this.label}: ${msg}`, { level: 'warn' });
+  }
+
+  /** Hold coins out of the next swap. They fold back into idle when the bot closes. */
+  private park(c: Coins) {
+    if (!(c.base > 0 || c.quote > 0)) return;
+    const a = this.state.aside ?? { base: 0, quote: 0 };
+    this.state.aside = { base: a.base + c.base, quote: a.quote + c.quote };
+    this.state.idle = { base: Math.max(0, this.state.idle.base - c.base), quote: Math.max(0, this.state.idle.quote - c.quote) };
+  }
+
+  /**
+   * A deposit bigger than 10% of the active range is cut back. Reported USD liquidity counts out-of-range
+   * liquidity, so the cap uses the active liquidity the pool reports now.
+   */
+  private parkOversize(pool: LpPool, v: PoolView, tickLower: number, tickUpper: number) {
+    const poolL = Number(v.liquidity);
+    if (!(poolL > 0)) return;
+    const active = pool.coinsFor(poolL, tickLower, tickUpper, v);
+    const activeQuote = active.base * v.price + active.quote;
+    if (!(activeQuote > 0) || !Number.isFinite(activeQuote)) return;
+    const idle = this.state.idle;
+    const value = idle.base * v.price + idle.quote;
+    const maxValue = (DEFAULT_MAX_POOL_SHARE / (1 - DEFAULT_MAX_POOL_SHARE)) * activeQuote;
+    if (!(value > maxValue * 1.02)) return;
+    const keep = maxValue / value;
+    const drop = { base: idle.base * (1 - keep), quote: idle.quote * (1 - keep) };
+    this.park(drop);
+    this.noteOnce(`set aside ${drop.quote.toPrecision(4)} ${this.quoteSym} + ${drop.base.toPrecision(4)} ${this.baseSym}: more than ${(DEFAULT_MAX_POOL_SHARE * 100).toFixed(0)}% of the pool's active liquidity`);
+  }
 
   /** A sent tx stage: null = not mined yet; otherwise the receipt (reverted ones are counted and retried up to MAX_TRIES). */
   private async settled(s: LpStep, v: PoolView): Promise<ReceiptLike | null> {
@@ -721,16 +795,33 @@ export class LpEngine {
       return;
     }
     s.range ??= pool.ticksFor(v.price * (1 - c.bandPct), v.price * (1 + c.bandPct), v);
+    this.parkOversize(pool, v, s.range.tickLower, s.range.tickUpper);
     const share = pool.baseShare(s.range.tickLower, s.range.tickUpper, v);
     const idle = this.state.idle, value = idle.base * v.price + idle.quote;
     const wantBase = share * value, haveBase = idle.base * v.price;
     const side: 'buy' | 'sell' = wantBase > haveBase ? 'buy' : 'sell';
     const gap = Math.abs(wantBase - haveBase);
     if (gap > value * LP_MIN_SWAP_SHARE) {
-      const amountIn = side === 'buy' ? gap : gap / v.price;
-      const q = await this.executor.quote(side, amountIn, this.state.limits);
+      let q = await this.executor.quote(side, side === 'buy' ? gap : gap / v.price, this.state.limits);
       if (!q.balanceOk) throw new Error(`can't swap to the range's mix: ${q.balanceNote}`);
-      if (q.priceImpact > this.state.limits.maxPriceImpact) throw new Error(`the swap to the range's mix would move the price ${(q.priceImpact * 100).toFixed(2)}% (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%)`);
+      if (q.priceImpact > this.state.limits.maxPriceImpact) {
+        const cap = this.state.limits.maxPriceImpact;
+        let lo = 0, hi = q.amountInHuman, best = 0;
+        let bestQ = q;
+        for (let i = 0; i < 10 && hi - lo > hi * 1e-4; i++) {
+          const mid = (lo + hi) / 2;
+          const mq = await this.executor.quote(side, mid, this.state.limits);
+          if (mq.balanceOk && mq.priceImpact <= cap) { best = mid; bestQ = mq; lo = mid; } else hi = mid;
+        }
+        const fitted = side === 'buy' ? best : best * v.price;
+        if (!(fitted > value * LP_MIN_SWAP_SHARE)) {
+          this.noteOnce(`left the mix alone: swapping to the range would move the price ${(q.priceImpact * 100).toFixed(2)}% (cap ${(cap * 100).toFixed(2)}%)`);
+          s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
+          return;
+        }
+        this.noteOnce(`entry swap cut from ${q.amountInHuman.toPrecision(4)} to ${best.toPrecision(4)} so the price moves ${(bestQ.priceImpact * 100).toFixed(2)}% (cap ${(cap * 100).toFixed(2)}%)`);
+        q = bestQ;
+      }
       try {
         const f = await this.executor.execute(q, { canSend: () => true, onSent: (_stage, hash) => this.log('info', `sent swap ${hash}`) });
         this.state.totals.gas += f.gasPls * v.price;
@@ -744,6 +835,50 @@ export class LpEngine {
     }
     s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
   }
+  private closed() {
+    this.state.step = null;
+    this.state.status = 'closed';
+    this.ev('stopped', `Liquidity ${this.label}: closed; ${this.state.idle.base.toPrecision(6)} ${this.baseSym} + ${this.state.idle.quote.toPrecision(6)} ${this.quoteSym} back in the wallet`, { level: 'success', notify: true });
+  }
+
+  /**
+   * Close to cash: sell the idle base coin back to the quote coin, in pieces when all of it would go over the
+   * price-impact cap (halved down to 1/64); then closed. A broadcast sell is settled by hash like the range swap.
+   * Dust is left: base worth under twice the sale's gas, or under 0.01% of what the bot holds.
+   */
+  private async sellToCash(v: PoolView, s: LpStep) {
+    if (s.swap) {
+      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut);
+      if (!r) return;
+      this.state.totals.gas += r.gasPls * v.price;
+      if (r.ok) this.applySwap('sell', s.swap.amountIn, r.amountOutHuman, v.price);
+      s.swap = undefined;
+      return;
+    }
+    const idle = this.state.idle;
+    // What is left is dust: under 0.01% of what the bot holds (checked first: a quote for a few wei of a coin fails
+    // with "rounds to zero"), or worth under twice the sale's gas.
+    if (!(idle.base * v.price >= (idle.base * v.price + idle.quote) * 1e-4)) return this.closed();
+    let amount = idle.base, q = await this.executor.quote('sell', amount, this.state.limits);
+    if (idle.base * v.price < 2 * q.gasPlsEstimate * v.price) return this.closed();
+    while (q.priceImpact > this.state.limits.maxPriceImpact && amount > idle.base / 64) {
+      amount /= 2;
+      q = await this.executor.quote('sell', amount, this.state.limits);
+    }
+    if (!q.balanceOk) throw new Error(`can't sell the ${this.baseSym} back: ${q.balanceNote}`);
+    if (q.priceImpact > this.state.limits.maxPriceImpact) throw new Error(`selling the ${this.baseSym} back would move the price ${(q.priceImpact * 100).toFixed(2)}% even in 1/64 pieces (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%); trying again on the next check`);
+    try {
+      const f = await this.executor.execute(q, { canSend: () => true, onSent: (_stage, hash) => this.log('info', `sent sell ${hash}`) });
+      this.state.totals.gas += f.gasPls * v.price;
+      this.applySwap('sell', f.amountInHuman, f.amountOutHuman, v.price);
+    } catch (e) {
+      const o = e instanceof ExecError ? e.opts : {};
+      if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
+      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price }; return; }
+      throw e;
+    }
+  }
+
   /** A swap to the range's mix landed; its cost is what went in less what came out, at the mid price. */
   private applySwap(side: 'buy' | 'sell', amountIn: number, amountOut: number, price: number) {
     this.state.totals.swapCost += side === 'buy' ? amountIn - amountOut * price : amountIn * price - amountOut;
@@ -810,7 +945,7 @@ export class LpEngine {
   private minted(s: LpStep, id: string, L: bigint, used: Coins, v: PoolView, pool: LpPool, paper?: LpPosition['paper']) {
     const range = s.range!;
     const { lower, upper } = pool.rangePrices(range.tickLower, range.tickUpper, v);
-    this.state.position = { id, tickLower: range.tickLower, tickUpper: range.tickUpper, liquidity: L.toString(), lower, upper, openedAt: this.now(), putIn: used, ...(paper ? { paper } : {}) };
+    this.state.position = { id, tickLower: range.tickLower, tickUpper: range.tickUpper, liquidity: L.toString(), lower, upper, openedAt: this.now(), putIn: used, feesBefore: { ...this.state.totals.feeCoins }, ...(paper ? { paper } : {}) };
     this.state.idle = { base: Math.max(0, this.state.idle.base - used.base), quote: Math.max(0, this.state.idle.quote - used.quote) };
     if (s.action === 'rerange') { this.state.lastRerangeAt = this.now(); this.state.reranges++; }
     this.state.step = null;
@@ -868,7 +1003,7 @@ export class LpEngine {
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
       status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, move: this.moveStatus(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
+      outSince: s.outSince, move: this.moveStatus(), positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }

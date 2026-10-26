@@ -26,6 +26,7 @@ export interface PresetPool { dex: string; kind: 'v2' | 'v3'; address: string; f
 import { getPreset, legKey, listPresets, resolvePreset, type ResolvedLeg } from '../../live/presets';
 import { sameAddr } from '../dex/types';
 import { costModelOf, gridEconomics, type EconCfg, type EconSummary } from './econ';
+import { capGridEntry } from '../../market/poolSize';
 import { ActivityBus } from './activity';
 import { CandleStore } from '../market/candleStore';
 import { closedOnly, fillGaps, isTF, replayCandles, sliceRange, type Candle, type TF } from '../../market/candles';
@@ -82,6 +83,8 @@ export interface MultiDeps {
   market?: (quote: string) => Promise<MarketSnapshot>;
   /** Multi-chain hub. Default: single PulseChain hub built from net/reader/signer (tests, legacy wiring). */
   hub?: Hub;
+  /** Set in a friend's copy (env.ts readCopy): the app shows whose copy it is and where the key is added */
+  copy?: { friend: string; host: string } | null;
 }
 
 export interface ChainWallet {
@@ -480,6 +483,32 @@ export class MultiBot {
     this.lpEngines.delete(id);
     this.multi.lps = this.multi.lps.filter((g) => g.id !== id);
     this.persist();
+  }
+
+  // ── For the smart trader (autopilot.ts) ─────────────────────────────
+  /** The default safety limits (price-impact cap, slippage, deadline) */
+  get limits(): SafetyLimits { return { ...this.multi.defaults }; }
+  hasBot(kind: 'grid' | 'lp', id: string): boolean {
+    return kind === 'grid' ? this.multi.grids.some((g) => g.id === id) : this.multi.lps.some((g) => g.id === id);
+  }
+  /**
+   * What a bot is worth in its spend coin, gas counted: a grid's capital + realized + unrealized (at its last price), a
+   * liquidity bot's equity (coins at today's price + fees sent − gas). null until it has a reading.
+   */
+  botValue(kind: 'grid' | 'lp', id: string): number | null {
+    if (kind === 'grid') {
+      const e = this.engine(id), c = e.state.config;
+      if (!c || e.state.lastPrice == null) return null;
+      const t = totals(e.modeTrades(), e.state.lastPrice);
+      return c.totalCapitalUsd + t.realized + t.unrealized;
+    }
+    return this.lp(id).pnl()?.equity ?? null;
+  }
+  /** The fast close finished: the bot is off the active list (paper immediately, live after the unwind). */
+  botCashedOut(kind: 'grid' | 'lp', id: string): boolean {
+    if (kind === 'grid') return this.engine(id).state.archivedAt != null;
+    const s = this.lp(id).state;
+    return s.archivedAt != null || s.status === 'closed';
   }
 
   /** KILL ALL: stop every grid and trend bot; queued jobs dropped, nothing new is sent. */
@@ -1131,12 +1160,13 @@ export class MultiBot {
   // ── Presets / economics (unchanged) ────────────────────────────────────
   listPresets() { return listPresets(); }
 
-  async economics(quote: string, cfg: EconCfg): Promise<EconSummary & { usdPerQuote: number | null; feeBps: number; chainId: number; label: string }> {
+  async economics(quote: string, cfg: EconCfg): Promise<EconSummary & { usdPerQuote: number | null; feeBps: number; chainId: number; label: string; entry: { amount: number; why: string | null } }> {
     const def = this.hub.def(quote);
     const { summary } = await gridEconomics(this.hub.quoter(quote), cfg, this.d.approval ?? 'exact');
     this.hub.setSpot(quote, summary.spot);
     try { await this.hub.nativeUsdAsync(def.chainId); } catch { /* optional */ }
-    return { ...summary, usdPerQuote: this.hub.usdPerQuote(quote), feeBps: def.pool.feeBps, chainId: def.chainId, label: this.hub.label(quote) };
+    const entry = capGridEntry({ capital: cfg.totalCapitalUsd, quoteReserve: summary.poolQuote, feeBps: def.pool.feeBps, maxImpact: 0.03, gridCount: cfg.gridCount });
+    return { ...summary, entry: { amount: entry.amount, why: entry.why }, usdPerQuote: this.hub.usdPerQuote(quote), feeBps: def.pool.feeBps, chainId: def.chainId, label: this.hub.label(quote) };
   }
 
   private legacyKeys() { return this.hub.list().filter((d) => d.legacy).map((d) => d.key); }
@@ -1354,6 +1384,7 @@ export class MultiBot {
     return {
       network: this.d.net.key, chainId: this.d.net.chainId, explorer: this.d.net.explorer,
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol),
+      copy: this.d.copy ?? null,
       hasSigner: this.hasSigner, address: this.address, walletBalances: this.walletBalances, wallets: this.walletView(), defaults: this.multi.defaults,
       txBusy: this.gate.busy, spots: this.spots, spotsAt: this.spotsAt,
       legacyChainId: this.hub.legacyChainId,

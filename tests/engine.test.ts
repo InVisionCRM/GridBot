@@ -334,3 +334,35 @@ describe('Grids saved before per-level sizes', () => {
   });
 });
 
+
+describe('GridEngine close', () => {
+  it('paper close archives immediately and does not sell; the coins stay where the fills left them', async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'paper', ...grid });
+    chain.setPrice(P0 * 0.935); // buys at 0.98, 0.96, 0.94
+    await engine.tick();
+    const bought = engine.paperBalances().pls;
+    expect(bought).toBeGreaterThan(0);
+    expect(engine.requestClose()).toBe(false);
+    const s = engine.status();
+    expect(s).toMatchObject({ status: 'stopped', closing: false });
+    expect(s.archivedAt).toBeGreaterThan(0);
+    expect(engine.paperBalances().pls).toBeCloseTo(bought, 6);
+    await engine.tick(); // archived: a later tick does not sell
+    expect(engine.paperBalances().pls).toBeCloseTo(bought, 6);
+    expect(engine.state.trades.filter((t) => t.side === 'sell')).toHaveLength(0);
+  });
+
+  it('Stop pauses without archiving; the grid keeps what it still holds', async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'paper', ...grid });
+    chain.setPrice(P0 * 0.935);
+    await engine.tick();
+    engine.stop();
+    expect(engine.state.archivedAt).toBeNull();
+    expect(engine.state.closing).toBe(false);
+    await engine.tick();
+    expect(engine.paperBalances().pls).toBeGreaterThan(0);
+    expect(engine.status().archivedAt).toBeNull();
+  });
+});

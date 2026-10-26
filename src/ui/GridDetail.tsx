@@ -219,7 +219,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="notices">
-        {g.available === false && <div className="banner error"><span className="grow">This market isn't available on the running server (its chain may be turned off in .env).</span></div>}
+        {g.available === false && <div className="banner error"><span className="grow">This market isn't available on the running server (its chain may be turned off {s.copy ? `by ${s.copy.host}` : 'in .env'}).</span></div>}
         {g.lastError && <div className="banner error"><span className="grow">{g.lastError}</span></div>}
         {g.spacingWarn && <div className="banner"><span className="grow">{g.spacingWarn}</span></div>}
         {running && rs === 'above' && <div className="banner"><span className="grow"><b>Price is above the range.</b> Every level has sold, so the grid waits in {q}. {g.recenter?.enabled ? 'Follow the price up is on, so the range moves up on its own (see below).' : 'Stop it and change the range, or turn on Follow the price up.'}</span></div>}

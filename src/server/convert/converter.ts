@@ -24,6 +24,7 @@ import type { Emit } from '../bot/activity';
 import { WRAPPED } from '../dex/abis';
 import type { FetchJson } from '../fetchJson';
 import { holdings, type Coin, type Unreadable } from './holdings';
+import { noKey } from '../words';
 
 /** A plan older than this must be made again before it runs (prices and balances move). */
 export const PLAN_TTL_MS = 10 * 60_000;
@@ -124,7 +125,7 @@ export class Converter {
   }
   private async owner(chainId: number): Promise<string> {
     const s = this.d.hub.rt(chainId).signer;
-    if (!s) throw new Error('Converting needs the wallet\'s key (PRIVATE_KEY in .env) for this chain.');
+    if (!s) throw new Error(noKey('Converting on this chain'));
     return s.getAddress();
   }
 

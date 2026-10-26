@@ -46,6 +46,8 @@ export interface SentTx { hash: string; wait(confirms?: number, timeoutMs?: numb
 export interface TxSender {
   getAddress(): Promise<string>;
   sendTransaction(tx: { to: string; data: string; value: bigint; nonce: number }): Promise<SentTx>;
+  /** Present on a wallet. Used only when a send is broadcast through a different RPC (MEV). */
+  signTransaction?(tx: { to: string; data: string; value: bigint; nonce: number }): Promise<string>;
 }
 
 export type Side = 'buy' | 'sell';
@@ -451,7 +453,11 @@ export class LiveExecutor implements Executor {
   constructor(
     readonly quoter: Quoter,
     private readonly signer: TxSender,
-    private readonly opts: { approval: 'exact' | 'max'; receiptTimeoutMs: number; sharedNonce?: SharedNonce },
+    private readonly opts: {
+      approval: 'exact' | 'max'; receiptTimeoutMs: number; sharedNonce?: SharedNonce;
+      /** Broadcast an already-signed raw tx. Quotes, slippage and the price-impact cap are unchanged. */
+      sendRaw?: (signed: string) => Promise<string>;
+    },
   ) {}
 
   async address(): Promise<string> {
@@ -539,6 +545,25 @@ export class LiveExecutor implements Executor {
       n = this.nonce;
     }
     try {
+      if (this.opts.sendRaw && this.signer.signTransaction) {
+        const raw = await this.signer.signTransaction({ ...req, nonce: n });
+        const hash = await this.opts.sendRaw(raw);
+        if (!shared) this.nonce = n + 1;
+        const reader = this.quoter.reader;
+        const timeout = this.opts.receiptTimeoutMs;
+        return {
+          hash,
+          wait: async () => {
+            const deadline = Date.now() + timeout;
+            while (Date.now() < deadline) {
+              const r = await reader.getTransactionReceipt(hash);
+              if (r) return r;
+              await new Promise((res) => setTimeout(res, 500));
+            }
+            return null;
+          },
+        };
+      }
       const tx = await this.signer.sendTransaction({ ...req, nonce: n });
       if (!shared) this.nonce = n + 1;
       return tx;

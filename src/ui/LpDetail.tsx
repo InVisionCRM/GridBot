@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
-import { ago, cls, num, pct, px, qty } from './fmt';
+import { ago, cls, dur, num, pct, px, qty, usd } from './fmt';
 import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -95,6 +95,47 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
   );
 }
 
+/** A coin's price in dollars: the base from the pool price, the quote from its own (null when it has none). */
+function usdPrices(b: AnyObj, k: number | null): { base: number | null; quote: number | null } {
+  return { base: k != null && b.price != null ? b.price * k : null, quote: k };
+}
+
+/**
+ * What the open position earns at its own pace: its fees since it opened (collected + waiting), per hour, carried to a
+ * day, a week and a month. Only this position's history; the time it spent out of range is in the pace.
+ */
+function PositionPace({ b, k }: { b: AnyObj; k: number | null }) {
+  const pf = b.positionFees, base = b.base, q = b.quote;
+  if (!b.position || !pf) return null;
+  const ms = Date.now() - pf.since, hours = ms / 3_600_000;
+  const valQuote = pf.coins.base * (b.price ?? 0) + pf.coins.quote;
+  const per = (h: number) => ({ base: (pf.coins.base / hours) * h, quote: (pf.coins.quote / hours) * h, value: (valQuote / hours) * h });
+  const rows = [['A day', 24], ['A week', 168], ['A month', 720]] as const;
+  const $ = (x: number) => (k != null ? usd(x * k) : qty(x, q, 4, false));
+  return (
+    <div className="card pace">
+      <div className="card-head">
+        <h3><L tip={`Fees this position has earned since it opened (collected plus waiting), carried forward at the same pace. It counts only this position: a range move starts a new one. Time the price spent outside the range is in the pace, so a pace from a calm stretch can run high. Valued at today's ${base} price.`}>This position's pace</L></h3>
+        <span className="muted small">open {dur(ms)}</span>
+      </div>
+      <p className="small">So far: <b>{px(pf.coins.base, 4)} {base}</b> + <b>{px(pf.coins.quote, 4)} {q}</b> ≈ <b className="pos">{$(valQuote)}</b></p>
+      {hours < 1
+        ? <p className="small muted">Measuring: the pace shows once the position has been open an hour.</p>
+        : <div className="pace-rows">{rows.map(([label, h]) => {
+          const x = per(h);
+          return (
+            <div key={label} className="pace-row">
+              <span className="k">{label}</span>
+              <b className="pos">≈ {$(x.value)}</b>
+              <span className="small muted">{px(x.base, 4)} {base} + {px(x.quote, 4)} {q}</span>
+            </div>
+          );
+        })}</div>}
+      <p className="muted small">If it keeps earning as it has since it opened{b.inRange === false ? '. It is out of range now, so it earns nothing until the price is back inside or the range moves' : ''}.</p>
+    </div>
+  );
+}
+
 export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const b: AnyObj | undefined = (s.lps ?? []).find((x: AnyObj) => x.id === id);
   const [, tick] = useState(0);
@@ -102,6 +143,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   if (!b) return null;
 
   const q = b.quote, base = b.base, k: number | null = b.usdPerQuote ?? null;
+  const prices = usdPrices(b, k);
   const pnl: AnyObj | null = b.pnl;
   const pos = b.position, step = b.step;
   const running = b.status === 'running', closed = b.status === 'closed';
@@ -125,6 +167,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
         <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
         <span className={`st ${closing ? 'closing' : b.status}`}>{closing ? 'Closing…' : closed ? 'Closed' : running ? 'Running' : 'Paused'}{step && !closing ? ` · ${ACTION[step.action].toLowerCase()}` : ''}</span>
+        {prices.base != null && <span className="pill mono" title={`Today's prices in dollars${prices.quote != null ? ` (${q} at ${usd(prices.quote)})` : ''}`}>{base} {usd(prices.base)}{prices.quote != null && Math.abs(prices.quote - 1) > 0.02 ? ` · ${q} ${usd(prices.quote)}` : ''}</span>}
         <span className="grow" />
         {running && <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST'))}>Pause</button>}
         {b.status === 'stopped' && <button type="button" className="btn primary" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
@@ -166,6 +209,8 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <span className="sub">{b.poolShare != null ? <>{pct(b.poolShare, b.poolShare < 0.001 ? 4 : 2)} of the pool's active liquidity</> : 'once the position is open'}<Usd v={b.coins && b.price != null ? b.coins.base * b.price + b.coins.quote : null} k={k} sign={false} /></span>
         </div>
       </div>
+
+      <PositionPace b={b} k={k} />
 
       <div className="split wide-left">
         <div className="card">

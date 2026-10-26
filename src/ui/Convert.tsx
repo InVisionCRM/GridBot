@@ -86,7 +86,7 @@ export function Convert({ s }: { s: AnyObj }) {
           <input value={impact} inputMode="decimal" disabled={running || checking} onChange={(e) => { setImpact(e.target.value.replace(/[^\d.]/g, '')); setPlan(null); }} /></label>
         <button type="button" className="btn primary" disabled={running || checking || !target || !chain?.hasSigner} onClick={check}>{checking ? 'Checking…' : 'Check my coins'}</button>
       </div>
-      {chain && !chain.hasSigner && <p className="small neg">This chain has no signing key set in .env, so there is nothing to convert from.</p>}
+      {chain && !chain.hasSigner && <p className="small neg">{s.copy ? 'No key added yet (add it under Account)' : 'This chain has no signing key set in .env'}, so there is nothing to convert from.</p>}
       {checking && <p className="muted small">Reading balances and running the safety check on coins the app doesn't know yet. On PulseChain this takes up to a minute.</p>}
       {err && <div className="banner error"><span className="grow">{err}</span></div>}
 
