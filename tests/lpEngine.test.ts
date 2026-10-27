@@ -24,7 +24,7 @@ const WPLS: Tok = { address: NET.pulsex.wpls, symbol: 'WPLS', decimals: 18 };
 const DAI: Tok = { address: NET.quotes.find((q) => q.symbol === 'DAI')!.address, symbol: 'DAI', decimals: 18 };
 const PRICE = 0.00003; // DAI per PLS
 
-function world() {
+function world(opt?: { emit?: (e: { msg: string }) => void; candles?: (market: string, tf: '1h') => { o: number; h: number; l: number; c: number }[] }) {
   const m = new MultiDexMock();
   [WPLS, DAI].forEach((t) => m.addToken(t));
   m.addV3('9mm-v3', { factory: dex('9mm-v3').factory, quoter: dex('9mm-v3').quoter! });
@@ -38,7 +38,7 @@ function world() {
   const hub = new Hub({ runtimes: [new ChainRuntime(CH, m, null)], markets: [...legacyMarkets(NET), def], legacyNet: NET });
   let t = 1_800_000_000_000;
   const store = new MemoryStore<LpState>();
-  const lp = new LpEngine({ net: NET, store, log: new Logger(true), hub, now: () => t });
+  const lp = new LpEngine({ net: NET, store, log: new Logger(true), hub, now: () => t, emit: opt?.emit, candles: opt?.candles });
   return { m, pool, def, hub, lp, store, at: (ms: number) => { t = 1_800_000_000_000 + ms; } };
 }
 const value = (lp: LpEngine) => lp.status().value!;
@@ -140,7 +140,6 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
   });
 
   // Out of range with Auto-move on: the range moves to the price at the next fresh reading.
-  const H = 3600_000;
   const STEP = Q128 / 10n ** 8n; // one burst of trading in the pool: fee growth per unit of liquidity on each token
   /** Trade in the pool and tick until the bot moves its range (or `max` ticks). */
   async function tradeUntilMoved(lp: LpEngine, m: MultiDexMock, pool: string, max = 20) {
@@ -741,5 +740,141 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       expect(row.realized).toBeCloseTo(p.net, 9);
       expect(row.unrealized).toBeCloseTo(p.price, 9);
     } finally { await a.close(); }
+  });
+});
+
+describe('LP range gates and compounding (off unless set)', () => {
+  const open = async (opt?: Parameters<typeof world>[0], start?: Partial<Parameters<LpEngine['start']>[0]>) => {
+    const w = world(opt);
+    await w.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: true, ...start });
+    await w.lp.tick();
+    return w;
+  };
+
+  it('a start without the new fields saves the old config shape and still moves on the first reading outside', async () => {
+    const { lp, m, pool } = await open();
+    expect(Object.keys(lp.state.config!).sort()).toEqual(['bandPct', 'baseAmount', 'capital', 'rerange']);
+    const saved = JSON.parse(JSON.stringify(lp.state)) as LpState;
+    expect(saved.config).not.toHaveProperty('range');
+    expect(saved.config).not.toHaveProperty('compound');
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 1, inRange: true });
+  });
+
+  it('dwells outside for the configured minutes, then moves', async () => {
+    const { lp, m, pool, at } = await open(undefined, { range: { dwellMin: 30 } });
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 0, inRange: false, hold: { wait: 'dwell' } });
+    at(29 * 60_000);
+    await lp.tick();
+    expect(lp.status().reranges).toBe(0);
+    at(30 * 60_000);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 1, inRange: true });
+  });
+
+  it('a price buffer holds a poke just past the edge', async () => {
+    const { lp, m, pool } = await open(undefined, { range: { bufferPct: 0.05 } });
+    m.movePrice(pool, 1.12); // about 12% up, only ~2% past a ±10% edge
+    await lp.tick();
+    expect(lp.status().inRange).toBe(false);
+    expect(lp.status().reranges).toBe(0);
+    expect(lp.status().hold?.wait).toBe('buffer');
+    m.movePrice(pool, 1.2 / 1.12); // ~20% from the start, past the 5% buffer
+    await lp.tick();
+    expect(lp.status().reranges).toBe(1);
+  });
+
+  it('the cost check waits until there is a fee pace, then moves when fees cover the gas', async () => {
+    const { lp, m, pool, at } = await open(undefined, { range: { costCheck: true, feeHorizonH: 24 } });
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n);
+    await lp.tick();
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status().reranges).toBe(0);
+    expect(lp.status().hold?.wait).toBe('cost');
+    at(60 * 60_000);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 1, inRange: true });
+  });
+
+  it('warns once as the price nears the edge, and not again until it comes back', async () => {
+    const msgs: string[] = [];
+    const { lp, m, pool } = await open({ emit: (e) => msgs.push(e.msg) }, { range: { nearEdgeFrac: 0.25 } });
+    m.movePrice(pool, 1.08);
+    await lp.tick();
+    expect(lp.status().inRange).toBe(true);
+    expect(lp.status().hold?.near).toBe(true);
+    expect(msgs.filter((x) => /near the edge/.test(x))).toHaveLength(1);
+    await lp.tick();
+    expect(msgs.filter((x) => /near the edge/.test(x))).toHaveLength(1);
+    m.movePrice(pool, 1 / 1.08);
+    await lp.tick();
+    expect(lp.status().hold?.near).toBe(false);
+  });
+
+  it('an ATR multiple widens the open beyond the configured band', async () => {
+    const px = PRICE;
+    const candles = Array.from({ length: 30 }, () => ({ o: px, h: px * 1.02, l: px * 0.98, c: px }));
+    const { lp } = await open({ candles: () => candles }, { bandPct: 0.01, range: { atrMult: 2, atrPeriod: 14 } });
+    const pos = lp.status().position!;
+    expect(pos.upper / pos.lower).toBeGreaterThan(1.1); // ±1% would be ~1.02; 2× a 4% ATR is about ±8%
+    expect(lp.state.config!.bandPct).toBe(0.01); // the setting is unchanged
+  });
+
+  it('cooldown 0 moves again on the next reading outside, right after a move', async () => {
+    const { lp, m, pool } = await open();
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status().reranges).toBe(1);
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 2, inRange: true });
+  });
+
+  it('a cooldown holds the next move, and a preset only changes the saved width', async () => {
+    const { lp, m, pool, at } = await open(undefined, { range: { cooldownMin: 60 } });
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status().reranges).toBe(1);
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 1, inRange: false, hold: { wait: 'cooldown' } });
+    at(59 * 60_000);
+    await lp.tick();
+    expect(lp.status().reranges).toBe(1);
+    at(60 * 60_000);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 2, inRange: true });
+
+    const quiet = await open();
+    const before = quiet.lp.status().position;
+    quiet.lp.setPolicy({ bandPct: 0.02, range: { dwellMin: 12 * 60, cooldownMin: 24 * 60 } });
+    expect(quiet.lp.state.config).toMatchObject({ bandPct: 0.02, range: { dwellMin: 720, cooldownMin: 1440 } });
+    expect(quiet.lp.status().reranges).toBe(0);
+    expect(quiet.lp.status().position).toEqual(before);
+  });
+
+  it('compounds fees into the position once they clear the gas multiple, and not before', async () => {
+    const { lp, m, pool } = await open(undefined, { compound: { enabled: true, gasMultiple: 1_000_000 }, rerange: false });
+    const L0 = lp.status().position!.liquidity;
+    // Small enough that 1_000_000 × the mock's gas still exceeds it, and large enough to add liquidity later.
+    m.addFees(pool, Q128 / 10n ** 9n, Q128 / 10n ** 9n);
+    await lp.tick();
+    const mid = lp.status();
+    const worth = mid.owed!.base * mid.price! + mid.owed!.quote;
+    expect(mid.hold?.compoundNeed).toBeGreaterThan(worth);
+    expect(mid.position!.liquidity).toBe(L0);
+    expect(mid.reranges).toBe(0);
+    const one = (mid.hold!.compoundNeed as number) / 1_000_000;
+    lp.setPolicy({ compound: { enabled: true, gasMultiple: Math.max(1, worth / one / 2) } });
+    await lp.tick();
+    const done = lp.status();
+    expect(done.owed!.base + done.owed!.quote).toBeCloseTo(0, 12);
+    expect(BigInt(done.position!.liquidity) > BigInt(L0)).toBe(true);
+    expect(done.reranges).toBe(0);
+    expect(done.pnl!.fees).toBeGreaterThan(0);
   });
 });

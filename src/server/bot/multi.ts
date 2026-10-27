@@ -15,6 +15,7 @@ import { FEE_BPS } from '../../live/economics';
 import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
 import { LpEngine, freshLp, upgradeLp, type LpStartParams, type LpState } from './lpEngine';
+import type { LpCompoundPolicy, LpRangePolicy } from '../../market/lpPolicy';
 import { TaxWatch } from './taxWatch';
 import type { Logger } from './logger';
 import type { Store } from './store';
@@ -296,6 +297,7 @@ export class MultiBot {
     eng = new LpEngine({
       net: this.d.net, store: new SliceStore(() => this.multi.lps, () => this.persist(), id), log: this.d.log, hub: this.hub,
       emit: (e) => this.activity.emitEvent(e), approval: this.d.approval, receiptTimeoutMs: this.d.receiptTimeoutMs, now: this.d.now, id,
+      candles: (market) => this.candles.get(market, '1h'),
     });
     this.lpEngines.set(id, eng);
     return eng;
@@ -476,6 +478,8 @@ export class MultiBot {
     return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
   }
   setLpRerange(id: string, enabled: boolean) { this.lp(id).setRerange(enabled); }
+  setLpPolicy(id: string, p: { range?: Partial<LpRangePolicy>; compound?: Partial<LpCompoundPolicy>; bandPct?: number }) { this.lp(id).setPolicy(p); }
+  compoundLp(id: string) { return this.lp(id).compoundNow(); }
   /** Move a liquidity bot's range to the price now, at a new width or the same one; it starts on the next tick. */
   moveLp(id: string, bandPct?: number) { return this.lp(id).move(bandPct); }
   setLpProfits(id: string, p: ProfitMode) { return this.lp(id).setProfits(p); }

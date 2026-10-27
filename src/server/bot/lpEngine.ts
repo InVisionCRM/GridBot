@@ -7,6 +7,9 @@
  *  re-range as soon as the price is outside the range (either way, with moving on; see watchRange), or when asked
  *           (move: now, or to a new width): exit (remove all, collect, burn) → swap back to the range's mix → open around
  *           the price. Reinvested fees roll in here.
+ *           Optional per-bot gates (config.range, config.compound — absent means off, which is this behaviour):
+ *           dwell, a price buffer, an ATR width, a near-edge warning, a move-vs-wait cost check, and compounding
+ *           fees back into the position once they cover N × the collect gas. See market/lpPolicy.ts.
  *  send     (profits mode "send") collect the fees straight to the payout address once they're worth
  *           PAYOUT_MIN_GAS_MULTIPLE × the collect's gas
  *  close    exit; the coins go back to the wallet
@@ -20,7 +23,12 @@ import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { feesOwed } from '../../live/v3Liquidity';
-import { gasInBase, LP_BAND, LP_GAS, LP_MIN_SWAP_SHARE } from '../../market/lp';
+import { gasInBase, LP_BAND, LP_GAS, LP_INCREASE_GAS, LP_MIN_SWAP_SHARE } from '../../market/lp';
+import {
+  checkCompoundPolicy, checkRangePolicy, compoundPolicy, decideCompound, decideRangeMove, effectiveBand, feePace, rangePolicy,
+  type LpCompoundPolicy, type LpRangePolicy, type RangeWait,
+} from '../../market/lpPolicy';
+import { atr } from '../../market/indicators';
 import { DEFAULT_MAX_POOL_SHARE } from '../../market/poolSize';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
@@ -30,7 +38,7 @@ import { Hub } from '../chains/hub';
 import { ERC20, V3_NPM } from '../dex/abis';
 import { readCall, sameAddr } from '../dex/types';
 import { LpPool, type Coins, type PoolView } from '../lp/lpPool';
-import { collectAllData, collectData, exitData, mintTx } from '../lp/npmCalls';
+import { collectAllData, collectData, exitData, increaseTx, mintTx } from '../lp/npmCalls';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type ReceiptLike, type TxSender } from './chain';
 import { checkProfitMode, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
@@ -59,13 +67,17 @@ export interface LpPosition {
   paper?: { g0: string; g1: string; inRange: boolean; owed0: string; owed1: string };
 }
 
-export type LpAction = 'open' | 'rerange' | 'close' | 'send';
-export type LpStage = 'exit' | 'swap' | 'approve' | 'mint' | 'collect';
+export type LpAction = 'open' | 'rerange' | 'close' | 'send' | 'compound';
+export type LpStage = 'exit' | 'swap' | 'approve' | 'mint' | 'collect' | 'increase';
 export interface LpStep {
   action: LpAction;
   stage: LpStage;
   /** Range chosen for the position being opened (fixed when the swap stage starts) */
   range?: { tickLower: number; tickUpper: number };
+  /** Half-width (fraction) fixed when an auto-move or a manual move was requested. */
+  rangeBand?: number;
+  /** Fees just collected, to be added back by a compound. */
+  taken?: Coins;
   /** Tx sent for this stage and not settled yet: never resent while set */
   hash?: string;
   sentAt?: number;
@@ -86,8 +98,15 @@ export interface LpState {
   /** Market key */
   market: string;
   status: 'idle' | 'running' | 'stopped' | 'closed';
-  /** ± range around the price at each (re-)open; capital in the spend coin, plus base coins from the wallet (may be 0) */
-  config: { bandPct: number; capital: number; baseAmount: number; rerange: boolean } | null;
+  /**
+   * ± range around the price at each (re-)open; capital in the spend coin, plus base coins from the wallet (may be 0).
+   * `range` and `compound` are optional and absent on bots saved before they existed: missing means every new gate
+   * is off (today's decisions).
+   */
+  config: {
+    bandPct: number; capital: number; baseAmount: number; rerange: boolean;
+    range?: LpRangePolicy; compound?: LpCompoundPolicy;
+  } | null;
   limits: SafetyLimits;
   profits: ProfitMode;
   position: LpPosition | null;
@@ -133,6 +152,10 @@ export interface LpStartParams {
   /** Base coins already in the wallet to put in too (only the difference to the range's mix is swapped) */
   baseAmount?: number;
   rerange?: boolean;
+  /** Omit to keep today's auto-move. Checked; invalid values throw. */
+  range?: Partial<LpRangePolicy>;
+  /** Omit to leave fees in the position until a move or a close. */
+  compound?: Partial<LpCompoundPolicy>;
   profits?: ProfitMode;
   limits?: Partial<SafetyLimits>;
 }
@@ -147,6 +170,20 @@ export interface LpDeps {
   receiptTimeoutMs?: number;
   now?: () => number;
   id?: string;
+  /** Hourly candles for an ATR width. Unused when the ATR multiple is 0 (the default). */
+  candles?: (market: string, tf: '1h') => { o: number; h: number; l: number; c: number }[];
+}
+
+/** What the last check decided, for the bot's page. Absent until the first check with a position. */
+export interface LpHold {
+  wait: RangeWait | 'blocked' | null;
+  toEdge: number | null;
+  near: boolean;
+  /** Quote of fees required before an automatic compound. null when compounding is off. */
+  compoundNeed: number | null;
+  feesWaiting: number | null;
+  /** ATR half-width, when it is wider than the configured band. */
+  suggestedBand: number | null;
 }
 
 /** A tx stage that keeps reverting stops the bot after this many tries. */
@@ -231,6 +268,10 @@ export class LpEngine {
   private noted = new Set<string>();
   private ticking = false;
   private readonly now: () => number;
+  /** Near-edge warning already sent for the current approach. */
+  private nearLatched = false;
+  /** Last range decision, for the page. Not saved. */
+  hold: LpHold | null = null;
 
   constructor(private readonly d: LpDeps) {
     this.now = d.now ?? Date.now;
@@ -256,7 +297,7 @@ export class LpEngine {
   get signer(): TxSender | null { const m = this.def; return m ? this.hub.rt(m.chainId).signer : null; }
   private get gate() { const m = this.def; return m ? this.hub.rt(m.chainId).gate : undefined; }
   private log(level: 'info' | 'warn' | 'error', msg: string) { this.d.log[level](`[${this.state.id}] ${msg}`); }
-  private ev(type: 'started' | 'stopped' | 'filled' | 'range' | 'error' | 'info' | 'sent', msg: string, extra: { level?: 'info' | 'success' | 'warn' | 'error'; notify?: boolean; data?: Record<string, unknown> } = {}) {
+  private ev(type: 'started' | 'stopped' | 'filled' | 'range' | 'error' | 'info' | 'sent' | 'alert', msg: string, extra: { level?: 'info' | 'success' | 'warn' | 'error'; notify?: boolean; data?: Record<string, unknown> } = {}) {
     this.d.emit?.({ type, msg, botId: this.state.id, kind: 'lp', pair: this.state.market, chainId: this.chainId, ...extra });
   }
   private save() { this.d.store.save(this.state); }
@@ -302,8 +343,13 @@ export class LpEngine {
     const v = await this.lp().view(); // fails fast on a pool that can't hold a position
     if (p.mode === 'live' && this.def?.safety && !(await this.hub.recheck(p.market)).liveAllowed) throw new Error(`LIVE blocked — ${this.label} failed the safety check`);
     if (profits.mode === 'send' && this.signer && sameAddr(await this.signer.getAddress(), profits.to)) throw new Error('That is the bot\'s own wallet: fees already stay there when reinvested.');
+    const range = p.range ? checkRangePolicy(p.range) : undefined;
+    const compound = p.compound ? checkCompoundPolicy(p.compound) : undefined;
     this.state = {
-      ...this.state, status: 'running', config: { bandPct: p.bandPct, capital: p.capital, baseAmount, rerange: p.rerange ?? true },
+      ...this.state, status: 'running', config: {
+        bandPct: p.bandPct, capital: p.capital, baseAmount, rerange: p.rerange ?? true,
+        ...(range ? { range } : {}), ...(compound ? { compound } : {}),
+      },
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },
       step: { action: 'open', stage: 'swap', tries: 0 }, outSince: null, lastRerangeAt: null, reranges: 0, seen: null,
       totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: this.now(), startPrice: v.price, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital + baseAmount * v.price]],
@@ -424,6 +470,36 @@ export class LpEngine {
     this.state.config.rerange = enabled;
     this.save();
   }
+  /** Replace the optional gates. Omitted side is left as saved. Absent fields inside a side use the defaults. */
+  setPolicy(next: { range?: Partial<LpRangePolicy>; compound?: Partial<LpCompoundPolicy>; bandPct?: number }) {
+    const c = this.state.config;
+    if (!c) throw new Error('Start it first.');
+    if (next.bandPct != null) {
+      if (!(next.bandPct >= LP_BAND.min && next.bandPct <= LP_BAND.max)) throw new Error(`Range must be ±${LP_BAND.min * 100}% to ±${LP_BAND.max * 100}%.`);
+      c.bandPct = next.bandPct;
+    }
+    if (next.range) c.range = checkRangePolicy({ ...c.range, ...next.range });
+    if (next.compound) c.compound = checkCompoundPolicy({ ...c.compound, ...next.compound });
+    this.save();
+  }
+  /**
+   * Collect waiting fees and add them back into this range, now. Ignores the gas multiple.
+   * Refused while a step runs, while paused, while fees are set to be sent out, and when nothing is waiting.
+   */
+  async compoundNow() {
+    const c = this.state.config;
+    if (!c || !this.state.position) throw new Error('No position is open.');
+    if (this.state.status !== 'running') throw new Error('Resume it first.');
+    if (this.state.step) throw new Error(`It is busy ${this.state.step.action === 'rerange' ? 'moving the range' : this.state.step.action === 'compound' ? 'compounding fees' : this.state.step.action === 'send' ? 'sending fees' : 'closing'}. Try again in a minute.`);
+    if (this.state.profits.mode !== 'reinvest') throw new Error('Fees are set to be sent out, so they are not added back into the position.');
+    const pool = this.lp(), v = await pool.view();
+    const owed = await this.owed(pool, this.state.position);
+    const fees = pool.coinsFromRaw(owed.raw0, owed.raw1, v);
+    if (!(fees.base * v.price + fees.quote > 0)) throw new Error('No fees are waiting.');
+    this.state.step = { action: 'compound', stage: 'collect', tries: 0 };
+    this.save();
+    this.ev('info', `Liquidity ${this.label}: compounding the waiting fees back into the position (asked)`, { level: 'info' });
+  }
   /**
    * Move the range to the price now, at `bandPct` (a new width) or the same width. Refused while a step runs, while
    * paused, and when the swap to the new range's mix would go over the price-impact cap (it would stop halfway).
@@ -432,7 +508,7 @@ export class LpEngine {
     const c = this.state.config;
     if (!c || !this.state.position) throw new Error('No position is open.');
     if (this.state.status !== 'running') throw new Error('Resume it first.');
-    if (this.state.step) throw new Error(`It is busy ${this.state.step.action === 'rerange' ? 'moving the range' : this.state.step.action === 'send' ? 'sending fees' : 'closing'}. Try again in a minute.`);
+    if (this.state.step) throw new Error(`It is busy ${this.state.step.action === 'rerange' ? 'moving the range' : this.state.step.action === 'compound' ? 'compounding fees' : this.state.step.action === 'send' ? 'sending fees' : 'closing'}. Try again in a minute.`);
     const band = bandPct ?? c.bandPct;
     if (!(band >= LP_BAND.min && band <= LP_BAND.max)) throw new Error(`Range must be ±${LP_BAND.min * 100}% to ±${LP_BAND.max * 100}%.`);
     const pool = this.lp(), v = await pool.view();
@@ -441,7 +517,7 @@ export class LpEngine {
     if (block) throw new Error(`Not moved: ${block}.`);
     const was = c.bandPct;
     c.bandPct = band;
-    this.state.step = { action: 'rerange', stage: 'exit', tries: 0 };
+    this.state.step = { action: 'rerange', stage: 'exit', tries: 0, rangeBand: band };
     this.save();
     this.ev('range', `Liquidity ${this.label}: ${band === was ? 'moving the range to the price' : `changing the range from ±${+(was * 100).toFixed(2)}% to ±${+(band * 100).toFixed(2)}%`} around ${v.price.toPrecision(6)} (asked)`, { level: 'info', notify: true });
   }
@@ -478,7 +554,8 @@ export class LpEngine {
       } else if (this.state.status === 'running' && this.state.position && !this.state.closing) {
         await this.watchRange(pool, v);
         if (!this.state.step && this.state.profits.mode === 'send') await this.maybeSend(pool, v);
-        if (this.state.step) await this.advance(pool, v); // a re-range or send that just became due starts now
+        if (!this.state.step) await this.maybeCompound(pool, v);
+        if (this.state.step) await this.advance(pool, v); // a re-range, compound or send that just became due starts now
       }
       if (this.state.closing && this.state.position && !this.state.step) {
         this.state.step = { action: 'close', stage: 'exit', tries: 0 };
@@ -500,15 +577,87 @@ export class LpEngine {
     }
   }
 
-  /** Out of range with moving on: move to the price now, unless the swap to the new range's mix would go over the price-impact cap. */
+  /**
+   * Out of range with moving on: move to the price now, unless the swap to the new range's mix would go over the
+   * price-impact cap. Optional gates (dwell, cooldown, buffer, cost check) are off when config.range is absent,
+   * and then this is the same decision as before: the first out-of-range reading moves, with no wait after a move.
+   */
   private async watchRange(pool: LpPool, v: PoolView) {
     const p = this.state.position!, c = this.state.config!;
-    const out = v.tick < p.tickLower || v.tick >= p.tickUpper;
-    if (!out) { this.state.outSince = null; return; }
-    this.state.outSince ??= this.now();
-    if (!c.rerange || await this.moveBlock(pool, v, c.bandPct)) return;
-    this.state.step = { action: 'rerange', stage: 'exit', tries: 0 };
+    const policy = rangePolicy(c.range);
+    const tickOut = v.tick < p.tickLower || v.tick >= p.tickUpper;
+    const base = {
+      tickOut, price: v.price, lower: p.lower, upper: p.upper, outSince: this.state.outSince,
+      lastMoveAt: this.state.lastRerangeAt, now: this.now(), rerange: c.rerange, policy,
+    };
+    let d = decideRangeMove(base);
+    if (d.wait === 'need-cost') {
+      const band = this.bandFor(v, policy);
+      d = decideRangeMove({ ...base, moveCost: await this.estimateMoveCost(pool, v, band), feePerHour: this.feePerHour(v) });
+    }
+    this.state.outSince = d.outSince;
+    this.noteNear(d.nearEdge, v.price, p.lower, p.upper, d.toEdge);
+    const suggested = policy.atrMult > 0 ? this.bandFor(v, policy) : null;
+    this.hold = {
+      wait: d.wait, toEdge: d.toEdge, near: d.nearEdge, compoundNeed: null, feesWaiting: null,
+      suggestedBand: suggested != null && suggested > c.bandPct + 1e-9 ? suggested : null,
+    };
+    if (!d.move) return;
+    const band = this.bandFor(v, policy);
+    if (await this.moveBlock(pool, v, band)) { this.hold = { ...this.hold, wait: 'blocked' }; return; }
+    this.state.step = { action: 'rerange', stage: 'exit', tries: 0, rangeBand: band };
     this.ev('range', `Liquidity ${this.label}: price ${v.price.toPrecision(6)} is outside ${p.lower.toPrecision(6)}–${p.upper.toPrecision(6)}; moving the range to the price`, { level: 'info', notify: true });
+  }
+
+  /** Half-width for the next open. ATR multiple 0 returns the configured band unchanged. */
+  private bandFor(v: PoolView, policy = rangePolicy(this.state.config?.range)): number {
+    const c = this.state.config!;
+    if (!(policy.atrMult > 0)) return c.bandPct;
+    const rows = this.d.candles?.(this.state.market, '1h') ?? [];
+    if (rows.length < policy.atrPeriod) {
+      this.noteOnce(`ATR needs ${policy.atrPeriod} hourly candles; using ±${(c.bandPct * 100).toFixed(2)}% until then`);
+      return c.bandPct;
+    }
+    const series = atr(rows.map((x) => ({ o: x.o, h: x.h, l: x.l, c: x.c })), policy.atrPeriod);
+    let last: number | null = null;
+    for (let i = series.length - 1; i >= 0; i--) if (series[i] != null) { last = series[i]; break; }
+    return effectiveBand(c.bandPct, last, v.price, policy.atrMult);
+  }
+
+  private feePerHour(v: PoolView): number | null {
+    const pf = this.positionFees();
+    if (!pf) return null;
+    return feePace(pf.coins.base * v.price + pf.coins.quote, this.now() - pf.since);
+  }
+
+  /** Gas to exit and re-open, plus the swap back to the mix (pool fee + half the quoted impact). null if the quote fails. */
+  private async estimateMoveCost(pool: LpPool, v: PoolView, bandPct: number): Promise<number | null> {
+    try {
+      const snap = await this.hub.quoter(this.state.market).market();
+      const gas = this.gasQuote(LP_GAS.v3.close + LP_GAS.v3.open, v, snap);
+      const pos = this.state.position!;
+      const range = pool.ticksFor(v.price * (1 - bandPct), v.price * (1 + bandPct), v);
+      const coins = pool.coinsFor(Number(pos.liquidity), pos.tickLower, pos.tickUpper, v);
+      const idle = this.state.idle, owed = this.view?.owed ?? { base: 0, quote: 0 };
+      const haveBase = (coins.base + idle.base + owed.base) * v.price;
+      const value = haveBase + coins.quote + idle.quote + owed.quote;
+      const wantBase = pool.baseShare(range.tickLower, range.tickUpper, v) * value;
+      const gap = Math.abs(wantBase - haveBase);
+      if (!(value > 0) || gap <= value * LP_MIN_SWAP_SHARE) return gas;
+      const side: 'buy' | 'sell' = wantBase > haveBase ? 'buy' : 'sell';
+      const q = await this.executor.quote(side, side === 'buy' ? gap : gap / v.price, this.state.limits);
+      return gas + gap * (pool.fee / 1e6 + q.priceImpact / 2);
+    } catch {
+      return null;
+    }
+  }
+
+  private noteNear(near: boolean, price: number, lower: number, upper: number, toEdge: number | null) {
+    if (!near) { this.nearLatched = false; return; }
+    if (this.nearLatched) return;
+    this.nearLatched = true;
+    const pct = toEdge == null ? '' : ` (${Math.round((1 - toEdge) * 100)}% of the way from the centre)`;
+    this.ev('range', `Liquidity ${this.label}: price ${price.toPrecision(6)} is near the edge of ${lower.toPrecision(6)}–${upper.toPrecision(6)}${pct}. The range stays put.`, { level: 'warn', notify: true });
   }
 
   /**
@@ -657,8 +806,10 @@ export class LpEngine {
     const s = this.state.step!;
     if (s.stage === 'exit') return this.exit(pool, v, s);
     if (s.stage === 'swap') return s.action === 'close' ? this.sellToCash(v, s) : this.swap(pool, v, s);
-    if (s.stage === 'approve') return this.approve(pool, s);
+    if (s.stage === 'approve') return this.approve(pool, s, s.action === 'compound' ? 'increase' : 'mint');
     if (s.stage === 'mint') return this.mint(pool, v, s);
+    if (s.stage === 'increase') return this.increase(pool, v, s);
+    if (s.action === 'compound') return this.compoundCollect(pool, v, s);
     return this.collect(pool, v, s);
   }
 
@@ -805,7 +956,6 @@ export class LpEngine {
 
   /** Swap the idle coins to the range's mix at today's price. */
   private async swap(pool: LpPool, v: PoolView, s: LpStep) {
-    const c = this.state.config!;
     if (s.swap) {
       const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut);
       if (!r) return;
@@ -815,7 +965,10 @@ export class LpEngine {
       s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
       return;
     }
-    s.range ??= pool.ticksFor(v.price * (1 - c.bandPct), v.price * (1 + c.bandPct), v);
+    if (!s.range) {
+      const band = s.rangeBand ?? this.bandFor(v);
+      s.range = pool.ticksFor(v.price * (1 - band), v.price * (1 + band), v);
+    }
     this.parkOversize(pool, v, s.range.tickLower, s.range.tickUpper);
     const share = pool.baseShare(s.range.tickLower, s.range.tickUpper, v);
     const idle = this.state.idle, value = idle.base * v.price + idle.quote;
@@ -908,7 +1061,7 @@ export class LpEngine {
   }
 
   /** Live: let the position manager pull each ERC-20 side (the native side is paid with the tx value). */
-  private async approve(pool: LpPool, s: LpStep) {
+  private async approve(pool: LpPool, s: LpStep, next: LpStage = 'mint') {
     if (s.hash) {
       const r = await this.settled(s, this.view?.v ?? (await pool.view()));
       if (!r) return;
@@ -922,7 +1075,7 @@ export class LpEngine {
       const amount = this.d.approval === 'max' ? MaxUint256 : need;
       return this.send(s, { to: t.address, data: ERC20.encodeFunctionData('approve', [pool.npm, amount]), value: 0n });
     }
-    s.stage = 'mint';
+    s.stage = next;
   }
 
   /** Open the position with the idle coins (what the range can take; the rest stays idle). */
@@ -975,6 +1128,27 @@ export class LpEngine {
     this.ev('filled', `Liquidity ${this.label}: ${s.action === 'rerange' ? 're-opened' : 'opened'} ${lower.toPrecision(6)}–${upper.toPrecision(6)} with ${used.base.toPrecision(6)} ${this.baseSym} + ${used.quote.toPrecision(6)} ${this.quoteSym}`, { level: 'success', notify: true, data: { id } });
   }
 
+  /**
+   * Reinvest mode, and only when compounding is enabled: once waiting fees are worth gasMultiple × the
+   * collect-and-add gas, collect them and add them back into the same range. Disabled (the default) returns
+   * before any quote, so a tick does the same work as before.
+   */
+  private async maybeCompound(pool: LpPool, v: PoolView) {
+    const pol = compoundPolicy(this.state.config?.compound);
+    if (!pol.enabled || this.state.profits.mode !== 'reinvest' || !this.state.position) return;
+    const p = this.state.position;
+    const o = await this.owed(pool, p);
+    const fees = pool.coinsFromRaw(o.raw0, o.raw1, v);
+    const snap = await this.hub.quoter(this.state.market).market();
+    const gas = this.gasQuote(LP_GAS.v3.close + LP_INCREASE_GAS, v, snap);
+    const worth = fees.base * v.price + fees.quote;
+    const gate = decideCompound(worth, gas, pol);
+    if (this.hold) this.hold = { ...this.hold, compoundNeed: gate.need, feesWaiting: worth };
+    if (!gate.compound) return;
+    if (!(Math.floor(pool.fund(fees, p.tickLower, p.tickUpper, v).L) > 0)) return;
+    this.state.step = { action: 'compound', stage: 'collect', tries: 0 };
+  }
+
   /** Send mode: once owed fees are worth PAYOUT_MIN_GAS_MULTIPLE × the collect's gas, collect them to the payout address. */
   private async maybeSend(pool: LpPool, v: PoolView) {
     const p = this.state.position!;
@@ -1004,6 +1178,81 @@ export class LpEngine {
     }
     await this.send(s, { to: pool.npm, data: collectData({ tokenId: BigInt(p.id), to, nativeOther: this.nativeOther(pool) }), value: 0n });
   }
+  /** Collect fees to this wallet and add them back into the open position. Paper does both in one step. */
+  private async compoundCollect(pool: LpPool, v: PoolView, s: LpStep) {
+    const p = this.state.position!;
+    if (this.state.mode === 'paper') return this.compoundPaper(pool, v, p);
+    if (s.hash) {
+      const r = await this.settled(s, v);
+      if (!r) return;
+      const col = events(r, pool.npm, 'Collect')[0];
+      if (!col) throw new Error('collect receipt has no Collect');
+      const fees = pool.coinsFromRaw(col.args.amount0 as bigint, col.args.amount1 as bigint, v);
+      this.addIdle(fees);
+      this.addFees(fees, v.price);
+      s.taken = fees;
+      s.stage = 'approve';
+      s.tries = 0;
+      return;
+    }
+    const to = await (this.executor as LiveExecutor).address();
+    await this.send(s, { to: pool.npm, data: collectData({ tokenId: BigInt(p.id), to, nativeOther: this.nativeOther(pool) }), value: 0n });
+  }
+
+  private async compoundPaper(pool: LpPool, v: PoolView, p: LpPosition) {
+    const o = await this.owed(pool, p);
+    const fees = pool.coinsFromRaw(o.raw0, o.raw1, v);
+    const worth = fees.base * v.price + fees.quote;
+    const add = BigInt(Math.floor(pool.fund(fees, p.tickLower, p.tickUpper, v).L));
+    if (!(worth > 0) || !(add > 0n)) { this.state.step = null; return; }
+    const used = pool.coinsFor(Number(add), p.tickLower, p.tickUpper, v);
+    p.paper = { ...p.paper!, owed0: '0', owed1: '0' };
+    this.addFees(fees, v.price);
+    p.liquidity = (BigInt(p.liquidity) + add).toString();
+    if (p.putIn) p.putIn = { base: p.putIn.base + used.base, quote: p.putIn.quote + used.quote };
+    this.addIdle({ base: Math.max(0, fees.base - used.base), quote: Math.max(0, fees.quote - used.quote) });
+    const snap = await this.hub.quoter(this.state.market).market();
+    this.state.totals.gas += this.gasQuote(LP_GAS.v3.close + LP_INCREASE_GAS, v, snap);
+    this.state.step = null;
+    this.ev('alert', `Liquidity ${this.label}: compounded ${worth.toPrecision(5)} ${this.quoteSym} of fees back into the position`, { level: 'success', notify: true });
+  }
+
+  /** Live: increaseLiquidity with the fees just collected. The range does not move. */
+  private async increase(pool: LpPool, v: PoolView, s: LpStep) {
+    const p = this.state.position!;
+    if (s.hash) {
+      const r = await this.settled(s, v);
+      if (!r) return;
+      const inc = events(r, pool.npm, 'IncreaseLiquidity')[0];
+      if (!inc) throw new Error('increase receipt has no IncreaseLiquidity');
+      const used = pool.coinsFromRaw(inc.args.amount0 as bigint, inc.args.amount1 as bigint, v);
+      p.liquidity = (BigInt(p.liquidity) + (inc.args.liquidity as bigint)).toString();
+      this.state.idle = { base: Math.max(0, this.state.idle.base - used.base), quote: Math.max(0, this.state.idle.quote - used.quote) };
+      if (p.putIn) p.putIn = { base: p.putIn.base + used.base, quote: p.putIn.quote + used.quote };
+      this.state.step = null;
+      const worth = used.base * v.price + used.quote;
+      this.ev('alert', `Liquidity ${this.label}: compounded ${worth.toPrecision(5)} ${this.quoteSym} of fees back into the position`, { level: 'success', notify: true });
+      return;
+    }
+    const want = s.taken ?? { base: 0, quote: 0 };
+    const have = { base: Math.min(this.state.idle.base, want.base), quote: Math.min(this.state.idle.quote, want.quote) };
+    const { L } = pool.fund(have, p.tickLower, p.tickUpper, v);
+    if (!(Math.floor(L) > 0)) {
+      this.state.step = null;
+      this.ev('info', `Liquidity ${this.label}: the waiting fees did not fit this range, so they stayed in the wallet`, { level: 'warn' });
+      return;
+    }
+    const rawWant = pool.rawAmounts(have, v), min = pool.rawAmounts(pool.coinsFor(Math.floor(L), p.tickLower, p.tickUpper, v), v);
+    const k = 1 - this.state.limits.slippageBps / 10_000;
+    const nativeIs0 = pool.def.base.native ? v.baseIs0 : pool.def.quote.native ? !v.baseIs0 : null;
+    const tx = increaseTx({
+      tokenId: BigInt(p.id), amount0: BigInt(Math.floor(rawWant.a0)), amount1: BigInt(Math.floor(rawWant.a1)),
+      min0: BigInt(Math.floor(min.a0 * k)), min1: BigInt(Math.floor(min.a1 * k)), deadline: this.deadline(),
+      native: nativeIs0 == null ? null : nativeIs0 ? 0 : 1,
+    });
+    await this.send(s, { to: pool.npm, ...tx });
+  }
+
   private sent(fees: Coins, price: number, to: string) {
     const worth = fees.base * price + fees.quote;
     this.addFees(fees, price);
@@ -1024,7 +1273,7 @@ export class LpEngine {
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
       status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, move: this.moveStatus(), positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
+      outSince: s.outSince, move: this.moveStatus(), hold: this.hold, positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }

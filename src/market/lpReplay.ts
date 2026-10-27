@@ -10,6 +10,8 @@
  *    ticks (low to high) inside its range.
  *  - Moves (rerange on): like the bot, as soon as a minute ends outside the range the position comes out at that price
  *    and opens ±band around it; a swap over the price-impact cap blocks the move. Fees are added back in at each move.
+ *    Optional `range` / `compound` (see lpPolicy) add dwell, a cooldown after each move, a price buffer,
+ *    an ATR width, a cost check and gas-aware compounding. Omit them and this is the path above, unchanged.
  *  - Swaps pay the pool fee and a price impact worked out from the minute's active liquidity (inside one tick range,
  *    so a thin pool's impact is understated); a gap under LP_MIN_SWAP_SHARE of the value isn't swapped.
  *  - Fees are counted in the coin they were paid in (and their worth in the quote coin when earned).
@@ -23,6 +25,11 @@
  * changed that setup's result by $15. So one replay is one path.
  */
 import { LP_MIN_SWAP_SHARE } from './lp';
+import { atr } from './indicators';
+import {
+  compoundPolicy, decideCompound, decideRangeMove, effectiveBand, feePace, rangePolicy,
+  type LpCompoundPolicy, type LpRangePolicy,
+} from './lpPolicy';
 import { amountsForLiquidity, coinsOfRaw, liquidityForAmounts, marketPrice, rangeTicks, rawOfCoins, sqrtPriceAt, type PoolSides } from '../live/v3Liquidity';
 
 /** One minute of a V3 pool's trading. */
@@ -86,6 +93,15 @@ export interface ReplayOpts {
   gasMove: number;
   /** Largest price impact a swap may have (fraction) */
   maxImpact: number;
+  /**
+   * Optional auto-move gates. Omit the object (not merely "all zeros") to take the original path,
+   * which does not consult them. An explicit default object is decided by lpPolicy and matches.
+   */
+  range?: Partial<LpRangePolicy>;
+  /** Optional fee compounding. Omit to leave fees in the position until a move, as today. */
+  compound?: Partial<LpCompoundPolicy>;
+  /** Gas in quote for one collect-and-add. Used only when compounding is enabled. */
+  gasCompound?: number;
 }
 
 export interface Coins { base: number; quote: number }
@@ -107,6 +123,8 @@ export interface ReplayResult {
   moveLoss: number;
   /** Earned after costs: fees − gas − swap costs − lost to moves, quote */
   net: number;
+  /** Times waiting fees were collected and added back without moving the range. 0 when compounding is off. */
+  compounds: number;
 }
 /** One range as the replay API answers it: the replay, and a position opened now with the same money (its coins, and its share of the pool's active liquidity) */
 export type ReplayRow = ReplayResult & { coinsNow: Coins; poolShareNow: number };
@@ -163,9 +181,9 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
   /** The coins the open position went in with */
   let putIn: Coins = { base: 0, quote: 0 };
   /** Swap `have` to the range's mix around `tick`, pay `gasQuote`, open the position; the rest stays idle. */
-  const open = (have: Coins, tick: number, liq: number, gasQuote: number) => {
+  const open = (have: Coins, tick: number, liq: number, gasQuote: number, band: number) => {
     const p = price(tick);
-    const { tickLower: tl, tickUpper: tu } = rangeTicks(p * (1 - o.bandPct), p * (1 + o.bandPct), pool.spacing, pool);
+    const { tickLower: tl, tickUpper: tu } = rangeTicks(p * (1 - band), p * (1 + band), pool.spacing, pool);
     const s = plan(have, tl, tu, tick, liq);
     const after = s.value - s.cost - gasQuote;
     if (!(after > 0)) throw new Error('opening costs more than the amount put in');
@@ -182,9 +200,22 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     idle = { base: Math.max(0, coins.base - used.base), quote: coins.quote - used.quote };
   };
 
+  // No policy object at all: the original loop. An explicit object, even all defaults, goes through lpPolicy.
+  const governed = o.range !== undefined || o.compound !== undefined;
+  const pol = governed ? rangePolicy(o.range) : null;
+  const comp = governed ? compoundPolicy(o.compound) : null;
+  const bars = governed && pol!.atrMult > 0 ? rowsToOhlc(rows, pool) : null;
+  const atrSeries = bars ? atr(bars, pol!.atrPeriod) : null;
+  const bandAt = (i: number, px: number) => (pol && pol.atrMult > 0 ? effectiveBand(o.bandPct, atrSeries?.[i] ?? null, px, pol.atrMult) : o.bandPct);
+
   const first = rows[0];
-  open({ base: 0, quote: o.capital }, first.c, first.liq, o.gasOpen);
+  open({ base: 0, quote: o.capital }, first.c, first.liq, o.gasOpen, bandAt(0, price(first.c)));
   let heldBack = false;
+  let outSinceMs: number | null = null;
+  let lastMoveAt: number | null = null;
+  let openedAt = first.t;
+  let feesAtOpen = 0;
+  let compounds = 0;
 
   for (let i = 1; i < rows.length; i++) {
     const m = rows[i], p = price(m.c);
@@ -198,28 +229,95 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     feeCoins.base += earned.base; feeCoins.quote += earned.quote;
     fees += val(earned, p);
 
-    const out = m.c < pos.tl || m.c >= pos.tu;
-    if (!out) heldBack = false;
-    if (!o.rerange || !out) continue;
+    if (!governed) {
+      const out = m.c < pos.tl || m.c >= pos.tu;
+      if (!out) heldBack = false;
+      if (!o.rerange || !out) continue;
+      const c = held(pos.L, pos.tl, pos.tu, m.c);
+      const have = { base: c.base + idle.base + owed.base, quote: c.quote + idle.quote + owed.quote };
+      const next = rangeTicks(p * (1 - o.bandPct), p * (1 + o.bandPct), pool.spacing, pool);
+      const s = plan(have, next.tickLower, next.tickUpper, m.c, m.liq);
+      // like the bot: a swap over the impact cap blocks the move
+      if (s.impact > o.maxImpact) { if (!heldBack) blocked++; heldBack = true; continue; }
+      heldBack = false;
+      moveLoss += val(putIn, p) - val(c, p);
+      owed = { base: 0, quote: 0 };
+      open(have, m.c, m.liq, o.gasMove, o.bandPct);
+      moves++;
+      continue;
+    }
+
+    if (comp!.enabled) {
+      const worth = val(owed, p);
+      const gate = decideCompound(worth, o.gasCompound ?? 0, comp!);
+      if (gate.compound) {
+        const raw = rawOfCoins(owed, pool);
+        const Ladd = liquidityForAmounts(sqrtPriceAt(m.c), sqrtPriceAt(pos.tl), sqrtPriceAt(pos.tu), raw.a0, raw.a1);
+        if (Ladd > 0) {
+          const used = held(Ladd, pos.tl, pos.tu, m.c);
+          pos = { tl: pos.tl, tu: pos.tu, L: pos.L + Ladd };
+          putIn = { base: putIn.base + used.base, quote: putIn.quote + used.quote };
+          idle = { base: idle.base + Math.max(0, owed.base - used.base), quote: idle.quote + Math.max(0, owed.quote - used.quote) };
+          owed = { base: 0, quote: 0 };
+          gas += o.gasCompound ?? 0;
+          compounds++;
+        }
+      }
+    }
+
+    const tickOut = m.c < pos.tl || m.c >= pos.tu;
+    const band = bandAt(i, p);
+    let quotedCost: number | undefined;
+    let quotedPace: number | null | undefined;
+    if (pol!.costCheck && tickOut) {
+      const preview = held(pos.L, pos.tl, pos.tu, m.c);
+      const have0 = { base: preview.base + idle.base + owed.base, quote: preview.quote + idle.quote + owed.quote };
+      const next0 = rangeTicks(p * (1 - band), p * (1 + band), pool.spacing, pool);
+      const s0 = plan(have0, next0.tickLower, next0.tickUpper, m.c, m.liq);
+      quotedCost = o.gasMove + s0.cost;
+      quotedPace = feePace(fees - feesAtOpen, (m.t - openedAt) * 1000);
+    }
+    const dec = decideRangeMove({
+      tickOut, price: p, lower: price(pos.tl), upper: price(pos.tu),
+      outSince: outSinceMs, lastMoveAt, now: m.t * 1000, rerange: o.rerange, policy: pol!,
+      ...(pol!.costCheck && tickOut ? { moveCost: quotedCost ?? null, feePerHour: quotedPace ?? null } : {}),
+    });
+    outSinceMs = dec.outSince;
+    if (!tickOut) heldBack = false;
+    if (!dec.move) continue;
     const c = held(pos.L, pos.tl, pos.tu, m.c);
     const have = { base: c.base + idle.base + owed.base, quote: c.quote + idle.quote + owed.quote };
-    const next = rangeTicks(p * (1 - o.bandPct), p * (1 + o.bandPct), pool.spacing, pool);
+    const next = rangeTicks(p * (1 - band), p * (1 + band), pool.spacing, pool);
     const s = plan(have, next.tickLower, next.tickUpper, m.c, m.liq);
-    // like the bot: a swap over the impact cap blocks the move
     if (s.impact > o.maxImpact) { if (!heldBack) blocked++; heldBack = true; continue; }
     heldBack = false;
     moveLoss += val(putIn, p) - val(c, p);
     owed = { base: 0, quote: 0 };
-    open(have, m.c, m.liq, o.gasMove);
+    open(have, m.c, m.liq, o.gasMove, band);
     moves++;
+    outSinceMs = null;
+    lastMoveAt = m.t * 1000;
+    feesAtOpen = fees;
+    openedAt = m.t;
   }
 
   const lastRow = rows[rows.length - 1];
   return {
     bandPct: o.bandPct, rerange: o.rerange, days: (lastRow.t - first.t) / DAY_S,
     feeCoins, fees, gas, swapCost, moves, blocked, inRange: inTime / (rows.length - 1), moveLoss,
-    net: fees - gas - swapCost - moveLoss,
+    net: fees - gas - swapCost - moveLoss, compounds,
   };
+}
+
+/** Minute highs and lows as prices, so Wilder ATR can size a range. Open is the previous close. */
+function rowsToOhlc(rows: PoolMinute[], pool: PoolSides): { o: number; h: number; l: number; c: number }[] {
+  let prev = priceAt(rows[0].c, pool);
+  return rows.map((m) => {
+    const hi = priceAt(m.hi, pool), lo = priceAt(m.lo, pool), c = priceAt(m.c, pool);
+    const o = prev;
+    prev = c;
+    return { o, h: Math.max(o, hi, lo, c), l: Math.min(o, hi, lo, c), c };
+  });
 }
 
 /** Each range with moves on and off, over all of `rows`. */

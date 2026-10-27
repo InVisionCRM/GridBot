@@ -48,6 +48,20 @@ export function exitData(a: { tokenId: bigint; liquidity: bigint; min0: bigint; 
   ]]);
 }
 
+/** Add tokens to an open position. Native side is paid with the tx value; refundETH returns the unused part. */
+export function increaseTx(a: {
+  tokenId: bigint; amount0: bigint; amount1: bigint; min0: bigint; min1: bigint; deadline: bigint;
+  /** Which token is the native coin paid with the tx value (null = none) */
+  native: 0 | 1 | null;
+}): { data: string; value: bigint } {
+  const inc = V3_NPM.encodeFunctionData('increaseLiquidity', [{
+    tokenId: a.tokenId, amount0Desired: a.amount0, amount1Desired: a.amount1,
+    amount0Min: a.min0, amount1Min: a.min1, deadline: a.deadline,
+  }]);
+  const value = a.native == null ? 0n : a.native === 0 ? a.amount0 : a.amount1;
+  return value > 0n ? { data: V3_NPM.encodeFunctionData('multicall', [[inc, V3_NPM.encodeFunctionData('refundETH')]]), value } : { data: inc, value: 0n };
+}
+
 /** Collect the fees owed to `to` (the position stays open). */
 export function collectData(a: { tokenId: bigint; to: string; nativeOther: string | null }): string {
   const calls = payout(a.tokenId, a.to, a.nativeOther);

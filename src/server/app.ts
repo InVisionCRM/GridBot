@@ -26,6 +26,7 @@ import { noKey } from './words';
 import { fetchJson } from './fetchJson';
 import { holdingsSnapshot } from './holdings/read';
 import { requestStore, type HaltOrigin } from './bot/audit';
+import type { LpCompoundPolicy, LpRangePolicy } from '../market/lpPolicy';
 
 export interface AppOpts {
   bot: MultiBot;
@@ -278,7 +279,10 @@ export function createApp(o: AppOpts) {
     const id = await bot.addLp({
       mode: b.mode === 'live' ? 'live' : 'paper', market: String(b.market ?? ''), bandPct: Number(b.bandPct), capital: Number(b.capital ?? 0),
       baseAmount: b.baseAmount == null ? undefined : Number(b.baseAmount),
-      rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined, profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
+      rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined,
+      range: b.range && typeof b.range === 'object' ? b.range as Partial<LpRangePolicy> : undefined,
+      compound: b.compound && typeof b.compound === 'object' ? b.compound as Partial<LpCompoundPolicy> : undefined,
+      profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
     });
     void bot.tickAll();
     return { ok: true, id };
@@ -287,6 +291,20 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
   app.post('/api/bot/lps/:id/close', wrap((req) => bot.closeLp(req.params.id)));
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
+  app.put('/api/bot/lps/:id/policy', wrap((req) => {
+    const b = req.body ?? {};
+    bot.setLpPolicy(req.params.id, {
+      ...(b.range && typeof b.range === 'object' ? { range: b.range as Partial<LpRangePolicy> } : {}),
+      ...(b.compound && typeof b.compound === 'object' ? { compound: b.compound as Partial<LpCompoundPolicy> } : {}),
+      ...(b.bandPct == null ? {} : { bandPct: Number(b.bandPct) }),
+    });
+    return { ok: true };
+  }));
+  app.post('/api/bot/lps/:id/compound', wrap(async (req) => {
+    await bot.compoundLp(req.params.id);
+    void bot.tickAll();
+    return { ok: true };
+  }));
   // { bandPct? }: move the range to the price now (a new width, or the same one)
   app.post('/api/bot/lps/:id/move', wrap(async (req) => {
     const b = req.body?.bandPct;
