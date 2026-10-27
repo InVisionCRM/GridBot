@@ -1,8 +1,10 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import { demoPlugin } from './src/v2/demo-plugin';
 
 export default defineConfig({
-  plugins: [react()],
+  // demoPlugin is structurally a Vite plugin. Cast because Vitest bundles its own Vite types.
+  plugins: [react(), demoPlugin() as never],
   server: {
     port: 5173,
     proxy: {
