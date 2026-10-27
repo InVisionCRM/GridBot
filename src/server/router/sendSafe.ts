@@ -4,11 +4,12 @@
  * then a fee check, all of that again after the chain's TxGate is acquired (a bot tx may have
  * been ahead of us). The router halt is read immediately before the shared nonce is taken.
  * Fees: EIP-1559 pays the network's suggested tip when it is within the per-chain tip cap, and
- * maxFee = 2×base + that tip. A suggestion above the cap aborts (code fee) instead of underpaying,
+ * maxFee = 2×base + that tip. feeHistory uses the 10th-percentile reward. A suggestion above the cap
+ * aborts (code fee) instead of underpaying,
  * which would stick the tx and block this chain's shared nonce. A legacy chain puts the price in
  * gasPrice. The hash is keccak256 of the signed bytes, so a send timeout or "already known" still
- * has a hash. The raw tx goes to one endpoint: a rotating send can time out after accept and the
- * next endpoint then says the nonce is used. Nothing here sends a second time. Not used by bots.
+ * has a hash. A timeout that no endpoint already has is rebroadcast as those same bytes. If it is
+ * still unknown when the wait ends, the shared nonce is dropped. Not used by bots.
  *
  * The caller, when one exists, must use that chain's runtime: hub.rt(chainId).gate and
  * hub.rt(chainId).nonce (or the runtime itself), and halted: routerSendHalted(router).
@@ -46,6 +47,11 @@ export interface SafeReader {
    * When absent, send('eth_sendRawTransaction') is used.
    */
   broadcastRaw?(raw: string): Promise<unknown>;
+  /**
+   * Same signed bytes on the next endpoint (same hash). Rejects with code NO_ENDPOINT when none remain.
+   * When absent, a timed-out broadcast is not tried again.
+   */
+  broadcastNext?(raw: string): Promise<unknown>;
   /** True when this hash is already known (any endpoint). When absent, one send() lookup is used. */
   hasTx?(hash: string): Promise<boolean>;
 }
@@ -84,10 +90,11 @@ export interface SendSafeOpts {
   l1FeeWei?: bigint;
   receiptTimeoutMs?: number;
   /**
-   * Read inside the gate, immediately before the nonce is taken.
+   * Required. Read inside the gate, immediately before the nonce is taken.
    * Stop all sets the router halt while this send may still be queued behind a bot tx.
+   * Pass routerSendHalted(router). A missing check is a halt, not a send.
    */
-  halted?: () => boolean;
+  halted: () => boolean;
   /** Called with a safe reason. Must not receive a raw RPC error (that can carry an endpoint). */
   warn?: (msg: string) => void;
 }
@@ -244,12 +251,18 @@ function payTip(o: SendSafeOpts, suggested: bigint): bigint {
   return suggested;
 }
 
-/** eth_maxPriorityFeePerGas, else the median tip from eth_feeHistory. Never a guessed tip below the network. */
+/** Lowest tenth of the sorted rewards. A median would follow a spike; the gas budget still caps the cost. */
+function percentile10(sortedAsc: bigint[]): bigint {
+  const i = Math.min(sortedAsc.length - 1, Math.floor(sortedAsc.length * 0.1));
+  return sortedAsc[i]!;
+}
+
+/** eth_maxPriorityFeePerGas, else the 10th-percentile tip from eth_feeHistory. Never a guessed tip below the network. */
 async function priorityFee(o: SendSafeOpts): Promise<bigint> {
   const direct = await tryQty(o, 'eth_maxPriorityFeePerGas', []);
   if (direct != null) return payTip(o, direct);
   try {
-    const hist = await o.reader.send('eth_feeHistory', ['0xa', 'latest', [50]]) as { reward?: unknown };
+    const hist = await o.reader.send('eth_feeHistory', ['0xa', 'latest', [10]]) as { reward?: unknown };
     const tips: bigint[] = [];
     if (Array.isArray(hist?.reward)) {
       for (const row of hist.reward) {
@@ -259,7 +272,7 @@ async function priorityFee(o: SendSafeOpts): Promise<bigint> {
       }
     }
     tips.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    if (tips.length) return payTip(o, tips[Math.floor(tips.length / 2)]!);
+    if (tips.length) return payTip(o, percentile10(tips));
   } catch { /* no history: do not invent a tip */ }
   fail(o, 'fee', 'no priority fee from the chain');
 }
@@ -318,7 +331,8 @@ async function assess(o: SendSafeOpts): Promise<Plan> {
 }
 
 function assertNotHalted(o: SendSafeOpts) {
-  if (o.halted?.()) fail(o, 'halt', 'router halted before the nonce was taken');
+  if (typeof o.halted !== 'function') fail(o, 'halt', 'halt check is missing');
+  if (o.halted()) fail(o, 'halt', 'router halted before the nonce was taken');
 }
 
 type BroadcastKind = 'already_known' | 'timeout' | 'underpriced' | 'stale_nonce' | 'other';
@@ -388,21 +402,26 @@ async function detectReplacement(o: SendSafeOpts, from: string, nonce: number, o
   const mined = await o.reader.getTransactionCount(from, 'latest');
   if (mined <= nonce) return null;
   let block = await o.reader.send('eth_getBlockByNumber', ['latest', true]);
+  let latest: bigint | null = null;
   for (let i = 0; i < BLOCK_SCAN && block; i++) {
+    const n = blockNum(block);
+    if (latest == null) latest = n;
     for (const tx of txsOf(block)) {
       if (!sameAddr(tx.from, from) || nonceOf(tx.nonce) !== nonce) continue;
       const hash = typeof tx.hash === 'string' ? tx.hash : '';
+      // A missing or short hash is not a different transaction. Keep tracking ours.
       if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) continue;
       if (hash.toLowerCase() === ourHash.toLowerCase()) return null;
+      // One block built on top, so a reorg of the tip cannot still drop it.
+      if (n == null || latest == null || latest <= n) continue;
       const kind = isCancel(tx, from) ? 'cancelled' : 'replaced';
       return { status: kind, state: 'source_replaced', hash: ourHash, replacementHash: hash };
     }
     if (i + 1 >= BLOCK_SCAN) break;
-    const n = blockNum(block);
     if (n == null || n <= 0n) break;
     block = await o.reader.send('eth_getBlockByNumber', [toQuantity(n - 1n), true]);
   }
-  // Not in the recent window, or the reads did not name a different hash. Keep tracking our hash.
+  // Not in the recent window, only in the tip, or the reads did not name a different hash.
   return null;
 }
 
@@ -425,6 +444,39 @@ async function waitOutcome(o: SendSafeOpts, from: string, hash: string, nonce: n
     } catch { /* a read failed; keep waiting. Do not report this hash confirmed. */ }
     if (Date.now() >= deadline) return { status: 'pending', state: 'source_sent', hash };
     await sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+  }
+}
+
+function noMoreEndpoints(e: unknown): boolean {
+  return (e as { code?: string } | null)?.code === 'NO_ENDPOINT';
+}
+
+async function submitRaw(o: SendSafeOpts, raw: string): Promise<void> {
+  if (o.reader.broadcastRaw) await o.reader.broadcastRaw(raw);
+  else await o.reader.send('eth_sendRawTransaction', [raw]);
+}
+
+/** Same signed bytes on each remaining endpoint. True once one accepts them or already has the hash. */
+async function rebroadcast(o: SendSafeOpts, raw: string, hash: string): Promise<boolean> {
+  if (!o.reader.broadcastNext) return false;
+  for (;;) {
+    try {
+      await o.reader.broadcastNext(raw);
+      return true;
+    } catch (e) {
+      if (noMoreEndpoints(e)) return ourTxIsKnown(o, hash);
+      const kind = broadcastKind(e);
+      if (kind === 'already_known') return true;
+      if (kind === 'stale_nonce') {
+        if (await ourTxIsKnown(o, hash)) return true;
+        throw e;
+      }
+      if (kind === 'timeout') {
+        if (await ourTxIsKnown(o, hash)) return true;
+        continue;
+      }
+      throw e;
+    }
   }
 }
 
@@ -464,15 +516,29 @@ async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number): Promise<Se
     if (e instanceof SendSafeAbort) fail(o, e.code, e.message);
     throw e;
   }
+  let unconfirmedTimeout = false;
   try {
-    if (o.reader.broadcastRaw) await o.reader.broadcastRaw(raw);
-    else await o.reader.send('eth_sendRawTransaction', [raw]);
+    await submitRaw(o, raw);
   } catch (e) {
     const kind = broadcastKind(e);
-    if (kind === 'already_known' || kind === 'timeout') {
-      // The bytes may already be in the mempool. Track the local hash. Do not send again and do not drop the nonce.
-    } else if (kind === 'stale_nonce' && await ourTxIsKnown(o, hash)) {
-      // This endpoint says the nonce is used because another endpoint already accepted these bytes.
+    if (kind === 'already_known' || (kind === 'stale_nonce' && await ourTxIsKnown(o, hash))) {
+      // These bytes are already out. Track the local hash.
+    } else if (kind === 'timeout') {
+      if (await ourTxIsKnown(o, hash)) {
+        // The response was lost after an endpoint accepted the bytes.
+      } else {
+        try {
+          // Same signed bytes, next endpoint. A new signature would be a different transaction.
+          const landed = await rebroadcast(o, raw, hash);
+          unconfirmedTimeout = !landed;
+        } catch (e2) {
+          o.nonce.invalidate();
+          const k2 = broadcastKind(e2);
+          if (k2 === 'underpriced') fail(o, 'underpriced', 'replacement underpriced; not resent');
+          if (k2 === 'stale_nonce') fail(o, 'stale_nonce', 'nonce already used; not resent');
+          fail(o, 'broadcast', sanitizeBroadcastError(e2));
+        }
+      }
     } else {
       o.nonce.invalidate();
       if (kind === 'underpriced') fail(o, 'underpriced', 'replacement underpriced; not resent');
@@ -481,6 +547,8 @@ async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number): Promise<Se
     }
   }
   const outcome = await waitOutcome(o, tx.from, hash, nonce);
+  // The token trader shares this nonce. A timeout that never showed up must not leave a gap.
+  if (unconfirmedTimeout && outcome.status === 'pending' && !(await ourTxIsKnown(o, hash))) o.nonce.invalidate();
   return { ...outcome, gasLimit: plan.gasLimit, nonce };
 }
 
@@ -492,6 +560,7 @@ export async function sendSafe(o: SendSafeOpts): Promise<SendSafeResult> {
   if (!Number.isInteger(o.chainId) || o.chainId <= 0) fail(o, 'sim', 'chain id is missing');
   if (typeof o.maxGasPriceWei !== 'bigint' || o.maxGasPriceWei <= 0n) fail(o, 'fee', 'gas price cap is missing');
   if (typeof o.maxPriorityFeeWei !== 'bigint' || o.maxPriorityFeeWei <= 0n) fail(o, 'fee', 'priority fee cap is missing');
+  if (typeof o.halted !== 'function') fail(o, 'halt', 'halt check is missing');
 
   // Refuse before any read when Stop all already landed. A send that is only queued later is checked inside the gate.
   assertNotHalted(o);

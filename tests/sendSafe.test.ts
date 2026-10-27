@@ -37,6 +37,8 @@ class Rpc implements SafeReader {
   broadcastError: unknown = null;
   receipt: { status: number; transactionHash?: string } | null | 'throw' = { status: 1 };
   blockTxs: Record<string, unknown>[] = [];
+  /** When set, full-block reads use this instead of blockTxs. The argument is the block number. */
+  blockTxsAt: ((n: number) => Record<string, unknown>[]) | null = null;
   blockNumber = 16;
   onEstimate: (() => void) | null = null;
   onBlock: (() => void) | null = null;
@@ -53,9 +55,10 @@ class Rpc implements SafeReader {
     }
     if (method === 'eth_getBlockByNumber') {
       this.onBlock?.();
-      const block: Record<string, unknown> = { number: toQuantity(this.blockNumber) };
+      const num = params[0] === 'latest' ? this.blockNumber : Number(BigInt(String(params[0])));
+      const block: Record<string, unknown> = { number: toQuantity(num) };
       if (this.baseFee != null) block.baseFeePerGas = toQuantity(this.baseFee);
-      if (params[1] === true) block.transactions = this.blockTxs;
+      if (params[1] === true) block.transactions = this.blockTxsAt ? this.blockTxsAt(num) : this.blockTxs;
       return block;
     }
     if (method === 'eth_maxPriorityFeePerGas') {
@@ -129,7 +132,7 @@ function harness(rpc = new Rpc(), signer = new Signer()) {
     l1FeeWei: over.l1FeeWei,
     receiptTimeoutMs: 30,
     warn: over.warn,
-    halted: over.halted,
+    halted: over.halted ?? (() => false),
   });
   return { rpc, signer, gate, nonce, tx, go };
 }
@@ -298,14 +301,16 @@ describe('sendSafe', () => {
     expect(missing.rpc.reads).toBe(0);
   });
 
-  it('uses the median feeHistory tip when eth_maxPriorityFeePerGas is missing', async () => {
+  it('uses the 10th-percentile feeHistory tip when eth_maxPriorityFeePerGas is missing', async () => {
     const h = harness();
     h.rpc.priorityError = new Error('the method eth_maxPriorityFeePerGas does not exist');
     h.rpc.baseFee = 10n;
-    h.rpc.feeHistory = { reward: [['0x5'], ['0x1'], ['0x3']] };
+    h.rpc.feeHistory = { reward: [['0x5'], ['0x1'], ['0x3'], ['0x9'], ['0x64']] };
     await h.go();
-    expect(h.signer.signed[0].maxPriorityFeePerGas).toBe(3n);
-    expect(h.signer.signed[0].maxFeePerGas).toBe(23n);
+    expect(h.rpc.calls.find((c) => c.method === 'eth_feeHistory')?.params[2]).toEqual([10]);
+    // Sorted 1, 3, 5, 9, 100. The 10th percentile is 1; the median is 5.
+    expect(h.signer.signed[0].maxPriorityFeePerGas).toBe(1n);
+    expect(h.signer.signed[0].maxFeePerGas).toBe(21n);
   });
 
   it('puts gasPrice on a legacy chain and leaves the 1559 fields empty', async () => {
@@ -635,7 +640,7 @@ describe('sendSafe', () => {
     const once = () => sendSafe({
       tx, kind: 'bridge', chainId: 1, reader, signer, gate, nonce,
       gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
-      receiptTimeoutMs: 30,
+      receiptTimeoutMs: 30, halted: () => false,
     });
     const first = await once();
     expect(first.status).toBe('confirmed');
@@ -683,7 +688,7 @@ describe('sendSafe', () => {
     const accepted = await sendSafe({
       tx, kind: 'bridge', chainId: 1, reader: soloReader, signer: soloSigner, gate: new TxGate(), nonce: soloNonce,
       gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
-      receiptTimeoutMs: 30,
+      receiptTimeoutMs: 30, halted: () => false,
     });
     expect(accepted.status).toBe('confirmed');
     expect(accepted.hash).toBe(hashOf(soloSigner));
@@ -692,8 +697,181 @@ describe('sendSafe', () => {
     const next = await sendSafe({
       tx, kind: 'bridge', chainId: 1, reader: soloReader, signer: soloSigner, gate: new TxGate(), nonce: soloNonce,
       gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
-      receiptTimeoutMs: 30,
+      receiptTimeoutMs: 30, halted: () => false,
     });
     expect(next.nonce).toBe(accepted.nonce + 1);
+  });
+
+  it('refuses a send when the tip cap or the halt check is missing', async () => {
+    const h = harness();
+    await expect(h.go({ maxPriorityFeeWei: 0n })).rejects.toMatchObject({ code: 'fee', message: 'priority fee cap is missing' });
+    expect(h.rpc.calls).toHaveLength(0);
+    expect(h.rpc.reads).toBe(0);
+    await expect(sendSafe({
+      tx: h.tx, kind: 'bridge', chainId: 1, reader: h.rpc, signer: h.signer, gate: h.gate, nonce: h.nonce,
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      halted: undefined as unknown as () => boolean,
+    })).rejects.toMatchObject({ code: 'halt', message: 'halt check is missing' });
+    expect(h.rpc.broadcasts).toHaveLength(0);
+  });
+
+  it('does not treat a missing or short hash as a replacement, and waits for one confirmation', async () => {
+    const other = '0x' + 'cd'.repeat(32);
+    const bad = harness();
+    bad.rpc.receipt = null;
+    bad.rpc.pending = 4;
+    bad.rpc.mined = 5;
+    bad.rpc.blockNumber = 20;
+    bad.rpc.blockTxs = [
+      { from: FROM, to: TO, nonce: '0x4', value: '0x1', input: '0xab' },
+      { hash: '0xdead', from: FROM, to: TO, nonce: '0x4', value: '0x1', input: '0xab' },
+    ];
+    const unseen = await bad.go();
+    expect(unseen.status).toBe('pending');
+    expect(unseen.state).toBe('source_sent');
+    expect(unseen.replacementHash).toBeUndefined();
+    expect(unseen.hash).toBe(hashOf(bad.signer));
+
+    const tipOnly = harness();
+    tipOnly.rpc.receipt = null;
+    tipOnly.rpc.pending = 4;
+    tipOnly.rpc.mined = 5;
+    tipOnly.rpc.blockNumber = 20;
+    tipOnly.rpc.blockTxsAt = (n) => (n === 20
+      ? [{ hash: other, from: FROM, to: TO, nonce: '0x4', value: '0x1', input: '0xabcdef' }]
+      : []);
+    const tip = await tipOnly.go();
+    expect(tip.status).toBe('pending');
+    expect(tip.replacementHash).toBeUndefined();
+
+    const buried = harness();
+    buried.rpc.receipt = null;
+    buried.rpc.pending = 4;
+    buried.rpc.mined = 5;
+    buried.rpc.blockNumber = 20;
+    buried.rpc.blockTxsAt = (n) => (n === 19
+      ? [{ hash: other, from: FROM, to: TO, nonce: '0x4', value: '0x1', input: '0xabcdef' }]
+      : []);
+    const rep = await buried.go();
+    expect(rep.status).toBe('replaced');
+    expect(rep.replacementHash).toBe(other);
+    expect(rep.hash).toBe(hashOf(buried.signer));
+  });
+
+  it('hasTx finds a hash that only a later endpoint has', async () => {
+    const hash = '0x' + 'ab'.repeat(32);
+    let first = 0;
+    let second = 0;
+    const a = {
+      async send(method: string) {
+        if (method === 'eth_getTransactionByHash' || method === 'eth_getTransactionReceipt') { first++; return null; }
+        throw new Error(method);
+      },
+    };
+    const b = {
+      async send(method: string, params: unknown[]) {
+        if (method === 'eth_getTransactionByHash' || method === 'eth_getTransactionReceipt') {
+          second++;
+          return method === 'eth_getTransactionByHash' && params[0] === hash ? { hash } : null;
+        }
+        throw new Error(method);
+      },
+    };
+    const reader = new FallbackReader(
+      ['https://rpc.example/a', 'https://rpc.example/b'], 1,
+      [a, b] as unknown as ConstructorParameters<typeof FallbackReader>[2],
+    );
+    expect(await reader.hasTx(hash)).toBe(true);
+    expect(first).toBeGreaterThan(0);
+    expect(second).toBeGreaterThan(0);
+  });
+
+  it('rebroadcasts the same bytes after a timeout, and a miss keeps the next nonce on the chain', async () => {
+    const tx: ExactTx = { from: FROM, to: TO, data: '0x1234', value: 0n };
+    const sendOpts = {
+      tx, kind: 'bridge' as const, chainId: 1, gasCap: 300_000n, gasBudgetWei: 10n ** 18n,
+      maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n, receiptTimeoutMs: 30, halted: () => false,
+    };
+    const known = new Set<string>();
+    const raws: string[][] = [[], []];
+    let counts = 0;
+    const ep = (i: 0 | 1, onRaw: (raw: string) => unknown) => ({
+      async send(method: string, params: unknown[]) {
+        if (method === 'eth_sendRawTransaction') {
+          const raw = String(params[0]);
+          raws[i].push(raw);
+          return onRaw(raw);
+        }
+        if (method === 'eth_getTransactionByHash' || method === 'eth_getTransactionReceipt') {
+          const hash = String(params[0]);
+          if (!known.has(hash)) return null;
+          if (method === 'eth_getTransactionReceipt') return { status: '0x1', transactionHash: hash, gasUsed: '0x1' };
+          return { hash };
+        }
+        if (method === 'eth_call') return '0x';
+        if (method === 'eth_estimateGas') return toQuantity(100_000n);
+        if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+        if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+        throw new Error(method);
+      },
+      async getTransactionCount() { counts++; return 4; },
+      async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
+    });
+    const reader = new FallbackReader(
+      ['https://rpc.example/a', 'https://rpc.example/b'], 1,
+      [
+        ep(0, () => { throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); }),
+        ep(1, (raw) => { known.add(keccak256(raw as `0x${string}`)); return '0x01'; }),
+      ] as unknown as ConstructorParameters<typeof FallbackReader>[2],
+    );
+    const signer = new Signer();
+    const nonce = new SharedNonce();
+    const first = await sendSafe({ ...sendOpts, reader, signer, gate: new TxGate(), nonce });
+    expect(first.status).toBe('confirmed');
+    expect(first.hash).toBe(hashOf(signer));
+    expect(raws[0]).toHaveLength(1);
+    expect(raws[1]).toEqual(raws[0]);
+    expect(first.hash).toBe(keccak256(raws[0][0] as `0x${string}`));
+    const followed = await sendSafe({ ...sendOpts, reader, signer, gate: new TxGate(), nonce });
+    expect(followed.nonce).toBe(first.nonce + 1);
+    expect(counts).toBe(1);
+
+    const missed: string[][] = [[], []];
+    let pendingReads = 0;
+    const chainPending = 8;
+    const miss = (i: 0 | 1) => ({
+      async send(method: string, params: unknown[]) {
+        if (method === 'eth_sendRawTransaction') {
+          missed[i].push(String(params[0]));
+          throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+        }
+        if (method === 'eth_getTransactionByHash' || method === 'eth_getTransactionReceipt') return null;
+        if (method === 'eth_call') return '0x';
+        if (method === 'eth_estimateGas') return toQuantity(100_000n);
+        if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+        if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+        throw new Error(method);
+      },
+      async getTransactionCount(_address: string, tag: string) {
+        if (tag === 'pending') pendingReads++;
+        return chainPending;
+      },
+      async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
+    });
+    const missReader = new FallbackReader(
+      ['https://rpc.example/a', 'https://rpc.example/b'], 1,
+      [miss(0), miss(1)] as unknown as ConstructorParameters<typeof FallbackReader>[2],
+    );
+    const missSigner = new Signer();
+    const missNonce = new SharedNonce();
+    const lost = await sendSafe({ ...sendOpts, reader: missReader, signer: missSigner, gate: new TxGate(), nonce: missNonce });
+    expect(lost.status).toBe('pending');
+    expect(lost.nonce).toBe(chainPending);
+    expect(missed[0]).toHaveLength(1);
+    expect(missed[1]).toEqual(missed[0]);
+    expect(lost.hash).toBe(keccak256(missed[0][0] as `0x${string}`));
+    const retry = await sendSafe({ ...sendOpts, reader: missReader, signer: missSigner, gate: new TxGate(), nonce: missNonce });
+    expect(retry.nonce).toBe(chainPending);
+    expect(pendingReads).toBe(2);
   });
 });

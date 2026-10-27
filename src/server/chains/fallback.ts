@@ -245,12 +245,28 @@ export class FallbackReader implements ChainReader, LogReader {
   send(method: string, params: unknown[]) { return this.run((p) => p.send(method, params)); }
 
   /**
-   * One eth_sendRawTransaction on the current endpoint. No rotation and no retry.
-   * A timeout after the node has accepted must not be tried on the next RPC: that one answers
-   * "nonce too low" and the shared nonce would be thrown away while the tx is already out.
+   * One eth_sendRawTransaction on the current endpoint. No rotation inside this call.
+   * sendSafe rebroadcasts the same bytes itself, after hasTx, when this one times out.
    */
+  private sentFrom = -1;
+
   broadcastRaw(raw: string): Promise<unknown> {
+    this.sentFrom = this.i;
     return this.limiter.run(() => this.providers[this.i].send('eth_sendRawTransaction', [raw]));
+  }
+
+  /**
+   * The same signed bytes on the next endpoint. Same hash, not a new transaction.
+   * Rejects with code NO_ENDPOINT once every endpoint has been tried.
+   */
+  broadcastNext(raw: string): Promise<unknown> {
+    const n = this.providers.length;
+    if (this.sentFrom < 0) this.sentFrom = this.i;
+    const next = this.sentFrom + 1;
+    if (next >= this.i + n) return Promise.reject(Object.assign(new Error('no further endpoint'), { code: 'NO_ENDPOINT' }));
+    const j = next % n;
+    this.sentFrom = next;
+    return this.limiter.run(() => this.providers[j].send('eth_sendRawTransaction', [raw]));
   }
 
   /** True when any endpoint already has this hash (tx or receipt). Used after "nonce too low". */

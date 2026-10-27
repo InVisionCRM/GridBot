@@ -39,12 +39,13 @@ export const FALLBACK_MAX_GAS_PRICE_WEI = 200n * GWEI;
  * Max priority fee (the tip) we will attach. A suggestion above this aborts the send.
  * Paying less than the network asked would leave the tx stuck and block every bot on this chain's nonce.
  * Ethereum 50 gwei is above a normal 1–3 gwei tip and still stops a runaway.
- * PulseChain's live tip is about 33,525 gwei; 100,000 gwei pays that and aborts a spike.
+ * PulseChain live tips run about 31,000–58,000 gwei, and the feeHistory p90 is about 935,000 gwei.
+ * 1,000,000 gwei pays that. The gas budget still bounds what a send can spend.
  * Robinhood is an L2, so 2 gwei is already a high tip. Any other chain uses a tenth of its gas-price cap.
  */
 export const DEFAULT_MAX_PRIORITY_FEE_WEI: Readonly<Record<number, bigint>> = {
   1: 50n * GWEI,
-  369: 100_000n * GWEI,
+  369: 1_000_000n * GWEI,
   4663: 2n * GWEI,
 };
 /** 1 native coin per gas unit. A stored cap cannot be set above this. */
