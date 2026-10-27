@@ -2,20 +2,20 @@ import { motion } from 'motion/react';
 import { useState } from 'react';
 import { TokenMark } from '../ui/icons';
 import { EquityCurve, Spark } from './equity-curve';
-import { formatPx, formatUsd, pct } from './format';
-import type { BotDesk, BotStatus, PortfolioSnapshot, TapePrice, TokenQty } from './metrics';
+import { formatPx, formatUsd, pct, showsNoFills } from './format';
+import type { BotDesk, BotMetrics, BotStatus, PortfolioSnapshot, TapePrice, TokenQty } from './metrics';
 import { usePhone, useReducedMotion } from './motion';
+import { PairLabel } from './pair-label';
 import { press } from './press';
 import { RangeSelect, type RangeKey } from './range-tabs';
 import { RangeTrack } from './range-track';
-import { RollingUsd } from './rolling-number';
 import { StatusMark } from './status-mark';
 import { TokenHeadline, TokenLine } from './tokens';
 
 function TapeItem({ p }: { p: TapePrice }) {
   return (
     <span className={p.change24h == null ? '' : p.change24h >= 0 ? 'up' : 'down'}>
-      <b>{p.symbol}</b>
+      <PairLabel pair={p.symbol} chain={p.chain} />
       <em className="px">{formatPx(p.price)}</em>
       {p.change24h != null && <em>{pct(p.change24h, 2, true)}</em>}
     </span>
@@ -93,33 +93,38 @@ export function HomeView({
   return (
     <div className="home">
       <section className="hero glass">
-        <div className="hero-main">
-          <p className="eyebrow">Generated</p>
-          <div className="hero-num">
-            {portfolio.generatedUsd == null ? '—' : <RollingUsd value={portfolio.generatedUsd} rollIn />}
+        <p className="eyebrow">Generated</p>
+        <div className="hero-top">
+          <div className="hero-units">
+            {portfolio.tokens.length
+              ? <TokenHeadline tokens={portfolio.tokens} usd={portfolio.generatedUsd} />
+              : '—'}
           </div>
-          <p className="hero-rate">
-            {portfolio.generatedPerDayUsd == null ? '—' : formatUsd(portfolio.generatedPerDayUsd, true)}
-            <span>/day</span>
-          </p>
-          <div className="hero-meta">
-            <button type="button" className="paper-toggle" aria-expanded={paper} onClick={() => setPaper((v) => !v)}>
-              Paper {portfolio.paperGeneratedUsd == null ? '—' : formatUsd(portfolio.paperGeneratedUsd, true)}
-            </button>
-            <p className="hero-stat"><span>Running</span> <b>{portfolio.botsRunning}/{portfolio.botsTotal}</b></p>
+          <Chips tokens={portfolio.tokens} />
+        </div>
+        <p className="hero-rate">
+          {portfolio.generatedPerDay == null ? '—' : portfolio.generatedPerDay.length ? <TokenLine tokens={portfolio.generatedPerDay} /> : '0'}
+          <span>/day</span>
+        </p>
+        <p className="usd-under">
+          {portfolio.generatedUsd == null ? '—' : `≈ ${formatUsd(portfolio.generatedUsd, false)}`}
+          {' · '}
+          {portfolio.generatedPerDayUsd == null ? '—' : `${formatUsd(portfolio.generatedPerDayUsd, false)}/day`}
+        </p>
+        <div className="hero-meta">
+          <button type="button" className="paper-toggle" aria-expanded={paper} onClick={() => setPaper((v) => !v)}>
+            Paper {portfolio.paperGeneratedUsd == null ? '—' : formatUsd(portfolio.paperGeneratedUsd, false)}
+          </button>
+          <p className="hero-stat"><span>Running</span> <b>{portfolio.botsRunning}/{portfolio.botsTotal}</b></p>
+        </div>
+        {paper && (
+          <div className="paper-chips">
+            {portfolio.paperTokens.length ? <Chips tokens={portfolio.paperTokens} /> : <p className="curve-empty">—</p>}
           </div>
-          {paper && (
-            <div className="paper-chips">
-              {portfolio.paperTokens.length ? <Chips tokens={portfolio.paperTokens} /> : <p className="curve-empty">—</p>}
-            </div>
-          )}
-        </div>
-        <div className="hero-side">
-          {portfolio.tokens.length ? <Chips tokens={portfolio.tokens} /> : <p className="curve-empty">—</p>}
-        </div>
+        )}
         <div className="hero-curve">
           <RangeSelect value={span} onChange={setSpan} />
-          {series.length > 1 ? <EquityCurve points={series} /> : <p className="curve-empty">—</p>}
+          {series.length > 1 ? <EquityCurve points={series} /> : <p className="curve-empty">Chart fills in as history builds</p>}
         </div>
       </section>
       <ModeSection title="Live" bots={live} onOpen={onOpen} />
@@ -152,6 +157,19 @@ function ModeSection({ title, bots, onOpen }: { title: string; bots: BotDesk[]; 
   );
 }
 
+function CardMade({ metrics }: { metrics: BotMetrics }) {
+  if (showsNoFills(metrics)) return <p className="card-made"><span>Generated</span> No fills yet</p>;
+  return (
+    <>
+      <p className="card-made">
+        <span>Generated</span>
+        <TokenHeadline tokens={metrics.generated} usd={metrics.generatedUsd} />
+      </p>
+      <p className="usd-under">{metrics.generatedUsd == null ? '—' : `≈ ${formatUsd(metrics.generatedUsd, false)}`}</p>
+    </>
+  );
+}
+
 function BotCard({ bot, onOpen }: { bot: BotDesk; onOpen: (id: string) => void }) {
   const open = () => { press(); onOpen(bot.metrics.botId); };
   return (
@@ -171,8 +189,10 @@ function BotCard({ bot, onOpen }: { bot: BotDesk; onOpen: (id: string) => void }
         <header>
           <TokenMark symbol={bot.base} size={28} />
           <div>
-            <motion.strong layoutId={`pair-${bot.metrics.botId}`}>{bot.pair}</motion.strong>
-            <em>{bot.dex} · {bot.chain} · {bot.metrics.kind} · {bot.metrics.mode}</em>
+            <motion.strong layoutId={`pair-${bot.metrics.botId}`}>
+              <PairLabel pair={bot.pair} chain={bot.chain} />
+            </motion.strong>
+            <em>{bot.dex} · {bot.metrics.kind} · {bot.metrics.mode}</em>
           </div>
           <StatusMark tone={bot.tone} status={bot.metrics.status as BotStatus} />
         </header>
@@ -180,11 +200,7 @@ function BotCard({ bot, onOpen }: { bot: BotDesk; onOpen: (id: string) => void }
           {bot.spark.length > 1 && <Spark points={bot.spark} />}
           <RangeTrack range={bot.metrics.range} tone={bot.tone} />
         </div>
-        <p className="card-made">
-          <span>Generated</span>
-          <TokenHeadline tokens={bot.metrics.generated} usd={bot.metrics.generatedUsd} />
-        </p>
-        <p className="usd-under">{formatUsd(bot.metrics.generatedUsd, true)}</p>
+        <CardMade metrics={bot.metrics} />
       </motion.div>
     </li>
   );

@@ -1,9 +1,9 @@
 import { AnimatePresence, motion } from 'motion/react';
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import type { ActivityItem } from './metrics';
 import { formatWhen, shortenFigures } from './format';
+import { PairLabel } from './pair-label';
 
-const ROW = 48;
 const KIND = { fill: 'Fill', recenter: 'Range', fee: 'Fee' } as const;
 
 export function ActivityTape({ items, full = false }: { items: ActivityItem[]; full?: boolean }) {
@@ -52,37 +52,23 @@ function Row({ item, open, onOpen }: { item: ActivityItem; open: boolean; onOpen
       onClick={() => onOpen(open ? null : item.id)}
     >
       <time>{formatWhen(item.t)}</time>
-      <span className="kind-pill">{KIND[item.kind]}</span>
-      <b>{item.pair || 'Bot'}</b>
+      <span className="tape-who">
+        <PairLabel pair={item.pair || 'Bot'} chain={item.chain} />
+        <span className="kind-pill">{KIND[item.kind]}</span>
+      </span>
       <span className="tape-msg">{open ? item.text : short}</span>
     </button>
   );
 }
 
 function VirtualTape({ items, openId, onOpen }: { items: ActivityItem[]; openId: string | null; onOpen: (id: string | null) => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [box, setBox] = useState({ scroll: 0, height: 480 });
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const read = () => setBox({ scroll: el.scrollTop, height: el.clientHeight || 480 });
-    read();
-    el.addEventListener('scroll', read, { passive: true });
-    const ro = new ResizeObserver(read);
-    ro.observe(el);
-    return () => { el.removeEventListener('scroll', read); ro.disconnect(); };
-  }, []);
-  const start = Math.max(0, Math.floor(box.scroll / ROW) - 2);
-  const end = Math.min(items.length, start + Math.ceil(box.height / ROW) + 6);
   return (
-    <div ref={ref} className="tape tape-full" aria-label="Activity">
-      <div style={{ height: items.length * ROW, position: 'relative' }}>
-        {items.slice(start, end).map((item, i) => (
-          <div key={item.id} className={`tape-row tape-abs tone-${item.tone}`} style={{ transform: `translateY(${(start + i) * ROW}px)`, height: ROW }}>
-            <Row item={item} open={openId === item.id} onOpen={onOpen} />
-          </div>
-        ))}
-      </div>
+    <div className="tape tape-full" aria-label="Activity">
+      {items.map((item) => (
+        <div key={item.id} className={`tape-row tone-${item.tone}`}>
+          <Row item={item} open={openId === item.id} onOpen={onOpen} />
+        </div>
+      ))}
       {!items.length && <p className="muted">Nothing yet.</p>}
     </div>
   );

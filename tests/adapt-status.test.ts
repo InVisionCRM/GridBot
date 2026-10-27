@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { adaptStatus } from '../src/v2/adapt-status';
-import { formatPx, formatTokenLine, formatUsd, formatWhen } from '../src/v2/format';
+import { formatPx, formatTokenLine, formatUsd, formatWhen, showsNoFills } from '../src/v2/format';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
 
 const AS_OF = sanitizedStatus.spotsAt;
@@ -43,6 +43,8 @@ describe('adaptStatus', () => {
   it('sums live dollars and does not fold paper into the headline', () => {
     expect(desk.portfolio.generatedUsd).toBeCloseTo(40);
     expect(desk.portfolio.generatedPerDayUsd).toBeCloseTo(20);
+    expect(desk.portfolio.generatedPerDay?.find((t) => t.symbol === 'USDC')?.amount).toBeCloseTo(10);
+    expect(desk.bots.find((b) => b.metrics.botId === 'lp-live')?.pair).toBe('ETH/USDC');
     expect(desk.portfolio.paperGeneratedUsd).toBeCloseTo(15.5);
     expect(desk.portfolio.tokens.map((t) => t.symbol).sort()).toEqual(['ETH', 'USDC']);
     expect(desk.portfolio.feesTodayLiveUsd).toBeNull();
@@ -52,6 +54,11 @@ describe('adaptStatus', () => {
   it('drops activity that is not a fill, fee, or range move, and strips hex', () => {
     expect(desk.activity).toHaveLength(2);
     expect(desk.activity.find((a) => a.botId === 'grid-paper')?.pair).toBe('AAA/USDC');
+    const lpLine = desk.activity.find((a) => a.botId === 'lp-live');
+    expect(lpLine?.pair).toBe('ETH/USDC');
+    expect(lpLine?.chain).toBe('ETH');
+    expect(lpLine?.text).toBe('Liquidity USDC/ETH: price is outside the range; moving the range to the price');
+    expect(lpLine?.text).not.toContain('·');
     expect(desk.activity.some((a) => /0x/i.test(a.text))).toBe(false);
     expect(JSON.stringify(desk)).not.toMatch(/0x[0-9a-fA-F]{8,}/);
   });
@@ -134,7 +141,8 @@ describe('adaptStatus', () => {
 
   it('flips a stable base under one dollar and leaves PLS/DAI alone', () => {
     const eth = desk.prices.find((p) => p.symbol.startsWith('ETH/USDC'));
-    expect(eth?.symbol).toBe('ETH/USDC·ETH');
+    expect(eth?.symbol).toBe('ETH/USDC');
+    expect(eth?.chain).toBe('ETH');
     expect(eth?.price).toBeCloseTo(2000);
     const now = 1_700_000_000_000;
     const pls = adaptStatus({
@@ -149,6 +157,7 @@ describe('adaptStatus', () => {
     }, [], now);
     const row = pls.prices[0];
     expect(row?.symbol).toBe('PLS/DAI');
+    expect(row?.chain).not.toContain('·');
     expect(row?.price).toBeCloseTo(5.093e-6);
   });
 });
@@ -167,6 +176,12 @@ describe('format', () => {
       { symbol: 'WETH', amount: 0.00236 },
     ])).toBe('+15.62 USDC + 0.00236 WETH');
     expect(formatTokenLine([{ symbol: 'PLS', amount: 98300 }])).toBe('+98.3k PLS');
+  });
+
+  it('treats a zero book with no fills as empty, and a real zero with fills as a number', () => {
+    expect(showsNoFills({ generated: [], generatedUsd: 0, fillCount: 0 })).toBe(true);
+    expect(showsNoFills({ generated: [], generatedUsd: null, fillCount: 0 })).toBe(false);
+    expect(showsNoFills({ generated: [{ amount: 1 }], generatedUsd: 0, fillCount: 2 })).toBe(false);
   });
 
   it('shows activity clocks in Detroit, not UTC', () => {

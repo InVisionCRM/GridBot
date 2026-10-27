@@ -4,14 +4,15 @@ import { TokenMark } from '../ui/icons';
 import type { View } from '../ui/model';
 import { ActivityTape } from './activity-tape';
 import { CandlePane } from './candle-pane';
-import { formatAge, formatStamp, formatTokenLine, formatUsd, pct, shortenFigures } from './format';
+import { formatAge, formatStamp, formatTokenLine, formatUsd, pct, shortenFigures, showsNoFills } from './format';
 import { LpRangeSlot } from './lp-range-slot';
 import type { ActivityItem, BotDesk, BotMetrics, EstimateBlock, TokenQty } from './metrics';
 import { usePhone } from './motion';
+import { PairLabel } from './pair-label';
 import { press } from './press';
 import { candlesInRange, RangeSelect, type RangeKey } from './range-tabs';
 import { RangeTrack } from './range-track';
-import { RollingPct, RollingUsd } from './rolling-number';
+import { RollingPct } from './rolling-number';
 import { StatusMark } from './status-mark';
 import { TokenHeadline, TokenLine } from './tokens';
 
@@ -72,17 +73,27 @@ export function BotView({
       <header className="bot-head">
         <TokenMark symbol={bot.base} size={36} />
         <div>
-          <motion.h1 layoutId={`pair-${m.botId}`}>{bot.pair}</motion.h1>
-          <p>{bot.dex} · {bot.chain} · {m.kind} · {m.mode}</p>
+          <motion.h1 layoutId={`pair-${m.botId}`}><PairLabel pair={bot.pair} chain={bot.chain} /></motion.h1>
+          <p>{bot.dex} · {m.kind} · {m.mode}</p>
         </div>
         <StatusMark tone={bot.tone} status={m.status} />
       </header>
       <section className="stat-strip glass" aria-label="Generated">
         <p className="eyebrow">Generated</p>
-        <div className="hero-gen"><TokenHeadline tokens={m.generated} usd={m.generatedUsd} /></div>
-        <p className="usd-under">
-          {m.generatedUsd == null ? '—' : phone ? formatUsd(m.generatedUsd, true) : <RollingUsd value={m.generatedUsd} />}
-        </p>
+        {showsNoFills(m) ? <div className="hero-gen">No fills yet</div> : (
+          <>
+            <div className="hero-gen"><TokenHeadline tokens={m.generated} usd={m.generatedUsd} /></div>
+            <p className="hero-rate">
+              {m.est.d1 == null ? '—' : m.est.d1.length ? <TokenLine tokens={m.est.d1} /> : '0'}
+              <span>/day</span>
+            </p>
+            <p className="usd-under">
+              {m.generatedUsd == null ? '—' : `≈ ${formatUsd(m.generatedUsd, false)}`}
+              {' · '}
+              {m.est.usd.d1 == null ? '—' : `${formatUsd(m.est.usd.d1, false)}/day`}
+            </p>
+          </>
+        )}
         <dl className="ests">
           <div>
             <dt>APR</dt>
@@ -91,11 +102,11 @@ export function BotView({
         </dl>
         <Estimates est={m.est} />
       </section>
-      <div className="chart-frame">
+      <div className={candles.length > 1 ? 'chart-frame' : 'chart-frame is-empty'}>
         <RangeSelect value={span} onChange={setSpan} />
         {candles.length > 1
           ? <CandlePane candles={candles} levels={bot.levels} fills={bot.fills} flashLevel={bot.flashLevel} />
-          : <p className="curve-empty">—</p>}
+          : <p className="curve-empty">Chart fills in as history builds</p>}
         <div className="range-on-chart">
           <RangeTrack range={m.range} tone={bot.tone} />
         </div>

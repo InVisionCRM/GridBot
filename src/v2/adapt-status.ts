@@ -307,12 +307,25 @@ function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
   return desk(metrics, str(lp.label) || `${base}/${quote}`, base, quote, chain, str(lp.dexName), price, []);
 }
 
-function desk(metrics: BotMetrics, pair: string, base: string, quote: string, chain: ChainInfo, dex: string, price: number | null, spark: number[]): BotDesk {
+const STABLES = new Set(['USDC', 'USDG', 'USDT', 'DAI', 'USD']);
+
+/** Pair people read, without a chain suffix. A stable base under $1 flips to quote/base. */
+function shownPair(base: string, quote: string, price: number | null, label: string): string {
+  if (base && quote) {
+    const b = base.toUpperCase();
+    const q = quote.toUpperCase();
+    if (price != null && price > 0 && price < 1 && STABLES.has(b) && !STABLES.has(q)) return `${quote}/${base}`;
+    return `${base}/${quote}`;
+  }
+  return label.split('·')[0]?.trim() || label || '—';
+}
+
+function desk(metrics: BotMetrics, label: string, base: string, quote: string, chain: ChainInfo, dex: string, price: number | null, spark: number[]): BotDesk {
   const tone = metrics.status !== 'running' ? 'idle'
     : metrics.range == null ? 'idle'
     : metrics.range.inRange ? 'in' : 'out';
   return {
-    metrics, pair, base, quote, chain: chain.short, chainColor: chain.color, dex: dex || '—',
+    metrics, pair: shownPair(base, quote, price, label), base, quote, chain: chain.short, chainColor: chain.color, dex: dex || '—',
     tone, spark: spark.length > 1 ? spark : [], levels: [], candles: [], fills: [], flashLevel: null,
     price, change24h: null,
   };
@@ -331,6 +344,23 @@ function perDayUsd(bots: BotDesk[]): number | null {
   if (!running.length) return null;
   if (running.some((b) => b.metrics.est.usd.d1 == null)) return null;
   return cents(running.reduce((s, b) => s + (b.metrics.est.usd.d1 ?? 0), 0));
+}
+
+function perDayTokens(bots: BotDesk[]): TokenQty[] | null {
+  const running = bots.filter((b) => b.metrics.status === 'running');
+  if (!running.length) return null;
+  if (running.some((b) => b.metrics.est.d1 == null)) return null;
+  const map = new Map<string, TokenQty>();
+  for (const b of running) {
+    for (const t of b.metrics.est.d1 ?? []) {
+      const cur = map.get(t.symbol) ?? { symbol: t.symbol, amount: 0, usd: 0 as number | null };
+      cur.amount += t.amount;
+      if (t.usd == null || cur.usd == null) cur.usd = null;
+      else cur.usd += t.usd;
+      map.set(t.symbol, cur);
+    }
+  }
+  return [...map.values()].filter((t) => t.amount !== 0);
 }
 
 function sumTokens(bots: BotDesk[]): TokenQty[] {
@@ -359,6 +389,7 @@ function portfolio(bots: BotDesk[], asOf: number): PortfolioSnapshot {
   return {
     asOf,
     generatedUsd: sumUsd(live, true),
+    generatedPerDay: perDayTokens(live),
     generatedPerDayUsd: perDayUsd(live),
     paperGeneratedUsd: sumUsd(paper, true),
     tokens: sumTokens(live),
@@ -374,26 +405,28 @@ function portfolio(bots: BotDesk[], asOf: number): PortfolioSnapshot {
   };
 }
 
-const STABLES = new Set(['USDC', 'USDG', 'USDT', 'DAI', 'USD']);
-
-/** Engine price is quote per 1 base. Flip only a stable base priced under 1, so PLS/DAI stays put. */
-function tapeOf(b: BotDesk): { symbol: string; price: number | null; change24h: null } {
+/** Engine price is quote per 1 base. The pair text is already conventional; only the price flips. */
+function tapeOf(b: BotDesk): { symbol: string; chain: string; price: number | null; change24h: null } {
   const px = b.price;
   const base = b.base.toUpperCase();
   const quote = b.quote.toUpperCase();
-  const chain = b.chain && b.chain !== '—' ? `·${b.chain}` : '';
-  if (px != null && px > 0 && px < 1 && STABLES.has(base) && !STABLES.has(quote)) {
-    return { symbol: `${b.quote}/${b.base}${chain}`, price: 1 / px, change24h: null };
-  }
-  return { symbol: b.pair, price: px, change24h: null };
+  const flip = px != null && px > 0 && px < 1 && STABLES.has(base) && !STABLES.has(quote);
+  return { symbol: b.pair, chain: b.chain === '—' ? '' : b.chain, price: flip && px ? 1 / px : px, change24h: null };
 }
 
-function activityOf(events: ActivityEvent[], names: Map<string, string>): ActivityItem[] {
+/** Log lines say `USDC/ETH·ETH`. The chain already has a badge, so the suffix comes off. */
+function withoutChainSuffix(text: string, chain: string): string {
+  if (!chain || chain === '—') return text;
+  return text.split(`·${chain}`).join('');
+}
+
+function activityOf(events: ActivityEvent[], names: Map<string, { pair: string; chain: string }>): ActivityItem[] {
   const want = new Set(['filled', 'range', 'queued']);
   const items: ActivityItem[] = [];
   for (const e of events) {
     if (!e || !want.has(e.type ?? '')) continue;
-    const text = stripSecrets(str(e.msg));
+    const named = names.get(str(e.botId));
+    const text = withoutChainSuffix(stripSecrets(str(e.msg)), named?.chain ?? '');
     if (!text) continue;
     const t = num(e.t);
     if (t == null) continue;
@@ -403,7 +436,8 @@ function activityOf(events: ActivityEvent[], names: Map<string, string>): Activi
       id: `a${t}-${items.length}`,
       t,
       botId: str(e.botId),
-      pair: names.get(str(e.botId)) ?? '',
+      pair: named?.pair ?? '',
+      chain: named?.chain ?? '',
       kind,
       text,
       tone,
@@ -424,6 +458,6 @@ export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = nu
     portfolio: portfolio(bots, asOf),
     bots,
     prices: bots.filter((b) => b.price != null).map(tapeOf),
-    activity: activityOf(events, new Map(bots.map((b) => [b.metrics.botId, b.pair]))),
+    activity: activityOf(events, new Map(bots.map((b) => [b.metrics.botId, { pair: b.pair, chain: b.chain }]))),
   };
 }

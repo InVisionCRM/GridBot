@@ -96,13 +96,15 @@ export interface BotDesk {
   change24h: number | null;
 }
 
-export interface TapePrice { symbol: string; price: number | null; change24h: number | null }
+export interface TapePrice { symbol: string; chain: string; price: number | null; change24h: number | null }
 
 export interface ActivityItem {
   id: string;
   t: number;
   botId: string;
+  /** Conventional base/quote, without a chain suffix. */
   pair: string;
+  chain: string;
   kind: 'fill' | 'recenter' | 'fee';
   text: string;
   tone: 'up' | 'down' | 'flat';
@@ -112,6 +114,8 @@ export interface PortfolioSnapshot {
   asOf: number;
   /** Live bots, summed after each bot's dollars are rounded to cents. Null if a running live bot has no dollar figure. */
   generatedUsd: number | null;
+  /** Sum of running live est.d1. Null when any running live bot has no D1 yet. */
+  generatedPerDay: TokenQty[] | null;
   /** Sum of running live est.usd.d1. Null when any running live bot has no D1 yet. */
   generatedPerDayUsd: number | null;
   paperGeneratedUsd: number | null;

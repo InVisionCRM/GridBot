@@ -75,6 +75,13 @@ export function formatAge(sec: number | null): string {
   return `${(h / 24).toFixed(1)}d`;
 }
 
+/** A real zero with nothing earned yet. Unknown (null) stays a dash in the view. */
+export function showsNoFills(m: { generated: { amount: number }[]; generatedUsd: number | null; fillCount: number | null }): boolean {
+  if (m.generatedUsd !== 0) return false;
+  if (m.generated.some((t) => t.amount !== 0)) return false;
+  return m.fillCount === 0 || m.fillCount == null;
+}
+
 /** Collapse long decimals in a log line. Display only; the full line stays on the item. */
 export function shortenFigures(text: string): string {
   return text.replace(/[+-]?\d[\d,]*(?:\.\d+)?/g, (raw) => {
