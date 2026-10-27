@@ -8,7 +8,9 @@ pragma solidity 0.8.26;
  * Flow: [wrap native → optional V2/V3 prep hop] → BUY through the exact V4 PoolKey and hooks (Universal Router +
  * Permit2) → transfer 10% to a fresh address → SELL the rest back the same way. Balance deltas reveal buy /
  * transfer / sell taxes; a revert at a stage reveals a honeypot. Native currency is address(0): the probe sends
- * value and measures its own ETH balance. V2 prep hops use SupportingFeeOnTransferTokens, same as SafetyProbe.
+ * value and measures its own ETH balance. The sell of native ETH quotes and swaps only the bought remainder
+ * (gotBuy minus the 10% transfer), not the funding ETH the state override endowed. V2 prep hops use
+ * SupportingFeeOnTransferTokens, same as SafetyProbe.
  *
  * The V4 hop encodes Universal Router 2.1.x calldata: command 0x10, actions 0x06/0x0c/0x0f, and
  * ExactInputSingleParams with minHopPriceX36 = 0.
@@ -76,8 +78,12 @@ contract SafetyProbeV4 {
             r.transferGot = _bal(bought, sink) - s0;
         }
 
-        address sellIn = sell.zeroForOne ? sell.key.currency0 : sell.key.currency1;
-        r.sellIn = _bal(sellIn, address(this));
+        address sellCur = sell.zeroForOne ? sell.key.currency0 : sell.key.currency1;
+        // ERC-20: the probe held none of the bought token, so its balance is what remains after the 10%
+        // transfer — the same sell size as SafetyProbe. Native ETH is also the funding endowment, so the
+        // balance includes leftover ETH. Quote and sell only the bought remainder.
+        if (sellCur == address(0)) r.sellIn = bought == address(0) ? r.gotBuy - r.transferSent : 0;
+        else r.sellIn = _bal(sellCur, address(this));
         r.expectedSell = _quoteV4(sell, r.sellIn);
         g = gasleft();
         try this.swapV4(sell, r.sellIn) returns (uint256 got) { r.gotSell = got; }

@@ -72,9 +72,7 @@ describe('Robinhood V4 fork', () => {
     const cfg = CHAINS.find((c) => c.id === 4663)!.dexes.find((d) => d.id === 'uniswap-v4')!;
     const v3 = CHAINS.find((c) => c.id === 4663)!.dexes.find((d) => d.id === 'uniswap-v3')!;
     // No-hook 0.05% ETH/USDG pool (currency0 is native ETH). The buy input is USDG, so the probe
-    // approves Permit2 and Permit2 approves the Universal Router before execute. The sell input is
-    // native ETH: the probe's whole balance, funding leftover plus the ETH just bought, quoted and
-    // swapped as that same amount.
+    // approves Permit2 and Permit2 approves the Universal Router before execute.
     const key = { currency0: ZERO, currency1: USDG, fee: 500, tickSpacing: 10, hooks: ZERO };
     const id = '0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982';
     expect(poolId(key)).toBe(id);
@@ -96,5 +94,38 @@ describe('Robinhood V4 fork', () => {
     expect(probe.transferSent > 0n).toBe(true);
     expect(probe.expectedSell > 0n).toBe(true);
     expect(probe.gotSell).toBe(probe.expectedSell);
+  }, 180_000);
+
+  it('sells only the ETH bought, not the funding balance, when native ETH is the sell currency', async () => {
+    const cfg = CHAINS.find((c) => c.id === 4663)!.dexes.find((d) => d.id === 'uniswap-v4')!;
+    const v3 = CHAINS.find((c) => c.id === 4663)!.dexes.find((d) => d.id === 'uniswap-v3')!;
+    const key = { currency0: ZERO, currency1: USDG, fee: 500, tickSpacing: 10, hooks: ZERO };
+    const id = '0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982';
+    const pool: PoolRef = {
+      dex: 'uniswap-v4', kind: 'v4', address: id, feeBps: 5,
+      v4: { ...key, poolId: id, dynamicFee: false },
+    };
+    const wethIn = 10n ** 15n;
+    const prep: Hop = { kind: 1, router: v3.router, quoter: v3.quoter!, fee: 100, tokenIn: WETH, tokenOut: USDG };
+    const probe = await simulateV4RoundTrip(rt(), {
+      weth: WETH, wethIn, prep,
+      buy: v4Leg(pool, USDG, WETH, cfg, WETH),
+      sell: v4Leg(pool, WETH, USDG, cfg, WETH),
+    });
+    expect(probe.stage, probe.err).toBe(0);
+    const proceeds = probe.gotBuy - probe.transferSent;
+    // The state override endows wethIn * 4. After the WETH deposit the leftover funding is 3 * wethIn,
+    // so the old sell (the whole ETH balance) is larger than the bought remainder and fails this equality.
+    expect(probe.sellIn).toBe(proceeds);
+    expect(probe.sellIn < wethIn * 3n).toBe(true);
+    const quoteRaw = await provider.call({
+      to: cfg.quoter,
+      data: V4_QUOTER.encodeFunctionData('quoteExactInputSingle', [{
+        poolKey: key, zeroForOne: true, exactAmount: proceeds, hookData: '0x',
+      }]),
+    });
+    const [quoted] = V4_QUOTER.decodeFunctionResult('quoteExactInputSingle', quoteRaw);
+    expect(probe.expectedSell).toBe(quoted);
+    expect(probe.gotSell).toBe(quoted);
   }, 180_000);
 });
