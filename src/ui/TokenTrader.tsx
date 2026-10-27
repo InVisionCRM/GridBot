@@ -57,6 +57,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         <label className="smart-field"><span className="k">Min pool age (hours)</span><input value={Math.round(o.minPoolAgeSec / 3600)} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, minPoolAgeSec: numIn(e.target.value) * 3600 } })} onBlur={() => void save({ minPoolAgeSec: o.minPoolAgeSec })} /></label>
         <label className="smart-field"><span className="k">Max pool share %</span><input value={Math.round(o.maxPoolShare * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxPoolShare: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxPoolShare: o.maxPoolShare })} /></label>
         <label className="smart-field"><span className="k">Impact cap %</span><input value={Math.round(o.maxImpact * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxImpact: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxImpact: o.maxImpact })} /></label>
+        <label className="smart-field"><span className="k">Trade-size cap %</span><input value={Math.round((o.sizeImpactCap ?? 0.01) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sizeImpactCap: numIn(e.target.value) / 100 } })} onBlur={() => void save({ sizeImpactCap: o.sizeImpactCap })} /></label>
         <label className="smart-field"><span className="k">Risk</span>
           <select value={o.risk} onChange={(e) => void save({ risk: e.target.value })}>
             <option value="safe">Safe</option>
@@ -72,6 +73,10 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         </label>
       </div>
 
+      <div className="tt-row" style={{ marginTop: 10 }}>
+        <label className="check"><input type="checkbox" checked={o.enforceSizeImpact === true} onChange={(e) => void save({ enforceSizeImpact: e.target.checked })} /><span>Cap impact at the trade size</span></label>
+        <span className="muted small">Off unless checked, and off changes nothing. The impact cap above still sizes the trade. When this is on, that sized trade is quoted again (V3 through the quoter) and skipped if the move is over the trade-size cap. The default cap is 1%. A quote that fails skips the buy.</span>
+      </div>
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.sniper.on} onChange={(e) => void save({ sniper: { ...o.sniper, on: e.target.checked } })} /><span>Sniper</span></label>
         <label className="smart-field"><span className="k">Min liquidity</span><input value={o.sniper.minLiquidityUsd} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, minLiquidityUsd: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>

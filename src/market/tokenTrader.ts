@@ -16,6 +16,8 @@ import { capSwap, TOKEN_MAX_POOL_SHARE } from './poolSize';
 
 export const DEFAULT_MIN_POOL_AGE_SEC = 24 * 3600;
 export const DEFAULT_SNIPER_MIN_LIQ_USD = 5_000;
+/** Default cap for the optional trade-size impact check. The 3% sizing cap and the 3%/5% depth rules stay. */
+export const DEFAULT_SIZE_IMPACT_CAP = 0.01;
 
 export const EXIT = {
   hardStop: 0.25,
@@ -129,9 +131,29 @@ export interface GateInput {
   recentLiqPull: boolean;
   /** The existing safety classifier. Live still requires this. */
   liveAllowed: boolean;
+  /**
+   * Quote impact at the sized trade and cap it. Absent or false: `sizeImpact` is ignored, so the gate
+   * matches today. The $100/$500/$1000 depth rules and the sizing cap are unchanged either way.
+   */
+  enforceSizeImpact?: boolean;
+  /** Impact at the sized trade. null = the quote failed. Ignored unless `enforceSizeImpact`. */
+  sizeImpact?: number | null;
+  /** Cap for that impact. Default 1% when the check is on. */
+  sizeImpactCap?: number;
 }
 
 export interface GateResult { ok: boolean; liveOk: boolean; reason: string | null }
+
+/**
+ * The trade-size impact rule. null impact (the quote threw or never came back) fails closed.
+ * A cap outside (0, 5%] falls back to 1% rather than letting the trade through.
+ */
+export function sizeImpactReason(impact: number | null, cap: number): string | null {
+  const limit = cap > 0 && cap <= HARD_CAPS.maxPriceImpact ? cap : DEFAULT_SIZE_IMPACT_CAP;
+  if (impact == null || !Number.isFinite(impact)) return 'price impact at this size could not be verified';
+  if (impact > limit) return `price impact ${(impact * 100).toFixed(2)}% at this size is over the ${(limit * 100).toFixed(2)}% cap`;
+  return null;
+}
 
 /**
  * Extra gate in front of the existing classifier. It does not weaken it: live still needs liveAllowed,
@@ -160,6 +182,10 @@ export function gateToken(g: GateInput): GateResult {
     if (g.canBlacklist === true) return hard('owner can blacklist');
     if (tax > TAX_TOLERANCE) return hard(`tax ${(tax * 100).toFixed(2)}% (safe allows none)`);
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
+  }
+  if (g.enforceSizeImpact) {
+    const why = sizeImpactReason(g.sizeImpact ?? null, g.sizeImpactCap ?? DEFAULT_SIZE_IMPACT_CAP);
+    if (why) return hard(why);
   }
   // Honeypot and a failed sell already returned above, so live only still needs the classifier and the tax cap.
   return { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null };
