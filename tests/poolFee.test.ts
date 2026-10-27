@@ -139,7 +139,7 @@ describe('dynamic-fee pools: fee read at quote time', () => {
   });
 });
 
-describe('findPools: feeBps is fee(), feeTier stays the factory tier', () => {
+describe('findPools: feeTier stays the factory tier', () => {
   const W = A(200), T = A(100), FACTORY = A(50), QUOTER = A(52), ROUTER = A(51), POOL = A(1);
   const ZERO = '0x' + '0'.repeat(40);
   const SEL_GET = V3_FACTORY.getFunction('getPool')!.selector;
@@ -173,18 +173,18 @@ describe('findPools: feeBps is fee(), feeTier stays the factory tier', () => {
     return { cfg, call, feeReads: () => feeReads, quotedFees };
   }
 
-  it('a static pool reports fee() in bps and still quotes and swaps on the factory tier', async () => {
+  it('a static pool takes feeBps from the factory tier and still quotes and swaps on that tier', async () => {
     const c = splitChain(false, () => 10000);
     const ad = new V3Adapter(c, c.cfg, W);
     const [pool] = await ad.findPools(W, T);
     expect(pool.address.toLowerCase()).toBe(POOL);
-    expect(pool).toMatchObject({ kind: 'v3', feeTier: 100, feeBps: 100 });
-    expect(c.feeReads()).toBe(1);
+    expect(pool).toMatchObject({ kind: 'v3', feeTier: 100, feeBps: 1 });
+    expect(c.feeReads()).toBe(0);
     const q = await ad.quote(pool, W, T, 1_000_000n);
-    expect(c.feeReads()).toBe(1);
+    expect(c.feeReads()).toBe(0);
     expect(c.quotedFees).toEqual([100n]);
-    // 990000 out of 1e6 at price 1 is exactly a 1% fee, and not the 0.01% factory tier.
-    expect(q.impact).toBeCloseTo(0, 6);
+    // The quoter mock returns a 1% shortfall. Impact is priced at the 0.01% tier, not at that shortfall.
+    expect(q.impact).toBeCloseTo(1 - 990_000 / (1_000_000 * (1 - 1 / 10_000)), 6);
     const built = ad.buildSwap({ pool, tokenIn: W, tokenOut: T, amountIn: 1_000_000n, amountOutMin: 1n, recipient: A(9), deadline: 99n });
     const single = V3_ROUTER.decodeFunctionData('exactInputSingle', (built.args as [bigint, string[]])[1][0])[0] as { fee: bigint };
     expect(single.fee).toBe(100n);
@@ -207,9 +207,21 @@ describe('findPools: feeBps is fee(), feeTier stays the factory tier', () => {
     expect(fees).toEqual([]);
   });
 
-  it('a pool whose fee() cannot be read is dropped instead of priced at the factory tier', async () => {
-    const c = splitChain(false, () => { throw new Error('no fee()'); });
+  it('a failed fee() read keeps the pool with feeBps equal to the factory tier', async () => {
+    const c = splitChain(true, () => { throw new Error('no fee()'); });
     const ad = new V3Adapter(c, c.cfg, W);
-    expect(await ad.findPools(W, T)).toEqual([]);
+    const [pool] = await ad.findPools(W, T);
+    expect(pool.address.toLowerCase()).toBe(POOL);
+    expect(pool).toMatchObject({ kind: 'v3', feeTier: 100, feeBps: 1 });
+    expect(c.feeReads()).toBe(1);
+  });
+
+  it('a non-dynamic DEX makes no fee() call in findPools', async () => {
+    const c = splitChain(false, () => 10000);
+    const ad = new V3Adapter(c, c.cfg, W);
+    const pools = await ad.findPools(W, T);
+    expect(pools).toHaveLength(1);
+    expect(pools[0]).toMatchObject({ feeTier: 100, feeBps: 1 });
+    expect(c.feeReads()).toBe(0);
   });
 });
