@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
@@ -28,6 +29,7 @@ const pool = (o: Partial<FreshPool> = {}): FreshPool => ({
 function trader(o: {
   now?: () => number; discover?: () => Promise<FreshPool[]>;
   assess?: (p: FreshPool) => Promise<GateInput>;
+  quoteImpact?: (p: FreshPool, spend: number) => Promise<number>;
   hits?: SnipeHit[]; resolve?: (h: SnipeHit) => Promise<FreshPool | null>;
   store?: MemoryStore<TraderState>;
 } = {}) {
@@ -36,6 +38,7 @@ function trader(o: {
   const t = new TokenTrader({
     store, now: o.now ?? (() => 1_700_000_000_000), sniper,
     discover: o.discover, assess: async (p) => (o.assess ? o.assess(p) : clean()),
+    quoteImpact: o.quoteImpact,
     resolve: o.resolve ?? (async () => null),
   });
   return { t, store };
@@ -130,6 +133,16 @@ describe('token trader engine', () => {
       expect(saved.body.options.perTradeUsd).toBe(40);
       expect(saved.body.options.sniper.on).toBe(true);
       expect(saved.body.options.sniper.chains[1]).toBe(false);
+      expect(saved.body.options.enforceSizeImpact).toBe(false);
+      expect(saved.body.options.sizeImpactCap).toBe(0.01);
+      expect(saved.body.options.maxImpact).toBe(0.03);
+      const ui = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
+      expect(ui).toMatch(/Cap impact at the trade size/);
+      expect(ui).toMatch(/enforceSizeImpact/);
+      const capped = await call('PUT', '/api/token-trader', { enforceSizeImpact: true, sizeImpactCap: 0.015 });
+      expect(capped.body.options.enforceSizeImpact).toBe(true);
+      expect(capped.body.options.sizeImpactCap).toBeCloseTo(0.015, 6);
+      expect(capped.body.options.maxImpact).toBe(0.03);
       expect((await call('POST', '/api/token-trader/on')).body.on).toBe(true);
       expect((await call('POST', '/api/token-trader/off')).body.on).toBe(false);
       expect(store.load()!.options.perTradeUsd).toBe(40);
@@ -144,5 +157,82 @@ describe('token trader engine', () => {
     expect(() => t.turnOn()).toThrow(/not wired/);
     expect(() => t.configure({ sniper: { on: false, minLiquidityUsd: 1, delayBlocks: 0, delaySec: 0, maxPerHour: 1, chains: {}, mevRpc: 'http://rpc.example' } })).toThrow(/https/);
     expect(() => t.configure({ maxImpact: 0.2 })).toThrow(/5%/);
+    expect(() => t.configure({ sizeImpactCap: 0.2 })).toThrow(/Trade-size/);
+  });
+
+  it('does not quote the trade size when the check is off, and skips when the quoted impact is over the cap', async () => {
+    const p = pool({ tokenSymbol: 'QUIET' });
+    let calls = 0;
+    const off = trader({
+      discover: async () => [p],
+      quoteImpact: async () => { calls++; throw new Error('rpc down'); },
+    });
+    off.t.configure({ minPoolAgeSec: 0 });
+    off.t.turnOn();
+    await off.t.tick();
+    expect(calls).toBe(0);
+    expect(off.t.status().positions).toHaveLength(1);
+    expect(off.t.status().options.enforceSizeImpact).toBe(false);
+    expect(off.t.status().options.maxImpact).toBe(0.03);
+
+    const spends: number[] = [];
+    const hot = trader({
+      discover: async () => [pool({ tokenSymbol: 'HOT' })],
+      quoteImpact: async (_p, spend) => { spends.push(spend); return 0.02; },
+    });
+    hot.t.configure({ minPoolAgeSec: 0, perTradeUsd: 100, enforceSizeImpact: true });
+    hot.t.turnOn();
+    await hot.t.tick();
+    expect(spends).toHaveLength(1);
+    expect(spends[0]).toBeGreaterThan(0.04);
+    expect(spends[0]).toBeLessThan(0.051);
+    expect(hot.t.status().positions).toHaveLength(0);
+    expect(hot.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/2\.00% at this size is over the 1\.00%/);
+
+    const ok = trader({
+      discover: async () => [pool({ tokenSymbol: 'OK' })],
+      quoteImpact: async () => 0.004,
+    });
+    ok.t.configure({ minPoolAgeSec: 0, enforceSizeImpact: true, sizeImpactCap: 0.01 });
+    ok.t.turnOn();
+    await ok.t.tick();
+    expect(ok.t.status().positions).toHaveLength(1);
+  });
+
+  it('skips the buy when the trade-size quote throws', async () => {
+    const { t } = trader({
+      discover: async () => [pool({ tokenSymbol: 'FAIL' })],
+      quoteImpact: async () => { throw new Error('quoter reverted'); },
+    });
+    t.configure({ minPoolAgeSec: 0, risk: 'any', enforceSizeImpact: true });
+    t.turnOn();
+    await t.tick();
+    expect(t.status().positions).toHaveLength(0);
+    expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+  });
+
+  it('keeps the trade-size check off for a saved file that predates it', async () => {
+    const store = new MemoryStore<TraderState>();
+    store.save({
+      version: 1, on: false,
+      options: {
+        mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 0, chains: [],
+        risk: 'safe', maxImpact: 0.03, maxPoolShare: 0.02,
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+      },
+      positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
+    } as TraderState);
+    let calls = 0;
+    const { t } = trader({
+      store, discover: async () => [pool()],
+      quoteImpact: async () => { calls++; throw new Error('should not be called'); },
+    });
+    expect(t.status().options.enforceSizeImpact).toBe(false);
+    expect(t.status().options.sizeImpactCap).toBe(0.01);
+    expect(t.status().options.maxImpact).toBe(0.03);
+    t.turnOn();
+    await t.tick();
+    expect(calls).toBe(0);
+    expect(t.status().positions).toHaveLength(1);
   });
 });
