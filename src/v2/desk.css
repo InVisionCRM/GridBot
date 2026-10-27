@@ -446,10 +446,9 @@
 .v2 .card-skel { height: 120px; margin-bottom: 12px; }
 
 @media (max-width: 800px) {
-  .v2 .hero.glass { padding: 12px 14px 10px; gap: 4px; }
-  .v2 .hero-units { font-size: 26px; line-height: 1.15; white-space: normal; }
-  .v2 .hero-top .chips { display: none; }
-  .v2 .hero-rate { font-size: 13px; margin: 0; white-space: nowrap; }
+  .v2 .hero.glass { padding: 18px 14px 16px; gap: 12px; }
+  .v2 .hero-units { font-size: 28px; line-height: 1.15; white-space: normal; }
+  .v2 .hero-rate { font-size: 15px; margin: 0; white-space: normal; }
   .v2 .hero-curve .seg button { padding: 1px 5px; font-size: 10px; }
   .v2 .hero-curve .curve-empty { font-size: 12px; }
   .v2 .hero-gen { font-size: 20px; }
