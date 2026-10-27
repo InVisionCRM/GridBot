@@ -16,6 +16,7 @@ import { DailyScanner, scanDepsFromHub, type ScanFile } from './market/scanner';
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
+import { SwapService } from './swap/service';
 import { fetchJson } from './fetchJson';
 import { PoolSearch } from './market/poolSearch';
 import { TFS } from '../market/candles';
@@ -108,6 +109,8 @@ const friends = copy ? undefined
       });
 const lpReplay = new LpReplay(hub, new PoolHistories(path.join(dataDir, 'pool-history'), (id) => readers.get(id)!), cfg.approval);
 const convert = new Converter({ hub, allocations: () => bot.allocations().rows, approval: cfg.approval, emit: activity.emitEvent, fetchJson });
+// Quotes and, in live mode, calldata only. Broadcasting stays with a later sendSafe caller.
+const swap = new SwapService({ runtime: (chainId) => hub.rt(chainId), allocations: () => bot.allocations().rows });
 // The smart trader: budgets per chain, run as grid and liquidity bots picked from the opportunity scan.
 const autopilot = new Autopilot({
   bot, store: new JsonStore<AutopilotState>(path.join(dataDir, 'autopilot.json')), emit: activity.emitEvent,
@@ -121,7 +124,7 @@ const tokenTrader = copy ? undefined : createTokenTrader({
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
-  lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
+  lpReplay: (q) => lpReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
   friends, autopilot, tokenTrader, copy: !!copy,
 });

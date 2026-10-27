@@ -17,6 +17,7 @@ import { fmtFeeTier } from '../live/chains';
 import type { VersionCheck } from './system/version';
 import { runChecks } from './system/checks';
 import type { Converter } from './convert/converter';
+import type { SwapService } from './swap/service';
 import type { PoolSearch } from './market/poolSearch';
 import type { FriendsHost } from './friends/host';
 import type { GeckoRelay } from './friends/relay';
@@ -49,6 +50,8 @@ export interface AppOpts {
   lpReplay?: (q: { market: string; capital?: number; maxImpact?: number }) => Promise<unknown>;
   /** Tools → Convert: a chain's holdings into one coin (server only: reads the explorer, signs swaps) */
   convert?: Converter;
+  /** Same-chain swap quotes. Builds calldata in live mode and never broadcasts it. */
+  swap?: SwapService;
   /** Pair search in the pair pickers (server only: asks DexScreener) */
   poolSearch?: PoolSearch;
   heartbeatMs?: number;
@@ -326,6 +329,20 @@ export function createApp(o: AppOpts) {
   }));
   app.get('/api/convert/job', wrap(() => ({ job: cv().job() })));
   app.post('/api/convert/stop', wrap(() => { cv().stop(); return { ok: true }; }));
+
+  // Quote only. Live mode returns calldata; this route never broadcasts it.
+  app.post('/api/swap/quote', wrap(async (req) => {
+    if (!o.swap) throw new Error('swap quoting is not available');
+    const b = req.body ?? {};
+    if (typeof b.amountIn !== 'string' || !/^\d+$/.test(b.amountIn)) throw new Error('amountIn must be a decimal string of raw units');
+    return plain(await o.swap.quote({
+      chainId: Number(b.chainId), tokenIn: String(b.tokenIn ?? ''), tokenOut: String(b.tokenOut ?? ''),
+      amountIn: BigInt(b.amountIn), owner: String(b.owner ?? ''),
+      recipient: typeof b.recipient === 'string' ? b.recipient : undefined,
+      mode: b.mode === 'live' ? 'live' : 'paper',
+      slippageBps: num(b.slippageBps), deadlineMinutes: num(b.deadlineMinutes), maxPriceImpact: num(b.maxPriceImpact),
+    }));
+  }));
 
   // ── Smart trader ────────────────────────────────────────────────────
   const ap = () => { if (!o.autopilot) throw new Error('The smart trader is not available.'); return o.autopilot; };
