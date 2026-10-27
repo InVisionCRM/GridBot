@@ -3,9 +3,15 @@
  * eth_call at 'pending', then estimateGas against the kind's cap, then an explicit gasLimit,
  * then a fee check, all of that again after the chain's TxGate is acquired (a bot tx may have
  * been ahead of us). The router halt is read immediately before the shared nonce is taken.
- * Fees: EIP-1559 uses a clamped priority fee and maxFee = 2×base + priority. A legacy chain
- * puts the price in gasPrice. The hash is keccak256 of the signed bytes, so a send timeout or
- * "already known" still has a hash. Nothing here sends a second time. Not used by bots.
+ * Fees: EIP-1559 pays the network's suggested tip when it is within the per-chain tip cap, and
+ * maxFee = 2×base + that tip. A suggestion above the cap aborts (code fee) instead of underpaying,
+ * which would stick the tx and block this chain's shared nonce. A legacy chain puts the price in
+ * gasPrice. The hash is keccak256 of the signed bytes, so a send timeout or "already known" still
+ * has a hash. The raw tx goes to one endpoint: a rotating send can time out after accept and the
+ * next endpoint then says the nonce is used. Nothing here sends a second time. Not used by bots.
+ *
+ * The caller, when one exists, must use that chain's runtime: hub.rt(chainId).gate and
+ * hub.rt(chainId).nonce (or the runtime itself), and halted: routerSendHalted(router).
  */
 import { Interface, keccak256, toQuantity } from 'ethers';
 import { isRealRevert, isTransportError } from '../chains/fallback';
@@ -16,12 +22,6 @@ import type { TxKind } from './settings';
 const REVERT = new Interface(['error Error(string)', 'error Panic(uint256)']);
 const ADDR = /^0x[0-9a-fA-F]{40}$/;
 const DATA = /^0x(?:[0-9a-fA-F]{2})*$/;
-const GWEI = 1_000_000_000n;
-/**
- * A node that answers eth_maxPriorityFeePerGas with the whole gas price must not have that
- * copied into the tip. 5 gwei covers a normal Ethereum tip; the per-chain unit cap is the abort.
- */
-export const PRIORITY_FEE_CLAMP_WEI = 5n * GWEI;
 const BLOCK_SCAN = 8;
 
 export type SendSafeCode =
@@ -41,6 +41,13 @@ export interface SafeReader {
   send(method: string, params: unknown[]): Promise<unknown>;
   getFeeData(): Promise<{ gasPrice: bigint | null; maxFeePerGas: bigint | null }>;
   getTransactionCount(address: string, blockTag: 'pending' | 'latest'): Promise<number>;
+  /**
+   * eth_sendRawTransaction on one endpoint, with no rotation. FallbackReader implements this.
+   * When absent, send('eth_sendRawTransaction') is used.
+   */
+  broadcastRaw?(raw: string): Promise<unknown>;
+  /** True when this hash is already known (any endpoint). When absent, one send() lookup is used. */
+  hasTx?(hash: string): Promise<boolean>;
 }
 
 /** Signs one tx. The hub's wallet does this; sendSafe broadcasts the raw bytes itself. */
@@ -68,6 +75,11 @@ export interface SendSafeOpts {
   gasBudgetWei: bigint;
   /** Wei per gas. Abort when the price itself is above this (router maxGasPriceWei). */
   maxGasPriceWei: bigint;
+  /**
+   * Wei. Abort when the network's suggested tip is above this (router maxPriorityFeeWei).
+   * The tip on the tx is the suggestion, never a lower clamp.
+   */
+  maxPriorityFeeWei: bigint;
   /** Extra wei (Orbit L1 component) added to the fee check. Omit on an L1. */
   l1FeeWei?: bigint;
   receiptTimeoutMs?: number;
@@ -78,6 +90,14 @@ export interface SendSafeOpts {
   halted?: () => boolean;
   /** Called with a safe reason. Must not receive a raw RPC error (that can carry an endpoint). */
   warn?: (msg: string) => void;
+}
+
+/**
+ * The halted predicate a router send must use. Stop all sets the halt; `on` is false by default
+ * and is not itself a halt, so a check of the on flag would refuse every send before Stop all.
+ */
+export function routerSendHalted(router: { isHalted(): boolean }): () => boolean {
+  return () => router.isHalted();
 }
 
 export type SendSafeStatus = 'confirmed' | 'pending' | 'reverted' | 'replaced' | 'cancelled';
@@ -216,16 +236,18 @@ async function tryQty(o: SendSafeOpts, method: string, params: unknown[]): Promi
   catch { return null; }
 }
 
-function clampPriority(tip: bigint, unitCap: bigint): bigint {
-  if (tip < 0n) return 0n;
-  const ceiling = unitCap < PRIORITY_FEE_CLAMP_WEI ? unitCap : PRIORITY_FEE_CLAMP_WEI;
-  return tip > ceiling ? ceiling : tip;
+/** Pay the suggestion, or abort. A lower tip would sit unmined and hold this chain's nonce. */
+function payTip(o: SendSafeOpts, suggested: bigint): bigint {
+  const cap = o.maxPriorityFeeWei;
+  if (suggested < 0n) fail(o, 'fee', 'priority fee is negative');
+  if (suggested > cap) fail(o, 'fee', `priority fee ${suggested} wei exceeds the ${cap} wei tip cap`);
+  return suggested;
 }
 
-/** eth_maxPriorityFeePerGas, else the median tip from eth_feeHistory, else 1 gwei. Always clamped. */
+/** eth_maxPriorityFeePerGas, else the median tip from eth_feeHistory. Never a guessed tip below the network. */
 async function priorityFee(o: SendSafeOpts): Promise<bigint> {
   const direct = await tryQty(o, 'eth_maxPriorityFeePerGas', []);
-  if (direct != null) return clampPriority(direct, o.maxGasPriceWei);
+  if (direct != null) return payTip(o, direct);
   try {
     const hist = await o.reader.send('eth_feeHistory', ['0xa', 'latest', [50]]) as { reward?: unknown };
     const tips: bigint[] = [];
@@ -233,13 +255,13 @@ async function priorityFee(o: SendSafeOpts): Promise<bigint> {
       for (const row of hist.reward) {
         const cell = Array.isArray(row) ? row[0] : null;
         const n = qtyOrNull(cell);
-        if (n != null && n > 0n) tips.push(n);
+        if (n != null) tips.push(n);
       }
     }
     tips.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    if (tips.length) return clampPriority(tips[Math.floor(tips.length / 2)]!, o.maxGasPriceWei);
-  } catch { /* fee history is optional; the default tip is below */ }
-  return clampPriority(GWEI, o.maxGasPriceWei);
+    if (tips.length) return payTip(o, tips[Math.floor(tips.length / 2)]!);
+  } catch { /* no history: do not invent a tip */ }
+  fail(o, 'fee', 'no priority fee from the chain');
 }
 
 async function resolveFee(o: SendSafeOpts): Promise<Pick<Plan, 'unit' | 'gasPrice' | 'maxFeePerGas' | 'maxPriorityFeePerGas'>> {
@@ -370,15 +392,18 @@ async function detectReplacement(o: SendSafeOpts, from: string, nonce: number, o
     for (const tx of txsOf(block)) {
       if (!sameAddr(tx.from, from) || nonceOf(tx.nonce) !== nonce) continue;
       const hash = typeof tx.hash === 'string' ? tx.hash : '';
+      if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) continue;
       if (hash.toLowerCase() === ourHash.toLowerCase()) return null;
       const kind = isCancel(tx, from) ? 'cancelled' : 'replaced';
-      return { status: kind, state: 'source_replaced', hash: ourHash, ...(hash ? { replacementHash: hash } : {}) };
+      return { status: kind, state: 'source_replaced', hash: ourHash, replacementHash: hash };
     }
+    if (i + 1 >= BLOCK_SCAN) break;
     const n = blockNum(block);
     if (n == null || n <= 0n) break;
     block = await o.reader.send('eth_getBlockByNumber', [toQuantity(n - 1n), true]);
   }
-  return { status: 'replaced', state: 'source_replaced', hash: ourHash };
+  // Not in the recent window, or the reads did not name a different hash. Keep tracking our hash.
+  return null;
 }
 
 async function waitOutcome(o: SendSafeOpts, from: string, hash: string, nonce: number): Promise<Outcome> {
@@ -403,6 +428,22 @@ async function waitOutcome(o: SendSafeOpts, from: string, hash: string, nonce: n
   }
 }
 
+/** The signed hash is already on an endpoint, so "nonce too low" is this tx, not a lost nonce. */
+async function ourTxIsKnown(o: SendSafeOpts, hash: string): Promise<boolean> {
+  if (o.reader.hasTx) {
+    try { return await o.reader.hasTx(hash); } catch { return false; }
+  }
+  try {
+    const tx = await o.reader.send('eth_getTransactionByHash', [hash]);
+    if (tx && typeof tx === 'object') return true;
+  } catch { /* one endpoint missed it; a receipt may still exist */ }
+  try {
+    const receipt = await o.reader.send('eth_getTransactionReceipt', [hash]);
+    if (receipt && typeof receipt === 'object') return true;
+  } catch { /* not found */ }
+  return false;
+}
+
 async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number): Promise<SendSafeResult> {
   const tx = o.tx;
   const common = { to: tx.to, data: tx.data, value: tx.value, nonce, gasLimit: plan.gasLimit, chainId: o.chainId };
@@ -424,16 +465,20 @@ async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number): Promise<Se
     throw e;
   }
   try {
-    await o.reader.send('eth_sendRawTransaction', [raw]);
+    if (o.reader.broadcastRaw) await o.reader.broadcastRaw(raw);
+    else await o.reader.send('eth_sendRawTransaction', [raw]);
   } catch (e) {
     const kind = broadcastKind(e);
-    if (kind !== 'already_known' && kind !== 'timeout') {
+    if (kind === 'already_known' || kind === 'timeout') {
+      // The bytes may already be in the mempool. Track the local hash. Do not send again and do not drop the nonce.
+    } else if (kind === 'stale_nonce' && await ourTxIsKnown(o, hash)) {
+      // This endpoint says the nonce is used because another endpoint already accepted these bytes.
+    } else {
       o.nonce.invalidate();
       if (kind === 'underpriced') fail(o, 'underpriced', 'replacement underpriced; not resent');
       if (kind === 'stale_nonce') fail(o, 'stale_nonce', 'nonce already used; not resent');
       fail(o, 'broadcast', sanitizeBroadcastError(e));
     }
-    // already known / the send itself timed out: the bytes may be in the mempool. Track the local hash. Do not send again.
   }
   const outcome = await waitOutcome(o, tx.from, hash, nonce);
   return { ...outcome, gasLimit: plan.gasLimit, nonce };
@@ -446,6 +491,7 @@ export async function sendSafe(o: SendSafeOpts): Promise<SendSafeResult> {
   if (typeof tx.value !== 'bigint' || tx.value < 0n) fail(o, 'sim', 'value must be a non-negative amount');
   if (!Number.isInteger(o.chainId) || o.chainId <= 0) fail(o, 'sim', 'chain id is missing');
   if (typeof o.maxGasPriceWei !== 'bigint' || o.maxGasPriceWei <= 0n) fail(o, 'fee', 'gas price cap is missing');
+  if (typeof o.maxPriorityFeeWei !== 'bigint' || o.maxPriorityFeeWei <= 0n) fail(o, 'fee', 'priority fee cap is missing');
 
   // Refuse before any read when Stop all already landed. A send that is only queued later is checked inside the gate.
   assertNotHalted(o);

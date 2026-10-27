@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { Wallet } from 'ethers';
 import { describe, expect, it } from 'vitest';
@@ -90,6 +90,19 @@ describe('private key handling', () => {
     const snap = index.indexOf('...process.env');
     expect(take).toBeGreaterThanOrEqual(0);
     expect(snap).toBeGreaterThan(take);
+  });
+  it('a built client bundle does not contain quote key or private key names', () => {
+    const dir = join(root, 'dist', 'client');
+    if (!existsSync(dir)) return;
+    const names = ['ACROSS_API_KEY', 'RELAY_API_KEY', 'LIFI_API_KEY', 'PRIVATE_KEY'];
+    const walk = (d: string): string[] => readdirSync(d).flatMap((f) => {
+      const p = join(d, f);
+      return statSync(p).isDirectory() ? walk(p) : /\.(js|css|html|map)$/.test(p) ? [p] : [];
+    });
+    for (const file of walk(dir)) {
+      const text = readFileSync(file, 'utf8');
+      for (const name of names) expect(text, file).not.toContain(name);
+    }
   });
   it('redacts a configured quote key shorter than 16 characters', () => {
     const key = 'rk_short_1';

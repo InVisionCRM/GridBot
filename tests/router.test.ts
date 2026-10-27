@@ -11,7 +11,7 @@ import { MultiBot, type MultiState } from '../src/server/bot/multi';
 import { MemoryStore } from '../src/server/bot/store';
 import { bridgeConfigured, takeBridgeKeys } from '../src/server/env';
 import { Router, type RouterFile } from '../src/server/router/router';
-import { DEFAULT_MAX_GAS_PRICE_WEI, etaP90Within, MAX_GAS_PRICE_WEI_CAP, ROUTER_HARD_CAPS } from '../src/server/router/settings';
+import { DEFAULT_MAX_GAS_PRICE_WEI, DEFAULT_MAX_PRIORITY_FEE_WEI, defaultMaxPriorityFee, etaP90Within, MAX_GAS_PRICE_WEI_CAP, ROUTER_HARD_CAPS } from '../src/server/router/settings';
 import { MockChain, NET } from './helpers/mockChain';
 
 const CHAINS = [369, 1, 4663];
@@ -74,6 +74,14 @@ describe('router settings', () => {
     expect(s.maxGasPriceWei['4663']).toBe(DEFAULT_MAX_GAS_PRICE_WEI[4663].toString());
     expect(router.maxGasPriceWei(1)).toBe(DEFAULT_MAX_GAS_PRICE_WEI[1]);
     expect(router.maxGasPriceWei(999)).toBeNull();
+    expect(s.maxPriorityFeeWei['1']).toBe(DEFAULT_MAX_PRIORITY_FEE_WEI[1].toString());
+    expect(s.maxPriorityFeeWei['369']).toBe(DEFAULT_MAX_PRIORITY_FEE_WEI[369].toString());
+    expect(s.maxPriorityFeeWei['4663']).toBe(DEFAULT_MAX_PRIORITY_FEE_WEI[4663].toString());
+    expect(DEFAULT_MAX_PRIORITY_FEE_WEI[369]).toBeGreaterThan(33_525n * 1_000_000_000n);
+    expect(router.maxPriorityFeeWei(369)).toBe(DEFAULT_MAX_PRIORITY_FEE_WEI[369]);
+    expect(router.maxPriorityFeeWei(999)).toBeNull();
+    expect(defaultMaxPriorityFee(10, 200n * 1_000_000_000n)).toBe(20n * 1_000_000_000n);
+    expect(defaultMaxPriorityFee(369, 1n)).toBe(1n);
     expect(router.isHalted()).toBe(false);
     expect(etaP90Within(60 * 60, 60)).toBe(true);
     expect(etaP90Within(60 * 60 + 1, 60)).toBe(false);
@@ -123,6 +131,9 @@ describe('router settings', () => {
     expect(router.update({ maxGasPriceWei: { '369': '1000000000' } }).maxGasPriceWei['369']).toBe('1000000000');
     expect(() => router.update({ maxGasPriceWei: { '999': '1' } })).toThrow(/Unknown chain/);
     expect(router.maxGasPriceWei(369)).toBe(1_000_000_000n);
+    expect(router.update({ maxPriorityFeeWei: { '1': '1' } }).maxPriorityFeeWei['1']).toBe('1');
+    expect(router.update({ maxPriorityFeeWei: { '369': MAX_GAS_PRICE_WEI_CAP.toString() + '0' } }).maxPriorityFeeWei['369']).toBe(MAX_GAS_PRICE_WEI_CAP.toString());
+    expect(() => router.update({ maxPriorityFeeWei: { '999': '1' } })).toThrow(/Unknown chain/);
     expect(s.autoClaim).toBe(true);
     expect(router.update({ maxPerMoveUsd: 100, maxSlippageBps: 0, maxPerMoveUsdByChain: { '369': 1_000 } }).maxPerMoveUsdByChain).toEqual({ '369': 100 });
     expect(router.status().maxSlippageBps).toBe(1);
@@ -138,7 +149,7 @@ describe('router settings', () => {
       version: 1, on: true, mode: 'live', maxPerMoveUsd: 0, maxPerDayUsd: 0,
       maxPerMoveUsdByChain: {}, maxPerDayUsdByChain: {}, allowedChains: [], allowedBridges: ['canonical-slow' as 'across'],
       minNetGainTok: {}, minNetGainPct: 0.005, maxSlippageBps: 99_999, maxEtaMin: 60, cooldownMin: 360,
-      maxMovesPerDay: 2, minConfidence: 0.5, gasCaps: {}, maxGasPriceWei: {}, autoClaim: false, halt: null,
+      maxMovesPerDay: 2, minConfidence: 0.5, gasCaps: {}, maxGasPriceWei: {}, maxPriorityFeeWei: {}, autoClaim: false, halt: null,
     });
     const host = new Router({ store, host: true, chainIds: CHAINS });
     expect(host.status().on).toBe(false);

@@ -75,6 +75,7 @@ export class Router {
       minConfidence: s.minConfidence,
       gasCaps: copyCaps(s.gasCaps),
       maxGasPriceWei: { ...s.maxGasPriceWei },
+      maxPriorityFeeWei: { ...s.maxPriorityFeeWei },
       autoClaim: s.autoClaim,
       halt: s.halt ? { subject: 'router', halt: { ...s.halt.halt } } : null,
       configured: { ...this.configured },
@@ -89,8 +90,12 @@ export class Router {
 
   /** Wei per gas for one chain, or null when that chain is not loaded. */
   maxGasPriceWei(chainId: number): bigint | null {
-    const s = this.state.maxGasPriceWei[String(chainId)];
-    return typeof s === 'string' && /^\d+$/.test(s) ? BigInt(s) : null;
+    return weiOf(this.state.maxGasPriceWei[String(chainId)]);
+  }
+
+  /** Max tip for one chain, or null when that chain is not loaded. A suggestion above this aborts the send. */
+  maxPriorityFeeWei(chainId: number): bigint | null {
+    return weiOf(this.state.maxPriorityFeeWei[String(chainId)]);
   }
 
   /** Stop all / turn off. A queued send reads this inside the gate, before it takes a nonce. */
@@ -170,10 +175,15 @@ export class Router {
       minConfidence: s.minConfidence,
       gasCaps: s.gasCaps,
       maxGasPriceWei: s.maxGasPriceWei,
+      maxPriorityFeeWei: s.maxPriorityFeeWei,
       autoClaim: s.autoClaim,
       halt: s.halt,
     });
   }
+}
+
+function weiOf(s: string | undefined): bigint | null {
+  return typeof s === 'string' && /^\d+$/.test(s) ? BigInt(s) : null;
 }
 
 function publicError(e: unknown): string {

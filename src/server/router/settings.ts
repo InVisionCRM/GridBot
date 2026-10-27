@@ -35,6 +35,18 @@ export const DEFAULT_MAX_GAS_PRICE_WEI: Readonly<Record<number, bigint>> = {
   4663: 30n * GWEI,
 };
 export const FALLBACK_MAX_GAS_PRICE_WEI = 200n * GWEI;
+/**
+ * Max priority fee (the tip) we will attach. A suggestion above this aborts the send.
+ * Paying less than the network asked would leave the tx stuck and block every bot on this chain's nonce.
+ * Ethereum 50 gwei is above a normal 1–3 gwei tip and still stops a runaway.
+ * PulseChain's live tip is about 33,525 gwei; 100,000 gwei pays that and aborts a spike.
+ * Robinhood is an L2, so 2 gwei is already a high tip. Any other chain uses a tenth of its gas-price cap.
+ */
+export const DEFAULT_MAX_PRIORITY_FEE_WEI: Readonly<Record<number, bigint>> = {
+  1: 50n * GWEI,
+  369: 100_000n * GWEI,
+  4663: 2n * GWEI,
+};
 /** 1 native coin per gas unit. A stored cap cannot be set above this. */
 export const MAX_GAS_PRICE_WEI_CAP = 10n ** 18n;
 
@@ -97,6 +109,8 @@ export interface RouterSettings {
   gasCaps: Record<string, Partial<Record<TxKind, number>>>;
   /** chain id → max wei per gas, decimal string. A send aborts when the price is above this. */
   maxGasPriceWei: Record<string, string>;
+  /** chain id → max priority fee (tip) in wei, decimal string. A suggestion above this aborts. */
+  maxPriorityFeeWei: Record<string, string>;
   autoClaim: boolean;
   halt: RouterHalt | null;
 }
@@ -129,6 +143,7 @@ export function defaultSettings(chainIds: readonly number[]): RouterSettings {
     minConfidence: 0.5,
     gasCaps: gasDefaults(chainIds),
     maxGasPriceWei: gasPriceDefaults(chainIds),
+    maxPriorityFeeWei: priorityDefaults(chainIds),
     autoClaim: false,
     halt: null,
   };
@@ -147,6 +162,24 @@ function defaultGasPrice(id: number): bigint {
 function gasPriceDefaults(chainIds: readonly number[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const id of chainIds) if (Number.isInteger(id) && id > 0) out[String(id)] = defaultGasPrice(id).toString();
+  return out;
+}
+
+/** Explicit per-chain tip cap, else a tenth of that chain's gas-price cap. Never above the gas-price cap. */
+export function defaultMaxPriorityFee(chainId: number, maxGasPriceWei: bigint): bigint {
+  const gas = maxGasPriceWei > 0n ? maxGasPriceWei : 1n;
+  const explicit = DEFAULT_MAX_PRIORITY_FEE_WEI[chainId];
+  let n = explicit ?? gas / 10n;
+  if (n < 1n) n = 1n;
+  if (n > gas) n = gas;
+  return n;
+}
+
+function priorityDefaults(chainIds: readonly number[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const id of chainIds) {
+    if (Number.isInteger(id) && id > 0) out[String(id)] = defaultMaxPriorityFee(id, defaultGasPrice(id)).toString();
+  }
   return out;
 }
 
@@ -293,16 +326,28 @@ function fillGasPrice(map: Record<string, string>, known: ReadonlySet<number>): 
   return out;
 }
 
-function priceMap(v: unknown, known: ReadonlySet<number>, base: Record<string, string>, strict: boolean): Record<string, string> {
+function fillPriority(map: Record<string, string>, gas: Record<string, string>, known: ReadonlySet<number>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const id of known) {
+    const gasCap = parseWei(gas[String(id)], defaultGasPrice(id));
+    out[String(id)] = parseWei(map[String(id)], defaultMaxPriorityFee(id, gasCap)).toString();
+  }
+  return out;
+}
+
+function priceMap(
+  v: unknown, known: ReadonlySet<number>, base: Record<string, string>, strict: boolean,
+  label: string, fallbackFor: (id: number) => bigint,
+): Record<string, string> {
   const out = { ...base };
   if (v == null) return out;
-  if (!isObj(v)) { if (strict) throw new Error('maxGasPriceWei must be an object of chain id → wei per gas.'); return out; }
+  if (!isObj(v)) { if (strict) throw new Error(`${label} must be an object of chain id → wei per gas.`); return out; }
   for (const [k, raw] of entries(v)) {
     const key = chainKey(Number(k), known);
     if (!key) { if (strict && k.trim()) throw new Error(`Unknown chain ${k}.`); continue; }
     if (raw == null) continue;
-    const fallback = parseWei(out[key], defaultGasPrice(Number(key)));
-    out[key] = (strict ? strictWei(raw, `maxGasPriceWei ${key}`) : parseWei(raw, fallback)).toString();
+    const fallback = parseWei(out[key], fallbackFor(Number(key)));
+    out[key] = (strict ? strictWei(raw, `${label} ${key}`) : parseWei(raw, fallback)).toString();
   }
   return out;
 }
@@ -342,6 +387,7 @@ function finish(s: RouterSettings, chainIds: readonly number[]): RouterSettings 
     minConfidence: clamp(s.minConfidence, 0, ROUTER_HARD_CAPS.minConfidence),
     gasCaps: fillGas(s.gasCaps, known),
     maxGasPriceWei: fillGasPrice(s.maxGasPriceWei, known),
+    maxPriorityFeeWei: fillPriority(s.maxPriorityFeeWei, fillGasPrice(s.maxGasPriceWei, known), known),
     autoClaim: s.autoClaim === true,
   };
 }
@@ -360,7 +406,11 @@ export function settingsFromFile(raw: unknown, chainIds: readonly number[]): Rou
       gasCaps[key] = { ...gasCaps[key], ...kindsOf(v, false) };
     }
   }
-  const maxGasPriceWei = priceMap(raw.maxGasPriceWei, known, base.maxGasPriceWei, false);
+  const maxGasPriceWei = priceMap(raw.maxGasPriceWei, known, base.maxGasPriceWei, false, 'maxGasPriceWei', defaultGasPrice);
+  const maxPriorityFeeWei = priceMap(
+    raw.maxPriorityFeeWei, known, base.maxPriorityFeeWei, false, 'maxPriorityFeeWei',
+    (id) => defaultMaxPriorityFee(id, parseWei(maxGasPriceWei[String(id)], defaultGasPrice(id))),
+  );
   return finish({
     on: raw.on === true,
     mode,
@@ -379,6 +429,7 @@ export function settingsFromFile(raw: unknown, chainIds: readonly number[]): Rou
     minConfidence: num(raw.minConfidence, base.minConfidence, 0, ROUTER_HARD_CAPS.minConfidence),
     gasCaps,
     maxGasPriceWei,
+    maxPriorityFeeWei,
     autoClaim: raw.autoClaim === true,
     halt: readHalt(raw.halt),
   }, chainIds);
@@ -399,6 +450,7 @@ export function patchSettings(current: RouterSettings, body: unknown, chainIds: 
     minNetGainTok: { ...current.minNetGainTok },
     gasCaps: Object.fromEntries(Object.entries(current.gasCaps).map(([id, row]) => [id, { ...row }])),
     maxGasPriceWei: { ...current.maxGasPriceWei },
+    maxPriorityFeeWei: { ...current.maxPriorityFeeWei },
     halt: current.halt,
   };
   for (const key of Object.keys(body)) {
@@ -461,7 +513,13 @@ export function patchSettings(current: RouterSettings, body: unknown, chainIds: 
         }
         break;
       case 'maxGasPriceWei':
-        next.maxGasPriceWei = priceMap(body.maxGasPriceWei, known, next.maxGasPriceWei, true);
+        next.maxGasPriceWei = priceMap(body.maxGasPriceWei, known, next.maxGasPriceWei, true, 'maxGasPriceWei', defaultGasPrice);
+        break;
+      case 'maxPriorityFeeWei':
+        next.maxPriorityFeeWei = priceMap(
+          body.maxPriorityFeeWei, known, next.maxPriorityFeeWei, true, 'maxPriorityFeeWei',
+          (id) => defaultMaxPriorityFee(id, parseWei(next.maxGasPriceWei[String(id)], defaultGasPrice(id))),
+        );
         break;
       case 'autoClaim':
         if (typeof body.autoClaim !== 'boolean') throw new Error('autoClaim must be true or false.');

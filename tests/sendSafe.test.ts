@@ -2,14 +2,17 @@
  * sendSafe: eth_call at pending, gas cap, explicit gasLimit, one send through the shared gate and nonce.
  * Fees, halt, replacement and broadcast errors are checked here. No second broadcast. No real RPC.
  */
+import { readFileSync } from 'node:fs';
 import { Interface, keccak256, toQuantity } from 'ethers';
 import { describe, expect, it } from 'vitest';
 import { requestHalt } from '../src/server/bot/audit';
 import type { SentTx } from '../src/server/bot/chain';
 import { MemoryStore } from '../src/server/bot/store';
 import { SharedNonce, TxGate } from '../src/server/bot/txGate';
+import { FallbackReader } from '../src/server/chains/fallback';
 import { Router, type RouterFile } from '../src/server/router/router';
-import { PRIORITY_FEE_CLAMP_WEI, sendSafe, type ExactTx, type GasSender, type SafeReader } from '../src/server/router/sendSafe';
+import { DEFAULT_MAX_GAS_PRICE_WEI, DEFAULT_MAX_PRIORITY_FEE_WEI } from '../src/server/router/settings';
+import { routerSendHalted, sendSafe, type ExactTx, type GasSender, type SafeReader } from '../src/server/router/sendSafe';
 
 const FROM = '0x1234567890123456789012345678901234567890';
 const TO = '0x2222222222222222222222222222222222222222';
@@ -65,6 +68,7 @@ class Rpc implements SafeReader {
       return this.feeHistory;
     }
     if (method === 'eth_gasPrice') return toQuantity(this.gasPriceWei);
+    if (method === 'eth_getTransactionByHash') return null;
     if (method === 'eth_sendRawTransaction') {
       this.broadcasts.push(String(params[0]));
       if (this.broadcastError) throw this.broadcastError;
@@ -113,13 +117,15 @@ function harness(rpc = new Rpc(), signer = new Signer()) {
   const nonce = new SharedNonce();
   const tx: ExactTx = { from: FROM, to: TO, data: '0x1234', value: 0n };
   const go = (over: {
-    gasCap?: bigint; gasBudgetWei?: bigint; l1FeeWei?: bigint; maxGasPriceWei?: bigint;
+    gasCap?: bigint; gasBudgetWei?: bigint; l1FeeWei?: bigint; maxGasPriceWei?: bigint; maxPriorityFeeWei?: bigint;
+    chainId?: number;
     kind?: 'bridge' | 'claim' | 'swap' | 'approve'; warn?: (m: string) => void; halted?: () => boolean;
   } = {}) => sendSafe({
-    tx, kind: over.kind ?? 'bridge', chainId: 1, reader: rpc, signer, gate, nonce,
+    tx, kind: over.kind ?? 'bridge', chainId: over.chainId ?? 1, reader: rpc, signer, gate, nonce,
     gasCap: over.gasCap ?? 300_000n,
     gasBudgetWei: over.gasBudgetWei ?? 10n ** 18n,
     maxGasPriceWei: over.maxGasPriceWei ?? 10n ** 12n,
+    maxPriorityFeeWei: over.maxPriorityFeeWei ?? 10n ** 12n,
     l1FeeWei: over.l1FeeWei,
     receiptTimeoutMs: 30,
     warn: over.warn,
@@ -220,15 +226,76 @@ describe('sendSafe', () => {
     expect(fee.signer.raws).toHaveLength(0);
   });
 
-  it('clamps a huge priority fee and does not copy it onto maxFee', async () => {
+  it('aborts when the suggested tip is above the chain cap instead of underpaying', async () => {
+    const cap = DEFAULT_MAX_PRIORITY_FEE_WEI[1];
     const h = harness();
     h.rpc.baseFee = 30n * GWEI;
-    h.rpc.priority = 200n * GWEI;
-    const ok = await h.go({ maxGasPriceWei: 500n * GWEI, gasBudgetWei: 500n * GWEI * 300_000n });
+    h.rpc.priority = cap + 1n;
+    await expect(h.go({
+      maxPriorityFeeWei: cap,
+      maxGasPriceWei: DEFAULT_MAX_GAS_PRICE_WEI[1],
+      gasBudgetWei: DEFAULT_MAX_GAS_PRICE_WEI[1] * 300_000n,
+    })).rejects.toMatchObject({ code: 'fee' });
+    expect(h.signer.raws).toHaveLength(0);
+    expect(h.rpc.broadcasts).toHaveLength(0);
+    expect(h.rpc.reads).toBe(0);
+
+    const later = harness();
+    later.rpc.baseFee = 30n * GWEI;
+    later.rpc.priority = 2n * GWEI;
+    let tips = 0;
+    const orig = later.rpc.send.bind(later.rpc);
+    later.rpc.send = async (method, params) => {
+      if (method === 'eth_maxPriorityFeePerGas') {
+        tips++;
+        if (tips >= 2) return toQuantity(cap + 1n);
+      }
+      return orig(method, params);
+    };
+    await expect(later.go({
+      maxPriorityFeeWei: cap,
+      maxGasPriceWei: DEFAULT_MAX_GAS_PRICE_WEI[1],
+      gasBudgetWei: DEFAULT_MAX_GAS_PRICE_WEI[1] * 300_000n,
+    })).rejects.toMatchObject({ code: 'fee' });
+    expect(tips).toBeGreaterThanOrEqual(2);
+    expect(later.rpc.reads).toBe(0);
+    expect(later.signer.raws).toHaveLength(0);
+  });
+
+  it('pays a PulseChain-sized tip and does not clamp it to 5 gwei', async () => {
+    const tip = 33_525n * GWEI;
+    const cap = DEFAULT_MAX_PRIORITY_FEE_WEI[369];
+    const gasCap = DEFAULT_MAX_GAS_PRICE_WEI[369];
+    expect(cap).toBeGreaterThan(tip);
+    expect(cap).toBeGreaterThan(5n * GWEI);
+    const h = harness();
+    h.rpc.baseFee = 80_000n * GWEI;
+    h.rpc.priority = tip;
+    const ok = await h.go({
+      chainId: 369,
+      maxPriorityFeeWei: cap,
+      maxGasPriceWei: gasCap,
+      gasBudgetWei: gasCap * 300_000n,
+    });
     expect(ok.status).toBe('confirmed');
-    expect(h.signer.signed[0].maxPriorityFeePerGas).toBe(PRIORITY_FEE_CLAMP_WEI);
-    expect(h.signer.signed[0].maxFeePerGas).toBe(60n * GWEI + PRIORITY_FEE_CLAMP_WEI);
+    expect(h.signer.signed[0].maxPriorityFeePerGas).toBe(tip);
+    expect(h.signer.signed[0].maxFeePerGas).toBe(160_000n * GWEI + tip);
     expect(h.signer.signed[0].maxPriorityFeePerGas).not.toBe(h.signer.signed[0].maxFeePerGas);
+    expect(h.signer.signed[0].maxPriorityFeePerGas).toBeGreaterThan(5n * GWEI);
+
+    const zero = harness();
+    zero.rpc.baseFee = 10n;
+    zero.rpc.priority = 0n;
+    await zero.go({ maxPriorityFeeWei: 2n * GWEI });
+    expect(zero.signer.signed[0].maxPriorityFeePerGas).toBe(0n);
+    expect(zero.signer.signed[0].maxFeePerGas).toBe(20n);
+
+    const missing = harness();
+    missing.rpc.priorityError = new Error('the method eth_maxPriorityFeePerGas does not exist');
+    missing.rpc.feeHistory = null;
+    await expect(missing.go()).rejects.toMatchObject({ code: 'fee', message: 'no priority fee from the chain' });
+    expect(missing.rpc.broadcasts).toHaveLength(0);
+    expect(missing.rpc.reads).toBe(0);
   });
 
   it('uses the median feeHistory tip when eth_maxPriorityFeePerGas is missing', async () => {
@@ -331,7 +398,7 @@ describe('sendSafe', () => {
       queued();
       return real(fn);
     }) as typeof h.gate.run;
-    const safe = h.go({ halted: () => router.isHalted() });
+    const safe = h.go({ halted: routerSendHalted(router) });
     await queuedP;
     expect(router.isHalted()).toBe(false);
     router.halt(requestHalt('stop-all', 'POST /api/bot/stop-all', Date.now()));
@@ -419,6 +486,7 @@ describe('sendSafe', () => {
     expect(warnings.join('\n')).not.toMatch(/https?:\/\//);
 
     const stale = harness();
+    stale.rpc.receipt = null;
     stale.rpc.broadcastError = Object.assign(new Error(`nonce too low https://rpc.example/${secret}`), { code: 'NONCE_EXPIRED' });
     const staleErr = await stale.go().then(() => { throw new Error('expected a throw'); }, (e: Error & { code?: string }) => e);
     expect(staleErr).toMatchObject({ code: 'stale_nonce', message: 'nonce already used; not resent' });
@@ -470,13 +538,162 @@ describe('sendSafe', () => {
     expect(mined.hash).not.toBe(other);
     expect(mined.status).not.toBe('confirmed');
 
-    const missing = harness();
-    missing.rpc.receipt = null;
-    missing.rpc.mined = 5;
-    missing.rpc.blockTxs = [];
-    const gone = await missing.go();
-    expect(gone.status).toBe('replaced');
-    expect(gone.hash).toBe(hashOf(missing.signer));
+    const unseen = harness();
+    unseen.rpc.receipt = null;
+    unseen.rpc.pending = 4;
+    unseen.rpc.mined = 5;
+    unseen.rpc.blockNumber = 20;
+    unseen.rpc.blockTxs = [{ hash: other, from: '0x' + '33'.repeat(20), to: TO, nonce: '0x4', value: '0x1', input: '0xab' }];
+    const gone = await unseen.go();
+    expect(gone.status).toBe('pending');
+    expect(gone.state).toBe('source_sent');
+    expect(gone.replacementHash).toBeUndefined();
+    expect(gone.hash).toBe(hashOf(unseen.signer));
+    expect(gone.status).not.toBe('replaced');
     expect(gone.status).not.toBe('confirmed');
+    const scans = unseen.rpc.calls.filter((c) => c.method === 'eth_getBlockByNumber' && c.params[1] === true);
+    expect(scans.length).toBeGreaterThanOrEqual(8);
+    expect(scans.length % 8).toBe(0);
+
+    const unread = harness();
+    unread.rpc.receipt = 'throw';
+    unread.rpc.mined = 9;
+    unread.rpc.blockNumber = 20;
+    const orig = unread.rpc.send.bind(unread.rpc);
+    unread.rpc.send = async (method, params) => {
+      if (method === 'eth_getBlockByNumber' && params[1] === true) throw new Error('block read failed');
+      return orig(method, params);
+    };
+    const pending = await unread.go();
+    expect(pending.status).toBe('pending');
+    expect(pending.state).toBe('source_sent');
+    expect(pending.hash).toBe(hashOf(unread.signer));
+    expect(pending.status).not.toBe('replaced');
+    expect(pending.status).not.toBe('confirmed');
+  });
+
+  it('wires router.isHalted into the halted check', async () => {
+    const router = new Router({ store: new MemoryStore<RouterFile>(), host: true, chainIds: [1] });
+    const halted = routerSendHalted(router);
+    const src = readFileSync(new URL('../src/server/router/sendSafe.ts', import.meta.url), 'utf8');
+    const body = src.slice(src.indexOf('function routerSendHalted'), src.indexOf('export async function sendSafe'));
+    expect(body).toMatch(/return \(\) => router\.isHalted\(\)/);
+    expect(halted.toString()).toMatch(/\.isHalted\s*\(/);
+    expect(router.status().on).toBe(false);
+    expect(router.isHalted()).toBe(false);
+    expect(halted()).toBe(false);
+    const h = harness();
+    const ok = await h.go({ halted });
+    expect(ok.status).toBe('confirmed');
+    router.halt(requestHalt('stop-all', 'POST /api/bot/stop-all', 1));
+    expect(router.status().on).toBe(false);
+    expect(halted()).toBe(true);
+    await expect(h.go({ halted })).rejects.toMatchObject({ code: 'halt' });
+    expect(h.rpc.reads).toBe(1);
+  });
+
+  it('does not rotate a broadcast, and a nonce-already-used answer is this tx when the hash is known', async () => {
+    const known = new Set<string>();
+    const raws: Record<'a' | 'b', string[]> = { a: [], b: [] };
+    const counts = { n: 0 };
+    const endpoint = (name: 'a' | 'b', onRaw: (raw: string) => never) => ({
+      async send(method: string, params: unknown[]) {
+        if (method === 'eth_sendRawTransaction') {
+          raws[name].push(String(params[0]));
+          return onRaw(String(params[0]));
+        }
+        if (method === 'eth_getTransactionByHash' || method === 'eth_getTransactionReceipt') {
+          const hash = String(params[0]);
+          if (!known.has(hash)) return null;
+          if (method === 'eth_getTransactionReceipt') return { status: '0x1', transactionHash: hash, gasUsed: '0x1' };
+          return { hash };
+        }
+        if (method === 'eth_call') return '0x';
+        if (method === 'eth_estimateGas') return toQuantity(100_000n);
+        if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+        if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+        throw new Error(method);
+      },
+      async getTransactionCount() { counts.n++; return 4; },
+      async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
+    });
+    const a = endpoint('a', (raw) => {
+      known.add(keccak256(raw as `0x${string}`));
+      throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+    });
+    const b = endpoint('b', () => {
+      throw Object.assign(new Error('nonce already used'), { code: 'NONCE_EXPIRED' });
+    });
+    const reader = new FallbackReader(
+      ['https://rpc.example/a', 'https://rpc.example/b'], 1,
+      [a, b] as unknown as ConstructorParameters<typeof FallbackReader>[2],
+    );
+    const signer = new Signer();
+    const gate = new TxGate();
+    const nonce = new SharedNonce();
+    const tx: ExactTx = { from: FROM, to: TO, data: '0x1234', value: 0n };
+    const once = () => sendSafe({
+      tx, kind: 'bridge', chainId: 1, reader, signer, gate, nonce,
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      receiptTimeoutMs: 30,
+    });
+    const first = await once();
+    expect(first.status).toBe('confirmed');
+    expect(first.hash).toBe(hashOf(signer));
+    expect(raws.a).toHaveLength(1);
+    expect(raws.b).toHaveLength(0);
+    expect(first.nonce).toBe(4);
+    const second = await once();
+    expect(second.nonce).toBe(5);
+    expect(counts.n).toBe(1);
+    expect(raws.b).toHaveLength(0);
+
+    const stuck = new Set<string>();
+    let lookups = 0;
+    const solo = {
+      raw: [] as string[],
+      async send(method: string, params: unknown[]) {
+        if (method === 'eth_sendRawTransaction') {
+          this.raw.push(String(params[0]));
+          stuck.add(keccak256(String(params[0]) as `0x${string}`));
+          throw Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' });
+        }
+        if (method === 'eth_getTransactionByHash' || method === 'eth_getTransactionReceipt') {
+          lookups++;
+          const hash = String(params[0]);
+          if (!stuck.has(hash)) return null;
+          if (method === 'eth_getTransactionReceipt') return { status: '0x1', transactionHash: hash, gasUsed: '0x1' };
+          return { hash };
+        }
+        if (method === 'eth_call') return '0x';
+        if (method === 'eth_estimateGas') return toQuantity(100_000n);
+        if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+        if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+        throw new Error(method);
+      },
+      async getTransactionCount() { return 7; },
+      async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
+    };
+    const soloReader = new FallbackReader(
+      ['https://rpc.example/solo'], 1,
+      [solo] as unknown as ConstructorParameters<typeof FallbackReader>[2],
+    );
+    const soloSigner = new Signer();
+    const soloNonce = new SharedNonce();
+    const accepted = await sendSafe({
+      tx, kind: 'bridge', chainId: 1, reader: soloReader, signer: soloSigner, gate: new TxGate(), nonce: soloNonce,
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      receiptTimeoutMs: 30,
+    });
+    expect(accepted.status).toBe('confirmed');
+    expect(accepted.hash).toBe(hashOf(soloSigner));
+    expect(solo.raw).toHaveLength(1);
+    expect(lookups).toBeGreaterThan(0);
+    const next = await sendSafe({
+      tx, kind: 'bridge', chainId: 1, reader: soloReader, signer: soloSigner, gate: new TxGate(), nonce: soloNonce,
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      receiptTimeoutMs: 30,
+    });
+    expect(next.nonce).toBe(accepted.nonce + 1);
   });
 });
