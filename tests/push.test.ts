@@ -3,22 +3,31 @@
  * No network. The transport is a fake, and nothing here signs a transaction.
  */
 import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PUSH_PREFS, dailyDue, pushAllowed, type PushPrefs } from '../src/live/pushRules';
 import { pctToEdge, rangeZone } from '../src/live/rangeBand';
-import { redact } from '../src/server/bot/logger';
+import { redact, Logger } from '../src/server/bot/logger';
+import { MultiBot, type MultiState } from '../src/server/bot/multi';
+import { MemoryStore } from '../src/server/bot/store';
+import { createApp } from '../src/server/app';
+import { MockChain, NET } from './helpers/mockChain';
 import { classifyPush } from '../src/server/push/classify';
-import { FillDigester } from '../src/server/push/digest';
+import { DIGEST_HOLD_CAP, FillDigester } from '../src/server/push/digest';
 import { LpWatch, type LpSnap } from '../src/server/push/lpWatch';
 import { buildPayload, pushTopic, serializePayload, testPayload, urgencyFor } from '../src/server/push/payload';
 import { PushService } from '../src/server/push/service';
 import { PushStore, pushStoreFile } from '../src/server/push/store';
-import type { PushTransport } from '../src/server/push/send';
+import { retryAfterMs, VAPID_SUBJECT, vapidSubjectFrom, type PushTransport } from '../src/server/push/send';
 import { loadOrCreateVapid, vapidFile } from '../src/server/push/vapid';
+import { normalizeView } from '../src/ui/model';
+import { PUSH_OPT_IN_KEY, pushOptedIn, setPushOptIn, shouldRestorePush, unsubscribePush } from '../src/ui/pushClient';
 
-const ENDPOINT = 'https://push.example/device-a';
+const ENDPOINT = 'https://web.push.apple.com/device-a';
+const OTHER = 'https://fcm.googleapis.com/fcm/send/device-b';
 const KEYS = { p256dh: 'abc12345', auth: 'def67890' };
 
 function mode(file: string) {
@@ -50,6 +59,42 @@ describe('subscription storage', () => {
     expect(again.subscriptions()[0].p256dh).toBe('zzzzzzzz');
     expect(again.subscriptions()[0].ua).toBe('iphone');
     expect(mode(file)).toBe(0o600);
+  });
+
+  it('accepts only browser push services', () => {
+    const store = new PushStore(pushStoreFile(dir()));
+    const ok = [
+      'https://web.push.apple.com/abc',
+      'https://api.push.apple.com/abc',
+      'https://fcm.googleapis.com/fcm/send/abc',
+      'https://updates.push.services.mozilla.com/wpush/abc',
+      'https://wns.notify.windows.com/abc',
+    ];
+    for (const endpoint of ok) store.upsert({ endpoint, keys: KEYS }, null);
+    expect(store.subscriptions()).toHaveLength(ok.length);
+    const bad = [
+      'https://127.0.0.1/push',
+      'https://10.1.2.3/push',
+      'https://192.168.1.5/push',
+      'https://172.16.0.4/push',
+      'https://100.64.0.8/push',
+      'https://169.254.1.1/push',
+      'https://[::1]/push',
+      'https://printer.local/push',
+      'https://mac.tailnet.ts.net/push',
+      'https://push.example/device',
+      'https://evil.push.apple.com.evil.com/x',
+      'https://notfcm.googleapis.com/x',
+      'http://web.push.apple.com/x',
+      'https://user:pass@web.push.apple.com/x',
+    ];
+    for (const endpoint of bad) {
+      expect(() => store.upsert({ endpoint, keys: KEYS }, null)).toThrow(/not usable/);
+      try { store.upsert({ endpoint, keys: KEYS }, null); } catch (e) {
+        expect((e as Error).message).not.toContain(endpoint);
+      }
+    }
+    expect(store.subscriptions()).toHaveLength(ok.length);
   });
 
   it('rejects a non-https endpoint without echoing the address', () => {
@@ -155,7 +200,23 @@ describe('digest', () => {
     const batch = d.flush();
     expect(batch?.title).toMatch(/2 more grid fills/);
     expect(batch?.count).toBe(2);
+    expect(d.flush()?.count).toBe(2);
+    d.commit();
     expect(d.flush()).toBeNull();
+  });
+
+  it('caps a digest at the held-list limit and counts the rest', () => {
+    expect(DIGEST_HOLD_CAP).toBe(200);
+    let now = 0;
+    const d = new FillDigester(10 * 60_000, 1, 60_000, () => now, 3);
+    d.offer({ title: 't', body: 'first', tag: 'a' });
+    for (let i = 0; i < 5; i++) d.offer({ title: 't', body: `held ${i}`, tag: `h${i}` });
+    now = 60_000;
+    const batch = d.flush();
+    expect(batch?.count).toBe(5);
+    expect(batch?.title).toMatch(/5 more grid fills/);
+    expect(batch?.body).toMatch(/\(\+2 more\)$/);
+    expect(d.flush()?.count).toBe(5);
   });
 
   it('sends individually again after the window', () => {
@@ -361,5 +422,205 @@ describe('push service', () => {
     expect(again.publicKey()).toBe(key);
     expect(again.view().subscribed).toBe(1);
     expect(JSON.stringify(again.view())).not.toContain(ENDPOINT);
+  });
+
+  it('keeps a grid-fill digest through quiet hours until it is delivered', async () => {
+    const h = harness();
+    h.setNow(Date.parse('2026-01-15T17:00:00Z'));
+    h.svc.subscribe(sub, 'test');
+    for (let i = 0; i < 8; i++) await h.svc.onActivity({ type: 'filled', kind: 'grid', msg: `Grid fill ${i}`, botId: 'g' });
+    expect(h.sent).toHaveLength(6);
+    h.svc.setPrefs({ quiet: { on: true } });
+    h.setNow(Date.parse('2026-01-16T04:30:00Z'));
+    await h.svc.tick();
+    await h.svc.tick();
+    expect(h.sent).toHaveLength(6);
+    h.setNow(Date.parse('2026-01-16T17:00:00Z'));
+    await h.svc.tick();
+    expect(h.sent).toHaveLength(7);
+    expect(JSON.parse(h.sent[6].body).title).toMatch(/2 more grid fills/);
+    await h.svc.tick();
+    expect(h.sent).toHaveLength(7);
+  });
+
+  it('retries an LP near-edge note that quiet hours blocked', async () => {
+    const snaps: LpSnap[] = [{ id: 'lp1', label: 'ETH/USDG', chainId: 1, price: 50, lower: 0, upper: 100, inRange: true, outSince: null }];
+    const h = harness(snaps);
+    h.setNow(Date.parse('2026-01-16T04:30:00Z'));
+    h.svc.subscribe(sub, 'test');
+    h.svc.setPrefs({ quiet: { on: true } });
+    await h.svc.tick();
+    snaps[0] = { ...snaps[0], price: 86 };
+    await h.svc.tick();
+    await h.svc.tick();
+    expect(h.sent).toHaveLength(0);
+    h.setNow(Date.parse('2026-01-16T17:00:00Z'));
+    await h.svc.tick();
+    expect(h.sent).toHaveLength(1);
+    expect(JSON.parse(h.sent[0].body).body).toMatch(/86% to the edge/);
+    await h.svc.tick();
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it('retries 429 and server errors and does not retry a gone subscription', async () => {
+    const sleeps: number[] = [];
+    const root = dir();
+    let gate: { statusCode: number; retryAfter?: number } | null = { statusCode: 429, retryAfter: 1_500 };
+    let calls = 0;
+    const svc = new PushService({
+      dir: root,
+      now: () => Date.parse('2026-06-01T16:00:00Z'),
+      sleep: async (ms) => { sleeps.push(ms); },
+      transport: { async send() { calls++; if (gate) throw Object.assign(new Error('push failed'), gate); } },
+    });
+    svc.subscribe(sub, 'test');
+    await svc.onActivity({ type: 'filled', kind: 'grid', msg: 'Grid buy', botId: 'g' });
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([1_500]);
+    expect(svc.view().subscribed).toBe(1);
+
+    calls = 0;
+    sleeps.length = 0;
+    gate = { statusCode: 503, retryAfter: 9_999_000 };
+    await svc.onActivity({ type: 'stopped', level: 'error', msg: 'tax', data: { halt: { origin: 'system', what: 'safety' } } });
+    expect(calls).toBe(3);
+    expect(sleeps).toEqual([5_000, 5_000]);
+    expect(svc.view().subscribed).toBe(1);
+
+    calls = 0;
+    gate = { statusCode: 410 };
+    await svc.onActivity({ type: 'filled', kind: 'grid', msg: 'Grid buy', botId: 'g' });
+    expect(calls).toBe(1);
+    expect(svc.view().subscribed).toBe(0);
+
+    svc.subscribe(sub, 'test');
+    calls = 0;
+    gate = { statusCode: 404 };
+    await svc.onActivity({ type: 'error', msg: 'reverted' });
+    expect(calls).toBe(1);
+    expect(svc.view().subscribed).toBe(0);
+  });
+
+  it('sends a test only to the named phone', async () => {
+    const root = dir();
+    const sent: string[] = [];
+    const svc = new PushService({
+      dir: root,
+      now: () => 1,
+      transport: { async send(s) { sent.push(s.endpoint); } },
+    });
+    svc.subscribe(sub, 'a');
+    svc.subscribe({ endpoint: OTHER, keys: { p256dh: 'zzzzzzzz', auth: KEYS.auth } }, 'b');
+    await expect(svc.test()).rejects.toThrow(/phone that should receive it/);
+    expect(sent).toEqual([]);
+    await svc.test(OTHER);
+    expect(sent).toEqual([OTHER]);
+  });
+});
+
+describe('push opt-in', () => {
+  it('unsubscribes the browser even when the endpoint is already known', async () => {
+    let disabled = 0;
+    const posted: string[] = [];
+    await unsubscribePush({
+      knownEndpoint: ENDPOINT,
+      disable: async () => { disabled++; return ENDPOINT; },
+      post: async (ep) => { posted.push(ep); },
+    });
+    expect(disabled).toBe(1);
+    expect(posted).toEqual([ENDPOINT]);
+  });
+
+  it('does not restore a subscription unless push was turned on', () => {
+    let value: string | null = null;
+    const mem = {
+      getItem: () => value,
+      setItem: (_k: string, v: string) => { value = v; },
+      removeItem: () => { value = null; },
+    };
+    expect(shouldRestorePush(pushOptedIn(mem))).toBe(false);
+    setPushOptIn(true, mem);
+    expect(mem.getItem()).toBe('1');
+    expect(PUSH_OPT_IN_KEY).toBe('gridbot-push-opt-in');
+    expect(shouldRestorePush(pushOptedIn(mem))).toBe(true);
+    setPushOptIn(false, mem);
+    expect(mem.getItem()).toBe('0');
+    expect(shouldRestorePush(pushOptedIn(mem))).toBe(false);
+  });
+
+  it('stays off after Turn off stores an opt-out', async () => {
+    let value: string | null = '1';
+    const mem = {
+      getItem: () => value,
+      setItem: (_k: string, v: string) => { value = v; },
+      removeItem: () => { value = null; },
+    };
+    const posted: string[] = [];
+    setPushOptIn(false, mem);
+    await unsubscribePush({
+      knownEndpoint: ENDPOINT,
+      disable: async () => OTHER,
+      post: async (ep) => { posted.push(ep); },
+    });
+    expect(mem.getItem()).toBe('0');
+    expect(posted).toEqual([ENDPOINT, OTHER]);
+    expect(shouldRestorePush(pushOptedIn(mem))).toBe(false);
+  });
+});
+
+describe('vapid subject and saved view', () => {
+  it('uses a configured VAPID subject and otherwise the local default', () => {
+    expect(vapidSubjectFrom(undefined)).toBe(VAPID_SUBJECT);
+    expect(vapidSubjectFrom('  mailto:desk@example.com ')).toBe('mailto:desk@example.com');
+    expect(vapidSubjectFrom('https://gridbot.example/push')).toBe('https://gridbot.example/push');
+    const junk = 'not-a-subject SECRET';
+    expect(vapidSubjectFrom(junk)).toBe(VAPID_SUBJECT);
+    expect(VAPID_SUBJECT).not.toContain('SECRET');
+    expect(retryAfterMs({ 'retry-after': '2' })).toBe(2_000);
+    expect(retryAfterMs({ 'retry-after': 'not-a-date' })).toBeUndefined();
+    const httpDate = new Date(Date.parse('2026-01-15T12:00:03Z')).toUTCString();
+    expect(retryAfterMs({ 'Retry-After': httpDate }, Date.parse('2026-01-15T12:00:00Z'))).toBe(3_000);
+  });
+
+  it('opens the Alerts screen instead of the old tools tab', () => {
+    expect(normalizeView({ v: 'tools', tab: 'alerts' })).toEqual({ v: 'alerts' });
+    expect(normalizeView({ v: 'tools', tab: 'chart' })).toMatchObject({ v: 'tools', tab: 'chart' });
+    expect(normalizeView(null)).toBeNull();
+  });
+});
+
+describe('push routes on a friend copy', () => {
+  it('push routes answer 403 on a friend copy', async () => {
+    const bot = new MultiBot({ net: NET, reader: new MockChain(1e-5), signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true) });
+    const push = {
+      publicKey: () => 'pub',
+      view: () => ({ ok: true }),
+      setPrefs: () => ({}),
+      subscribe: () => ({ ok: true }),
+      unsubscribe: () => ({ ok: true }),
+      test: async () => ({ ok: true as const, sent: 1 }),
+    };
+    const hit = async (copy: boolean, via?: string) => {
+      const app = createApp({ bot, net: NET, copy, push, heartbeatMs: 60_000, statusThrottleMs: 60_000 });
+      const server = http.createServer(app);
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+      const port = (server.address() as AddressInfo).port;
+      try {
+        return await new Promise<{ status: number }>((resolve, reject) => {
+          const req = http.request({
+            host: '127.0.0.1', port, path: '/api/push/status', method: 'GET',
+            headers: { host: `127.0.0.1:${port}`, ...(via ? { 'x-gridbot-via': via } : {}) },
+          }, (res) => {
+            res.resume();
+            res.on('end', () => resolve({ status: res.statusCode ?? 0 }));
+          });
+          req.on('error', reject);
+          req.end();
+        });
+      } finally { server.close(); }
+    };
+    expect((await hit(true)).status).toBe(403);
+    expect((await hit(false, 'friend')).status).toBe(403);
+    expect((await hit(false, 'owner')).status).toBe(200);
   });
 });

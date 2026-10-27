@@ -124,6 +124,7 @@ const tokenTrader = copy ? undefined : createTokenTrader({
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));
 const push = new PushService({
   dir: dataDir,
+  subject: cfg.vapidSubject,
   log: (level, msg) => log[level](msg),
   positions: () => { try { return lpSnapsFromStatus(bot.status()); } catch { return []; } },
   summary: () => { try { return dailySummary(bot.status()); } catch { return { title: 'GridBot · daily summary', body: 'No priced realized profit to report.' }; } },

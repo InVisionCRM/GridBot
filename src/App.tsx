@@ -20,15 +20,15 @@ import { Tools } from './ui/Tools';
 import { Opportunities } from './ui/Opportunities';
 import { SmartTrader } from './ui/SmartTrader';
 import { useVersion } from './ui/System';
-import { type View } from './ui/model';
+import { normalizeView, type View } from './ui/model';
 import { Header } from './ui/Header';
 import { Holdings, useHoldings } from './ui/Holdings';
 import { loadShowUsd, saveShowUsd, ShowUsdCtx } from './ui/money';
 
 function loadView(): View {
   try {
-    const v = JSON.parse(localStorage.getItem('view') ?? 'null') as View | null;
-    if (v && ['home', 'bots', 'more', 'opps', 'auto', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools', 'alerts'].includes(v.v)) return v;
+    const stored = normalizeView(JSON.parse(localStorage.getItem('view') ?? 'null'));
+    if (stored) return stored;
   } catch { /* storage unavailable */ }
   return { v: 'home' };
 }
@@ -159,7 +159,7 @@ export default function App() {
           {view.v === 'grid' && <GridDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'trend' && <TrendDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'lp' && <LpDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
-          {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} prefs={prefs} setPrefs={setPrefs} ver={ver} />}
+          {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} ver={ver} />}
           {view.v === 'alerts' && <Alerts status={s} prefs={prefs} setPrefs={setPrefs} />}
         </ViewError>
 

@@ -6,7 +6,7 @@ import { http } from './api';
 import { ChainBadge, PairPicker, chainOf, chains, lbl, mk, useChainFilter } from './chains';
 import { RangeBar } from './charts';
 import { dur, num, px, time } from './fmt';
-import { disablePush, enablePush, isIos, loadPushStatus, localSubscription, needsHomeScreen, savePushPrefs } from './pushClient';
+import { disablePush, enablePush, isIos, loadPushStatus, localSubscription, needsHomeScreen, pushOptedIn, savePushPrefs, setPushOptIn, shouldRestorePush, unsubscribePush } from './pushClient';
 import type { ActivityEvent } from './useStream';
 
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -150,7 +150,8 @@ export function Alerts({ status: s, prefs, setPrefs }: { status: AnyObj; prefs: 
     refresh().then(async (view) => {
       if (dead) return;
       const sub = await localSubscription(view.publicKey).catch(() => null);
-      if (sub) await http('/api/push/subscribe', 'POST', sub.toJSON()).catch(() => undefined);
+      if (dead || !sub || !shouldRestorePush(pushOptedIn())) return;
+      await http('/api/push/subscribe', 'POST', sub.toJSON()).catch(() => undefined);
     }).catch((e) => { if (!dead) setPushErr((e as Error).message); });
     return () => { dead = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -196,16 +197,20 @@ export function Alerts({ status: s, prefs, setPrefs }: { status: AnyObj; prefs: 
     try {
       const json = await enablePush(push.publicKey);
       await http('/api/push/subscribe', 'POST', json);
+      setPushOptIn(true);
       setEndpoint(json.endpoint ?? null);
       await refresh();
     } catch (e) { setPushErr((e as Error).message); } finally { setBusy(false); }
   };
   const turnOff = async () => {
     setBusy(true); setPushErr(null);
+    setPushOptIn(false);
     try {
-      const ep = endpoint ?? await disablePush();
-      if (ep) await http('/api/push/unsubscribe', 'POST', { endpoint: ep });
-      else await disablePush();
+      await unsubscribePush({
+        knownEndpoint: endpoint,
+        disable: disablePush,
+        post: async (ep) => { await http('/api/push/unsubscribe', 'POST', { endpoint: ep }); },
+      });
       setEndpoint(null);
       await refresh();
     } catch (e) { setPushErr((e as Error).message); } finally { setBusy(false); }

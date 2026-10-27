@@ -78,6 +78,52 @@ export async function enablePush(publicKey: string): Promise<PushSubscriptionJSO
   return json;
 }
 
+/**
+ * '1' after the user taps Turn on. '0' after Turn off, and that opt-out stays stored.
+ * A missing value means they have not asked for push. Only '1' may restore a subscription.
+ */
+export const PUSH_OPT_IN_KEY = 'gridbot-push-opt-in';
+
+type OptStore = { getItem(key: string): string | null; setItem(key: string, value: string): void; removeItem(key: string): void };
+
+function browserStore(): OptStore | null {
+  try { return typeof localStorage === 'undefined' ? null : localStorage; } catch { return null; }
+}
+
+export function pushOptedIn(storage: OptStore | null = browserStore()): boolean {
+  try { return storage?.getItem(PUSH_OPT_IN_KEY) === '1'; } catch { return false; }
+}
+
+export function setPushOptIn(on: boolean, storage: OptStore | null = browserStore()) {
+  try {
+    if (!storage) return;
+    storage.setItem(PUSH_OPT_IN_KEY, on ? '1' : '0');
+  } catch { /* storage unavailable */ }
+}
+
+/** True only after the user has turned push on. A leftover browser subscription is not enough. */
+export function shouldRestorePush(optedIn: boolean): boolean {
+  return optedIn;
+}
+
+/**
+ * Always unsubscribe in the browser, then delete every endpoint we know on the server.
+ * The page's remembered endpoint must not skip pushManager.unsubscribe.
+ */
+export async function unsubscribePush(o: {
+  knownEndpoint: string | null;
+  disable: () => Promise<string | null>;
+  post: (endpoint: string) => Promise<void>;
+}): Promise<void> {
+  const fromBrowser = await o.disable();
+  const seen = new Set<string>();
+  for (const ep of [o.knownEndpoint, fromBrowser]) {
+    if (!ep || seen.has(ep)) continue;
+    seen.add(ep);
+    await o.post(ep);
+  }
+}
+
 export async function disablePush(): Promise<string | null> {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return null;
   const reg = await navigator.serviceWorker.getRegistration();

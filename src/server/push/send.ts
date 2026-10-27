@@ -19,7 +19,27 @@ export interface PushTransport {
   send(sub: PushSub, body: string, opts: PushSendOpts): Promise<void>;
 }
 
-export function createWebPush(keys: { publicKey: string; privateKey: string }): PushTransport {
+/** mailto: or https:// only. Anything else falls back to the local default. The value is not logged. */
+export function vapidSubjectFrom(raw: string | undefined): string {
+  const v = raw?.trim() ?? '';
+  if (/^mailto:[^\s@]+@[^\s@]+$/.test(v)) return v;
+  if (/^https:\/\/[^\s]+$/.test(v)) return v;
+  return VAPID_SUBJECT;
+}
+
+/** Retry-After as milliseconds, or undefined. A delay-seconds value is capped by the sender. */
+export function retryAfterMs(headers: { [key: string]: string | string[] | undefined } | undefined, now = Date.now()): number | undefined {
+  const raw = headers?.['retry-after'] ?? headers?.['Retry-After'];
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  if (!v) return undefined;
+  const secs = Number(v);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const when = Date.parse(v);
+  if (!Number.isFinite(when)) return undefined;
+  return Math.max(0, when - now);
+}
+
+export function createWebPush(keys: { publicKey: string; privateKey: string }, subject = VAPID_SUBJECT): PushTransport {
   return {
     async send(sub, body, opts) {
       try {
@@ -32,14 +52,16 @@ export function createWebPush(keys: { publicKey: string; privateKey: string }): 
             contentEncoding: 'aes128gcm',
             timeout: 10_000,
             ...(opts.topic ? { topic: opts.topic } : {}),
-            vapidDetails: { subject: VAPID_SUBJECT, publicKey: keys.publicKey, privateKey: keys.privateKey },
+            vapidDetails: { subject, publicKey: keys.publicKey, privateKey: keys.privateKey },
           },
         );
       } catch (e) {
-        // WebPushError.message includes the endpoint. Keep only the status code.
+        // WebPushError.message includes the endpoint. Keep only the status code and a numeric Retry-After.
         const status = e instanceof webpush.WebPushError ? e.statusCode : 0;
-        const err = new Error(status ? `status ${status}` : 'request failed') as Error & { statusCode: number };
+        const retryAfter = e instanceof webpush.WebPushError ? retryAfterMs(e.headers) : undefined;
+        const err = new Error(status ? `status ${status}` : 'request failed') as Error & { statusCode: number; retryAfter?: number };
         err.statusCode = status;
+        if (retryAfter != null) err.retryAfter = retryAfter;
         throw err;
       }
     },

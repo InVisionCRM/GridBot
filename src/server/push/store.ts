@@ -30,11 +30,22 @@ function empty(): PushFile {
   return { subscriptions: [], prefs: DEFAULT_PUSH_PREFS, dailySentOn: null, deliveries: [] };
 }
 
+/** Hosts a browser actually uses. Anything else (an IP, a tailnet name, a private address) is refused. */
+function pushServiceHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, '');
+  if (h === 'web.push.apple.com' || h.endsWith('.push.apple.com')) return true;
+  if (h === 'fcm.googleapis.com') return true;
+  if (h === 'updates.push.services.mozilla.com') return true;
+  if (h.endsWith('.notify.windows.com') && h !== 'notify.windows.com') return true;
+  return false;
+}
+
 function httpsEndpoint(v: unknown): string | null {
   if (typeof v !== 'string' || v.length < 12 || v.length > 2000) return null;
   try {
     const u = new URL(v);
     if (u.protocol !== 'https:' || u.username || u.password) return null;
+    if (!pushServiceHost(u.hostname)) return null;
   } catch { return null; }
   // Keep the browser's string. Re-serializing the URL can change it, and then the test button would not match.
   return v;

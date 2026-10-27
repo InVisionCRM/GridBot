@@ -56,11 +56,15 @@ export class LpWatch {
   private zone = new Map<string, RangeZone>();
   private outAt = new Map<string, number>();
   private toldOut = new Set<string>();
+  private toldNear = new Set<string>();
 
   constructor(private readonly now: () => number = Date.now, private readonly outMs = LP_OUT_MS) {}
 
   /** An auto-move event already told the phone. Skip the "out for 10 min" push for this stay outside. */
   suppressOut(id: string) { if (id) this.toldOut.add(id); }
+
+  /** The near-edge note was handed to a phone. Skip it until the price leaves the edge and comes back. */
+  suppressNear(id: string) { if (id) this.toldNear.add(id); }
 
   /**
    * The first sight of a position only records where it is, so a restart does not repeat an alert
@@ -77,9 +81,13 @@ export class LpWatch {
       this.zone.set(s.id, zone);
       if (prev == null) {
         if (zone === 'out') this.outAt.set(s.id, s.outSince ?? now);
+        if (zone === 'near') this.toldNear.add(s.id);
         continue;
       }
-      if (zone === 'near' && prev === 'in') notes.push(this.near(s));
+      if (zone === 'near') {
+        // Same as out-of-range: while the note has not been handed off, the next tick offers it again.
+        if (!this.toldNear.has(s.id)) notes.push(this.near(s));
+      } else this.toldNear.delete(s.id);
       if (zone === 'out') {
         if (prev !== 'out') this.outAt.set(s.id, s.outSince ?? now);
         const since = this.outAt.get(s.id) ?? s.outSince ?? now;
@@ -95,6 +103,7 @@ export class LpWatch {
       this.zone.delete(id);
       this.outAt.delete(id);
       this.toldOut.delete(id);
+      this.toldNear.delete(id);
     }
     return notes;
   }

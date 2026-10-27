@@ -192,6 +192,10 @@ export function createGateway(d: GatewayDeps) {
     const owner = res.locals.owner === true;
     const f = res.locals.friend as Friend | null;
     if (!owner && !f) return req.path.startsWith('/api/') ? res.status(401).json({ error: 'Please log in again.', login: true }) : res.redirect(303, '/login');
+    // Lock-screen push is the owner's phones only. A friend session is not proxied to their copy or to the host app.
+    if (!owner && (req.path === '/api/push' || req.path.startsWith('/api/push/'))) {
+      return res.status(403).json({ error: 'Push is only available on the owner login.' });
+    }
     const port = owner ? d.hostPort : f!.port;
     if (!port) {
       return req.path.startsWith('/api/')

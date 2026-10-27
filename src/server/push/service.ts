@@ -20,6 +20,10 @@ export interface PushDeps {
   log?: (level: 'info' | 'warn', msg: string) => void;
   positions?: () => LpSnap[];
   summary?: () => { title: string; body: string };
+  /** Contact on the VAPID key. Already checked; the default is mailto:gridbot@localhost. */
+  subject?: string;
+  /** Tests skip the real wait. Production sleeps. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const GONE = new Set([404, 410]);
@@ -31,14 +35,16 @@ export class PushService {
   private readonly transport: PushTransport;
   private readonly digest = new FillDigester(undefined, undefined, undefined, () => this.now());
   private readonly lp: LpWatch;
+  private readonly sleep: (ms: number) => Promise<void>;
   private tail: Promise<void> = Promise.resolve();
 
   constructor(private readonly o: PushDeps) {
     this.now = o.now ?? Date.now;
     this.store = new PushStore(join(o.dir, 'push.json'), this.now);
     this.keys = loadOrCreateVapid(vapidFile(o.dir));
-    this.transport = o.transport ?? createWebPush(this.keys);
+    this.transport = o.transport ?? createWebPush(this.keys, o.subject);
     this.lp = new LpWatch(this.now);
+    this.sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
   private run<T>(fn: () => Promise<T>): Promise<T> {
@@ -89,6 +95,7 @@ export class PushService {
 
   test(endpoint?: string): Promise<{ ok: true; sent: number }> {
     return this.run(async () => {
+      if (!endpoint) throw new Error('Send the test from the phone that should receive it.');
       const sent = await this.deliver(testPayload(this.now()), endpoint);
       if (!sent) throw new Error(this.store.subscriptions().length ? 'The push service did not accept the test.' : 'Turn on push on this phone first.');
       return { ok: true as const, sent };
@@ -123,15 +130,17 @@ export class PushService {
   private async tickBody() {
     const batch = this.digest.flush();
     if (batch && this.allowed('grid_fill')) {
-      await this.deliver(buildPayload('grid_fill', batch.body, { title: batch.title, tag: batch.tag, ts: this.now() }));
+      const sent = await this.deliver(buildPayload('grid_fill', batch.body, { title: batch.title, tag: batch.tag, ts: this.now() }));
+      if (sent > 0) this.digest.commit();
     }
     let snaps: LpSnap[] = [];
     try { snaps = this.o.positions?.() ?? []; } catch (e) { this.warn(e); }
     const notes = this.lp.update(snaps);
     if (this.allowed('lp_range')) {
       for (const n of notes) {
-        if (n.kind === 'out') this.lp.suppressOut(n.id);
-        await this.deliver(buildPayload('lp_range', n.body, { title: n.title, tag: n.tag, ts: this.now(), botId: n.id }));
+        const sent = await this.deliver(buildPayload('lp_range', n.body, { title: n.title, tag: n.tag, ts: this.now(), botId: n.id }));
+        if (sent > 0 && n.kind === 'out') this.lp.suppressOut(n.id);
+        if (sent > 0 && n.kind === 'near') this.lp.suppressNear(n.id);
       }
     }
     const prefs = this.store.prefs();
@@ -140,6 +149,32 @@ export class PushService {
     try { text = this.o.summary(); } catch (e) { this.warn(e); return; }
     const sent = await this.deliver(buildPayload('daily_summary', text.body, { title: text.title, tag: 'daily-summary', ts: this.now() }));
     if (sent) this.store.markDaily(dayKey(prefs.daily.tz, this.now()));
+  }
+
+  /** 404 and 410 are permanent. 429, 5xx, and a timeout are worth another try. */
+  private retryable(status: number): boolean {
+    return status === 0 || status === 408 || status === 429 || (status >= 500 && status <= 599);
+  }
+
+  private delayFor(e: unknown, attempt: number): number {
+    const hinted = (e as { retryAfter?: number }).retryAfter;
+    if (typeof hinted === 'number' && Number.isFinite(hinted) && hinted >= 0) return Math.min(5_000, hinted);
+    return Math.min(2_000, 200 * 2 ** (attempt - 1));
+  }
+
+  private async postOne(s: { endpoint: string; p256dh: string; auth: string }, body: string, opts: ReturnType<typeof sendOpts>, tries: number): Promise<'ok' | 'gone' | 'fail'> {
+    for (let attempt = 1; attempt <= tries; attempt++) {
+      try {
+        await this.transport.send({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, body, opts);
+        return 'ok';
+      } catch (e) {
+        const status = (e as { statusCode?: number }).statusCode ?? 0;
+        if (GONE.has(status)) { this.warn(e); return 'gone'; }
+        if (!this.retryable(status) || attempt === tries) { this.warn(e); return 'fail'; }
+        await this.sleep(this.delayFor(e, attempt));
+      }
+    }
+    return 'fail';
   }
 
   /** How many phones accepted it. A 404 or 410 means that browser unsubscribed, so the row is dropped. */
@@ -151,18 +186,13 @@ export class PushService {
     }
     const body = serializePayload(payload);
     const opts = sendOpts(payload);
+    const tries = payload.type === 'bot_halted' || payload.type === 'tx_failed' ? 3 : 2;
     let sent = 0;
     for (const s of subs) {
-      try {
-        await this.transport.send({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, body, opts);
-        this.store.mark(s.endpoint, true, null);
-        sent++;
-      } catch (e) {
-        const status = (e as { statusCode?: number }).statusCode ?? 0;
-        if (GONE.has(status)) this.store.remove(s.endpoint);
-        else this.store.mark(s.endpoint, false, status ? `status ${status}` : 'request failed');
-        this.warn(e);
-      }
+      const result = await this.postOne(s, body, opts, tries);
+      if (result === 'ok') { this.store.mark(s.endpoint, true, null); sent++; }
+      else if (result === 'gone') this.store.remove(s.endpoint);
+      else this.store.mark(s.endpoint, false, 'not delivered');
     }
     this.store.record({ at: this.now(), type: payload.type, title: payload.title, body: payload.body, ok: sent > 0 });
     return sent;

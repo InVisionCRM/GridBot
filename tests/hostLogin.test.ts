@@ -188,6 +188,23 @@ describe('owner gateway', () => {
     expect(locked.text).toMatch(/Too many wrong passwords for this name/);
   });
 
+  it('refuses push routes for a friend session', async () => {
+    const { gw, friendSeen, hostSeen, friendCookie, ownerCookie } = await setup();
+    const denied = await raw(gw, '/api/push/status', { host: PUBLIC, cookie: friendCookie });
+    expect(denied.status).toBe(403);
+    expect(denied.text).toMatch(/owner login/);
+    expect(friendSeen).toHaveLength(0);
+    const posted = await raw(gw, '/api/push/test', {
+      host: PUBLIC, cookie: friendCookie, origin: `https://${PUBLIC}`, 'content-type': 'application/json',
+    }, '{"endpoint":"https://web.push.apple.com/x"}');
+    expect(posted.status).toBe(403);
+    expect(friendSeen).toHaveLength(0);
+    const owner = await raw(gw, '/api/push/status', { host: PUBLIC, cookie: ownerCookie });
+    expect(owner.status).not.toBe(403);
+    expect(hostSeen.length).toBeGreaterThan(0);
+    expect(hostSeen[0]['x-gridbot-via']).toBe('owner');
+  });
+
   it('a friend cookie reaches the friend copy and never the host app', async () => {
     const { gw, hostSeen, friendSeen, friendCookie } = await setup();
     const r = await raw(gw, '/api/health', { host: PUBLIC, cookie: friendCookie, 'x-forwarded-for': '100.9.9.9' });

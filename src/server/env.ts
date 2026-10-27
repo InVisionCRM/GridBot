@@ -3,6 +3,7 @@ import { FetchRequest, JsonRpcProvider, Wallet } from 'ethers';
 import { getNetwork, type NetworkKey } from '../live/networks';
 import { registerSecret } from './bot/logger';
 import { ownerLoginFrom, parsePassHash, type OwnerConfig } from './friends/owner';
+import { vapidSubjectFrom } from './push/send';
 
 /** Load .env from the working directory (Node ≥ 20.12). Missing file is fine. */
 export function loadEnv(file = '.env') {
@@ -25,6 +26,7 @@ export function readSettings() {
     approval: (process.env.APPROVAL_MODE === 'max' ? 'max' : 'exact') as 'exact' | 'max',
     maxRetries: Math.max(0, Number(process.env.MAX_RETRIES ?? 1)),
     retryDelayMs: Math.max(0, Number(process.env.RETRY_DELAY_MS ?? 5000)),
+    vapidSubject: vapidSubjectFrom(process.env.VAPID_SUBJECT),
   };
 }
 
