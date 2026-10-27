@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest runs on a case-insensitive disk, like the Mac the app runs on.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint --if-present
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: No file names that clash only by case
+        if: runner.os == 'Linux'
+        run: |
+          dupes=$(git ls-files | awk '{ print tolower($0) }' | sort | uniq -d)
+          if [ -n "$dupes" ]; then echo "Paths that differ only by case:"; echo "$dupes"; exit 1; fi
