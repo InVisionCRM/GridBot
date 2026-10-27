@@ -1450,20 +1450,24 @@ export class MultiBot {
   }
 
   status() {
-    const at = Date.now();
+    const now = Date.now();
+    // Metrics are as of the bot's last price reading, not the wall clock: status() then only changes when a bot
+    // actually ticks (the v2 stream sends no patch for a clock that moved), and a stopped bot's rates stop at its
+    // last reading. A bot with no reading yet uses the current minute.
+    const asOf = (b: { priceAt?: number | null }) => (typeof b.priceAt === 'number' && b.priceAt > 0 && b.priceAt <= now ? b.priceAt : Math.floor(now / 60_000) * 60_000);
     const grids = this.multi.grids.map((g) => {
       const st = (this.engines.get(g.id) ?? this.attach(g.id)).status();
       const out = { ...st, kind: 'grid' as const, usdPerQuote: this.usdPerQuote(st.stable) };
-      return { ...out, metrics: gridMetrics(out, at) };
+      return { ...out, metrics: gridMetrics(out, asOf(st)) };
     });
     const trends = this.multi.trends.map((t) => {
       const st = (this.trendEngines.get(t.id) ?? this.attachTrend(t.id)).status();
       const out = { ...st, usdPerQuote: this.usdPerQuote(st.quote) };
-      return { ...out, metrics: trendMetrics(out, at) };
+      return { ...out, metrics: trendMetrics(out, asOf(st)) };
     });
     const lps = this.multi.lps.map((t) => {
       const st = (this.lpEngines.get(t.id) ?? this.attachLp(t.id)).status();
-      return { ...st, metrics: lpMetrics(st, at) };
+      return { ...st, metrics: lpMetrics(st, asOf(st)) };
     });
     const aggregate = liveAggregate(grids, trends, lps);
     return {
@@ -1476,7 +1480,7 @@ export class MultiBot {
       chains: this.chainsStatus(),
       marketList: this.marketList(),
       grids, trends, lps, aggregate, allocations: this.allocations(), alerts: this.multi.alerts,
-      feesToday: feesToday([...grids, ...trends, ...lps], at),
+      feesToday: feesToday([...grids, ...trends, ...lps], now),
       candleSync: this.candleSyncStatus?.() ?? null,
       log: this.d.log.entries.slice(-80).reverse(),
     };
