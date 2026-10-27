@@ -46,10 +46,11 @@ const inconclusive = (): SafetyReport => ({ ...measured(), risk: 'unknown', live
 const PASS = measured({ gotBuy: 990n });
 const FAIL = measured({ stage: 4 }); // a completed check that failed
 
-/** What each hub.inspect call does, in order; the last entry repeats. */
-type Step = 'none' | 'throw' | 'rate' | SafetyReport;
+/** What each hub.inspect call does, in order; the last entry repeats. 'hang' never answers. */
+type Step = 'none' | 'throw' | 'rate' | 'hang' | SafetyReport;
 
-function world(shipped: SafetyReport = PASS) {
+interface WorldOpts { store?: MemoryStore<MultiState>; steps?: Step[]; bootCheckMs?: number; tryMs?: number }
+function world(shipped: SafetyReport = PASS, o: WorldOpts = {}) {
   let t = 1_000_000;
   const pls = new MockChain(0.00001), eth = new MultiDexMock();
   [WETH, USDC, TKN].forEach((x) => eth.addToken(x));
@@ -64,20 +65,22 @@ function world(shipped: SafetyReport = PASS) {
   const noSend = { getAddress: async () => ME, sendTransaction: async () => { throw new Error('test: must not send'); } };
   const hub = new Hub({
     runtimes: [new ChainRuntime(CHAINS[0], pls, null), new ChainRuntime(ETH, eth, noSend)], markets: [...legacyMarkets(NET), ETH_DEF, def],
-    legacyNet: NET, custom: new MemoryStore<CustomFile>(), now: () => t, safetyRetryMs: [0, 0],
+    legacyNet: NET, custom: new MemoryStore<CustomFile>(), now: () => t, safetyRetryMs: [0, 0], safetyTryTimeoutMs: o.tryMs,
   });
-  const bot = new MultiBot({ net: NET, reader: pls, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub, now: () => t });
-  let steps: Step[] = ['none'];
+  let steps: Step[] = o.steps ?? ['none'];
   let calls = 0;
   (hub as unknown as { inspect: () => Promise<unknown> }).inspect = async () => {
     const s = steps[Math.min(calls, steps.length - 1)];
     calls++;
+    if (s === 'hang') return new Promise(() => {});
     if (s === 'throw') throw Object.assign(new Error('request timeout (code=TIMEOUT)'), { code: 'TIMEOUT' });
     if (s === 'rate') throw new Error('429 Too Many Requests: rate limit exceeded');
     return s === 'none' ? { safety: null, chosen: null } : { safety: s, chosen: {} };
   };
+  const store = o.store ?? new MemoryStore<MultiState>();
+  const bot = new MultiBot({ net: NET, reader: pls, signer: null, store, log: new Logger(true), hub, now: () => t, bootCheckMs: o.bootCheckMs });
   const set = (...s: Step[]) => { steps = s; calls = 0; };
-  return { hub, bot, key: def.key, set, calls: () => calls, tick: (ms: number) => { t += ms; } };
+  return { hub, bot, store, key: def.key, set, calls: () => calls, tick: (ms: number) => { t += ms; } };
 }
 
 async function gridParams(bot: MultiBot, key: string) {
@@ -226,11 +229,13 @@ describe('2. A LIVE start needs a fresh, completed safety check', () => {
     expect(bot.status().grids).toHaveLength(0);
   });
 
-  it('no Start anyway when the last known report is not a measured pass (never passed, or failed)', async () => {
+  it('conservative rule: no live start (not even Start anyway) for a token never checked to a pass or that last failed', async () => {
     for (const shipped of [inconclusive(), FAIL]) {
       const { bot, key, set } = world(shipped);
       set('throw');
       const p = { mode: 'live' as const, ...(await gridParams(bot, key)) };
+      await expect(bot.add(p)).rejects.toMatchObject({ code: 'SAFETY_INCOMPLETE', canStartAnyway: false });
+      set('throw');
       const e = await caught(asButton(() => bot.add({ ...p, startAnyway: true })));
       expect(e).toBeInstanceOf(SafetyIncomplete);
       expect((e as SafetyIncomplete).canStartAnyway).toBe(false);
@@ -285,6 +290,199 @@ describe('2b. liquidity bots follow the same rule', () => {
     bot.stopAll();
     set(FAIL);
     await expect(asButton(() => bot.addLp({ ...p, startAnyway: true }))).rejects.toBeInstanceOf(SafetyBlocked);
+  });
+});
+
+const asResume = <T>(fn: () => Promise<T>) => requestStore.run({ origin: 'gateway-owner', endpoint: 'POST /api/bot/grids/:id/resume', ua: 'phone', from: null }, fn);
+
+describe('3. Resume of a stopped LIVE bot runs the same fresh check (3 tries)', () => {
+  /** A live grid, trend and LP on the market, started on a passing check, then stopped. */
+  async function stoppedLive(shipped: SafetyReport = PASS) {
+    const w = world(shipped);
+    w.set(PASS);
+    const g = await w.bot.add({ mode: 'live', ...(await gridParams(w.bot, w.key)) });
+    const t = await w.bot.addTrend({ mode: 'live', quote: w.key, tf: '1h', capital: 0.001 });
+    const l = await w.bot.addLp({ mode: 'live', market: w.key, bandPct: 0.1, capital: 0.001 });
+    w.bot.stopAll();
+    const st = () => w.bot.status();
+    const bots = {
+      grid: { resume: () => w.bot.resume(g), get: () => st().grids.find((x) => x.id === g)! },
+      trend: { resume: () => w.bot.resumeTrend(t), get: () => st().trends.find((x) => x.id === t)! },
+      lp: { resume: () => w.bot.resumeLp(l), get: () => st().lps.find((x: { id: string }) => x.id === l)! },
+    };
+    return { ...w, bots };
+  }
+
+  it('check passes → resumes; one try; no override', async () => {
+    const w = await stoppedLive();
+    for (const [, b] of Object.entries(w.bots)) {
+      w.set(PASS);
+      await b.resume();
+      expect(w.calls()).toBe(1);
+      expect(b.get().status).toBe('running');
+      expect(b.get().startOverride ?? null).toBeNull();
+    }
+  });
+
+  it('check completes and fails → resume refused with the reasons (grid, trend, LP); the bot stays stopped', async () => {
+    const w = await stoppedLive();
+    for (const [, b] of Object.entries(w.bots)) {
+      w.set('throw', FAIL);
+      const e = await caught(b.resume());
+      expect(e).toBeInstanceOf(SafetyBlocked);
+      expect(e!.message).toMatch(/LIVE blocked — .* safety \w+: /);
+      expect(b.get().status).toBe('stopped');
+    }
+  });
+
+  it("check can't complete (3 tries) → resumes on the last passing report, marked stale, audited + activity warning; no button needed", async () => {
+    const w = await stoppedLive();
+    for (const [kind, b] of Object.entries(w.bots)) {
+      w.set('throw');
+      await asResume(() => b.resume());
+      expect(w.calls()).toBe(3);
+      expect(b.get().status).toBe('running');
+      expect(b.get().startOverride).toMatchObject({ kind: 'resume', what: 'resume', origin: 'gateway-owner', endpoint: 'POST /api/bot/grids/:id/resume', ua: 'phone', blockedBy: expect.stringMatching(/timeout/), tries: 3 });
+      expect(w.hub.def(w.key).safety!.stale).toBeTruthy();
+      expect(w.bot.status().safetyStale).toEqual([expect.objectContaining({ key: w.key })]);
+      const ev = w.bot.activity.recent().filter((e) => /resumed on the last passing safety report/.test(e.msg)).at(-1)!;
+      expect(ev, kind).toMatchObject({ level: 'warn', notify: true, data: { startOverride: expect.objectContaining({ kind: 'resume' }) } });
+      w.bot.stopAll();
+    }
+  });
+
+  it("can't complete and there is no passing report (never passed / last failed) → resume refused", async () => {
+    const w = await stoppedLive();
+    // The stored report is replaced by a measured fail, then the RPC goes away.
+    w.set(FAIL);
+    await w.bot.recheckMarket(w.key).catch(() => undefined);
+    for (const [, b] of Object.entries(w.bots)) {
+      w.set('throw');
+      await expect(b.resume()).rejects.toBeInstanceOf(SafetyIncomplete);
+      expect(b.get().status).toBe('stopped');
+    }
+  });
+
+  it('paper resume is unchanged: no check', async () => {
+    const w = world();
+    const id = await w.bot.add({ mode: 'paper', ...(await gridParams(w.bot, w.key)) });
+    w.bot.stopAll();
+    w.set('throw');
+    await w.bot.resume(id);
+    expect(w.calls()).toBe(0);
+    expect(w.bot.status().grids[0].status).toBe('running');
+  });
+
+  it('a hung RPC is cut off per try: the resume answers instead of hanging', async () => {
+    const w = world(PASS, { tryMs: 30 });
+    w.set(PASS);
+    const id = await w.bot.add({ mode: 'live', ...(await gridParams(w.bot, w.key)) });
+    w.bot.stopAll();
+    w.set('hang');
+    const t0 = Date.now();
+    await w.bot.resume(id);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(w.bot.status().grids[0].startOverride).toMatchObject({ kind: 'resume', blockedBy: expect.stringMatching(/timed out/) });
+    w.bot.stopAll();
+  });
+});
+
+describe('4. App restart: live bots restored as running follow the resume rule, held until their check answers', () => {
+  /** A store with a live grid, trend and LP running on the market (written by a first app run). */
+  async function savedRunning() {
+    const w = world();
+    w.set(PASS);
+    await w.bot.add({ mode: 'live', ...(await gridParams(w.bot, w.key)) });
+    await w.bot.addTrend({ mode: 'live', quote: w.key, tf: '1h', capital: 0.001 });
+    await w.bot.addLp({ mode: 'live', market: w.key, bandPct: 0.1, capital: 0.001 });
+    await w.bot.bootSafety;
+    const st = w.bot.status();
+    expect([...st.grids, ...st.trends, ...st.lps].map((b) => b.status)).toEqual(['running', 'running', 'running']);
+    return w.store;
+  }
+  const all = (bot: MultiBot) => { const st = bot.status(); return [...st.grids, ...st.trends, ...st.lps] as { id: string; status: string; halt?: unknown; startOverride?: unknown }[]; };
+
+  it('boot check passes → all keep running, one check for the market', async () => {
+    const store = await savedRunning();
+    const w = world(PASS, { store, steps: [PASS] });
+    await w.bot.bootSafety;
+    expect(w.calls()).toBe(1); // one check per market, not per bot
+    expect(all(w.bot).map((b) => b.status)).toEqual(['running', 'running', 'running']);
+    expect(w.bot.status().safetyChecking).toEqual([]);
+  });
+
+  it('boot check completes and fails → none is resumed: all stopped with the reasons (safety pause), notifying alert', async () => {
+    const store = await savedRunning();
+    const w = world(PASS, { store, steps: ['throw', FAIL] });
+    await w.bot.bootSafety;
+    for (const b of all(w.bot)) {
+      expect(b.status).toBe('stopped');
+      expect(b.halt).toMatchObject({ what: 'safety-pause', origin: 'system', detail: expect.stringMatching(/safety check after restart: LIVE blocked/) });
+    }
+    expect(w.bot.activity.recent().some((e) => e.level === 'error' && e.notify && /safety check after restart/.test(e.msg))).toBe(true);
+  });
+
+  it("boot check can't complete → keep running on the last passing report, stale, audited (kind 'boot', the app) with a warning", async () => {
+    const store = await savedRunning();
+    const w = world(PASS, { store, steps: ['throw'] });
+    await w.bot.bootSafety;
+    expect(w.calls()).toBe(3);
+    for (const b of all(w.bot)) {
+      expect(b.status).toBe('running');
+      expect(b.startOverride).toMatchObject({ kind: 'boot', what: 'boot', origin: 'system', blockedBy: expect.stringMatching(/timeout/) });
+    }
+    expect(w.bot.status().safetyStale).toEqual([expect.objectContaining({ key: w.key })]);
+    expect(w.bot.activity.recent().filter((e) => e.level === 'warn' && e.notify && /safety check after restart couldn't complete/.test(e.msg))).toHaveLength(3);
+    // The audit is saved: a second restart (check passes) still shows it until the bot is restarted or resumed.
+    const again = world(PASS, { store, steps: [PASS] });
+    await again.bot.bootSafety;
+    expect(all(again.bot).every((b) => (b.startOverride as { kind?: string })?.kind === 'boot')).toBe(true);
+  });
+
+  it("boot check can't complete and the last report isn't a pass → stopped, not resumed", async () => {
+    const store = await savedRunning();
+    const w = world(FAIL, { store, steps: ['throw'] });
+    await w.bot.bootSafety;
+    for (const b of all(w.bot)) expect(b.status).toBe('stopped');
+  });
+
+  it('boot never gets stuck: a hung RPC is cut off by the boot deadline; bots are held (not ticked) until then', async () => {
+    const store = await savedRunning();
+    const w = world(PASS, { store, steps: ['hang'], bootCheckMs: 150, tryMs: 10_000 });
+    const ids = all(w.bot).map((b) => b.id);
+    expect(w.bot.status().safetyChecking.sort()).toEqual([...ids].sort());
+    // While held, the poll doesn't tick them (they send nothing new).
+    const engines = [
+      ...(w.bot as unknown as { engines: Map<string, { tick: () => Promise<void> }> }).engines.values(),
+      ...(w.bot as unknown as { trendEngines: Map<string, { tick: () => Promise<void> }> }).trendEngines.values(),
+      ...(w.bot as unknown as { lpEngines: Map<string, { tick: () => Promise<void> }> }).lpEngines.values(),
+    ];
+    let ticked = 0;
+    for (const e of engines) e.tick = async () => { ticked++; };
+    await w.bot.tickAll();
+    expect(ticked).toBe(0);
+    const t0 = Date.now();
+    await w.bot.bootSafety;
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(w.bot.status().safetyChecking).toEqual([]);
+    for (const b of all(w.bot)) {
+      expect(b.status).toBe('running');
+      expect(b.startOverride).toMatchObject({ kind: 'boot', blockedBy: expect.stringMatching(/timed out|out of time/) });
+    }
+    await w.bot.tickAll();
+    expect(ticked).toBe(3);
+  });
+
+  it('paper bots and stopped live bots are not checked at boot', async () => {
+    const w0 = world();
+    const id = await w0.bot.add({ mode: 'paper', ...(await gridParams(w0.bot, w0.key)) });
+    w0.set(PASS);
+    const lid = await w0.bot.add({ mode: 'live', ...(await gridParams(w0.bot, w0.key)) });
+    w0.bot.stop(lid);
+    const w = world(PASS, { store: w0.store, steps: ['throw'] });
+    await w.bot.bootSafety;
+    expect(w.calls()).toBe(0);
+    expect(w.bot.status().grids.find((g) => g.id === id)!.status).toBe('running');
   });
 });
 

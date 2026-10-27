@@ -180,7 +180,7 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/bot/grids', wrap(async (req) => { const id = await bot.add(startBody(req.body ?? {})); void bot.tickAll(); return { ok: true, id }; }));
   app.post('/api/bot/grids/:id/start', wrap(async (req) => { await bot.start(req.params.id, startBody(req.body ?? {})); void bot.tickAll(); }));
-  app.post('/api/bot/grids/:id/resume', wrap((req) => { bot.resume(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/grids/:id/resume', wrap(async (req) => { await bot.resume(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/grids/:id/stop', wrap((req) => bot.stop(req.params.id)));
   app.post('/api/bot/grids/:id/close', wrap((req) => bot.closeGrid(req.params.id)));
   app.put('/api/bot/grids/:id/limits', wrap((req) => bot.setLimits(req.params.id, limitsBody(req.body ?? {}))));
@@ -263,10 +263,10 @@ export function createApp(o: AppOpts) {
     if (typeof b.id === 'string' && b.id) return { ok: true, stopped: bot.stopById(b.id) };
     throw new Error('Send { "id": "<bot id>" } to stop one bot, or { "all": true } to stop every bot.');
   }));
-  app.post('/api/bot/resume', wrap(() => {
+  app.post('/api/bot/resume', wrap(async () => {
     const g = bot.status().grids.find((x) => x.config && x.status !== 'running');
     if (!g) throw new Error('No stopped grid to resume');
-    bot.resume(g.id);
+    await bot.resume(g.id);
     void bot.tickAll();
   }));
 
@@ -279,7 +279,7 @@ export function createApp(o: AppOpts) {
     void bot.tickAll();
     return { ok: true, id };
   }));
-  app.post('/api/bot/trends/:id/resume', wrap((req) => { bot.resumeTrend(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/trends/:id/resume', wrap(async (req) => { await bot.resumeTrend(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/trends/:id/stop', wrap((req) => bot.stopTrend(req.params.id)));
   app.post('/api/bot/trends/:id/sell', wrap((req) => bot.sellTrend(req.params.id)));
   app.post('/api/bot/trends/:id/close', wrap((req) => bot.closeTrend(req.params.id)));
@@ -299,7 +299,7 @@ export function createApp(o: AppOpts) {
     void bot.tickAll();
     return { ok: true, id };
   }));
-  app.post('/api/bot/lps/:id/resume', wrap((req) => { bot.resumeLp(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/lps/:id/resume', wrap(async (req) => { await bot.resumeLp(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
   app.post('/api/bot/lps/:id/close', wrap((req) => bot.closeLp(req.params.id)));
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));

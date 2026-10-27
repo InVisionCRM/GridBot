@@ -294,7 +294,18 @@ export class TrendEngine {
     this.emit('started', `Trend bot started — ${this.state.name} (${p.mode})`, { level: 'success' });
   }
 
-  resume() {
+  /** Record that this live run goes on without a completed safety check (MultiBot's boot check). Saved. */
+  setStartOverride(o: StartOverride) {
+    this.state.startOverride = o;
+    this.save();
+  }
+
+  /**
+   * `override`: MultiBot ran the fresh safety check (Hub.liveCheck) for a LIVE resume. A Halt-like record when it
+   * couldn't complete and the bot resumes on the last passing report (audited); null when it passed; undefined when
+   * called directly (no check: tests, paper).
+   */
+  resume(override?: StartOverride | null) {
     if (this.state.status === 'running') return;
     if (!this.state.capital) throw new Error('Nothing to resume.');
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
@@ -304,6 +315,7 @@ export class TrendEngine {
     this.state.closing = false;
     this.state.archivedAt = null;
     this.state.halt = null;
+    if (override !== undefined) this.state.startOverride = override;
     this.closeNote = null;
     this.save();
     this.log('info', 'Resumed.');

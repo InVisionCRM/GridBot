@@ -161,7 +161,7 @@ What doesn't change:
 
 **Live starts need a fresh, completed safety check** (grid, preset, trend, liquidity; `Hub.liveCheck`). Paper starts are unchanged and don't check.
 
-- Up to **3 tries**, 1 s then 2 s apart. Each try already rotates across the chain's RPCs.
+- Up to **3 tries**, 1 s then 2 s apart. Each try already rotates across the chain's RPCs, and is cut off after 20 s (a hung RPC can't hold the start). The page shows **Checking safety…** meanwhile.
 - A try *doesn't complete* when it throws, returns no report, or its simulation doesn't run. A real honeypot or `paused()` found by an inconclusive run counts as completed.
 - **Completed and passing:** the bot starts.
 - **Completed and failing** (honeypot, tax over the cap, paused, thin pool, …): refused with the reasons, API `400 {code: 'SAFETY_BLOCKED'}`. There is **no** Start anyway.
@@ -169,7 +169,24 @@ What doesn't change:
   - `canStartAnyway` is true only when the last known report was a measured pass. A token that never passed (or last failed) can't be started live.
   - New bot then shows the reason with a **Start anyway** button. It asks for a confirm, then sends the same start with `startAnyway: true` (header `X-GridBot-From: start-anyway`). The server still runs the 3 tries first.
   - The bot stores `startOverride`: who pressed it (origin: this computer / phone / friend copy, endpoint, browser), when, why the check was blocked, the tries and the last report's date and risk. It shows on the bot's page, in `status`, and as a notifying warning in the activity log.
-- The autopilot's own live opens never use Start anyway. **Resume** of a stopped bot still uses the stored report (unchanged).
+- The autopilot's own live opens never use Start anyway.
+- **Conservative rule:** a token whose last report isn't a measured pass (its simulation never ran, or it last failed) can't go live at all, with or without Start anyway.
+
+**Resume of a stopped LIVE bot** (grid, trend, liquidity) runs the same fresh check (3 tries; *Checking safety…* on the page). Paper resumes don't check.
+
+- **Completed and failing:** refused with the reasons (`SAFETY_BLOCKED`). The bot stays stopped.
+- **Not completed:** it resumes on the last passing report, which is marked **stale** (banner, Markets tag). No Start anyway click: the bot was already vetted and running. It gets `startOverride` with `kind: 'resume'` and who resumed it, plus a notifying warning in the activity log.
+- **Not completed and no passing report** (never passed, or last failed): refused (`SAFETY_INCOMPLETE`).
+- The token trader's *Resume new buys* and the smart trader's *carry on* aren't per-market bots: each new buy there runs its own safety gate, so they're unchanged.
+
+**After an app restart** (bots restored from `state.json` as running), the same rule applies, per market, with one check shared by the market's bots:
+
+- Live bots on a market with a safety report are **held** (the poll doesn't tick them, so they send nothing new) until the check answers. `status.safetyChecking` lists them; their pages show *Checking safety after the restart…*.
+- Bots that are closing, or that have a tx in flight, aren't held: they only settle or unwind.
+- **Passes:** released.
+- **Completed and failing:** all of them stay **stopped** (a safety pause with the reasons, and a notifying alert). A bot whose check fails is never resumed.
+- **Not completed:** released on the last passing report (stale), with `startOverride.kind: 'boot'` (the app, `origin: system`) and a notifying warning per bot. With no passing report they stay stopped.
+- **Never stuck:** all tries for one market stop after 45 s (`bootCheckMs`); each try is cut off at 20 s. Out of time counts as not completed.
 
 Custom markets persist in `data/custom.json` and work in grids, trend bots, backtests (GeckoTerminal with on-chain V2/V3 rebuild fallback), charts, market panels, alerts and analytics. **Re-check** re-runs the safety probe. **Remove** works once no bot or alert uses the market. A pool that is already a pair can't be added a second time (before, re-adding a coin's second pool made a duplicate pair).
 

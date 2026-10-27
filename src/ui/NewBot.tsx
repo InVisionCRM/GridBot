@@ -9,7 +9,8 @@ import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
 import { LP_BAND, LP_MIN_SWAP_SHARE } from '../market/lp';
 import { rangeBaseShare } from '../live/v3Liquidity';
 import { L } from './Tip';
-import { botApi, offersStartAnyway } from './api';
+import { botApi } from './api';
+import { useLiveStart } from './SafetyChecking';
 import { pct, px } from './fmt';
 import { ChainBadge, Orientation, PairPicker, chainOf, feeLabel, marketsOf, mk, unflipKey, useChainFilter } from './chains';
 import { TrendConfigEditor, strategyRule } from './TrendConfig';
@@ -19,36 +20,6 @@ import { coinFunds, errMsg, floorSig, spendFunds, type AnyObj, type BotKind, typ
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
-/** Extra body for a start request, and the button name the server records (audit). */
-type Send = (extra: { startAnyway?: true }, from?: string) => Promise<unknown>;
-/**
- * A LIVE start whose safety check couldn't complete after 3 tries is refused with the reason. When the token's last
- * measured check passed, the server offers Start anyway: shown here as a button that asks for a confirm, then sends
- * the same start with startAnyway (recorded on the bot: who pressed it and why it was blocked). A check that
- * completed and failed has no Start anyway; its reason shows like any other error.
- */
-function useLiveStart(act: Common['act'], busy: boolean) {
-  const [blocked, setBlocked] = useState<{ msg: string; send: Send } | null>(null);
-  const run = (send: Send) => act(async () => {
-    setBlocked(null);
-    try { await send({}); } catch (e) {
-      if (offersStartAnyway(e)) { setBlocked({ msg: e.message, send }); return; }
-      throw e;
-    }
-  });
-  const anyway = () => {
-    const b = blocked;
-    if (!b || !confirm(`${b.msg}\n\nStart anyway? It starts LIVE on the last known safety report, without a fresh check. Who pressed it (this computer, the phone or a friend copy), when, and why the check was blocked are recorded on the bot.`)) return;
-    act(async () => { await b.send({ startAnyway: true }, 'start-anyway'); setBlocked(null); });
-  };
-  const banner = blocked && (
-    <div className="banner error">
-      <span>{blocked.msg}</span>{' '}
-      <button type="button" className="btn live small-btn" disabled={busy} onClick={anyway}>Start anyway</button>
-    </div>
-  );
-  return { run, banner };
-}
 type Mode = 'paper' | 'live';
 interface Econ {
   ok: boolean; reasons: string[]; levelSize: number; buyLevels: number; spacingPct: number; roundTripFeePct: number;
@@ -246,7 +217,7 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
   const live = useLiveStart(act, busy);
   const startCustom = () => {
     if (!confirmLive(`grid on ${m.label}`)) return;
-    live.run(async (extra, from) => {
+    live.run(mode === 'live', async (extra, from) => {
       const r = await botApi('grids', 'POST', {
         mode, stable: pair, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: +amount,
         limits: limitsBody(limits, !!m.quoteNative), recenter: follow, profits: profitsBody(profits), ...extra,
@@ -257,7 +228,7 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
   const legQuoteNative = !!legs?.some((l) => mk(s, l.quote).quoteNative);
   const startPreset = () => {
     if (!confirmLive(`${preset.name} preset`)) return;
-    live.run(async (extra, from) => {
+    live.run(mode === 'live', async (extra, from) => {
       const r = await botApi(`presets/${presetId}/start`, 'POST', {
         mode, quote: pair, amounts: JSON.parse(amountsKey), limits: limitsBody(limits, legQuoteNative), recenter: follow, profits: profitsBody(profits), ...extra,
       }, from);
@@ -372,7 +343,7 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
   const live = useLiveStart(act, busy);
   const start = () => {
     if (mode === 'live' && !confirm(`Start a LIVE trend bot on ${m.label} (${tf})? It signs real swaps from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
-    live.run(async (extra, from) => {
+    live.run(mode === 'live', async (extra, from) => {
       const r = await botApi('trends', 'POST', { mode, quote: pair, tf, cfg, capital: +amount, name: name || undefined, limits: limitsBody(limits, !!m.quoteNative), ...extra }, from);
       nav({ v: 'trend', id: r.id });
     });
@@ -461,7 +432,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const live = useLiveStart(act, busy);
   const start = () => {
     if (mode === 'live' && !confirm(`Start a LIVE liquidity position on ${m.label}? It signs real transactions from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
-    live.run(async (extra, from) => {
+    live.run(mode === 'live', async (extra, from) => {
       const r = await botApi('lps', 'POST', {
         mode, market: pair, bandPct: b, capital: q, baseAmount: a, rerange, profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative), ...extra,
       }, from);

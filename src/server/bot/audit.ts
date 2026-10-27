@@ -68,18 +68,26 @@ export function isHalt(v: unknown): v is Halt {
 }
 
 /**
- * A LIVE start that went ahead without a completed safety check (Start anyway, after 3 tries couldn't complete it).
- * Who pressed it (origin, endpoint, browser), when, why the check was blocked, and the last report it relied on.
+ * A LIVE run that went on without a completed safety check (3 tries couldn't complete it), on the last passing report:
+ * - 'start-anyway': a start, after the Start anyway button (who pressed it: origin, endpoint, browser);
+ * - 'resume': a Resume of a stopped live bot (who resumed it), no button needed since it was already vetted;
+ * - 'boot': a live bot that was running when the app stopped and keeps running after the restart (the app).
+ * Also when, why the check was blocked, and the last report it relied on.
  */
+export type OverrideKind = 'start-anyway' | 'resume' | 'boot';
 export interface StartOverride extends Halt {
+  kind: OverrideKind;
   blockedBy: string;
   tries: number;
   lastKnownAt: number;
   lastKnownRisk: string;
 }
 
-export function startOverride(info: { blockedBy: string; tries: number; lastKnownAt: number; lastKnownRisk: string }, at: number): StartOverride {
-  return { ...requestHalt('start-anyway', 'Start anyway (API)', at), ...info };
+export function startOverride(info: { blockedBy: string; tries: number; lastKnownAt: number; lastKnownRisk: string }, at: number, kind: OverrideKind = 'start-anyway'): StartOverride {
+  const who = kind === 'boot' ? systemHalt('boot', 'App restart', at)
+    : kind === 'resume' ? requestHalt('resume', 'Resume (API)', at)
+    : requestHalt('start-anyway', 'Start anyway (API)', at);
+  return { ...who, kind, ...info };
 }
 
 /** A start that a Stop all / STOP chain overtook while it was under way. It is refused; `halt` is that press. */

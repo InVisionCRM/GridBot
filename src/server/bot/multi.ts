@@ -6,7 +6,7 @@
  */
 import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { LiveNetwork } from '../../live/networks';
-import { Hub } from '../chains/hub';
+import { Hub, SafetyBlocked, SafetyIncomplete, type StartAnywayInfo } from '../chains/hub';
 import { isFlipKey, unflipKey, type MarketDef } from '../../live/markets';
 import { checkGasReserve, reserveCfg } from '../../live/gasReserve';
 import { humanAmount } from '../../live/amount';
@@ -28,7 +28,7 @@ import { sameAddr } from '../dex/types';
 import { costModelOf, gridEconomics, type EconCfg, type EconSummary } from './econ';
 import { capGridEntry } from '../../market/poolSize';
 import { ActivityBus } from './activity';
-import { requestHalt, systemHalt, type Halt } from './audit';
+import { requestHalt, startOverride, systemHalt, type Halt, type StartOverride } from './audit';
 import { CandleStore } from '../market/candleStore';
 import { closedOnly, fillGaps, isTF, replayCandles, sliceRange, type Candle, type TF } from '../../market/candles';
 import { atr, ema, efficiencyRatio, rsi } from '../../market/indicators';
@@ -101,7 +101,12 @@ export interface MultiDeps {
   copy?: { friend: string; host: string } | null;
   /** A chain whose RPCs keep failing this long raises a banner + Activity entry (RPC_ALERT_MINUTES; default 3 min). */
   rpcAlertAfterMs?: number;
+  /** Boot: how long the safety re-check of live bots that were running may take in all, per market (default 45 s). */
+  bootCheckMs?: number;
 }
+
+/** Boot safety re-check of live bots that were running: all tries of one market together stop after this long. */
+export const BOOT_CHECK_MS = 45_000;
 
 export interface ChainWallet {
   chainId: number;
@@ -236,6 +241,82 @@ export class MultiBot {
       this.activity.emit('status');
     };
     this.resumeClosing();
+    this.bootSafety = this.checkAtBoot();
+  }
+
+  /**
+   * Live bots restored as running (state.json) on a market with a safety report: held (not ticked, so they send
+   * nothing new) until a fresh check of their market answers, like a Resume:
+   * - passes → released;
+   * - completes and fails → stopped (safety pause) with the reasons, never resumed;
+   * - can't complete (3 tries, at most bootCheckMs in all) → released on the last passing report, which is marked stale,
+   *   with a warning and an audit record on the bot (kind 'boot'); no passing report → stopped.
+   * Closing bots and a tx already in flight are not held: those only settle or unwind.
+   */
+  readonly bootSafety: Promise<void>;
+  private readonly held = new Set<string>();
+  private isHeld(id: string) { return this.held.has(id); }
+
+  private async checkAtBoot(): Promise<void> {
+    type Bot = { id: string; state: { mode: string; status: string; closing?: boolean; archivedAt?: number | null }; stop: (why: Halt) => void; setStartOverride: (o: StartOverride) => void };
+    const byKey = new Map<string, { bot: Bot; persist: () => void; label: string }[]>();
+    const add = (key: string, bot: Bot, persist: () => void, label: string) => {
+      const s = bot.state;
+      if (s.mode !== 'live' || s.status !== 'running' || s.closing || s.archivedAt) return;
+      if (!this.hub.has(key) || !this.hub.def(key).safety) return;
+      const k = unflipKey(key);
+      byKey.set(k, [...(byKey.get(k) ?? []), { bot, persist, label }]);
+      this.held.add(bot.id);
+    };
+    for (const e of this.engines.values()) add(e.state.stable, { id: e.state.id, state: e.state, stop: (h) => e.stop(h), setStartOverride: (o) => e.setStartOverride(o) }, () => this.persist(), `Grid ${this.hub.label(e.state.stable)}`);
+    for (const e of this.trendEngines.values()) add(e.state.quote, { id: e.state.id, state: e.state, stop: (h) => e.stop(h), setStartOverride: (o) => e.setStartOverride(o) }, () => this.persist(), e.state.name || this.hub.label(e.state.quote));
+    for (const e of this.lpEngines.values()) add(e.state.market, { id: e.state.id, state: e.state, stop: (h) => e.stop(h), setStartOverride: (o) => e.setStartOverride(o) }, () => this.persist(), `Liquidity ${this.hub.label(e.state.market)}`);
+    if (!byKey.size) return;
+    await Promise.all([...byKey].map(async ([key, bots]) => {
+      const label = this.hub.label(key), chainId = this.hub.def(key).chainId;
+      const say = (level: 'info' | 'warn' | 'error', msg: string, notify: boolean, data?: Record<string, unknown>) =>
+        this.activity.emitEvent({ type: level === 'info' ? 'info' : 'alert', kind: 'system', level, notify, pair: key, chainId, msg, data });
+      try {
+        let info: StartAnywayInfo | null = null;
+        try {
+          info = (await this.hub.liveCheck(key, { startAnyway: true, deadlineMs: this.d.bootCheckMs ?? BOOT_CHECK_MS })).override;
+        } catch (e) {
+          // Completed and failed, or couldn't complete with no passing report to fall back on: never resumed.
+          const why = e instanceof SafetyBlocked || e instanceof SafetyIncomplete ? e.message : `safety check error: ${(e as Error).message}`;
+          const halt = systemHalt('safety-pause', `safety check after restart: ${why}`.slice(0, 300), this.now());
+          for (const b of bots) b.bot.stop(halt);
+          say('error', `${label}: safety check after restart — ${why}. ${bots.length} live bot(s) stay stopped; review, then resume.`, true);
+          return;
+        }
+        if (!info) { say('info', `${label}: safety re-checked after restart — passes; ${bots.length} live bot(s) carry on`, false); return; }
+        for (const b of bots) {
+          const audit = startOverride(info, this.now(), 'boot');
+          b.bot.setStartOverride(audit);
+          say('warn', `${b.label}: safety check after restart couldn't complete (${info.blockedBy}); kept running on the last passing report from ${new Date(info.lastKnownAt).toISOString()} (now stale)`, true, { botId: b.bot.id, startOverride: audit });
+        }
+      } finally {
+        for (const b of bots) this.held.delete(b.bot.id);
+        this.activity.emit('status');
+      }
+    }));
+  }
+
+  /**
+   * A LIVE resume runs the same fresh check as a start (3 tries). Completed and failing → refused with the reasons
+   * (SafetyBlocked). Couldn't complete → resumes on the last passing report (stale), audited as kind 'resume', with a
+   * warning; no Start anyway needed, the bot was already vetted and running. No passing report → refused.
+   * Returns undefined for paper / a running bot / a market without a safety report (resume as before).
+   */
+  private needsResumeCheck(mode: string, status: string, key: string) {
+    return mode === 'live' && status !== 'running' && this.hub.has(key) && !!this.hub.def(key).safety;
+  }
+  private async resumeSafety(id: string, key: string, label: string): Promise<StartOverride | null> {
+    const info = (await this.hub.liveCheck(key, { startAnyway: true })).override;
+    if (!info) return null;
+    const audit = startOverride(info, this.now(), 'resume');
+    this.activity.emitEvent({ type: 'alert', kind: 'system', level: 'warn', notify: true, pair: key, chainId: this.hub.def(key).chainId, botId: id,
+      msg: `${label}: resumed on the last passing safety report from ${new Date(info.lastKnownAt).toISOString()} (now stale) — the fresh check couldn't complete (${info.blockedBy})`, data: { startOverride: audit } });
+    return audit;
   }
 
   /** On-chain unwinds started by Close. They run beside the poll loop and don't wait for each other. */
@@ -384,7 +465,12 @@ export class MultiBot {
     if (p.mode === 'live' && eng.state.status !== 'running') await this.assertCovers(p.stable ?? eng.state.stable, p.totalCapitalUsd, p.limits);
     await eng.start(p);
   }
-  resume(id: string) { this.engine(id).resume(); }
+  /** Paper, or no safety report: resumes at once (as before). LIVE on a market with a report: fresh check first. */
+  resume(id: string): Promise<void> {
+    const e = this.engine(id);
+    if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.stable)) { e.resume(); return Promise.resolve(); }
+    return this.resumeSafety(id, e.state.stable, `Grid ${this.hub.label(e.state.stable)}`).then((o) => e.resume(o));
+  }
   stop(id: string, why?: Halt) { this.engine(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/grids/:id/stop', this.now())); }
   setLimits(id: string, l: Partial<SafetyLimits>) { this.engine(id).setLimits(l); }
   setRecenter(id: string, enabled: boolean) { this.engine(id).setRecenter(enabled); }
@@ -477,7 +563,12 @@ export class MultiBot {
     try { await eng.start({ ...p, limits: slot.limits, guard }); } catch (e) { this.removeTrend(slot.id, true); throw e; }
     return slot.id;
   }
-  resumeTrend(id: string) { this.trend(id).resume(); }
+  /** Paper, or no safety report: resumes at once (as before). LIVE on a market with a report: fresh check first. */
+  resumeTrend(id: string): Promise<void> {
+    const e = this.trend(id);
+    if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.quote)) { e.resume(); return Promise.resolve(); }
+    return this.resumeSafety(id, e.state.quote, e.state.name || this.hub.label(e.state.quote)).then((o) => e.resume(o));
+  }
   stopTrend(id: string, why?: Halt) { this.trend(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/trends/:id/stop', this.now())); }
   /** Sell the open trend position and keep watching for the next signal. */
   sellTrend(id: string) {
@@ -522,7 +613,12 @@ export class MultiBot {
     return slot.id;
   }
   stopLp(id: string, why?: Halt) { this.lp(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/lps/:id/stop', this.now())); }
-  resumeLp(id: string) { this.lp(id).resume(); }
+  /** Paper, or no safety report: resumes at once (as before). LIVE on a market with a report: fresh check first. */
+  resumeLp(id: string): Promise<void> {
+    const e = this.lp(id);
+    if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.market)) { e.resume(); return Promise.resolve(); }
+    return this.resumeSafety(id, e.state.market, `Liquidity ${this.hub.label(e.state.market)}`).then((o) => e.resume(o));
+  }
   closeLp(id: string, why?: Halt) {
     const e = this.lp(id);
     const live = e.close(why ?? requestHalt('close', 'POST /api/bot/lps/:id/close', this.now()));
@@ -847,6 +943,7 @@ export class MultiBot {
       for (const e of this.engines.values()) {
         // A stopped grid has nothing to do. Ticking it used to re-read price and balances for every one, ahead of a close.
         if (e.state.archivedAt) continue;
+        if (this.isHeld(e.state.id) && !e.state.inFlight && !e.state.payoutInFlight) continue; // boot safety check pending
         if (e.state.status === 'running' || e.state.closing || e.state.inFlight || e.state.payoutInFlight) {
           push(e.chainId, async () => {
             const before = last(e.state);
@@ -857,6 +954,7 @@ export class MultiBot {
       }
       for (const e of this.trendEngines.values()) {
         if (e.state.archivedAt) continue;
+        if (this.isHeld(e.state.id) && !e.state.inFlight) continue; // boot safety check pending
         if (e.state.status === 'running' || e.state.closing || e.state.inFlight) push(e.chainId, () => e.tick(this.spots[e.state.quote]));
       }
       // A stopped liquidity bot doesn't tick, except to settle a tx already sent. Its position keeps earning, so its
@@ -864,6 +962,7 @@ export class MultiBot {
       for (const e of this.lpEngines.values()) {
         if (e.state.archivedAt || e.state.status === 'idle' || e.state.status === 'closed') continue;
         const sent = !!(e.state.step?.hash || e.state.step?.swap);
+        if (this.isHeld(e.state.id) && !sent) continue; // boot safety check pending
         if (e.state.status === 'running' || e.state.closing || sent || (e.state.status === 'stopped' && n % STOPPED_LP_EVERY === 0)) push(e.chainId, () => e.tick());
       }
       await Promise.all([...byChain.values()].map(async (jobs) => { for (const j of jobs) await j(); }));
@@ -1577,6 +1676,8 @@ export class MultiBot {
       legacyChainId: this.hub.legacyChainId,
       chains: this.chainsStatus(),
       marketList: this.marketList(),
+      /** Live bots held after a restart until their market's safety check answers (ids). The page shows "checking safety…". */
+      safetyChecking: [...this.held],
       safetyStale: this.hub.list().filter((d) => d.safety?.stale).map((d) => ({ key: d.key, label: this.hub.label(d.key), at: d.safety!.at, ...d.safety!.stale! })),
       grids, trends, lps, aggregate, allocations: this.allocations(), alerts: this.multi.alerts,
       candleSync: this.candleSyncStatus?.() ?? null,
