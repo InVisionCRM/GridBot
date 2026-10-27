@@ -3,14 +3,13 @@ import { useState } from 'react';
 import { Icon } from '../ui/icons';
 import { ActivityTape } from './activity-tape';
 import { BotView } from './bot-view';
+import { deskStatusPill } from './format';
 import { HomeView, Ticker } from './home-view';
 import { MoreView } from './more-view';
 import { press } from './press';
 import { useDesk } from './use-desk';
 
 type Page = { v: 'home' } | { v: 'bot'; id: string } | { v: 'activity' } | { v: 'more' };
-
-const SOURCE_LABEL = { live: 'Live', snapshot: 'Owner snapshot', fixture: 'Fixture' } as const;
 
 export function DeskApp() {
   const { snap, stale, failed } = useDesk();
@@ -25,8 +24,7 @@ export function DeskApp() {
           {snap && <Ticker prices={snap.prices} />}
           <header className="v2-head">
             <strong>GridBot</strong>
-            {snap && <span className={`source-badge source-${snap.source}`}>{SOURCE_LABEL[snap.source]}</span>}
-            <span className={`live-chip ${stale ? 'stale' : ''}`}><i className="live-dot" /> {stale ? 'Stale' : 'Live'}</span>
+            {snap && <StatusPill source={snap.source} asOf={snap.portfolio.asOf} stale={stale} />}
           </header>
           {snap?.source === 'fixture' && <p className="sample-banner" role="status">Sample data, not your bots</p>}
           {failed && !snap && <StreamError />}
@@ -85,6 +83,12 @@ export function DeskApp() {
       </LayoutGroup>
     </MotionConfig>
   );
+}
+
+function StatusPill({ source, asOf, stale }: { source: string; asOf: number; stale: boolean }) {
+  const pill = deskStatusPill(source, asOf, stale);
+  const cls = pill.tone === 'snap' ? 'is-snap' : pill.tone === 'stale' ? 'stale' : '';
+  return <span className={`live-chip ${cls}`}><i className="live-dot" /> {pill.text}</span>;
 }
 
 function StreamError() {

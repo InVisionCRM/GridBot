@@ -1,7 +1,30 @@
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import type { TokenQty } from './metrics';
 import { formatTokenLine, formatUsd } from './format';
-import { usePhone } from './motion';
+
+/** Smallest headline size before a line becomes a "+N more" pill. */
+export const HEADLINE_FLOOR_PX = 22;
+
+/**
+ * Largest whole-pixel size at or below the natural size that fits in `available`.
+ * Null means even the floor overflows, so the line should fold.
+ * A missing width keeps the natural size.
+ */
+export function headlinePx(
+  naturalPx: number,
+  widthAt: (px: number) => number,
+  available: number,
+  floor = HEADLINE_FLOOR_PX,
+): number | null {
+  if (!(available > 0)) return Math.round(naturalPx);
+  const natural = Math.round(naturalPx);
+  if (widthAt(natural) <= available) return natural;
+  const min = natural > floor ? floor : Math.max(13, natural - 2);
+  for (let px = natural - 1; px >= min; px -= 1) {
+    if (widthAt(px) <= available) return px;
+  }
+  return null;
+}
 
 export function TokenLine({ tokens, usd = null, className = '' }: { tokens: TokenQty[] | null; usd?: number | null; className?: string }) {
   if (tokens == null) return <span className={className}>—</span>;
@@ -13,17 +36,60 @@ function mainToken(tokens: TokenQty[]): TokenQty {
   return [...tokens].sort((a, b) => Math.abs(b.usd ?? 0) - Math.abs(a.usd ?? 0) || Math.abs(b.amount) - Math.abs(a.amount))[0];
 }
 
-/** On a narrow screen, two or more tokens collapse to the main one plus a chip. */
+function measureLine(sample: HTMLElement, text: string, px: number): number {
+  const cs = getComputedStyle(sample);
+  const probe = document.createElement('span');
+  probe.textContent = text;
+  probe.style.cssText = `position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;font:${cs.font};letter-spacing:${cs.letterSpacing};font-size:${px}px;`;
+  document.body.appendChild(probe);
+  const width = probe.getBoundingClientRect().width;
+  probe.remove();
+  return width;
+}
+
+/** Full token line on one row. Shrink once, then a small pill, only when the measured line does not fit. */
 export function TokenHeadline({ tokens, usd = null }: { tokens: TokenQty[] | null; usd?: number | null }) {
-  const phone = usePhone();
+  const host = useRef<HTMLSpanElement>(null);
+  const [px, setPx] = useState<number | 'fold' | null>(null);
   const [open, setOpen] = useState(false);
-  if (!phone || open || !tokens || tokens.length < 2) return <TokenLine tokens={tokens} usd={usd} />;
+  const text = tokens?.length ? formatTokenLine(tokens) : '';
+  useLayoutEffect(() => {
+    const el = host.current;
+    if (!el) return;
+    const read = () => {
+      if (open || !tokens || tokens.length < 2) {
+        setPx((cur) => (cur == null ? cur : null));
+        return;
+      }
+      const sample = el.parentElement ?? el;
+      const naturalPx = parseFloat(getComputedStyle(sample).fontSize) || HEADLINE_FLOOR_PX;
+      const fitted = headlinePx(naturalPx, (size) => measureLine(sample, text, size), el.clientWidth);
+      const next: number | 'fold' = fitted == null ? 'fold' : fitted;
+      setPx((cur) => (cur === next ? cur : next));
+    };
+    read();
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open, text, tokens]);
+  if (!tokens?.length) return <TokenLine tokens={tokens} usd={usd} />;
+  const folded = px === 'fold' && !open && tokens.length >= 2;
   return (
-    <span className="token-fold">
-      <TokenLine tokens={[mainToken(tokens)]} />
-      <button type="button" className="chip more" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen(true); }}>
-        +{tokens.length - 1} more
-      </button>
+    <span
+      ref={host}
+      className={`token-headline${open ? ' is-open' : ''}${folded ? ' is-fold' : ''}`}
+      style={typeof px === 'number' && !open ? { fontSize: px } : undefined}
+    >
+      {folded ? (
+        <span className="token-fold">
+          <TokenLine tokens={[mainToken(tokens)]} />
+          <button type="button" className="chip more" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen(true); }}>
+            +{tokens.length - 1} more
+          </button>
+        </span>
+      ) : (
+        <TokenLine tokens={tokens} usd={usd} />
+      )}
     </span>
   );
 }

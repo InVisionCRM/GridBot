@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { adaptStatus } from '../src/v2/adapt-status';
-import { formatPx, formatTokenLine, formatUsd, formatWhen, showsNoFills } from '../src/v2/format';
+import { deskStatusPill, formatClockEt, formatPx, formatTokenLine, formatUsd, formatWhen, showsNoFills } from '../src/v2/format';
+import { HEADLINE_FLOOR_PX, headlinePx } from '../src/v2/tokens';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
 
 const AS_OF = sanitizedStatus.spotsAt;
@@ -215,5 +216,25 @@ describe('format', () => {
     const utc = new Date(t).toISOString().slice(11, 19);
     expect(detroit).not.toContain(utc);
     expect(detroit).toMatch(/5:05:09/);
+    expect(formatClockEt(t)).toBe('5:05 PM ET');
+  });
+
+  it('uses one status pill that follows the source', () => {
+    const t = Date.UTC(2026, 9, 27, 21, 5, 9);
+    expect(deskStatusPill('live', t, false)).toEqual({ text: 'Live', tone: 'live' });
+    expect(deskStatusPill('live', t, true)).toEqual({ text: 'Stale', tone: 'stale' });
+    expect(deskStatusPill('snapshot', t, false)).toEqual({ text: 'Snapshot · 5:05 PM ET', tone: 'snap' });
+    expect(deskStatusPill('fixture', t, false).tone).toBe('snap');
+  });
+
+  it('shrinks a headline to the largest size that fits', () => {
+    const widthAt = (px: number) => px * 14;
+    expect(HEADLINE_FLOOR_PX).toBe(22);
+    expect(headlinePx(28, widthAt, 400)).toBe(28);
+    expect(headlinePx(28, widthAt, 328)).toBe(23);
+    expect(headlinePx(28, widthAt, 200)).toBe(null);
+    expect(headlinePx(16, (px) => px * 15, 226)).toBe(15);
+    expect(headlinePx(16, widthAt, 180)).toBe(null);
+    expect(headlinePx(34, widthAt, 0)).toBe(34);
   });
 });

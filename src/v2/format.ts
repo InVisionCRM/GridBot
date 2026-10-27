@@ -95,6 +95,23 @@ export function shortenFigures(text: string): string {
   });
 }
 
+/** Hour and minute in America/Detroit, labeled ET. */
+export function formatClockEt(ms: number): string {
+  const clock = new Date(ms).toLocaleTimeString('en-US', {
+    timeZone: 'America/Detroit',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  return `${clock.replace(/\u202f/g, ' ')} ET`;
+}
+
+/** One header pill. Green Live only for a live source that is still connected. */
+export function deskStatusPill(source: string, asOf: number, stale: boolean): { text: string; tone: 'live' | 'snap' | 'stale' } {
+  if (source === 'live' && !stale) return { text: 'Live', tone: 'live' };
+  if (source === 'live') return { text: 'Stale', tone: 'stale' };
+  return { text: `Snapshot · ${formatClockEt(asOf)}`, tone: 'snap' };
+}
+
 /** Clock time in America/Detroit, not the server's UTC. */
 export function formatWhen(ms: number): string {
   return new Date(ms).toLocaleTimeString('en-US', {
