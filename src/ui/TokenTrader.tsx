@@ -30,12 +30,12 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
     <section className="card" id="token-trader">
       <div className="card-head">
         <h2>Token trader</h2>
-        <span className={`tag ${t.on ? (o.mode === 'live' ? 'live' : 'pos') : ''}`}>{t.on ? `On · ${o.mode}` : 'Off'}</span>
+        <span className={`tag ${t.on ? (o.mode === 'live' ? 'live' : 'pos') : ''}`}>{modeLabel(t, o)}</span>
         <span className="muted small">{usd(t.openUsd ?? 0)} open of {usd(o.totalUsd)}</span>
         <span className="grow" />
-        {t.on
-          ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/token-trader/off', 'POST'))}>Off</button>
-          : <button type="button" className="btn small-btn primary" disabled={busy} onClick={() => void start(o, run)}>On</button>}
+        {t.runMode !== 'exits' && <button type="button" className="btn small-btn" disabled={busy} title="No new buys, discovery or snipes. Stop-loss and take-profit exits keep running." onClick={() => void run(() => http('/api/token-trader/off', 'POST', { mode: 'exits' }))}>Off for new buys</button>}
+        {t.runMode !== 'full' && <button type="button" className="btn small-btn" disabled={busy} title="Runs nothing: no exits, no discovery, no buys." onClick={() => void offCompletely(t, run)}>Off completely, no exits</button>}
+        {!t.on && <button type="button" className="btn small-btn primary" disabled={busy} onClick={() => void start(o, run)}>On</button>}
       </div>
       <p className="small">New and trending pools, sized from the pool's depth, under your per-trade and total limits. Exits: a third at +50%, a third at +100%, a 20% trail after +30%, a hard stop at −25%, plus liquidity pulled, a tax that appears, a failed sell, a 6h time stop and volume dying. The sniper buys a pool when liquidity is added and ignores the minimum age. Paper fills the same way, with the pool's fee, impact and tax.</p>
       {err && <div className="banner error" role="alert"><span className="grow">{err}</span></div>}
@@ -45,7 +45,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
           <span className="grow">
             New buys and snipes stopped{t.entriesHalt.chains ? ` on ${t.entriesHalt.chains.map((c: number) => chainOf(s, c)?.name ?? c).join(', ')}` : ''}
             {t.entriesHalt.halt ? ` (${haltText(t.entriesHalt.halt)})` : ''}.
-            {' '}{t.on ? <b>Exits still managed: {t.exitsManaged ?? t.positions.length}</b> : `It is off: the exits of its ${t.positions.length} position(s) are not watched.`}
+            {' '}{t.runMode !== 'full' ? <b>Exits still managed: {t.exitsManaged ?? 0}</b> : `It is off completely: the exits of its ${t.positions.length} position(s) are not watched.`}
           </span>
           <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/token-trader/resume-entries', 'POST'))}>Resume new buys</button>
         </div>
@@ -119,6 +119,19 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
 }
 
 function numIn(v: string) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
+
+/** "On · paper" / "Off for new buys · exits running (N)" / "Off completely, no exits" */
+export function modeLabel(t: AnyObj, o: AnyObj): string {
+  if (t.runMode === 'on' || (t.runMode == null && t.on)) return `On · ${o.mode}`;
+  if (t.runMode === 'full') return 'Off completely, no exits';
+  return `Off for new buys · exits running (${t.exitsManaged ?? 0})`;
+}
+
+async function offCompletely(t: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<void>) {
+  const n = t.positions?.length ?? 0;
+  if (!confirm(`Turn the token trader off completely? Nothing will run: no buys, no snipes and no exits.${n ? ` The stop-losses and take-profits of its ${n} open position(s) will NOT be watched until you turn it on or back to "Off for new buys".` : ''}`)) return;
+  await run(() => http('/api/token-trader/off', 'POST', { mode: 'full' }));
+}
 
 async function start(o: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<void>) {
   if (o.mode === 'live' && !confirm(`Turn the token trader on with real money? Up to $${o.perTradeUsd} a trade and $${o.totalUsd} open. The sniper is ${o.sniper.on ? 'on' : 'off'}.`)) return;

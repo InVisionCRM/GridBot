@@ -99,7 +99,20 @@ export interface TraderState {
   entriesHalt?: { halt: Halt; chains: number[] | null } | null;
   /** The last stop of the token trader itself (turned off, or new buys stopped), for the stop audit */
   lastHalt?: Halt | null;
+  /**
+   * What "off" means (only read while on is false). 'exits': no discovery, buys or snipes, but stop-loss / take-profit
+   * exits keep running on open positions (live sells included). 'full': nothing runs. Missing (files written before
+   * this field) = 'exits': the old off message promised "open positions stay until their exit rules fire".
+   */
+  offMode?: OffMode;
+  /** Mode changes (on, off for new buys, off completely), newest first, for the stop audit */
+  modeLog?: { mode: RunMode; halt: Halt }[];
 }
+
+export type OffMode = 'exits' | 'full';
+/** on: everything runs. exits: off for new buys, exits running. full: off completely, nothing runs. */
+export type RunMode = 'on' | OffMode;
+const MODE_LOG_MAX = 50;
 
 export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string }
 export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string }
@@ -150,6 +163,19 @@ export class TokenTrader {
     this.d.emit?.({ type: 'info', kind: 'system', level, msg });
   }
 
+  /** on / exits (off for new buys, exits running) / full (off completely). */
+  runMode(): RunMode {
+    return this.state.on ? 'on' : this.state.offMode === 'full' ? 'full' : 'exits';
+  }
+  /** A sell (an exit) may run and be sent: anything but "off completely". Never allows a buy. */
+  canSell(): boolean {
+    return this.runMode() !== 'full';
+  }
+  /** Open positions whose exits actually run: all of them unless off completely. */
+  private watched(): Position[] {
+    return this.canSell() ? this.state.positions : [];
+  }
+
   status() {
     const openUsd = this.openUsd();
     return {
@@ -159,7 +185,10 @@ export class TokenTrader {
       entriesHalt: this.state.entriesHalt ?? null,
       lastHalt: this.state.lastHalt ?? null,
       /** Open positions whose exits (stops, take-profits) are still managed, also while new buys are stopped */
-      exitsManaged: this.state.on ? this.state.positions.length : 0,
+      exitsManaged: this.watched().length,
+      runMode: this.runMode(),
+      offMode: this.state.offMode ?? 'exits',
+      modeLog: this.state.modeLog ?? [],
       positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p) })),
     };
   }
@@ -183,16 +212,34 @@ export class TokenTrader {
       if (this.d.signerReady && o.chains.length && o.chains.some((id) => !this.d.signerReady!(id))) throw new Error('Live needs a signing key on every chain you turned on.');
     }
     this.state.on = true;
+    this.logMode('on', requestHalt('token-trader-on', 'POST /api/token-trader/on', this.now()));
     this.say(`token trader on (${o.mode}): up to ${o.perTradeUsd} USD a trade, ${o.totalUsd} USD open, pools at least ${Math.round(o.minPoolAgeSec / 3600)}h old unless the sniper is on`);
     this.save();
   }
 
-  turnOff() {
+  /**
+   * mode 'exits' (default, and what "Off" always did on paper): no discovery, buys or snipes; exits keep running.
+   * mode 'full' ("Off completely, no exits"): nothing runs, open positions are left alone.
+   */
+  turnOff(mode: OffMode = 'exits') {
+    if (mode !== 'exits' && mode !== 'full') throw new Error('Off mode must be "exits" or "full".');
     this.state.on = false;
-    const halt = requestHalt('token-trader-off', 'POST /api/token-trader/off', this.now());
+    this.state.offMode = mode;
+    const halt = requestHalt('token-trader-off', `POST /api/token-trader/off (${mode === 'full' ? 'off completely' : 'off for new buys'})`, this.now());
     this.state.lastHalt = halt;
-    this.d.emit?.({ type: 'stopped', kind: 'system', level: 'warn', notify: true, msg: 'token trader off; open positions stay until their exit rules fire', data: { halt } });
+    this.logMode(mode, halt);
+    const n = this.state.positions.length, w = this.watched().length;
+    const msg = mode === 'full'
+      ? `token trader off completely: no buys, no snipes and no exits${n ? `; the stops and take-profits of its ${n} open position(s) are not watched` : ''}`
+      : `token trader off for new buys: no discovery, buys or snipes; exits running on ${w} open position(s)`;
+    this.d.emit?.({ type: 'stopped', kind: 'system', level: 'warn', notify: true, msg, data: { halt, mode } });
     this.save();
+  }
+
+  private logMode(mode: RunMode, halt: Halt) {
+    const l = this.state.modeLog ??= [];
+    l.unshift({ mode, halt });
+    if (l.length > MODE_LOG_MAX) l.length = MODE_LOG_MAX;
   }
 
   /** New buys and snipes are stopped on this chain (Stop all or STOP chain). Exits still run. */
@@ -215,7 +262,7 @@ export class TokenTrader {
     const where = chains == null ? '' : ` on chain ${chains.join(', ')}`;
     this.d.emit?.({
       type: 'stopped', kind: 'system', level: 'warn', notify: true, data: { halt },
-      msg: `token trader: new buys and snipes stopped${where} (${halt.detail}).${this.state.on ? ` Exits still managed: ${n}` : n ? ` It is off, so the exits of its ${n} position(s) are not watched until it is turned on` : ''}`,
+      msg: `token trader: new buys and snipes stopped${where} (${halt.detail}).${this.canSell() ? ` Exits still managed: ${this.watched().length}` : n ? ` It is off completely, so the exits of its ${n} position(s) are not watched` : ''}`,
     });
     this.save();
   }
@@ -236,11 +283,15 @@ export class TokenTrader {
     if (m.price != null && m.price > p.peak) p.peak = m.price;
   }
 
+  /**
+   * on: snipes, exits, discovery. Off for new buys: exits only. Off completely: nothing. Every step re-reads the mode,
+   * so an off (either kind) that lands while a tick is awaiting wins for the rest of that tick.
+   */
   async tick() {
-    if (this.busy || !this.state.on) return;
+    if (this.busy || !this.canSell()) return;
     this.busy = true;
     try {
-      await this.takeSnipes();
+      if (this.state.on) await this.takeSnipes();
       await this.exits();
       // Turned off while the snipes or exits were awaited: no new entries this tick.
       if (this.state.on) await this.scanEntries();
@@ -393,9 +444,13 @@ export class TokenTrader {
   private async exits() {
     const left: Position[] = [];
     for (const p of this.state.positions) {
+      // Turned off completely while this loop was awaiting: leave the rest alone.
+      if (!this.canSell()) { left.push(p); continue; }
       if (this.d.mark) {
         const m = await this.d.mark(p);
         if (m) Object.assign(p, m);
+        // Off completely landed while the mark was read: don't sell (a live send is refused by canSell too).
+        if (!this.canSell()) { left.push(p); continue; }
       }
       if (p.price > p.peak) p.peak = p.price;
       const d = decideExit(this.exitOf(p));

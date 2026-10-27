@@ -111,7 +111,8 @@ export function createTokenTrader(o: {
         if (q.block) throw new Error(q.block);
         if (!q.balanceOk) throw new Error(q.balanceNote ?? 'balance');
         if (q.priceImpact > limits.maxPriceImpact) throw new Error(`price impact ${(q.priceImpact * 100).toFixed(2)}% is over the cap`);
-        const fill = await ex.execute(q, { canSend: () => trader.status().on, onSent: () => undefined });
+        // Exits: allowed on and in "off for new buys" (exits only), never when off completely. Buys use canBuy above.
+        const fill = await ex.execute(q, { canSend: () => trader.canSell(), onSent: () => undefined });
         return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash };
       },
     },
