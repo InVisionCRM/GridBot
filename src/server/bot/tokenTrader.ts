@@ -16,6 +16,7 @@ import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
 import type { Emit } from './activity';
 import type { Store } from './store';
 import type { PoolSniper, SnipeHit } from '../market/sniper';
+import { requestHalt, type Halt } from './audit';
 
 export interface SniperOptions {
   on: boolean;
@@ -91,6 +92,13 @@ export interface TraderState {
   cursors: Record<string, number>;
   /** Sniper buy timestamps (ms), for the per-hour cap */
   snipesAt: number[];
+  /**
+   * Stop all (chains null) or STOP chain: no new buys or snipes there until "Resume new buys". Exits of positions
+   * already held keep running. The halt is the stop audit record (who, from where, when).
+   */
+  entriesHalt?: { halt: Halt; chains: number[] | null } | null;
+  /** The last stop of the token trader itself (turned off, or new buys stopped), for the stop audit */
+  lastHalt?: Halt | null;
 }
 
 export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string }
@@ -148,6 +156,10 @@ export class TokenTrader {
       ...this.state,
       openUsd,
       lastError: this.lastError,
+      entriesHalt: this.state.entriesHalt ?? null,
+      lastHalt: this.state.lastHalt ?? null,
+      /** Open positions whose exits (stops, take-profits) are still managed, also while new buys are stopped */
+      exitsManaged: this.state.on ? this.state.positions.length : 0,
       positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p) })),
     };
   }
@@ -177,7 +189,42 @@ export class TokenTrader {
 
   turnOff() {
     this.state.on = false;
-    this.say('token trader off; open positions stay until their exit rules fire');
+    const halt = requestHalt('token-trader-off', 'POST /api/token-trader/off', this.now());
+    this.state.lastHalt = halt;
+    this.d.emit?.({ type: 'stopped', kind: 'system', level: 'warn', notify: true, msg: 'token trader off; open positions stay until their exit rules fire', data: { halt } });
+    this.save();
+  }
+
+  /** New buys and snipes are stopped on this chain (Stop all or STOP chain). Exits still run. */
+  entriesStopped(chainId: number): boolean {
+    const h = this.state.entriesHalt;
+    return !!h && (h.chains == null || h.chains.includes(chainId));
+  }
+  /** A buy may be sent: the trader is on and new buys aren't stopped on that chain. Checked again right before sending. */
+  canBuy(chainId: number): boolean {
+    return this.state.on && !this.entriesStopped(chainId);
+  }
+
+  /** Stop all (chainId null) / STOP chain: stop new buys and snipes; positions already held keep their exits. */
+  stopEntries(chainId: number | null, halt: Halt) {
+    const cur = this.state.entriesHalt;
+    const chains = chainId == null || (cur && cur.chains == null) ? null : [...new Set([...(cur?.chains ?? []), chainId])];
+    this.state.entriesHalt = { halt, chains };
+    this.state.lastHalt = halt;
+    const n = this.state.positions.length;
+    const where = chains == null ? '' : ` on chain ${chains.join(', ')}`;
+    this.d.emit?.({
+      type: 'stopped', kind: 'system', level: 'warn', notify: true, data: { halt },
+      msg: `token trader: new buys and snipes stopped${where} (${halt.detail}).${this.state.on ? ` Exits still managed: ${n}` : n ? ` It is off, so the exits of its ${n} position(s) are not watched until it is turned on` : ''}`,
+    });
+    this.save();
+  }
+
+  /** Lift a Stop all / STOP chain for the token trader: new buys and snipes may happen again. */
+  resumeEntries() {
+    if (!this.state.entriesHalt) return;
+    this.state.entriesHalt = null;
+    this.say('token trader: new buys and snipes allowed again');
     this.save();
   }
 
@@ -249,6 +296,8 @@ export class TokenTrader {
   private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number) {
     const o = this.state.options;
     if (this.state.positions.some((p) => p.pool.toLowerCase() === pool.pool.toLowerCase() && p.chainId === pool.chainId)) return;
+    // Checked again after the safety check's awaits: a Stop all that landed meanwhile wins.
+    if (!this.canBuy(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: 'new buys are stopped' }); return; }
     const sized = sizeBuy({
       perTradeUsd: o.perTradeUsd, totalUsd: o.totalUsd, openUsd: this.openUsd(),
       quoteReserve: pool.quoteReserve, usdPerSpend: pool.usdPerSpend, feeBps: pool.feeBps,
@@ -281,6 +330,7 @@ export class TokenTrader {
     const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
     if (!this.wantChain(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'chain is off' }); return; }
     if (pool.kind === 'v4') { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); return; }
+    if (this.entriesStopped(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); return; }
     const a = await this.assess(pool);
     if (!a.ok) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
     await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax);
@@ -288,6 +338,7 @@ export class TokenTrader {
 
   private async scanEntries() {
     if (!this.d.discover) return;
+    if (this.state.entriesHalt?.chains === null) return; // stopped everywhere: don't even look
     const pools = await this.d.discover();
     const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: 0 });
     for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });

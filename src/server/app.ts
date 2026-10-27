@@ -24,6 +24,7 @@ import type { Autopilot, AutoOptions, Budget } from './bot/autopilot';
 import type { TokenTrader, TraderOptions } from './bot/tokenTrader';
 import { noKey } from './words';
 import { fetchJson } from './fetchJson';
+import { StatusFeed } from './statusFeed';
 import { holdingsSnapshot } from './holdings/read';
 import { requestStore, type HaltOrigin } from './bot/audit';
 
@@ -247,7 +248,14 @@ export function createApp(o: AppOpts) {
   }));
   // Back-compat aliases (single-grid era)
   app.post('/api/bot/start', wrap(async (req) => { const id = await bot.add(startBody(req.body ?? {})); void bot.tickAll(); return { ok: true, id }; }));
-  app.post('/api/bot/stop', wrap(() => bot.stopAll()));
+  // Single-grid era alias. It used to stop every bot with an empty body; now it stops one bot ({ id }) and stops all
+  // only with an explicit { all: true }. Like every host route it answers loopback only (phones: owner login).
+  app.post('/api/bot/stop', wrap((req) => {
+    const b = (req.body ?? {}) as { id?: unknown; all?: unknown };
+    if (b.all === true) { bot.stopAll(); return { ok: true, stopped: 'all' }; }
+    if (typeof b.id === 'string' && b.id) return { ok: true, stopped: bot.stopById(b.id) };
+    throw new Error('Send { "id": "<bot id>" } to stop one bot, or { "all": true } to stop every bot.');
+  }));
   app.post('/api/bot/resume', wrap(() => {
     const g = bot.status().grids.find((x) => x.config && x.status !== 'running');
     if (!g) throw new Error('No stopped grid to resume');
@@ -333,6 +341,8 @@ export function createApp(o: AppOpts) {
   app.post('/api/autopilot/on', wrap(async () => { await ap().turnOn(); void bot.tickAll(); return plain(ap().status()); }));
   // { sell: true } closes every bot it runs to cash; false leaves them running unmanaged
   app.post('/api/autopilot/off', wrap((req) => { ap().turnOff(req.body?.sell === true); void ap().tick(); return plain(ap().status()); }));
+  // { chainId }: that budget opens and swaps again after Stop all / STOP chain
+  app.post('/api/autopilot/carry-on', wrap((req) => { ap().carryOn(Number(req.body?.chainId)); void ap().tick(); return plain(ap().status()); }));
   app.post('/api/autopilot/review', wrap(async () => { await ap().review(true); void bot.tickAll(); return plain(ap().status()); }));
 
   const tt = () => { if (!o.tokenTrader) throw new Error('The token trader is not available.'); return o.tokenTrader; };
@@ -350,6 +360,8 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
   app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
+  // After Stop all / STOP chain: new buys and snipes may happen again
+  app.post('/api/token-trader/resume-entries', wrap(() => { tt().resumeEntries(); return plain(tt().status()); }));
 
   // ── Friends' copies: the host's Tools → Friends, and the relay the copies fetch candles through ─────
   app.get('/api/host/gecko', wrap(async (req, res) => {
@@ -451,33 +463,40 @@ export function createApp(o: AppOpts) {
   app.get('/api/activity', wrap((req) => ({ events: bot.activity.recent(Math.min(400, num(req.query.n) ?? 100), num(req.query.since) ?? 0) })));
 
   // ── SSE: activity + ticks + status pushes ────────────────────────────
+  // The status is computed once per push for all clients (StatusFeed). v1 (no ?v): the whole status, as before.
+  // v2 (?v=2): a snapshot in hello, then only what changed (docs/stream-v2.md), plus an hb event the UI watches.
+  const feed = new StatusFeed(() => bot.status(), o.statusThrottleMs ?? 1000);
+  const poke = () => feed.poke();
+  const pokeAct = (e: ActivityEvent) => { if (e.type !== 'tick' && e.type !== 'candles') poke(); };
+  let clients = 0;
+  // The feed listens only while a client is connected.
+  const join = () => { if (clients++ === 0) { bot.activity.on('status', poke); bot.activity.on('activity', pokeAct); } };
+  const leave = () => { if (--clients === 0) { bot.activity.off('status', poke); bot.activity.off('activity', pokeAct); feed.stop(); } };
   app.get('/api/bot/stream', (req, res) => {
+    const v2 = String(req.query.v ?? '') === '2';
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
     const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     const since = Number(req.headers['last-event-id'] ?? req.query.since ?? 0) || 0;
-    send('hello', { t: Date.now(), network: net.key, recent: bot.activity.recent(100, since) });
-    let statusTimer: ReturnType<typeof setTimeout> | null = null;
-    let lastStatus = 0;
-    const pushStatus = () => {
-      if (statusTimer) return;
-      const wait = Math.max(0, (o.statusThrottleMs ?? 1000) - (Date.now() - lastStatus));
-      statusTimer = setTimeout(() => {
-        statusTimer = null; lastStatus = Date.now();
-        try { send('status', bot.status()); } catch { /* ignore */ }
-      }, wait);
-    };
-    const onAct = (e: ActivityEvent) => { res.write(`id: ${e.id}\n`); send('activity', e); if (e.type !== 'tick' && e.type !== 'candles') pushStatus(); };
+    const hbMs = o.heartbeatMs ?? (v2 ? 5_000 : 15_000);
+    if (v2) {
+      const { seq, status } = feed.snapshot();
+      send('hello', { v: 2, t: Date.now(), network: net.key, recent: bot.activity.recent(100, since), epoch: feed.epoch, seq, status, hbMs });
+    } else send('hello', { t: Date.now(), network: net.key, recent: bot.activity.recent(100, since) });
+    join();
+    const off = v2
+      ? feed.onPatch((p) => send('patch', p))
+      : feed.onFull((s) => { try { send('status', s); } catch { /* ignore */ } });
+    const onAct = (e: ActivityEvent) => { res.write(`id: ${e.id}\n`); send('activity', e); };
     const onTicks = (t: unknown) => send('ticks', t);
     bot.activity.on('activity', onAct);
     bot.activity.on('ticks', onTicks);
-    bot.activity.on('status', pushStatus);
-    const hb = setInterval(() => res.write(`: hb ${Date.now()}\n\n`), o.heartbeatMs ?? 15_000);
+    const hb = setInterval(() => (v2 ? send('hb', { t: Date.now(), seq: feed.seq, epoch: feed.epoch }) : res.write(`: hb ${Date.now()}\n\n`)), hbMs);
     req.on('close', () => {
       clearInterval(hb);
-      if (statusTimer) clearTimeout(statusTimer);
+      off();
+      leave();
       bot.activity.off('activity', onAct);
       bot.activity.off('ticks', onTicks);
-      bot.activity.off('status', pushStatus);
     });
   });
 

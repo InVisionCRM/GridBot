@@ -6,6 +6,7 @@ import { http } from './api';
 import { ago, num, pct } from './fmt';
 import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj } from './model';
+import { haltText } from './haltText';
 
 const usd = (n: number) => `$${num(Math.abs(n), Math.abs(n) >= 100 ? 0 : 2)}`;
 
@@ -39,6 +40,16 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       <p className="small">New and trending pools, sized from the pool's depth, under your per-trade and total limits. Exits: a third at +50%, a third at +100%, a 20% trail after +30%, a hard stop at −25%, plus liquidity pulled, a tax that appears, a failed sell, a 6h time stop and volume dying. The sniper buys a pool when liquidity is added and ignores the minimum age. Paper fills the same way, with the pool's fee, impact and tax.</p>
       {err && <div className="banner error" role="alert"><span className="grow">{err}</span></div>}
       {t.lastError && <div className="banner"><span className="grow">{t.lastError}</span></div>}
+      {t.entriesHalt && (
+        <div className="banner error" role="status">
+          <span className="grow">
+            New buys and snipes stopped{t.entriesHalt.chains ? ` on ${t.entriesHalt.chains.map((c: number) => chainOf(s, c)?.name ?? c).join(', ')}` : ''}
+            {t.entriesHalt.halt ? ` (${haltText(t.entriesHalt.halt)})` : ''}.
+            {' '}{t.on ? <b>Exits still managed: {t.exitsManaged ?? t.positions.length}</b> : `It is off: the exits of its ${t.positions.length} position(s) are not watched.`}
+          </span>
+          <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/token-trader/resume-entries', 'POST'))}>Resume new buys</button>
+        </div>
+      )}
 
       <div className="tt-grid">
         <label className="smart-field"><span className="k">Per trade USD</span><input value={o.perTradeUsd} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, perTradeUsd: numIn(e.target.value) } })} onBlur={() => void save({ perTradeUsd: o.perTradeUsd })} /></label>

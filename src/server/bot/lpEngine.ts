@@ -35,7 +35,7 @@ import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Execu
 import { checkProfitMode, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
-import { requestHalt, resolveHalt, systemHalt, type Halt } from './audit';
+import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import { noKey } from '../words';
@@ -135,6 +135,8 @@ export interface LpStartParams {
   rerange?: boolean;
   profits?: ProfitMode;
   limits?: Partial<SafetyLimits>;
+  /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
+  guard?: () => Halt | null;
 }
 
 export interface LpDeps {
@@ -302,6 +304,13 @@ export class LpEngine {
     const v = await this.lp().view(); // fails fast on a pool that can't hold a position
     if (p.mode === 'live' && this.def?.safety && !(await this.hub.recheck(p.market)).liveAllowed) throw new Error(`LIVE blocked — ${this.label} failed the safety check`);
     if (profits.mode === 'send' && this.signer && sameAddr(await this.signer.getAddress(), profits.to)) throw new Error('That is the bot\'s own wallet: fees already stay there when reinvested.');
+    const stoppedBy = p.guard?.();
+    if (stoppedBy) {
+      this.state.halt = { ...stoppedBy, at: this.now() };
+      this.save();
+      this.ev('stopped', `Liquidity ${this.label}: not started — ${stoppedBy.detail} was pressed while it was starting`, { level: 'warn', notify: true, data: { halt: this.state.halt } });
+      throw new StartStopped(stoppedBy);
+    }
     this.state = {
       ...this.state, status: 'running', config: { bandPct: p.bandPct, capital: p.capital, baseAmount, rerange: p.rerange ?? true },
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },

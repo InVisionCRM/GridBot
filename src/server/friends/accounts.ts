@@ -67,11 +67,11 @@ export function cleanName(raw: string): string {
   return n;
 }
 
-/** Where friends open the app: an https origin with no path (Tailscale Funnel gives https://computer.tailnet.ts.net). */
+/** Where friends open the app: an https origin with no path (`tailscale serve status` prints https://computer.tailnet.ts.net). */
 export function cleanAddress(raw: string): string {
   let u: URL;
   try { u = new URL(raw.trim()); } catch { throw new Error('Paste the whole address, starting with https://'); }
-  if (u.protocol !== 'https:') throw new Error('The address must start with https:// (Tailscale Funnel gives one).');
+  if (u.protocol !== 'https:') throw new Error('The address must start with https:// (`tailscale serve status` prints one).');
   if (u.pathname !== '/' || u.search || u.hash || u.username || u.password) throw new Error('Paste only the address, like https://your-computer.your-tailnet.ts.net');
   return u.origin;
 }
@@ -132,7 +132,7 @@ export class Friends {
   }
   private link(name: string, friendId: string | null) {
     if (!this.f.host.name) throw new Error('Add your name first: friends see who invited them.');
-    if (!this.f.host.address) throw new Error('Add the address friends open first (from Tailscale Funnel).');
+    if (!this.f.host.address) throw new Error('Add the address friends open first (from `tailscale serve status`).');
     const token = randomBytes(32).toString('base64url');
     const now = this.now();
     const invite: Invite = { id: randomUUID(), tokenHash: hashToken(token), name, friendId, createdAt: now, expiresAt: now + INVITE_MS };

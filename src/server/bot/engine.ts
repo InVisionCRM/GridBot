@@ -24,7 +24,7 @@ import { pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, type RecenterState } from '../../live/recenter';
 import { noKey } from '../words';
-import { requestHalt, resolveHalt, systemHalt, type Halt } from './audit';
+import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
 
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
@@ -121,6 +121,14 @@ export interface EngineDeps {
   hub?: Hub;
 }
 
+/** What MultiBot.tickAll already read this poll, so each grid doesn't read it again. */
+export interface TickCtx {
+  /** This market's price from the poll's price batch */
+  price?: number;
+  /** One wallet read per key per poll (cleared after a trade on the chain) */
+  wallet?: <T>(key: string, read: () => Promise<T>) => Promise<T>;
+}
+
 export interface StartParams extends GridConfig {
   mode: Mode;
   stable?: string;
@@ -129,6 +137,8 @@ export interface StartParams extends GridConfig {
   recenter?: boolean;
   /** Reinvest (default) or send profits to an address; omitted = keep this grid's current setting */
   profits?: ProfitMode;
+  /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
+  guard?: () => Halt | null;
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -308,6 +318,7 @@ export class GridEngine {
     if (!intervals.some((i) => i.status === 'waitingBuy')) throw new Error(`The price (${price}) is below the range. Start when it's inside the range, or lower the range.`);
     const profits = checkProfitMode(p.profits ?? this.state.profits);
     await this.checkPayoutTarget(profits);
+    this.refuseIfStopped(p.guard);
 
     this.executor = executor;
     const paperReset = p.mode === 'paper';
@@ -330,6 +341,16 @@ export class GridEngine {
     this.tag('info', `Started ${p.mode.toUpperCase()} ${this.label} ${p.lowerPrice}–${p.upperPrice} ×${p.gridCount}, ${usdPerBuy.toPrecision(5)} ${stable}/buy, spacing ${(econ.spacingPct * 100).toFixed(3)}%, impact ${(econ.impactPct * 100).toFixed(3)}%, gas ${econ.gasQuote.toPrecision(3)} ${stable}/RT, net ${econ.netPerRoundTrip.toPrecision(4)} ${stable} (${(econ.netPct * 100).toFixed(3)}%)/RT worst, price ${price}`);
     if (warn) this.tag('warn', warn);
     this.ev('started', `Grid started — ${this.label} ${p.lowerPrice.toPrecision(4)}–${p.upperPrice.toPrecision(4)} ×${p.gridCount} (${p.mode})`, { level: 'success' });
+  }
+
+  /** Stop all / STOP chain pressed while this start awaited quotes and balances: it wins, and the grid stays off. */
+  private refuseIfStopped(guard?: () => Halt | null) {
+    const h = guard?.();
+    if (!h) return;
+    this.state.halt = { ...h, at: this.now() };
+    this.save();
+    this.ev('stopped', `Grid ${this.label}: not started — ${h.detail} was pressed while it was starting`, { level: 'warn', notify: true, data: { halt: this.state.halt } });
+    throw new StartStopped(h);
   }
 
   /** Markets with a safety report (custom tokens, verified built-ins): re-run the eth_call buy/sell simulation before going live; honeypot / tax / unknown → refuse. */
@@ -402,6 +423,9 @@ export class GridEngine {
         this.state.status = 'stopped';
         this.state.closing = false;
         this.save();
+        const halt = this.state.halt ?? null;
+        this.ev('stopped', `Grid ${this.label} stopped — can't close: ${this.lastError}. Its coins stay in the wallet.`, { level: 'warn', notify: true, data: { halt } });
+        this.tag('warn', `STOPPED (close requested, market unavailable: ${this.lastError}).`);
         return false;
       }
       this.finishClose();
@@ -610,28 +634,38 @@ export class GridEngine {
   }
   stopLoop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  async tick(): Promise<void> {
+  async tick(ctx: TickCtx = {}): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
       if (this.state.inFlight && !this.draining) await this.reconcile();
-      const price = await this.executor.getPrice();
+      // The poll's price batch already read this market's price (MultiBot.tickAll); reading it again per grid doubled
+      // the RPC calls. A grid ticked on its own (or after a trade on its chain this poll) reads its own.
+      const price = ctx.price != null && ctx.price > 0 && !this.state.inFlight ? ctx.price : await this.executor.getPrice();
       this.state.lastPrice = price;
       this.state.lastPriceAt = this.now();
       this.hub.setSpot(this.state.stable, price);
-      try { this.balances = await this.executor.balances(); } catch { /* keep last */ }
+      try {
+        // Live balances are the wallet's: grids on the same market share one read per poll (paper balances are each grid's own).
+        this.balances = this.executor.mode === 'live' && ctx.wallet
+          ? { ...(await ctx.wallet(`bal:${this.state.stable}`, () => this.executor.balances())) }
+          : await this.executor.balances();
+      } catch { /* keep last */ }
       const signer = this.signer;
       if (signer) {
         try {
           if (this.executor.mode === 'live') this.walletBalances = this.balances;
           else {
-            const q = this.hub.quoter(this.state.stable);
-            const a = await signer.getAddress();
-            const [b, st] = await Promise.all([
-              q.base.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.base.address),
-              q.stable.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.stable.address),
-            ]);
-            this.walletBalances = { pls: Number(b) / 10 ** q.base.decimals, stable: Number(st) / 10 ** q.stable.decimals };
+            const read = async () => {
+              const q = this.hub.quoter(this.state.stable);
+              const a = await signer.getAddress();
+              const [b, st] = await Promise.all([
+                q.base.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.base.address),
+                q.stable.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.stable.address),
+              ]);
+              return { pls: Number(b) / 10 ** q.base.decimals, stable: Number(st) / 10 ** q.stable.decimals };
+            };
+            this.walletBalances = { ...(ctx.wallet ? await ctx.wallet(`wallet:${this.state.stable}`, read) : await read()) };
           }
         } catch { /* keep last */ }
       }

@@ -21,7 +21,7 @@ import {
 import { tradeStats, pushCapped, drawdown } from '../../market/stats';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type ChainReader, type Executor, type Fill, type MarketSnapshot, type Quote, type TxSender } from './chain';
 import type { Emit } from './activity';
-import { requestHalt, resolveHalt, systemHalt, type Halt } from './audit';
+import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import type { SharedNonce, TxGate } from './txGate';
@@ -148,6 +148,8 @@ export interface TrendStartParams {
   capital: number;
   name?: string;
   limits?: Partial<SafetyLimits>;
+  /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
+  guard?: () => Halt | null;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -259,6 +261,13 @@ export class TrendEngine {
       if (!chk.ok) throw new Error(chk.reason!);
     }
     const price = await executor.getPrice();
+    const stoppedBy = p.guard?.();
+    if (stoppedBy) {
+      this.state.halt = { ...stoppedBy, at: this.now() };
+      this.save();
+      this.emit('stopped', `${this.state.name || this.hub.label(p.quote)}: not started — ${stoppedBy.detail} was pressed while it was starting`, { level: 'warn', notify: true, data: { halt: this.state.halt } });
+      throw new StartStopped(stoppedBy);
+    }
     this.executor = executor;
     const keepTrades = this.state.trades.filter((t) => !t.paper || p.mode === 'live');
     this.state = {

@@ -11,6 +11,7 @@ import { errMsg, botView, type AnyObj, type Nav } from './model';
 import { L } from './Tip';
 import { useOpportunities } from './Opportunities';
 import { TokenTraderPanel } from './TokenTrader';
+import { haltText } from './haltText';
 
 type Risk = 'safe' | 'medium' | 'any';
 interface Opts { grid: boolean; lp: boolean; newTokens: boolean; risk: Risk; slots: number; stopLossPct: number }
@@ -64,7 +65,7 @@ export function SmartTrader({ s, nav }: { s: AnyObj; nav: Nav }) {
 
       {!a.on && !managing && <Setup s={s} a={a} busy={busy} run={run} />}
       {(a.on || managing) && <>
-        {a.accounts.map((x: AnyObj) => <AccountCard key={x.chainId} s={s} x={x} nav={nav} />)}
+        {a.accounts.map((x: AnyObj) => <AccountCard key={x.chainId} s={s} x={x} nav={nav} busy={busy} onCarryOn={() => void run(() => http('/api/autopilot/carry-on', 'POST', { chainId: x.chainId }))} />)}
         <OnControls a={a} busy={busy} run={run} />
       </>}
       <Decisions log={a.log} s={s} />
@@ -172,7 +173,7 @@ function OptionsForm({ opts, setOpts }: { opts: Opts; setOpts: (o: Opts) => void
   );
 }
 
-function AccountCard({ s, x, nav }: { s: AnyObj; x: AnyObj; nav: Nav }) {
+function AccountCard({ s, x, nav, busy, onCarryOn }: { s: AnyObj; x: AnyObj; nav: Nav; busy: boolean; onCarryOn: () => void }) {
   const v: number | null = x.value, r = v == null ? null : v / x.amount - 1;
   const others = Object.entries(x.coins as Record<string, number>).filter(([c, n]) => c !== x.coin && n > 0);
   return (
@@ -186,6 +187,12 @@ function AccountCard({ s, x, nav }: { s: AnyObj; x: AnyObj; nav: Nav }) {
         </span>
       </div>
       {x.halted && <div className="banner error"><span className="grow">Stopped by the loss limit: {x.halted}.</span></div>}
+      {x.killed && (
+        <div className="banner error" role="status">
+          <span className="grow">Stopped by {x.killed}{x.killHalt ? ` (${haltText(x.killHalt)})` : ''}: it opens nothing, sends no swap and closes nothing on this chain until you carry on.</span>
+          <button type="button" className="btn small-btn" disabled={busy} onClick={onCarryOn}>Carry on</button>
+        </div>
+      )}
       <p className="small muted">Not in a bot: {big(x.coins[x.coin] ?? 0)} {x.coin}{others.map(([c, n]) => ` + ${big(n)} ${c}`).join('')}{x.pending ? ` · ${x.pending} swap${x.pending === 1 ? '' : 's'} confirming` : ''}</p>
       {!x.bots.length && <p className="small muted">No bots yet.</p>}
       <div className="smart-bots">
