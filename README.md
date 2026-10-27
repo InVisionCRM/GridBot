@@ -229,7 +229,7 @@ Your own dashboard stays on this computer. To open it from your iPhone, reach th
 
 **On your iPhone**
 
-Install the Tailscale app and log in to the same tailnet. Open `https://<mac>.<tailnet>.ts.net`, log in as `owner` with the password from step 2, and add the page to the home screen if you want. You need the Tailscale app running so the phone is on the tailnet; Safari alone cannot see a tailnet address.
+Install the Tailscale app and log in to the same tailnet. Open `https://<mac>.<tailnet>.ts.net`, log in as `owner` with the password from step 2, then add the page to the Home Screen. Lock-screen alerts (iOS 16.4 or later) are delivered only to that installed app, not to a Safari tab. You need the Tailscale app running so the phone is on the tailnet; Safari alone cannot see a tailnet address. Open Alerts, turn push on, and send a test. The steps are in the pull request that added Web Push, and under Notifications below.
 
 `tailscale serve` forwards with `Host: <mac>.<tailnet>.ts.net` and `X-Forwarded-*` headers. The gateway allows that hostname (from `GATEWAY_HOST` or the address saved under Tools → Friends) and refuses any other public host. It does not trust `X-Forwarded-Host`. It then calls your app on `127.0.0.1:3847` with a localhost Host, and sets a localhost Origin only after its own same-origin check. The app still refuses any other Host or Origin on a direct connection, so opening port 3847 does not skip the gateway.
 
@@ -576,7 +576,7 @@ Tools → Charts also has backfill buttons when a pair has no data.
 - **Charts.** lightweight-charts v5 with pair/timeframe switches; EMA/Donchian/Bollinger overlays; RSI/MACD panes; grid levels and fills; trend entries/exits; stop/TP/trail lines; equity + drawdown per bot and for the whole portfolio. The last candle follows live ticks.
 - **Analytics.** Portfolio ≈USD (live PLS/DAI cross), today/7d/all-time, vs HODL, allocation, funds coverage, per-bot stats, journal with filters and `/api/analytics/journal.csv`. Market panels show depth, volume, ATR%, trend and a regime hint (efficiency ratio).
 - **Live.** Server-sent events (`/api/bot/stream?v=2`): one snapshot, then only the changes, plus a 5 s heartbeat; see [docs/stream-v2.md](docs/stream-v2.md). If nothing arrives for 15 s, a banner says the data may be stale. There is a 3 s polling fallback; Activity drawer; status dots that dim when a price read is stale; a short highlight when a fill lands. Routine price ticks update quietly.
-- **Notifications and alerts.** Opt-in browser notifications (tab must be open). Alerts: price above/below, RSI above/below, grid out of range. All motion respects `prefers-reduced-motion`.
+- **Notifications and alerts.** Lock-screen Web Push is off until you subscribe on the Alerts screen. The Mac sends straight to the browser’s own push service (Apple or Google). Nothing new is exposed on the internet, and Tailscale Funnel stays off. Types: grid fills (a digest when more than six land inside ten minutes), LP near an edge or out of range, bot halted, a failed transaction, low gas, a sniper hit, and an optional daily summary at 21:00 US Eastern. In-tab notifications still work while the tab is open. Price, RSI, and grid-range alerts are unchanged. The VAPID key is created on first run at `data/push-vapid.json` (mode 600), not in `.env`, and is not written to the log. Deleting that file rotates the key; each phone then has to subscribe again. The Mac has to be awake to send. All motion respects `prefers-reduced-motion`.
 
 ## Checks
 

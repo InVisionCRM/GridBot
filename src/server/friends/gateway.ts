@@ -41,7 +41,7 @@ export interface GatewayDeps {
   now?: () => number;
 }
 
-const PUBLIC = ['/favicon.svg', '/manifest.webmanifest', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png'];
+const PUBLIC = ['/favicon.svg', '/manifest.webmanifest', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png', '/sw.js'];
 /** Never passed on: the gateway's cookie, where the request came from, and hop-by-hop headers. */
 const DROP_IN = /^(cookie|origin|referer|forwarded|x-forwarded-.*|x-real-ip|tailscale-.*|x-gridbot-via|connection|keep-alive|proxy-.*|upgrade)$/i;
 const DROP_OUT = /^(connection|keep-alive|transfer-encoding|set-cookie)$/i;
@@ -106,7 +106,10 @@ export function createGateway(d: GatewayDeps) {
 
   if (d.publicDir) {
     const dir = d.publicDir;
-    app.get(PUBLIC, (req, res) => res.sendFile(join(dir, req.path), (e) => { if (e && !res.headersSent) res.status(404).end(); }));
+    app.get(PUBLIC, (req, res) => {
+      if (req.path === '/sw.js') res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(join(dir, req.path), (e) => { if (e && !res.headersSent) res.status(404).end(); });
+    });
   }
 
   // ── Log in / out ─────────────────────────────────────────────────────

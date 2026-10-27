@@ -2,6 +2,8 @@
   "name": "GridBot",
   "short_name": "GridBot",
   "start_url": "/",
+  "scope": "/",
+  "id": "/",
   "display": "standalone",
   "background_color": "#0b0f0e",
   "theme_color": "#0b0f0e",

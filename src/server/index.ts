@@ -25,6 +25,9 @@ import { FriendsHost } from './friends/host';
 import { GeckoRelay, hostScan, relayFetch } from './friends/relay';
 import { Autopilot, type AutopilotState, type ScanView } from './bot/autopilot';
 import { createTokenTrader, tokenTraderStore } from './market/tokenFeed';
+import { PushService } from './push/service';
+import { lpSnapsFromStatus } from './push/lpWatch';
+import { dailySummary } from './push/summary';
 
 loadEnv();
 const friendsSecret = takeFriendsSecret();
@@ -119,13 +122,25 @@ const tokenTrader = copy ? undefined : createTokenTrader({
 });
 // Stop all / STOP chain: the token trader and sniper make no new buys there; exits of positions it holds keep running.
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));
+const push = new PushService({
+  dir: dataDir,
+  log: (level, msg) => log[level](msg),
+  positions: () => { try { return lpSnapsFromStatus(bot.status()); } catch { return []; } },
+  summary: () => { try { return dailySummary(bot.status()); } catch { return { title: 'GridBot · daily summary', body: 'No priced realized profit to report.' }; } },
+});
+activity.on('activity', (ev) => { void push.onActivity(ev).catch(() => log.warn('push: event was not sent')); });
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
   lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader, copy: !!copy,
+  friends, autopilot, tokenTrader, copy: !!copy, push,
 });
 if (isProd) {
+  app.get('/sw.js', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('js');
+    res.sendFile(path.join(clientDir, 'sw.js'));
+  });
   app.use(express.static(clientDir));
   app.get('*', (_req, res) => res.sendFile(path.join(clientDir, 'index.html')));
 }
@@ -143,6 +158,8 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   dailyScan?.start();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
+  pushTimer = setInterval(() => { void push.tick().catch(() => log.warn('push: tick failed')); }, 15_000);
+  log.info('Web push ready');
   if (friends instanceof FriendsHost) {
     for (const rt of hub.runtimes()) if (rt.signer) hostAddresses.push(await rt.signer.getAddress());
     await friends.start().catch((e: Error) => { log.error(e.message); process.exit(1); });
@@ -158,9 +175,11 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 });
 let autopilotTimer: ReturnType<typeof setInterval> | null = null;
 let tokenTimer: ReturnType<typeof setInterval> | null = null;
+let pushTimer: ReturnType<typeof setInterval> | null = null;
 const shutdown = () => {
   if (autopilotTimer) clearInterval(autopilotTimer);
   if (tokenTimer) clearInterval(tokenTimer);
+  if (pushTimer) clearInterval(pushTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
   try { bot.flush(); } catch { /* logged by the store */ }
   if (friends instanceof FriendsHost) friends.stop();

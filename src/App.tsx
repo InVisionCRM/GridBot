@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Guide } from './Guide';
 import { useStream, type ActivityEvent } from './ui/useStream';
 import { Activity } from './ui/Activity';
-import { loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs } from './ui/Alerts';
+import { Alerts, loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs } from './ui/Alerts';
+import { preparePushWorker } from './ui/pushClient';
 import { botApi, http } from './ui/api';
 import { usd } from './ui/fmt';
 import { ChainFilterCtx, chainOf, RefreshCtx, rpcAlerts, type ChainFilter } from './ui/chains';
@@ -27,7 +28,7 @@ import { loadShowUsd, saveShowUsd, ShowUsdCtx } from './ui/money';
 function loadView(): View {
   try {
     const v = JSON.parse(localStorage.getItem('view') ?? 'null') as View | null;
-    if (v && ['home', 'bots', 'more', 'opps', 'auto', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
+    if (v && ['home', 'bots', 'more', 'opps', 'auto', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools', 'alerts'].includes(v.v)) return v;
   } catch { /* storage unavailable */ }
   return { v: 'home' };
 }
@@ -68,6 +69,7 @@ export default function App() {
   const [drawer, setDrawer] = useState(false);
   const scrolling = useRef(false);
   const scrollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => { void preparePushWorker(); }, []);
   useEffect(() => {
     const move = () => { scrolling.current = true; };
     const end = () => {
@@ -158,6 +160,7 @@ export default function App() {
           {view.v === 'trend' && <TrendDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'lp' && <LpDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} prefs={prefs} setPrefs={setPrefs} ver={ver} />}
+          {view.v === 'alerts' && <Alerts status={s} prefs={prefs} setPrefs={setPrefs} />}
         </ViewError>
 
         {drawer && <>

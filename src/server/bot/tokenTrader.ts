@@ -146,8 +146,8 @@ export class TokenTrader {
 
   private now() { return (this.d.now ?? Date.now)(); }
   private save() { this.d.store.save(this.state); }
-  private say(msg: string, level: 'info' | 'warn' | 'success' = 'info') {
-    this.d.emit?.({ type: 'info', kind: 'system', level, msg });
+  private say(msg: string, level: 'info' | 'warn' | 'success' = 'info', extra?: { notify?: boolean; data?: Record<string, unknown> }) {
+    this.d.emit?.({ type: 'info', kind: 'system', level, msg, ...(extra ?? {}) });
   }
 
   status() {
@@ -322,7 +322,7 @@ export class TokenTrader {
     const why = `buy ${sized.why}`;
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price, why, pnlUsd: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
-    this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success');
+    this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' } } : undefined);
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
   }
 
