@@ -519,6 +519,27 @@ export class Hub {
     return this.byChain(chainId).find((m) => m.pool.dex === dex
       && (m.pool.kind === 'v3' ? sameAddr(m.pool.address, pool) : pair(m.base.address, m.quote.address)))?.key ?? null;
   }
+  /** This app's market for two coins on any pool, turned to spend `quote`; null when it has none */
+  marketForCoins(chainId: number, base: string, quote: string): string | null {
+    for (const m of this.byChain(chainId)) {
+      if (sameAddr(m.base.address, base) && sameAddr(m.quote.address, quote)) return m.key;
+      if (sameAddr(m.quote.address, base) && sameAddr(m.base.address, quote)) return `${m.key}~`;
+    }
+    return null;
+  }
+  /**
+   * This app's market for a scanned pool (`ref`: its coin, the coin it spends, the pool), turned to spend ref.quote
+   * ('HEX~' for HEX spending PLS on the PLS/HEX market); null when the pool isn't in this app.
+   */
+  marketFor(chainId: number, dex: string, ref: { address: string; quote: string; pool: string }): string | null {
+    const key = this.marketOnPool(chainId, dex, ref.pool, ref.address, ref.quote);
+    // Not on that pool any more (its pool was switched since the scan): the app's market for the same two coins
+    if (key == null) return this.marketForCoins(chainId, ref.address, ref.quote);
+    const d = this.def(key);
+    if (sameAddr(d.base.address, ref.address) && sameAddr(d.quote.address, ref.quote)) return key;
+    if (sameAddr(d.quote.address, ref.address) && sameAddr(d.base.address, ref.quote)) return `${key}~`;
+    return null;
+  }
 
   // ── Pool selection (PulseChain: PulseX V1 / PulseX V2 / 9mm V2 / 9mm V3; elsewhere every configured DEX) ──
   /**

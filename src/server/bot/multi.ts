@@ -146,11 +146,22 @@ class SliceStore<T extends { id: string }> implements Store<T> {
   save(state: T) {
     const arr = this.list();
     const i = arr.findIndex((g) => g.id === this.id);
-    const next = { ...state, id: this.id };
-    if (i >= 0) arr[i] = next; else arr.push(next);
+    // Removed while one of its ticks was still running: that tick's save must not bring it back. (Every slice is
+    // listed before its engine is attached, so a live one is always found.)
+    if (i < 0) return;
+    arr[i] = { ...state, id: this.id };
     this.persist();
   }
 }
+
+/** The wallet doesn't hold what a start or a swap needs (beyond what live bots and the smart trader count) */
+export class FundsError extends Error {}
+
+/** Profit a grid sent to its payout address (a transfer in flight is leaving the wallet): no longer the grid's */
+const sentProfit = (s: BotState) => s.payouts.filter((p) => p.ok && p.paper === (s.mode === 'paper')).reduce((a, p) => a + p.amount, 0) + (s.payoutInFlight?.amount ?? 0);
+
+/** Coins counted as in use besides the bots' own (the smart trader's money not in a bot): in allocations like a bot's */
+export interface Holding { chainId: number; token: { address: string; native?: boolean; symbol: string }; amount: number; id: string }
 
 export interface JournalRow {
   t: number; botId: string; kind: 'grid' | 'trend'; bot: string; pair: string; mode: Mode; side: 'buy' | 'sell';
@@ -185,9 +196,11 @@ export class MultiBot {
   address: string | null = null;
   candleSyncStatus: (() => unknown) | null = null;
   readonly taxWatch: TaxWatch;
+  /** The smart trader's live coins not in a bot (set by it): counted in allocations, so no bot or Convert takes them */
+  holdings: (() => Holding[]) | null = null;
   /**
    * Told of Stop all (chainId null) and STOP chain, after the bots are stopped, with the audit record: the smart trader
-   * and the token trader stop opening anything new.
+   * and the token trader stop opening anything new. The one stop hook system (it replaced onStop).
    */
   readonly stopHooks: ((chainId: number | null, halt: Halt) => void)[] = [];
   /** Stop all / STOP chain presses, numbered: a start that was under way when one landed is refused (stopWins) */
@@ -542,18 +555,44 @@ export class MultiBot {
    */
   botValue(kind: 'grid' | 'lp', id: string): number | null {
     if (kind === 'grid') {
-      const e = this.engine(id), c = e.state.config;
-      if (!c || e.state.lastPrice == null) return null;
-      const t = totals(e.modeTrades(), e.state.lastPrice);
-      return c.totalCapitalUsd + t.realized + t.unrealized;
+      const e = this.engine(id), s = e.state, c = s.config;
+      if (!c || s.lastPrice == null) return null;
+      const t = totals(e.modeTrades(), s.lastPrice);
+      return c.totalCapitalUsd + t.realized + t.unrealized - sentProfit(s);
     }
-    return this.lp(id).pnl()?.equity ?? null;
+    const e = this.lp(id), s = e.state;
+    // A closed one holds only its idle coins (and is never read again, so after a restart it has no reading)
+    if (s.status === 'closed') return s.lastPrice == null ? null : s.idle.quote + s.idle.base * s.lastPrice - s.totals.gas;
+    const p = e.pnl();
+    return p ? p.equity - s.totals.sent : null;
   }
-  /** The fast close finished: the bot is off the active list (paper immediately, live after the unwind). */
+  /** The close finished: the bot is off the active list (paper immediately, live after the unwind), or a liquidity bot an older version closed. */
   botCashedOut(kind: 'grid' | 'lp', id: string): boolean {
     if (kind === 'grid') return this.engine(id).state.archivedAt != null;
     const s = this.lp(id).state;
     return s.archivedAt != null || s.status === 'closed';
+  }
+  /** running / stopped (by hand, KILL ALL, a safety pause) / closed …, and whether a close is under way */
+  botStatus(kind: 'grid' | 'lp', id: string): { status: string; closing: boolean } {
+    if (kind === 'grid') { const s = this.engine(id).state; return { status: s.status, closing: !!s.closing }; }
+    const s = this.lp(id).state;
+    return { status: s.status, closing: !!s.closing || s.step?.action === 'close' };
+  }
+  /**
+   * What a bot off the active list holds: its base coin, and its spend coin = its value (as botValue, gas counted) less
+   * that base coin at its last price. null until it has a reading.
+   */
+  botCoins(kind: 'grid' | 'lp', id: string): { base: number; quote: number } | null {
+    const v = this.botValue(kind, id);
+    if (v == null) return null;
+    if (kind === 'grid') {
+      const e = this.engine(id), price = e.state.lastPrice!;
+      const base = totals(e.modeTrades(), price).pos.plsHeld;
+      return { base, quote: v - base * price };
+    }
+    const s = this.lp(id).state;
+    if (s.position) throw new Error(`liquidity bot ${id} still has its position open`);
+    return { base: s.idle.base, quote: v - s.idle.base * s.lastPrice! };
   }
 
   /** Mark a start: the guard it gets says which Stop all / STOP chain (for its chain) landed while it was starting. */
@@ -623,21 +662,23 @@ export class MultiBot {
   }
 
   allocations() {
-    type Row = { token: string; chainId: number; address: string; native: boolean; allocated: number; wallet: number | null; bots: { id: string; kind: 'grid' | 'trend' | 'lp'; amount: number }[] };
+    type Kind = 'grid' | 'trend' | 'lp' | 'trader';
+    type Row = { token: string; chainId: number; address: string; native: boolean; allocated: number; wallet: number | null; bots: { id: string; kind: Kind; amount: number }[] };
     const rows = new Map<string, Row>();
-    const add = (d: MarketDef, side: 'base' | 'quote', id: string, kind: 'grid' | 'trend' | 'lp', amount: number) => {
+    const addCoin = (chainId: number, tk: Holding['token'], id: string, kind: Kind, amount: number) => {
       if (!(amount > 1e-12)) return;
-      const tk = d[side];
-      const token = this.tokLabel(d.chainId, tk.symbol);
-      const r = rows.get(token) ?? { token, chainId: d.chainId, address: tk.address, native: !!tk.native, allocated: 0, wallet: null, bots: [] };
+      const token = this.tokLabel(chainId, tk.symbol);
+      const r = rows.get(token) ?? { token, chainId, address: tk.address, native: !!tk.native, allocated: 0, wallet: null, bots: [] };
       r.allocated += amount; r.bots.push({ id, kind, amount });
       rows.set(token, r);
     };
+    const add = (d: MarketDef, side: 'base' | 'quote', id: string, kind: Kind, amount: number) => addCoin(d.chainId, d[side], id, kind, amount);
+    for (const h of this.holdings?.() ?? []) addCoin(h.chainId, h.token, h.id, 'trader', h.amount);
     for (const e of this.engines.values()) {
       const s = e.state, d = e.def;
       if (!d || s.mode !== 'live' || !s.config || (s.status !== 'running' && !s.inFlight)) continue;
       const t = totals(e.modeTrades(), s.lastPrice);
-      add(d, 'quote', s.id, 'grid', Math.max(0, s.config.totalCapitalUsd + t.realized - t.pos.costUsd));
+      add(d, 'quote', s.id, 'grid', Math.max(0, s.config.totalCapitalUsd + t.realized - t.pos.costUsd - sentProfit(s)));
       add(d, 'base', s.id, 'grid', t.pos.plsHeld);
     }
     for (const e of this.trendEngines.values()) {
@@ -708,24 +749,40 @@ export class MultiBot {
   private async assertCovers(key: string, amount: number, limits?: Partial<SafetyLimits>) {
     const d = this.hub.def(key);
     if (!this.hub.rt(d.chainId).signer) return;
+    await this.assertCoin(d.chainId, d.quote, amount, limits);
+  }
+  /**
+   * Live: `amount` of a coin is in the wallet on top of what live bots and the smart trader already count; spending the
+   * native coin also keeps the gas reserve. Reads the wallet first.
+   */
+  async assertCoin(chainId: number, token: Holding['token'], amount: number, limits?: Partial<SafetyLimits>) {
     await this.refreshWallet(true);
-    const label = this.tokLabel(d.chainId, d.quote.symbol);
+    const label = this.tokLabel(chainId, token.symbol);
     // A balance that couldn't be read stops a live start: it used to skip this check entirely.
-    const w = this.wallets.get(d.chainId), tok = d.quote.native ? null : w?.tokens[d.quote.address.toLowerCase()];
-    const unread = !w ? 'no balance read yet' : w.error ?? (d.quote.native ? null : tok ? tok.error : `${label} isn't tracked in this wallet`);
-    if (unread) throw new Error(`Couldn't read your ${label} balance (${unread}), so nothing was started. Try again in a minute.`);
-    const have = this.walletAmount(d.chainId, d.quote)!;
-    const cur = this.allocations().rows.find((r) => r.token === label)?.allocated ?? 0;
-    if (d.quote.native) {
+    const w = this.wallets.get(chainId), tok = token.native ? null : w?.tokens[token.address.toLowerCase()];
+    const unread = !w ? 'no balance read yet' : w.error ?? (token.native ? null : tok ? tok.error : `${label} isn't tracked in this wallet`);
+    if (unread) throw new FundsError(`Couldn't read your ${label} balance (${unread}), so nothing was started. Try again in a minute.`);
+    const have = this.walletAmount(chainId, token)!;
+    const row = this.allocations().rows.find((r) => r.token === label), cur = row?.allocated ?? 0;
+    const f = humanAmount, held = row?.bots.filter((b) => b.kind === 'trader').reduce((a, b) => a + b.amount, 0) ?? 0;
+    const trader = held > 0 ? ` (the smart trader counts ${f(held)} ${label} of it)` : '';
+    if (token.native) {
       // Spending the native coin (flipped HEX/PLS …): capital + gas reserve + other live bots' native must fit.
       const chk = checkGasReserve({ capital: amount, balance: have, allocated: cur, cfg: reserveCfg({ ...this.multi.defaults, ...(limits ?? {}) }), symbol: label });
-      if (!chk.ok) throw new Error(chk.reason!);
+      if (!chk.ok) throw new FundsError(chk.reason! + trader);
       return;
     }
     if (have + 1e-9 < cur + amount) {
-      const f = humanAmount;
-      throw new Error(`Not enough ${label} in your wallet. This needs ${f(cur + amount)} ${label} (${f(amount)} for this bot${cur ? ` + ${f(cur)} already used by your other live bots` : ''}), and the wallet has ${f(have)} ${label}. Use a smaller amount, or start it in paper mode.`);
+      throw new FundsError(`Not enough ${label} in your wallet. This needs ${f(cur + amount)} ${label} (${f(amount)} for this bot${cur ? ` + ${f(cur)} already used by your other live bots${trader}` : ''}), and the wallet has ${f(have)} ${label}. Use a smaller amount, or start it in paper mode.`);
     }
+  }
+  /** Live: the wallet holds all that live bots and the smart trader count of a coin (checked before the trader spends some). */
+  async assertBooked(chainId: number, token: Holding['token']) {
+    await this.refreshWallet(true);
+    const label = this.tokLabel(chainId, token.symbol), w = this.wallets.get(chainId), have = this.walletAmount(chainId, token);
+    if (!w || w.error || have == null) throw new FundsError(`Couldn't read your ${label} balance (${w?.error ?? 'no balance read yet'}), so nothing was swapped. Trying again on the next check.`);
+    const cur = this.allocations().rows.find((r) => r.token === label)?.allocated ?? 0;
+    if (have + 1e-9 < cur) throw new FundsError(`Your wallet has ${humanAmount(have)} ${label}, less than the ${humanAmount(cur)} your live bots and the smart trader count (something else spent some), so nothing was swapped.`);
   }
 
   /** Base coins a bot is given from the wallet must be there (after what live bots already use). Runs after assertCovers read the wallet. */
@@ -1115,7 +1172,7 @@ export class MultiBot {
       const pnl = t.side === 'sell' || t.failed ? (t.roundTripNet ?? t.realizedPnlUsd) : null;
       rows.push({
         t: t.timestamp, botId, kind, bot, pair: t.stable, mode: t.paper ? 'paper' : 'live', side: t.side,
-        reason: t.reason ?? (t.manual ? 'manual' : t.levelPrice != null ? `level ${t.levelPrice.toPrecision(5)}` : t.failed ? 'failed' : 'grid'),
+        reason: t.reason ?? (t.manual ? 'manual' : t.closeSale ? 'close' : t.levelPrice != null ? `level ${t.levelPrice.toPrecision(5)}` : t.failed ? 'failed' : 'grid'),
         pls: t.plsAmount, quote: t.stableAmount, price: t.price, fee: t.feeQuote ?? 0, gas: t.gasUsd, pnl, pnlUsd: pnl != null && k ? pnl * k : null,
         slippagePct: t.slippagePct ?? null, tx: t.txHash, failed: !!t.failed,
       });
@@ -1358,10 +1415,12 @@ export class MultiBot {
     await this.hub.ensureSpot(d.key);
     return d.key;
   }
-  /** Opportunity → market key: the market already added for this token, quote and pool, or a new one (safety re-checked; one that fails is paper only). */
+  /**
+   * Opportunity → market key: the app's market for these two coins (on any pool: one switched to another pool since the
+   * scan is still it), or a new one on this pool (safety re-checked; one that fails is paper only).
+   */
   async addOpportunityMarket(req: { chainId: number; address: string; quote: string; pool: string }): Promise<string> {
-    const have = this.hub.byChain(req.chainId).find((m) => sameAddr(m.base.address, req.address) && sameAddr(m.quote.address, req.quote) && sameAddr(m.pool.address, req.pool));
-    const key = have ? have.key : (await this.addMarket(req)).key;
+    const key = this.hub.marketForCoins(req.chainId, req.address, req.quote) ?? (await this.addMarket(req)).key;
     // Priced now, not on the next all-markets poll (~30 s): New bot centres the range on this price right away.
     await this.hub.ensureSpot(key);
     return key;
