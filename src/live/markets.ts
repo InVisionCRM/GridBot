@@ -58,6 +58,20 @@ export interface SafetyReport {
   paused?: boolean | null;
   /** Token decimals read on-chain at check time */
   decimals?: number;
+  /**
+   * Set when the last re-check failed or measured nothing: the values above are the last known ones, kept for display
+   * and for the taxes the quotes use, but not re-confirmed since `since`. Cleared by the next re-check that measures.
+   * Being stale never pauses or stops a bot; `liveAllowed` keeps its last known value.
+   */
+  stale?: SafetyStale;
+}
+
+export interface SafetyStale {
+  /** First failed re-check in this run of failures */
+  since: number;
+  /** Most recent failed re-check */
+  lastTry: number;
+  why: string;
 }
 
 export interface MarketDef {

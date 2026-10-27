@@ -247,7 +247,8 @@ export class TrendEngine {
     if (errs.length) throw new Error(errs.join('; '));
     if (p.mode === 'live' && def.safety) {
       let sf = def.safety ?? null;
-      try { sf = await this.hub.recheck(p.quote); } catch (e) { this.log('warn', `safety re-check failed: ${(e as Error).message}`); }
+      try { sf = await this.hub.recheck(p.quote); } catch (e) { sf = this.hub.def(p.quote).safety ?? sf; this.log('warn', `safety re-check failed: ${(e as Error).message}`); }
+      if (sf?.stale && sf.liveAllowed) this.log('warn', `starting on the last known safety report from ${new Date(sf.at).toISOString()} (stale: ${sf.stale.why})`);
       if (!sf?.liveAllowed) throw new Error(`LIVE blocked — ${this.hub.label(p.quote)} safety ${sf?.risk ?? 'unknown'}: ${(sf?.reasons ?? ['no safety check']).join(' ')}`);
     }
     const executor = this.makeExecutor(p.mode, p.quote);
