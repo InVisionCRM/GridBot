@@ -91,7 +91,7 @@ describe('replay gates', () => {
   });
 });
 
-describe('ETH/USDG ±1% reconstruction', () => {
+describe('synthetic seeded ETH/USDG fixture (not market data)', () => {
   const report = runEthUsdgReplay();
   const by = (name: string) => report.rows.find((r) => r.label.startsWith(name))!;
 
@@ -103,6 +103,7 @@ describe('ETH/USDG ±1% reconstruction', () => {
     expect(text).toContain('Preset B');
     expect(text).toContain('Stay put');
     expect(text.toLowerCase()).not.toContain('recommend');
+    expect(report.source).toMatch(/Synthetic test fixture/);
     expect(report.source).toMatch(/not the Robinhood swap tape/);
     expect(report.readme).toMatchObject({ moves: 23, fees: 70.38, moveLoss: 84.23, net: -16.22 });
     for (const r of report.rows) expect(r.net).toBeCloseTo(r.fees - r.gas - r.swapCost - r.moveLoss, 8);

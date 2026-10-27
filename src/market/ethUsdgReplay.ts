@@ -170,7 +170,7 @@ export function runEthUsdgReplay(rows = ethUsdgMinutes()): EthReplayReport {
   });
   const stay = replayLp(rows, ETH_USDG_POOL, { ...base, bandPct: 0.01, rerange: false });
   return {
-    source: 'Reconstructed minute path (not the Robinhood swap tape). See src/market/ethUsdgReplay.ts.',
+    source: 'Synthetic test fixture. Reconstructed minute path (not the Robinhood swap tape, and not the headline). See src/market/ethUsdgReplay.ts.',
     assumptions: [
       'Net quote = fees earned − gas − swap cost − realized rebalancing loss. That is what the bot made. Holding the coins is not in this table.',
       'No swap tape in this repo. The README totals (23 moves, −16.22 net, 70.38 fees, 84.23 move loss) were produced by an earlier missed-fee rule and are not replayed here.',
