@@ -22,6 +22,7 @@ import type { FriendsHost } from './friends/host';
 import type { GeckoRelay } from './friends/relay';
 import type { Autopilot, AutoOptions, Budget } from './bot/autopilot';
 import type { TokenTrader, TraderOptions } from './bot/tokenTrader';
+import { playLeaderboard } from '../metrics/playScore';
 import { noKey } from './words';
 import { fetchJson } from './fetchJson';
 import { holdingsSnapshot } from './holdings/read';
@@ -350,6 +351,7 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
   app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
+  app.get('/api/plays/scorecard', wrap(() => playLeaderboard(tt().plays())));
 
   // ── Friends' copies: the host's Tools → Friends, and the relay the copies fetch candles through ─────
   app.get('/api/host/gecko', wrap(async (req, res) => {

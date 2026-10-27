@@ -123,6 +123,10 @@ export interface Fill {
   shortfallPct?: number;
   /** Combined tax applied on this swap (input × output legs) */
   taxPct?: number;
+  /** Swap-receipt gas units. Absent on paper and when the field is not a safe integer. */
+  swapGasUsed?: number;
+  /** Wei per gas on the swap receipt. */
+  swapGasPriceWei?: number;
 }
 
 export interface MarketSnapshot {
@@ -444,6 +448,14 @@ function gasOf(r: ReceiptLike | null | undefined): bigint {
   return r ? r.gasUsed * (r.gasPrice ?? 0n) : 0n;
 }
 
+function receiptGas(r: ReceiptLike): { swapGasUsed?: number; swapGasPriceWei?: number } {
+  const out: { swapGasUsed?: number; swapGasPriceWei?: number } = {};
+  const max = BigInt(Number.MAX_SAFE_INTEGER);
+  if (r.gasUsed <= max) out.swapGasUsed = Number(r.gasUsed);
+  if (r.gasPrice != null && r.gasPrice <= max) out.swapGasPriceWei = Number(r.gasPrice);
+  return out;
+}
+
 /** Signs with the server signer for this chain. One transaction at a time per chain; nonces tracked per chain. */
 export class LiveExecutor implements Executor {
   readonly mode = 'live' as const;
@@ -653,6 +665,7 @@ export class LiveExecutor implements Executor {
       gasPls: fromUnits(gasWei, 18) * k, gasNative: fromUnits(gasWei, 18), fromReceipt: outSource !== 'minOut',
       outSource, expectedOutHuman: q.quotedOutHuman, shortfallPct: q.quotedOutHuman > 0 ? 1 - outHuman / q.quotedOutHuman : 0,
       taxPct: 1 - (1 - q.taxInPct) * (1 - q.taxOutPct),
+      ...receiptGas(r),
     };
   }
 
