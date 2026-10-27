@@ -27,7 +27,7 @@ export type Emit = (e: ActivityInput) => void;
 
 function loadActivity(file: string, max: number): ActivityEvent[] {
   const out: ActivityEvent[] = [];
-  for (const line of readLogLines(file)) {
+  for (const line of readLogLines(file, 1)) { // the backlog needs only the newest lines
     try {
       const e = JSON.parse(line) as ActivityEvent;
       if (e && typeof e.id === 'number' && typeof e.msg === 'string' && typeof e.t === 'number') out.push(e);

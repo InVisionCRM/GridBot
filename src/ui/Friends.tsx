@@ -1,5 +1,5 @@
 /**
- * Tools → Friends (the host's own app only): the address friends open (Tailscale Funnel), invite and new-password
+ * Tools → Friends (the host's own app only): the address friends open (tailscale serve + device sharing), invite and new-password
  * links, and each friend's copy (server: /api/friends, friends/host.ts). A copy runs on this computer with the
  * friend's own bots and key; it never sees the host's.
  */
@@ -76,8 +76,11 @@ function On({ v, busy, run }: { v: On; busy: boolean; run: (fn: () => Promise<un
         <h3>1 · Where friends open it</h3>
         <p className="small muted">
           Your own phone stays on your tailnet: <code>tailscale serve --bg {v.port}</code> (readme, Phone access).
-          Friends who are not on your tailnet need Tailscale Funnel: <code>tailscale funnel --bg {v.port}</code>.
-          It prints an address starting with https://; paste it below. <a href="https://tailscale.com/kb/1223/funnel" target="_blank" rel="noreferrer">Funnel guide</a>
+          Friends use the same <code>tailscale serve</code> address: share this computer with them from the Tailscale admin console
+          (Machines → this computer → Share), they accept with their own Tailscale account, and open the address with the Tailscale app on.
+          {' '}<a href="https://tailscale.com/kb/1084/sharing" target="_blank" rel="noreferrer">Sharing guide</a>.
+          {' '}Paste the address <code>tailscale serve status</code> prints (it starts with https://) below.
+          {' '}Avoid Tailscale Funnel: it puts the log-in page on the public internet. The owner log-in is refused through Funnel.
         </p>
         <div className="form-row">
           <label>Your name<input value={name} placeholder="Kyle" onChange={(e) => setName(e.target.value)} /></label>
