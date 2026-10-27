@@ -5,7 +5,7 @@
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import { calculateGridLevels } from '../../engine/gridEngine';
 import { DEFAULT_LIMITS, validateLimits, type SafetyLimits } from '../../live/limits';
-import { applySell, replay, roundTripStats, totals, type LiveTrade } from '../../live/ledger';
+import { applySell, replay, roundTripStats, totals, type LiveTrade, gridMoveFills } from '../../live/ledger';
 import { buildIntervals, buyAmountPerInterval, evaluateTick, onTradeFilled, onTradeSkipped, seedIntervals, type LiveInterval, type QueuedTrade } from '../../live/liveGrid';
 import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
@@ -525,7 +525,7 @@ export class GridEngine {
       econ, spacingWarn: econWarning(econ),
       recenter: { enabled: true, aboveSince: null, lastAt: now, count: r.count + 1 },
     };
-    this.seedUpper(price);
+    this.seedUpper(price, true);
     this.save();
     const msg = `Grid ${this.label}: price stayed above the range for ${RECENTER_AFTER_MS / 3600_000}h, so the range moved up to ${next.lowerPrice.toPrecision(5)}–${next.upperPrice.toPrecision(5)} (±${(band * 100).toFixed(0)}%, ${next.gridCount} levels)`;
     this.tag('info', msg);
@@ -536,7 +536,7 @@ export class GridEngine {
    * Coins for the levels at or above the price (seedIntervals): first coins this grid already holds that no level
    * owns (a live restart), then one start-up buy queued for the rest.
    */
-  private seedUpper(price: number) {
+  private seedUpper(price: number, recenter = false) {
     const pos = replay(this.modeTrades());
     const owned = this.state.intervals.reduce((a, i) => a + (i.status === 'holding' ? i.plsAmount : 0), 0);
     const free = Math.max(0, pos.plsHeld - owned);
@@ -544,7 +544,7 @@ export class GridEngine {
     const { intervals, job } = seedIntervals(this.state.intervals, price, { pls: free, cost: free * avg }, this.now());
     const fromHeld = intervals.filter((iv, i) => iv.status === 'holding' && this.state.intervals[i].status !== 'holding').length;
     this.state.intervals = intervals;
-    if (job) this.state.queue.push(job);
+    if (job) this.state.queue.push(recenter ? { ...job, recenter: true } : job);
     if (fromHeld || job) {
       const sym = this.def?.quote.symbol ?? this.state.stable;
       this.tag('info', `Levels above the price: ${fromHeld} use ${this.baseSym} the grid already holds${job ? `; buying ${this.baseSym} for ${job.seed!.length} with ${job.amount.toPrecision(5)} ${sym}` : ''}`);
@@ -754,7 +754,7 @@ export class GridEngine {
       plsAmount, stableAmount, price: execPrice, gasPls, gasUsd: gasQuote, txHash: f.txHash, approvalTxHash: f.approvalTxHash,
       timestamp: this.now(), realizedPnlUsd: realized, paper: this.state.mode === 'paper',
       triggerPrice: job.triggerPrice, levelPrice: job.levelPrice, quotedPrice: f.quotedPrice, execPrice, slippagePct,
-      fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.seed ? { seed: job.seed } : {}),
+      fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.seed ? { seed: job.seed } : {}), ...(job.recenter ? { recenter: true } : {}),
       ...(f.taxPct ? { taxPct: f.taxPct } : {}), ...(f.outSource ? { outSource: f.outSource } : {}), ...(f.expectedOut != null ? { expectedOut: f.expectedOut } : {}),
       ...(this.def ? { dex: this.def.pool.dex, feeBps: this.def.pool.feeBps, ...(this.def.pool.feeTier != null ? { feeTier: this.def.pool.feeTier } : {}) } : {}),
     });
@@ -941,7 +941,8 @@ export class GridEngine {
         };
       })(),
       stats: roundTripStats(trades),
-      moveCount: trades.filter((t) => !t.failed && !t.manual).length,
+      // fills, without a re-center's own seed buy: the re-center is one move (recenter.count; desk adds them)
+      moveCount: gridMoveFills(trades, this.state.recenter?.count ?? 0),
       lastMoveAt: trades.reduce((m, t) => (!t.failed && !t.manual ? Math.max(m, t.timestamp || 0) : m), 0) || null,
       econ: this.state.econ ?? null,
       lastError: this.lastError,

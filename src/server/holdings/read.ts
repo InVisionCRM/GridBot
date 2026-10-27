@@ -23,7 +23,7 @@ import { holdings as readListed, type Holding } from '../convert/holdings';
 import type { FetchJson } from '../fetchJson';
 import type { MultiBot } from '../bot/multi';
 import type { ChainRuntime } from '../chains/runtime';
-import type { Hub } from '../chains/hub';
+import { PRICE_TTL_MS, type Hub } from '../chains/hub';
 
 const NFT_CAP = 48;
 const CHAIN_MS = 90_000;
@@ -357,14 +357,14 @@ function priceOf(hub: Hub, chainId: number, address: string | null, wrapped: str
   return hub.tokenUsd(chainId, address);
 }
 
+/** Fresh (≤ PRICE_TTL_MS) spots for the native coin and every market touching these coins, before pricing them. */
 async function warmPrices(hub: Hub, chainId: number, addrs: string[]) {
   await hub.nativeUsdAsync(chainId).catch(() => null);
   const want = new Set(addrs.map((a) => a.toLowerCase()));
   const markets = hub.byChain(chainId).filter((m) => want.has(m.base.address.toLowerCase()) || want.has(m.quote.address.toLowerCase()));
-  for (const m of markets.slice(0, 16)) {
-    if (hub.tokenUsd(chainId, m.base.address) != null && hub.tokenUsd(chainId, m.quote.address) != null) continue;
-    await hub.ensureSpot(m.key).catch(() => 0);
-  }
+  // A price that exists can still be hours old (a stopped bot's market isn't polled): re-read any spot older than
+  // PRICE_TTL_MS. ensureSpot returns a fresh cached one without a chain read.
+  for (const m of markets.slice(0, 16)) await hub.ensureSpot(m.key, PRICE_TTL_MS).catch(() => 0);
 }
 
 async function readChain(bot: MultiBot, rt: ChainRuntime, owner: string, links: BotLink, fetchJson: FetchJson): Promise<ChainPiece> {

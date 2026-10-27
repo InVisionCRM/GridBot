@@ -34,6 +34,8 @@ export interface QueuedTrade {
   manual?: boolean;
   /** Start-up buy: coins for these intervals at or above the price, split between them when it fills */
   seed?: number[];
+  /** The seed buy of a range re-center: part of that re-center, which counts as one move */
+  recenter?: boolean;
 }
 
 let qseq = 0;

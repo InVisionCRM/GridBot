@@ -435,8 +435,10 @@ describe('Auto-recenter: follows the price up only', () => {
     expect(g.config).toMatchObject({ gridCount: 10, totalCapitalUsd: 30 });
     // the trades carry over; the new levels above the price got their coins from one start-up buy
     expect(g.trades.length).toBe(trades + 1);
-    expect(g.trades[0]).toMatchObject({ side: 'buy', seed: [5, 6, 7, 8, 9] });
+    expect(g.trades[0]).toMatchObject({ side: 'buy', seed: [5, 6, 7, 8, 9], recenter: true });
     expect(g.recenter).toMatchObject({ enabled: true, count: 1, aboveSince: null });
+    // the re-center is one move: its seed buy isn't counted again as a fill
+    expect(g.moveCount).toBe(trades);
     expect(bot.activity.recent(50).some((e) => e.type === 'range' && /moved up/.test(e.msg))).toBe(true);
   });
 

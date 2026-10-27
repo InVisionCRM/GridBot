@@ -39,6 +39,9 @@ export interface InspectResult {
   existing: string | null;
 }
 
+/** Prices for dollar values are re-read when older than this (holdings, gas conversion, the USD oracle). */
+export const PRICE_TTL_MS = 60_000;
+
 export class Hub {
   readonly spots: Record<string, number> = {};
   readonly spotAt: Record<string, number> = {};
@@ -161,9 +164,29 @@ export class Hub {
   }
 
   // ── USD / native oracle ───────────────────────────────────────────────
+  /**
+   * Spots are sell-side quotes (quote per base after the pool fee), which trading needs. Dollar values use the mid:
+   * the spot with the pool fee taken back out, so a coin on a 1% pool isn't marked 1% under on a 0.05% one.
+   * A flipped view's mid is the inverse of the original's.
+   */
+  midSpot(key: string): number | null {
+    const d = this.get(key);
+    if (d?.flipped) {
+      const orig = this.get(unflipKey(key)) ? this.midSpot(unflipKey(key)) : null;
+      if (orig != null && orig > 0) return 1 / orig;
+      const s = this.spots[key];
+      return s > 0 ? s : null;
+    }
+    const s = this.spots[key];
+    if (!(s > 0)) return null;
+    const f = (d?.pool.feeBps ?? 0) / 10_000;
+    return f > 0 && f < 1 ? s / (1 - f) : s;
+  }
+
   setSpot(key: string, p: number) { if (p > 0 && Number.isFinite(p)) { this.spots[key] = p; this.spotAt[key] = this.now(); } }
 
-  async ensureSpot(key: string, maxAgeMs = 120_000): Promise<number> {
+  /** Default age (PRICE_TTL_MS) after which a cached spot is read again before it is used for a price. */
+  async ensureSpot(key: string, maxAgeMs = PRICE_TTL_MS): Promise<number> {
     const p = this.spots[key];
     if (p > 0 && this.now() - (this.spotAt[key] ?? 0) < maxAgeMs) return p;
     const v = await this.quoter(key).getPrice();
@@ -185,7 +208,7 @@ export class Hub {
 
   nativeUsd(chainId: number): number | null {
     const k = this.usdRefKey(chainId);
-    return k && this.spots[k] > 0 ? this.spots[k] : null;
+    return k ? this.midSpot(k) : null;
   }
 
   /** USD per token from cached spots (sync; null when no route is priced yet). */
@@ -195,8 +218,8 @@ export class Hub {
     if (c && sameAddr(c.wrappedNative.address, addr)) return this.nativeUsd(chainId);
     if (depth > 2) return null;
     for (const m of this.byChain(chainId)) {
-      const s = this.spots[m.key];
-      if (!(s > 0)) continue;
+      const s = this.midSpot(m.key);
+      if (s == null || !(s > 0)) continue;
       if (sameAddr(m.base.address, addr) && !sameAddr(m.quote.address, addr)) {
         const q = this.tokenUsd(chainId, m.quote.address, depth + 1);
         if (q != null) return s * q;
@@ -215,8 +238,8 @@ export class Hub {
     return this.tokenUsd(d.chainId, d.quote.address) ?? (d.quoteKind === 'stable' ? 1 : null);
   }
   baseUsd(key: string): number | null {
-    const k = this.usdPerQuote(key), s = this.spots[key];
-    return k != null && s > 0 ? s * k : null;
+    const k = this.usdPerQuote(key), s = this.midSpot(key);
+    return k != null && s != null && s > 0 ? s * k : null;
   }
 
   async nativeUsdAsync(chainId: number): Promise<number | null> {

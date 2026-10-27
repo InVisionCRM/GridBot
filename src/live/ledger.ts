@@ -9,6 +9,8 @@ export interface LiveTrade {
   intervalIndex: number;
   /** Start-up buy: the levels above the start price it bought coins for (split between them) */
   seed?: number[];
+  /** The seed buy of a range re-center (part of that one move) */
+  recenter?: boolean;
   stable: string;
   /** PLS amount bought or sold (human units) */
   plsAmount: number;
@@ -127,4 +129,18 @@ export function roundTripStats(trades: LiveTrade[]) {
     totalGas: trades.reduce((s, t) => s + t.gasUsd, 0),
     avgSlippagePct: slips.length ? slips.reduce((a, b) => a + b, 0) / slips.length : 0,
   };
+}
+
+/**
+ * Fills that count as moves. A range re-center is one move (counted from recenter.count), so the seed buy it queued
+ * for the levels above the new range is not counted again. New seed buys carry `recenter`; older ones don't, so when
+ * the grid has re-centered, every seed buy after its first (the start-up one) is taken as a re-center's, at most one
+ * per re-center.
+ */
+export function gridMoveFills(trades: LiveTrade[], recenters: number): number {
+  const ok = trades.filter((t) => !t.failed && !t.manual);
+  const seeds = ok.filter((t) => t.side === 'buy' && t.seed?.length).sort((a, b) => a.timestamp - b.timestamp);
+  const flagged = seeds.filter((t) => t.recenter).length;
+  const legacy = recenters > 0 ? seeds.filter((t) => !t.recenter).slice(1).length : 0;
+  return ok.length - Math.min(Math.max(0, recenters), flagged + legacy);
 }
