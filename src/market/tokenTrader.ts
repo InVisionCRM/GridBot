@@ -13,6 +13,7 @@ import { HARD_CAPS } from '../live/limits';
 import { MAX_TAX, TAX_TOLERANCE } from '../live/tax';
 import { simBuy, simSell, type CostModel } from './costs';
 import { capSwap, TOKEN_MAX_POOL_SHARE } from './poolSize';
+import { v3LockSatisfies, type V3LpReport } from './v3LpLock';
 
 export const DEFAULT_MIN_POOL_AGE_SEC = 24 * 3600;
 export const DEFAULT_SNIPER_MIN_LIQ_USD = 5_000;
@@ -94,8 +95,17 @@ export interface GateInput {
   canPause: boolean | null;
   canBlacklist: boolean | null;
   proxy: boolean | null;
-  /** LP can be pulled by the owner (not burned / not locked). null = not detectable. */
+  /**
+   * LP can be pulled by the owner (not burned / not locked). null = not detectable, and null is not a block.
+   * The live assess path sets this null: nothing in this repo reads a GoPlus-style LP-holder list.
+   * V2 burn/owner math lives in lpRemovable and is not applied here.
+   */
   lpUnlocked: boolean | null;
+  /**
+   * On-chain V3 position-NFT evidence. Set only when the trader option `v3LpLockCheck` is on.
+   * Absent (the default) leaves this gate unchanged.
+   */
+  v3Lp?: V3LpReport;
   /** Largest holder as a share of supply. null = unknown, and unknown is not a block. */
   holderConcentration: number | null;
   recentLiqPull: boolean;
@@ -103,7 +113,7 @@ export interface GateInput {
   liveAllowed: boolean;
 }
 
-export interface GateResult { ok: boolean; liveOk: boolean; reason: string | null }
+export interface GateResult { ok: boolean; liveOk: boolean; reason: string | null; /** Present only when the input carried a V3 report. */ v3Lp?: V3LpReport }
 
 /**
  * Extra gate in front of the existing classifier. It does not weaken it: live still needs liveAllowed,
@@ -111,7 +121,8 @@ export interface GateResult { ok: boolean; liveOk: boolean; reason: string | nul
  */
 export function gateToken(g: GateInput): GateResult {
   const maxTax = g.maxTax ?? MAX_TAX;
-  const hard = (reason: string): GateResult => ({ ok: false, liveOk: false, reason });
+  // No `v3Lp` key unless the check actually ran, so existing results stay the same shape.
+  const hard = (reason: string): GateResult => (g.v3Lp === undefined ? { ok: false, liveOk: false, reason } : { ok: false, liveOk: false, reason, v3Lp: g.v3Lp });
   if (g.honeypot === true) return hard('honeypot: the sell simulation was blocked');
   if (g.sellSimOk === false) return hard('sell simulation failed');
   if (g.paused === true) return hard('token is paused');
@@ -124,7 +135,9 @@ export function gateToken(g: GateInput): GateResult {
   if (g.mode === 'live' && !g.liveAllowed) return hard('safety check does not allow live trading');
   if (g.risk === 'safe' || g.risk === 'medium') {
     if (g.canPause === true) return hard('owner can pause');
-    if (g.lpUnlocked === true) return hard('liquidity is unlocked');
+    // The V3 report is optional. When it is absent these two lines are the old check: true blocks, null does not.
+    if (g.v3Lp?.status === 'unverified') return hard('V3 liquidity lock unverified');
+    if (g.lpUnlocked === true && !v3LockSatisfies(g.v3Lp)) return hard('liquidity is unlocked');
     if (tax > maxTax) return hard(`tax ${(tax * 100).toFixed(1)}% is over the ${(maxTax * 100).toFixed(0)}% cap`);
   }
   if (g.risk === 'safe') {
@@ -134,7 +147,8 @@ export function gateToken(g: GateInput): GateResult {
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
   }
   // Honeypot and a failed sell already returned above, so live only still needs the classifier and the tax cap.
-  return { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null };
+  const passed = { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null };
+  return g.v3Lp === undefined ? passed : { ...passed, v3Lp: g.v3Lp };
 }
 
 export interface BuySize {
