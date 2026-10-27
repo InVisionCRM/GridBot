@@ -242,7 +242,8 @@ export class TokenTrader {
     try {
       await this.takeSnipes();
       await this.exits();
-      await this.scanEntries();
+      // Turned off while the snipes or exits were awaited: no new entries this tick.
+      if (this.state.on) await this.scanEntries();
       this.lastError = null;
     } catch (e) {
       this.lastError = (e as Error).message;
@@ -328,6 +329,9 @@ export class TokenTrader {
 
   private async consider(pool: FreshPool, source: 'scan' | 'snipe') {
     const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
+    // Turned off since this tick started (POST /on runs a tick at once; discovery can take minutes): stop here,
+    // before the safety check's reads. buy() checks canBuy() again after them.
+    if (!this.state.on) return;
     if (!this.wantChain(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'chain is off' }); return; }
     if (pool.kind === 'v4') { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); return; }
     if (this.entriesStopped(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); return; }
@@ -340,9 +344,13 @@ export class TokenTrader {
     if (!this.d.discover) return;
     if (this.state.entriesHalt?.chains === null) return; // stopped everywhere: don't even look
     const pools = await this.d.discover();
+    if (!this.state.on) return; // turned off while discovery was pending (2026-10-27: 4 paper buys ~3 min after off)
     const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: 0 });
     for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
-    for (const p of keep) await this.consider(p, 'scan');
+    for (const p of keep) {
+      if (!this.state.on) break;
+      await this.consider(p, 'scan');
+    }
   }
 
   private hourRoom() {
@@ -359,6 +367,7 @@ export class TokenTrader {
     for (const n of notes) this.say(n.msg, n.level);
     let room = this.hourRoom();
     for (const hit of hits) {
+      if (!this.state.on) break; // turned off while the sniper's log read was pending
       if (sn.chains[hit.chainId] === false) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: hit.pool.slice(0, 8), verdict: 'skipped', why: 'sniper is off for this chain' }); continue; }
       if (hit.skip) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: 'V4', verdict: 'skipped', why: hit.skip }); continue; }
       if (hit.kind === 'v4') continue;
