@@ -34,13 +34,21 @@ export interface TraderOptions {
   mode: 'paper' | 'live';
   perTradeUsd: number;
   totalUsd: number;
-  /** Scan discovery only. Snipes ignore it. */
+  /**
+   * Scan discovery skips a pool younger than this when its age is known. Snipes do not use it there.
+   * When enforceWashAndAge is on, the gate uses the same number, and an unknown age skips safe and medium.
+   */
   minPoolAgeSec: number;
   /** Empty = every chain the app trades */
   chains: number[];
   risk: 'safe' | 'medium' | 'any';
   maxImpact: number;
   maxPoolShare: number;
+  /**
+   * When on, safe and medium apply minPoolAgeSec in the gate, treat an unknown pool age as a skip,
+   * and skip wash volume (24h volume over 20× liquidity). Off: the gate ignores this and discovery is unchanged.
+   */
+  enforceWashAndAge: boolean;
   sniper: SniperOptions;
 }
 
@@ -110,7 +118,7 @@ const TRADE_MAX = 200;
 
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
-  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
+  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE, enforceWashAndAge: false,
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
 
@@ -139,6 +147,11 @@ export class TokenTrader {
     sniper?: PoolSniper;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
+    /**
+     * Optional volume and age read. Called only when enforceWashAndAge is on.
+     * Production does not set this: the gate uses the pool row it already has. A throw is unverified.
+     */
+    poolFacts?: (pool: FreshPool) => Promise<{ createdAt: number | null; volumeUsd: number; liquidityUsd: number }>;
   }) {
     const loaded = d.store.load();
     this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } } } : fresh();
@@ -183,7 +196,11 @@ export class TokenTrader {
       if (this.d.signerReady && o.chains.length && o.chains.some((id) => !this.d.signerReady!(id))) throw new Error('Live needs a signing key on every chain you turned on.');
     }
     this.state.on = true;
-    this.say(`token trader on (${o.mode}): up to ${o.perTradeUsd} USD a trade, ${o.totalUsd} USD open, pools at least ${Math.round(o.minPoolAgeSec / 3600)}h old unless the sniper is on`);
+    const ageH = Math.round(o.minPoolAgeSec / 3600);
+    const ageNote = o.enforceWashAndAge
+      ? `pools at least ${ageH}h old, and safe/medium skip an unknown age or wash volume`
+      : `pools at least ${ageH}h old unless the sniper is on`;
+    this.say(`token trader on (${o.mode}): up to ${o.perTradeUsd} USD a trade, ${o.totalUsd} USD open, ${ageNote}`);
     this.save();
   }
 
@@ -289,7 +306,30 @@ export class TokenTrader {
   private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number }> {
     if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0 };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
-    const r = gateToken({ ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) });
+    const base: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
+    if (this.state.options.enforceWashAndAge) {
+      let volumeUsd = pool.volumeUsd;
+      let liquidityUsd = pool.liquidityUsd;
+      let createdAt = pool.createdAt;
+      let freshnessUnverified = false;
+      if (this.d.poolFacts) {
+        try {
+          const f = await this.d.poolFacts(pool);
+          volumeUsd = f.volumeUsd;
+          liquidityUsd = f.liquidityUsd;
+          createdAt = f.createdAt;
+        } catch {
+          freshnessUnverified = true;
+        }
+      }
+      base.enforceWashAndAge = true;
+      base.freshnessUnverified = freshnessUnverified;
+      base.volumeUsd = volumeUsd;
+      base.liquidityUsd = liquidityUsd;
+      base.poolAgeSec = createdAt == null ? null : Math.max(0, (this.now() - createdAt) / 1000);
+      base.gateMinPoolAgeSec = this.state.options.minPoolAgeSec;
+    }
+    const r = gateToken(base);
     return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0 };
   }
 

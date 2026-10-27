@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bestSetup, bestWay, dailySwing, expectedGrid, expectedLp, GRID_PER_SWING, LP_REPEAT, SETUP_BANDS, SETUP_LEVELS, MIN_SCAN_CANDLES, MIN_SELL_HOURS, NATIVE_EEEE, NATIVE_ZERO, parseTopPools, pickTokens, SCAN_EVERY_MS, SCAN_PAGES, SCAN_RULES, TEST_USD, type TopPool } from '../src/market/scan';
+import { bestSetup, bestWay, dailySwing, expectedGrid, expectedLp, GRID_PER_SWING, isWashVolume, LP_REPEAT, SETUP_BANDS, SETUP_LEVELS, MIN_SCAN_CANDLES, MIN_SELL_HOURS, NATIVE_EEEE, NATIVE_ZERO, parseTopPools, pickTokens, SCAN_EVERY_MS, SCAN_PAGES, SCAN_RULES, TEST_USD, type TopPool } from '../src/market/scan';
 import { DEFAULT_COSTS } from '../src/market/costs';
 import { runGridBacktest } from '../src/market/backtest';
 import type { Candle } from '../src/market/candles';
@@ -56,6 +56,19 @@ describe('ranking (walk-forward, Oct 2026): grids by swing, liquidity by what it
     expect(bestWay({ grid, swingPct: 0.3, lp })).toEqual({ how: 'grid', expected: GRID_PER_SWING * 0.3 });
     expect(bestWay({ grid, swingPct: 0.1, lp: { ...lp, earnedPct: 0.05 } })).toEqual({ how: 'lp', expected: LP_REPEAT * 0.05 });
     expect(bestWay({ grid: null, swingPct: 0.3, lp: null })).toBeNull();
+  });
+});
+
+describe('wash volume', () => {
+  it('is volume over 20× liquidity; exactly 20× is still picked and not flagged', () => {
+    expect(isWashVolume(20, 1)).toBe(false);
+    expect(isWashVolume(20.01, 1)).toBe(true);
+    expect(isWashVolume(100, 0)).toBe(false);
+    const r = pickTokens([
+      pool({ name: 'EDGE / USDC', base: '0xe2', quote: USDC, liquidityUsd: 100_000, volume24Usd: 2_000_000 }),
+    ], SPEND, WETH);
+    expect(r.picked.map((p) => p.pool.name)).toEqual(['EDGE / USDC']);
+    expect(r.picked[0].pool.wash).toBe(false);
   });
 });
 

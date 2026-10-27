@@ -13,6 +13,7 @@ import { HARD_CAPS } from '../live/limits';
 import { MAX_TAX, TAX_TOLERANCE } from '../live/tax';
 import { simBuy, simSell, type CostModel } from './costs';
 import { capSwap, TOKEN_MAX_POOL_SHARE } from './poolSize';
+import { isWashVolume } from './scan';
 
 export const DEFAULT_MIN_POOL_AGE_SEC = 24 * 3600;
 export const DEFAULT_SNIPER_MIN_LIQ_USD = 5_000;
@@ -101,6 +102,19 @@ export interface GateInput {
   recentLiqPull: boolean;
   /** The existing safety classifier. Live still requires this. */
   liveAllowed: boolean;
+  /**
+   * Wash volume and minimum pool age. Ignored unless this is true, so a gate call that leaves it off
+   * matches the gate from before this check existed.
+   */
+  enforceWashAndAge?: boolean;
+  /** A volume or age read failed. Safe and medium skip when the flag is on. */
+  freshnessUnverified?: boolean;
+  /** Used only for the wash check, and only when the flag is on. */
+  volumeUsd?: number;
+  /** Seconds since the pool was created. null = unknown. Ignored unless the flag is on. */
+  poolAgeSec?: number | null;
+  /** Same setting as scan discovery (`minPoolAgeSec`). 0 means no age requirement. */
+  gateMinPoolAgeSec?: number;
 }
 
 export interface GateResult { ok: boolean; liveOk: boolean; reason: string | null }
@@ -132,6 +146,17 @@ export function gateToken(g: GateInput): GateResult {
     if (g.canBlacklist === true) return hard('owner can blacklist');
     if (tax > TAX_TOLERANCE) return hard(`tax ${(tax * 100).toFixed(2)}% (safe allows none)`);
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
+  }
+  if ((g.risk === 'safe' || g.risk === 'medium') && g.enforceWashAndAge) {
+    if (g.freshnessUnverified) return hard('pool age or volume could not be verified');
+    const volume = g.volumeUsd ?? 0;
+    if (isWashVolume(volume, g.liquidityUsd)) return hard(`volume is ${Math.round(volume / g.liquidityUsd)}× liquidity`);
+    const min = g.gateMinPoolAgeSec ?? 0;
+    if (min > 0 && g.poolAgeSec == null) return hard('pool age could not be verified');
+    if (min > 0 && g.poolAgeSec != null && g.poolAgeSec < min) {
+      const h = Math.max(0, Math.round(g.poolAgeSec / 3600));
+      return hard(`pool is ${h}h old (minimum ${Math.round(min / 3600)}h)`);
+    }
   }
   // Honeypot and a failed sell already returned above, so live only still needs the classifier and the tax cap.
   return { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null };

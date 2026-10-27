@@ -75,6 +75,26 @@ describe('safety gate', () => {
     expect(gateToken(clean({ risk: 'medium', sellTax: 0.2 })).reason).toMatch(/over the/);
   });
 
+  it('wash and age fields do nothing until the flag is on', () => {
+    const extra = { volumeUsd: 1e12, poolAgeSec: null as number | null, gateMinPoolAgeSec: 24 * 3600, freshnessUnverified: true };
+    expect(gateToken(clean(extra))).toEqual(gateToken(clean()));
+    expect(gateToken(clean({ ...extra, enforceWashAndAge: false }))).toEqual(gateToken(clean()));
+  });
+
+  it('with wash and age on, safe and medium skip wash volume, a young pool, and an unknown or failed age; any does not', () => {
+    const old = { enforceWashAndAge: true, volumeUsd: 1_000, poolAgeSec: 48 * 3600, gateMinPoolAgeSec: 24 * 3600 };
+    expect(gateToken(clean(old)).ok).toBe(true);
+    expect(gateToken(clean({ ...old, volumeUsd: 50_000 * 20 })).ok).toBe(true);
+    expect(gateToken(clean({ ...old, volumeUsd: 50_000 * 21 })).reason).toBe('volume is 21× liquidity');
+    expect(gateToken(clean({ risk: 'medium', ...old, volumeUsd: 50_000 * 21 })).reason).toMatch(/21× liquidity/);
+    expect(gateToken(clean({ ...old, poolAgeSec: 3600 })).reason).toBe('pool is 1h old (minimum 24h)');
+    expect(gateToken(clean({ risk: 'medium', ...old, poolAgeSec: null })).reason).toBe('pool age could not be verified');
+    expect(gateToken(clean({ ...old, poolAgeSec: null, gateMinPoolAgeSec: 0 })).ok).toBe(true);
+    expect(gateToken(clean({ ...old, freshnessUnverified: true })).reason).toBe('pool age or volume could not be verified');
+    expect(gateToken(clean({ risk: 'any', enforceWashAndAge: true, freshnessUnverified: true, volumeUsd: 1e12, poolAgeSec: null, gateMinPoolAgeSec: 24 * 3600 })).ok).toBe(true);
+    expect(gateToken(clean({ ...old, liquidityUsd: 0, minLiquidityUsd: 0, volumeUsd: 1e12 })).ok).toBe(true);
+  });
+
   it('any blocks only the hard failures, and live still needs the existing classifier', () => {
     expect(gateToken(clean({ risk: 'any', proxy: true, canPause: true, canBlacklist: true, sellTax: 0.05, lpUnlocked: true })).ok).toBe(true);
     expect(gateToken(clean({ mode: 'live', risk: 'any', liveAllowed: false })).reason).toMatch(/does not allow live/);
