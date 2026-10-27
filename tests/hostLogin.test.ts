@@ -196,6 +196,10 @@ describe('owner gateway', () => {
     expect(friendSeen[0].cookie).toBeUndefined();
     expect(friendSeen[0]['x-forwarded-for']).toBeUndefined();
     expect(friendSeen[0].host).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(friendSeen[0]['x-gridbot-via']).toBe('friend');
+    const spoofed = await raw(gw, '/api/health', { host: PUBLIC, cookie: friendCookie, 'x-gridbot-via': 'owner' });
+    expect(spoofed.status).toBe(200);
+    expect(friendSeen.at(-1)?.['x-gridbot-via']).toBe('friend');
   });
 
   it('an owner cookie reaches the host API with a localhost Host and, on a change, a localhost Origin', async () => {
@@ -210,6 +214,7 @@ describe('owner gateway', () => {
     expect(hostSeen[0].origin).toBeUndefined();
     expect(hostSeen[0]['x-forwarded-for']).toBeUndefined();
     expect(hostSeen[0]['x-forwarded-host']).toBeUndefined();
+    expect(hostSeen[0]['x-gridbot-via']).toBe('owner');
     const stop = await raw(gw, '/api/bot/stop-all', {
       host: PUBLIC, cookie: ownerCookie, origin: `https://${PUBLIC}`, 'content-type': 'application/json', 'x-forwarded-proto': 'https',
     }, '{}');
@@ -218,6 +223,10 @@ describe('owner gateway', () => {
     expect(hostSeen.at(-1)?.origin).toBe(`http://127.0.0.1:${hostPort}`);
     expect(hostSeen.at(-1)?.host).toBe(`127.0.0.1:${hostPort}`);
     expect(hostSeen.at(-1)?.cookie).toBeUndefined();
+    expect(hostSeen.at(-1)?.['x-gridbot-via']).toBe('owner');
+    const spoofed = await raw(gw, '/api/health', { host: PUBLIC, cookie: ownerCookie, 'x-gridbot-via': 'friend' });
+    expect(spoofed.status).toBe(200);
+    expect(hostSeen.at(-1)?.['x-gridbot-via']).toBe('owner');
   });
 
   it('refuses a change from another site, a foreign host, and a spoofed X-Forwarded-Host', async () => {

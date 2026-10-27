@@ -6,5 +6,11 @@ export function humanAmount(x: number): string {
   if (a >= 1e6) return `${sign}${+(a / 1e6).toPrecision(4)}M`;
   if (a >= 1e4) return `${sign}${+(a / 1e3).toPrecision(4)}K`;
   if (a >= 1) return `${sign}${+a.toFixed(2)}`;
-  return `${sign}${+a.toPrecision(4)}`;
+  const precise = a.toPrecision(4);
+  // toPrecision switches to scientific notation under ~1e-6 ("9.3e-10"), which reads as a broken balance.
+  if (/e/i.test(precise)) {
+    const s = a.toFixed(12).replace(/0+$/, '').replace(/\.$/, '');
+    return `${sign}${s === '0' ? '<0.000000000001' : s}`;
+  }
+  return `${sign}${+precise}`;
 }

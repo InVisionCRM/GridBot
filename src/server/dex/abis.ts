@@ -84,6 +84,11 @@ export const V3_NPM = new Interface([
   'event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)',
   'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
 ]);
+/** ERC-721 enumerable: how a wallet's V3 position NFTs are listed (balanceOf + tokenOfOwnerByIndex). */
+export const ERC721_ENUM = new Interface([
+  'function balanceOf(address owner) view returns (uint256)',
+  'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
+]);
 export const V3_QUOTER = new Interface([
   'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
   'function quoteExactInput(bytes path, uint256 amountIn) returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)',

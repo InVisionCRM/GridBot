@@ -21,6 +21,7 @@ import {
 import { tradeStats, pushCapped, drawdown } from '../../market/stats';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type ChainReader, type Executor, type Fill, type MarketSnapshot, type Quote, type TxSender } from './chain';
 import type { Emit } from './activity';
+import { requestHalt, resolveHalt, systemHalt, type Halt } from './audit';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import type { SharedNonce, TxGate } from './txGate';
@@ -111,6 +112,8 @@ export interface TrendState {
   closing?: boolean;
   /** Hidden from the active list; trades stay for analytics. Absent on older state. */
   archivedAt?: number | null;
+  /** Why this bot last stopped or closed. Absent on state saved before this field existed. */
+  halt?: Halt | null;
 }
 
 export interface TrendDeps {
@@ -156,7 +159,7 @@ export function freshTrend(net: LiveNetwork, id?: string): TrendState {
     status: 'idle', cfg: { ...DEFAULT_TREND }, limits: { ...DEFAULT_LIMITS }, capital: 0, cash: 0, position: null, queue: [],
     inFlight: null, trades: [], signals: [], lastBarT: null, cooldownUntil: 0, lastPrice: null, lastPriceAt: null,
     lastNote: '', blocked: 0, startedAt: null, startPrice: null, equity: [],
-    closing: false, archivedAt: null,
+    closing: false, archivedAt: null, halt: null,
   };
 }
 
@@ -181,11 +184,13 @@ export class TrendEngine {
     const accept = loaded && (isLegacyKey(loaded.quote ?? d.net.defaultQuote) ? loaded.network === d.net.key : true);
     this.state = accept ? { ...base, ...loaded!, cfg: { ...DEFAULT_TREND, ...loaded!.cfg } } : base;
     if (this.state.mode === 'live' && !this.signer && this.state.status === 'running') {
+      this.state.halt = systemHalt('startup', 'No signing key — stopped.', this.now());
       this.state.status = 'stopped';
       this.log('warn', 'LIVE trend bot but no PRIVATE_KEY — stopped.');
     }
     this.executor = this.makeExecutor(this.state.mode, this.state.quote);
     if (this.executor instanceof UnavailableExecutor && this.state.status === 'running') {
+      this.state.halt = systemHalt('startup', `${this.state.quote}: ${this.lastError ?? 'market unavailable'} — stopped.`, this.now());
       this.state.status = 'stopped';
       this.log('warn', `${this.state.quote}: ${this.lastError} — stopped.`);
     }
@@ -260,7 +265,7 @@ export class TrendEngine {
       status: 'running', cfg, limits, capital: p.capital, cash: p.capital, position: null, queue: [], inFlight: null,
       trades: p.mode === 'paper' ? [] : keepTrades, signals: [], lastBarT: null, cooldownUntil: 0, lastPrice: price, lastPriceAt: this.now(),
       lastNote: 'waiting for the next closed candle', blocked: 0, startedAt: this.now(), startPrice: price, equity: [[this.now(), p.capital]],
-      closing: false, archivedAt: null,
+      closing: false, archivedAt: null, halt: null,
     };
     // Don't act on the candle that closed before start: wait for the next close.
     const k = closedOnly(this.d.candles(p.quote, p.tf), p.tf, Math.floor(this.now() / 1000));
@@ -280,21 +285,25 @@ export class TrendEngine {
     this.state.status = 'running';
     this.state.closing = false;
     this.state.archivedAt = null;
+    this.state.halt = null;
     this.closeNote = null;
     this.save();
     this.log('info', 'Resumed.');
     this.emit('started', `Trend bot resumed — ${this.state.name}`);
   }
 
-  stop(why = 'STOPPED') {
+  stop(why?: string | Halt) {
+    const halt = resolveHalt(why, this.now());
+    const word = typeof why === 'string' ? why : halt.detail || 'STOPPED';
     const dropped = this.state.queue.length;
     this.state.queue = [];
     if (this.state.status === 'running') this.state.status = 'stopped';
     this.state.closing = false;
+    this.state.halt = halt;
     this.closeNote = null;
     this.save();
-    this.log('warn', `${why}. ${dropped} queued dropped.${this.state.position ? ' Position stays open; stops are NOT monitored while stopped.' : ''}`);
-    this.emit('stopped', `${this.state.name}: ${why.toLowerCase()}${this.state.position ? ' (position open, stops paused)' : ''}`, { level: 'warn', notify: true });
+    this.log('warn', `${word}. ${dropped} queued dropped.${this.state.position ? ' Position stays open; stops are NOT monitored while stopped.' : ''}`);
+    this.emit('stopped', `${this.state.name}: ${word.toLowerCase()}${this.state.position ? ' (position open, stops paused)' : ''}`, { level: 'warn', notify: true, data: { halt } });
   }
 
   /** Queue a market sell of the whole position (works while running; the bot keeps watching for the next signal). */
@@ -309,19 +318,22 @@ export class TrendEngine {
    * and the bot leaves the active list immediately. A live position is marked closing and sold through the normal
    * quote, price-impact cap and slippage. @returns true when that on-chain sell still has to run.
    */
-  requestClose(): boolean {
+  requestClose(why?: Halt): boolean {
     if (this.state.archivedAt) return false;
     // Paper books the open trade at the last price already in memory. No quote, no poll.
     if (this.state.mode !== 'live') {
+      this.noteClose(why);
       this.settlePaper();
       this.finishClose();
       return false;
     }
     if (this.state.closing) return false;
     if (!this.state.position && !this.state.inFlight) {
+      this.noteClose(why);
       this.finishClose();
       return false;
     }
+    this.noteClose(why);
     this.state.closing = true;
     this.state.status = 'running';
     this.closeNote = null;
@@ -358,6 +370,11 @@ export class TrendEngine {
     s.inFlight = null;
   }
 
+  private noteClose(why?: Halt) {
+    if (why) this.state.halt = { ...why, at: this.now() };
+    else if (!this.state.halt) this.state.halt = requestHalt('close', 'Close', this.now());
+  }
+
   private finishClose() {
     this.state.queue = [];
     this.state.status = 'stopped';
@@ -365,7 +382,7 @@ export class TrendEngine {
     this.state.archivedAt = this.now();
     this.closeNote = null;
     this.save();
-    this.emit('stopped', `${this.state.name || 'Trend bot'} closed`, { level: 'success', notify: true });
+    this.emit('stopped', `${this.state.name || 'Trend bot'} closed`, { level: 'success', notify: true, data: { halt: this.state.halt ?? null } });
   }
 
   /** Hide a stopped trend bot. A live one that still holds a coin stays until Close unwinds it. */
@@ -704,8 +721,10 @@ export class TrendEngine {
       trades: trades.slice(-100).reverse(),
       pnl: { realized, unrealized, equity, returnPct: s.capital ? equity / s.capital - 1 : 0, gas: trades.reduce((a, t) => a + t.gasUsd, 0), fees: trades.reduce((a, t) => a + (t.feeQuote ?? 0), 0) },
       stats: { ...tradeStats(closed), maxDrawdown: drawdown(s.equity).max, timeInMarket: s.startedAt ? inMarketMs / Math.max(1, this.now() - s.startedAt) : 0 },
+      moveCount: trades.filter((t) => !t.failed).length,
+      lastMoveAt: trades.reduce((m, t) => (!t.failed ? Math.max(m, t.timestamp || 0) : m), 0) || null,
       equityHist: s.equity.slice(-600),
-      blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, lastError: this.lastError,
+      blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, lastError: this.lastError,
     };
   }
 }

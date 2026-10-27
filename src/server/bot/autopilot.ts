@@ -20,6 +20,7 @@
  * budget's coin at today's prices; the gas its swaps pay comes out of the account's own coin of the chain.
  */
 import { FundsError, type Holding, type MultiBot } from './multi';
+import { systemHalt } from './audit';
 import type { Store } from './store';
 import type { Emit } from './activity';
 import type { Mode } from './engine';
@@ -521,7 +522,9 @@ export class Autopilot {
         if (!b.retiring && this.state.closeAll) b.retiring = { why: 'turned off', started: false, alt: null };
         if (!b.retiring || st.closing || a.killed || st.status !== 'running') continue;
         try {
-          if (b.kind === 'grid') this.d.bot.closeGrid(b.id); else this.d.bot.closeLp(b.id);
+          // The stop audit (#28): this close is the smart trader's, for the loss limit or its own reason.
+          const halt = systemHalt(b.retiring.why === 'loss limit' ? 'loss-limit' : 'autopilot', b.retiring.why === 'loss limit' ? (a.halted || 'loss limit') : b.retiring.why, this.now());
+          if (b.kind === 'grid') this.d.bot.closeGrid(b.id, halt); else this.d.bot.closeLp(b.id, halt);
           b.retiring.started = true;
           this.save();
         } catch (e) { this.warn(`couldn't start closing ${b.label}: ${msg(e)}`, c); }

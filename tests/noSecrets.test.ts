@@ -26,7 +26,9 @@ describe('private key handling', () => {
   it('frontend code never touches keys or signing', () => {
     for (const [f, code] of src) {
       if (f.startsWith(join('src', 'server'))) continue;
-      expect(/privateKey|PRIVATE_KEY|mnemonic|sendTransaction|eth_sign|signMessage/i.test(code) || /\bWallet\b/.test(code), f).toBe(false);
+      // The word "Wallet" in a sentence is a balance. A signer is `new Wallet` or an import of Wallet.
+      expect(/privateKey|PRIVATE_KEY|mnemonic|sendTransaction|eth_sign|signMessage/i.test(code), f).toBe(false);
+      expect(/new\s+Wallet\b|import\s*\{[^}]*\bWallet\b/.test(code), f).toBe(false);
     }
   });
   it('env.ts deletes the key from process.env and never logs it', () => {

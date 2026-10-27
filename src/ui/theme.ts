@@ -1,24 +1,24 @@
-/** Night Desk palette for canvas charts (lightweight-charts needs literal colours; keep in sync with styles.css :root). */
+/** Pro Desk palette for canvas charts (lightweight-charts needs literal colours; keep in sync with styles.css :root). */
 export const T = {
-  bg: '#0b0f0e',
-  line: '#1f2a27',
-  line2: '#2c3a36',
-  text: '#e6efec',
-  muted: '#7f918b',
-  profit: '#3dffa2',
-  loss: '#ff6b6b',
-  warn: '#f2c14e',
-  font: "'Jost', 'Avenir Next', sans-serif",
+  bg: '#0B0E11',
+  line: '#2B3139',
+  line2: '#3C434D',
+  text: '#EAECEF',
+  muted: '#848E9C',
+  profit: '#0ECB81',
+  loss: '#F6465D',
+  warn: '#F0B90B',
+  font: "'IBM Plex Mono', ui-monospace, monospace",
 } as const;
 
 /** Indicator colours: muted, distinct from profit/loss so overlays never read as gains or losses. */
 export const IND = {
-  fast: '#c9d4d0',
-  slow: '#6f8f86',
-  band: '#4f625c',
-  rsi: '#a9b8b3',
-  macd: '#c9d4d0',
-  signal: '#f2c14e',
+  fast: '#B7BDC6',
+  slow: '#848E9C',
+  band: '#5E6673',
+  rsi: '#B7BDC6',
+  macd: '#B7BDC6',
+  signal: '#F0B90B',
 } as const;
 
 export const alpha = (hex: string, a: number) => {

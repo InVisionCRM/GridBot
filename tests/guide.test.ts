@@ -47,8 +47,11 @@ describe('Guide', () => {
 
   it('is wired into the main UI behind a Guide button', () => {
     const app = readFileSync(join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
-    expect(app).toMatch(/onClick=\{\(\) => setGuide\(true\)\}>Guide</);
+    const more = readFileSync(join(__dirname, '..', 'src', 'ui', 'More.tsx'), 'utf8');
+    expect(app).toContain('onGuide={() => setGuide(true)}');
     expect(app).toContain('<Guide onClose={closeGuide} />');
+    expect(more).toContain('Guide');
+    expect(more).toContain('onGuide');
   });
 
   it('documents the supported chains, PulseChain DEXes and the custom-token policy', () => {
