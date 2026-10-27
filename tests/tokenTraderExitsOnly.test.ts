@@ -211,3 +211,85 @@ describe('mode persistence and audit', () => {
     expect(s.t.status().lastHalt).toMatchObject({ what: 'token-trader-off', detail: expect.stringMatching(/off completely/) });
   });
 });
+
+describe('update migration: an old "off" file (on: false, no offMode)', () => {
+  /** A pre-update file: the trader was off, with these positions. */
+  async function oldOffFile(live: boolean) {
+    const s = await withPositions(2, { live });
+    const raw = structuredClone(s.store.load()!) as TraderState;
+    raw.on = false;
+    delete raw.offMode; delete raw.modeLog; delete raw.pendingChoice;
+    const store = new MemoryStore<TraderState>();
+    store.save(raw);
+    return store;
+  }
+  const crashAll = (t: TokenTrader) => { for (const p of t.status().positions) t.mark(p.id, { price: p.entryPrice * 0.7 }); };
+
+  it('only paper positions: loads exits-only, no banner, and runs exits', async () => {
+    const s = make({ store: await oldOffFile(false) });
+    expect(s.t.status()).toMatchObject({ runMode: 'exits', pendingChoice: null, exitsManaged: 2 });
+    crashAll(s.t);
+    await s.t.tick();
+    expect(s.t.status().positions).toHaveLength(0);
+  });
+
+  it('a live position: loads off completely, raises the banner, and sends no sell', async () => {
+    const s = make({ store: await oldOffFile(true), live: true });
+    const st = s.t.status();
+    expect(st).toMatchObject({ runMode: 'full', offMode: 'full', exitsManaged: 0, pendingChoice: { livePositions: 2, at: NOW } });
+    expect(s.events.find((e) => e.notify)?.msg).toBe('Token trader has 2 live position(s) unwatched — choose: run exits / keep fully off');
+    expect(st.modeLog[0]).toMatchObject({ mode: 'full', halt: { what: 'token-trader-migrate', origin: 'system' } });
+    expect(s.t.canSell()).toBe(false);
+    crashAll(s.t);
+    for (let i = 0; i < 3; i++) await s.t.tick();
+    expect(s.sells).toHaveLength(0);
+    expect(s.t.status().positions).toHaveLength(2);
+    // persisted: a second boot still waits for the choice and still sends nothing
+    const again = make({ store: s.store, live: true });
+    expect(again.t.status()).toMatchObject({ runMode: 'full', pendingChoice: { livePositions: 2 } });
+    await again.t.tick();
+    expect(again.sells).toHaveLength(0);
+  });
+
+  it('choosing "run exits" clears the banner, is audited, and runs exits (live sells)', async () => {
+    const s = make({ store: await oldOffFile(true), live: true });
+    s.t.turnOff('exits'); // the banner's "Run exits" button
+    const st = s.t.status();
+    expect(st).toMatchObject({ runMode: 'exits', pendingChoice: null, exitsManaged: 2 });
+    expect(st.modeLog[0]).toMatchObject({ mode: 'exits', halt: { what: 'token-trader-off', detail: expect.stringMatching(/update choice: run exits for 2 live position/) } });
+    crashAll(s.t);
+    await s.t.tick();
+    expect(s.sells.length).toBeGreaterThan(0);
+    expect(s.t.status().positions).toHaveLength(0);
+    expect(make({ store: s.store, live: true }).t.status().pendingChoice).toBeNull();
+  });
+
+  it('choosing "keep fully off" clears the banner, is audited, and stays idle', async () => {
+    const s = make({ store: await oldOffFile(true), live: true });
+    s.t.turnOff('full'); // the banner's "Keep fully off" button
+    const st = s.t.status();
+    expect(st).toMatchObject({ runMode: 'full', pendingChoice: null, exitsManaged: 0 });
+    expect(st.modeLog[0].halt.detail).toMatch(/update choice: keep fully off for 2 live position/);
+    const before = { ...s.calls };
+    crashAll(s.t);
+    await s.t.tick();
+    expect(s.sells).toHaveLength(0);
+    expect(s.calls).toEqual(before);
+    const again = make({ store: s.store, live: true });
+    expect(again.t.status()).toMatchObject({ runMode: 'full', pendingChoice: null });
+  });
+
+  it('a file that already has a mode is not migrated again', async () => {
+    const s = await withPositions(1, { live: true });
+    s.t.turnOff('exits');
+    const again = make({ store: s.store, live: true });
+    expect(again.t.status()).toMatchObject({ runMode: 'exits', pendingChoice: null });
+  });
+});
+
+describe('UI banner text', () => {
+  it('matches the agreed wording', async () => {
+    const { choiceText } = await import('../src/ui/TokenTrader');
+    expect(choiceText({ livePositions: 2 })).toBe('Token trader has 2 live positions unwatched — choose: run exits / keep fully off');
+  });
+});

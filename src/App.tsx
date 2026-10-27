@@ -18,6 +18,7 @@ import { ViewError } from './ui/ViewError';
 import { Tools } from './ui/Tools';
 import { Opportunities } from './ui/Opportunities';
 import { SmartTrader } from './ui/SmartTrader';
+import { TokenTraderChoiceBanner } from './ui/TokenTrader';
 import { useVersion } from './ui/System';
 import { type View } from './ui/model';
 import { Header } from './ui/Header';
@@ -135,6 +136,7 @@ export default function App() {
           connected={connected} ver={ver.v} holdings={holdings.data} onActivity={() => setDrawer(true)} onGuide={() => setGuide(true)}
         />
 
+        {!s?.copy && <TokenTraderChoiceBanner />}
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}
 
         <ViewError key={`${view.v}:${'id' in view ? view.id : ''}:${'tab' in view ? view.tab : ''}:${view.v === 'holdings' ? view.focus ?? '' : ''}`} onHome={() => nav({ v: 'home' })}>

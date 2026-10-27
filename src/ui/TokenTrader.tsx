@@ -10,6 +10,36 @@ import { haltText } from './haltText';
 
 const usd = (n: number) => `$${num(Math.abs(n), Math.abs(n) >= 100 ? 0 : 2)}`;
 
+/** Banner text for an update that loaded live positions off completely (server: TokenTrader.migrateOffMode). */
+export function choiceText(c: { livePositions: number }): string {
+  return `Token trader has ${c.livePositions} live positions unwatched — choose: run exits / keep fully off`;
+}
+
+/**
+ * App-wide, until chosen: an old "off" token-trader file with LIVE positions loads off completely, so no real sell
+ * goes out before Kyle picks. "Run exits" = off for new buys (exits running); "Keep fully off" = off completely.
+ * Either choice is a POST /api/token-trader/off, so it is in the stop audit, and it clears the banner.
+ */
+export function TokenTraderChoiceBanner() {
+  const [c, setC] = useState<{ livePositions: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const load = useCallback(() => http('/api/token-trader').then((x) => setC(x?.pendingChoice ?? null)).catch(() => setC(null)), []);
+  useEffect(() => { void load(); const id = setInterval(load, 10_000); return () => clearInterval(id); }, [load]);
+  if (!c) return null;
+  const pick = async (mode: 'exits' | 'full') => {
+    setBusy(true);
+    try { const x = await http('/api/token-trader/off', 'POST', { mode }); setC(x?.pendingChoice ?? null); setErr(null); } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
+  };
+  return (
+    <div className="banner error" role="alert">
+      <span className="grow">{choiceText(c)}{err ? ` (${err})` : ''}</span>
+      <button type="button" className="btn small-btn" disabled={busy} onClick={() => void pick('exits')}>Run exits</button>
+      <button type="button" className="btn small-btn" disabled={busy} onClick={() => void pick('full')}>Keep fully off</button>
+    </div>
+  );
+}
+
 export function TokenTraderPanel({ s }: { s: AnyObj }) {
   const [t, setT] = useState<AnyObj | null>(null);
   const [err, setErr] = useState<string | null>(null);

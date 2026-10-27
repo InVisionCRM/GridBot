@@ -16,7 +16,7 @@ import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
 import type { Emit } from './activity';
 import type { Store } from './store';
 import type { PoolSniper, SnipeHit } from '../market/sniper';
-import { requestHalt, type Halt } from './audit';
+import { requestHalt, systemHalt, type Halt } from './audit';
 
 export interface SniperOptions {
   on: boolean;
@@ -107,6 +107,11 @@ export interface TraderState {
   offMode?: OffMode;
   /** Mode changes (on, off for new buys, off completely), newest first, for the stop audit */
   modeLog?: { mode: RunMode; halt: Halt }[];
+  /**
+   * Set when a file from before off modes (on: false, no offMode) held LIVE positions: it loads off completely and the
+   * owner must choose "run exits" or "keep fully off" (no real sell goes out before that). Cleared by any mode change.
+   */
+  pendingChoice?: { livePositions: number; at: number } | null;
 }
 
 export type OffMode = 'exits' | 'full';
@@ -155,6 +160,26 @@ export class TokenTrader {
   }) {
     const loaded = d.store.load();
     this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } } } : fresh();
+    this.migrateOffMode(loaded);
+  }
+
+  /**
+   * A file written before off modes has on: false and no offMode. Only paper positions (or none): exits-only, which is
+   * what the old off message promised. Any LIVE position: off completely until the owner chooses, so no real sell goes
+   * out on the first boot after the update.
+   */
+  private migrateOffMode(loaded: TraderState | null | undefined) {
+    if (!loaded || loaded.version !== 1 || loaded.on !== false || loaded.offMode != null) return;
+    const live = this.state.positions.filter((p) => p.mode === 'live').length;
+    if (live > 0) {
+      this.state.offMode = 'full';
+      this.state.pendingChoice = { livePositions: live, at: this.now() };
+      this.logMode('full', systemHalt('token-trader-migrate', `Update: off with ${live} live position(s) loads off completely until you choose`, this.now()));
+      this.d.emit?.({ type: 'alert', kind: 'system', level: 'warn', notify: true, msg: `Token trader has ${live} live position(s) unwatched — choose: run exits / keep fully off` });
+    } else {
+      this.state.offMode = 'exits';
+    }
+    this.save();
   }
 
   private now() { return (this.d.now ?? Date.now)(); }
@@ -189,6 +214,7 @@ export class TokenTrader {
       runMode: this.runMode(),
       offMode: this.state.offMode ?? 'exits',
       modeLog: this.state.modeLog ?? [],
+      pendingChoice: this.state.pendingChoice ?? null,
       positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p) })),
     };
   }
@@ -212,6 +238,7 @@ export class TokenTrader {
       if (this.d.signerReady && o.chains.length && o.chains.some((id) => !this.d.signerReady!(id))) throw new Error('Live needs a signing key on every chain you turned on.');
     }
     this.state.on = true;
+    this.state.pendingChoice = null;
     this.logMode('on', requestHalt('token-trader-on', 'POST /api/token-trader/on', this.now()));
     this.say(`token trader on (${o.mode}): up to ${o.perTradeUsd} USD a trade, ${o.totalUsd} USD open, pools at least ${Math.round(o.minPoolAgeSec / 3600)}h old unless the sniper is on`);
     this.save();
@@ -223,9 +250,12 @@ export class TokenTrader {
    */
   turnOff(mode: OffMode = 'exits') {
     if (mode !== 'exits' && mode !== 'full') throw new Error('Off mode must be "exits" or "full".');
+    const choice = this.state.pendingChoice;
     this.state.on = false;
     this.state.offMode = mode;
-    const halt = requestHalt('token-trader-off', `POST /api/token-trader/off (${mode === 'full' ? 'off completely' : 'off for new buys'})`, this.now());
+    this.state.pendingChoice = null;
+    const what = mode === 'full' ? 'off completely' : 'off for new buys';
+    const halt = requestHalt('token-trader-off', choice ? `POST /api/token-trader/off (update choice: ${mode === 'full' ? 'keep fully off' : 'run exits'} for ${choice.livePositions} live position(s))` : `POST /api/token-trader/off (${what})`, this.now());
     this.state.lastHalt = halt;
     this.logMode(mode, halt);
     const n = this.state.positions.length, w = this.watched().length;
