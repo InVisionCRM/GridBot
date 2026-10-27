@@ -7,11 +7,11 @@ function reduced() {
   return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
-export function RollingUsd({ value, sign = true, className = '' }: { value: number; sign?: boolean; className?: string }) {
-  const mv = useMotionValue(value);
-  const [text, setText] = useState(() => usd(value, sign));
+export function RollingUsd({ value, sign = true, className = '', rollIn = false }: { value: number; sign?: boolean; className?: string; rollIn?: boolean }) {
+  const mv = useMotionValue(rollIn ? 0 : value);
+  const [text, setText] = useState(() => usd(rollIn ? 0 : value, sign));
   const [flash, setFlash] = useState('');
-  const prev = useRef(value);
+  const prev = useRef(rollIn ? 0 : value);
   useMotionValueEvent(mv, 'change', (v) => setText(usd(v, sign)));
   useEffect(() => {
     const dir = value > prev.current + 0.0001 ? 'up' : value < prev.current - 0.0001 ? 'down' : '';

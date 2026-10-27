@@ -23,7 +23,6 @@ export function DeskApp() {
           {snap && <Ticker prices={snap.prices} />}
           <header className="v2-head">
             <strong>GridBot</strong>
-            <span className="demo-pill">Demo data</span>
             <span className={`live-chip ${stale ? 'stale' : ''}`}><i className="live-dot" /> {stale ? 'Stale' : 'Live'}</span>
           </header>
           {stale && <p className="stale-banner" role="status">Connection dropped. Numbers are frozen until the stream returns.</p>}

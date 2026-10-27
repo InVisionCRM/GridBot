@@ -19,6 +19,7 @@ export function useDesk() {
         if (!cur) return cur;
         const next = new Map(d.bots.map((b) => [b.metrics.botId, b]));
         return {
+          source: cur.source,
           portfolio: d.portfolio,
           prices: d.prices.length ? d.prices : cur.prices,
           bots: cur.bots.map((b) => next.get(b.metrics.botId) ?? b),

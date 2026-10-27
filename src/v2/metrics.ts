@@ -1,24 +1,29 @@
 /**
- * BotMetrics contract. Every figure is produced on the server.
- * Views display these fields and do not derive one money figure from another.
+ * BotMetrics contract. Views display these fields and do not derive money.
  *
- * Headline is always dollarsMadeUsd (metrics.headline === 'dollarsMade').
- * LP: fees collected + fees owed − gas − swap fees − taxes − realized rebalance loss.
- * Grid, trend, token: realized trade profit − fees − gas − taxes.
- * totalPnlUsd = dollarsMadeUsd + priceChangeUsd.
- * aprPct and est.* extrapolate dollars made. Simple APR, not compounded.
- * Percents are fractions (0.041 = 4.1%). Estimates are USD, or null.
+ * Headline is token units generated, net of costs (`generated`), with `generatedUsd` under it.
+ * Home's headline is live `generatedUsd` plus per-token chips. Paper is separate.
+ * Price change and value versus capital are breakdown context, not the hero.
+ * est.d1 / d7 / d365 are generation rates in token units. Null until the window has enough history:
+ * about 28 minutes, 3.2 hours, and 7 days. APR is generatedUsd / capitalInUsd, not compounded and not annualized.
+ * Percents are fractions. Null means the snapshot did not carry the figure.
  */
 
 export type BotMode = 'live' | 'paper';
 export type BotKind = 'grid' | 'trend' | 'lp' | 'token';
 export type BotStatus = 'running' | 'paused' | 'stopped' | 'closed';
 
+export interface TokenQty {
+  symbol: string;
+  amount: number;
+  usd: number | null;
+}
+
 export interface EstimateBlock {
-  d1: number | null;
-  d7: number | null;
-  d365: number | null;
-  /** Why an estimate is missing, or what the extrapolation is. */
+  d1: TokenQty[] | null;
+  d7: TokenQty[] | null;
+  d365: TokenQty[] | null;
+  usd: { d1: number | null; d7: number | null; d365: number | null };
   needs: string;
 }
 
@@ -34,43 +39,42 @@ export interface BotMetrics {
   mode: BotMode;
   kind: BotKind;
   status: BotStatus;
-  startedAt: number;
-  ageSec: number;
-  capitalInUsd: number;
-  currentValueUsd: number;
-  /** Realized trade profit for grid, trend, and token. Not the headline. */
-  realizedUsd: number;
-  unrealizedUsd: number;
-  feesEarnedUsd: number;
-  feesCollectedUsd: number;
-  /** Fees owed / still in the position. */
-  feesUncollectedUsd: number;
-  gasUsd: number;
-  /** Swap fees (pool fee and impact the server has already summed). */
-  swapCostUsd: number;
-  tokenTaxesUsd: number;
-  realizedRebalanceLossUsd: number;
-  priceChangeUsd: number;
-  dollarsMadeUsd: number;
-  headline: 'dollarsMade';
-  /** dollarsMadeUsd + priceChangeUsd. Expander only. */
-  totalPnlUsd: number;
-  totalPnlPct: number;
-  /** Simple APR on dollars made. Null until there is enough history. */
+  startedAt: number | null;
+  ageSec: number | null;
+  capitalInUsd: number | null;
+  currentValueUsd: number | null;
+  /** Realized trade profit in USD. Null when the bot has no such figure. */
+  realizedUsd: number | null;
+  unrealizedUsd: number | null;
+  feesCollected: TokenQty[];
+  feesOwed: TokenQty[];
+  feesCollectedUsd: number | null;
+  feesUncollectedUsd: number | null;
+  gasUsd: number | null;
+  swapCostUsd: number | null;
+  /** Not in the owner snapshot. Stay null rather than zero. */
+  tokenTaxesUsd: number | null;
+  realizedRebalanceLossUsd: number | null;
+  priceChangeUsd: number | null;
+  /** Net token units. Empty when they cannot be split or are unknown. */
+  generated: TokenQty[];
+  generatedUsd: number | null;
+  headline: 'generated';
+  /** generatedUsd + priceChangeUsd. Sheet only. Null if either part is unknown. */
+  totalPnlUsd: number | null;
+  totalPnlPct: number | null;
   aprPct: number | null;
   est: EstimateBlock;
-  moveCount: number;
-  fillCount: number;
+  moveCount: number | null;
+  fillCount: number | null;
   range: RangeBlock | null;
   asOf: number;
-  /** Tooltip. The server's formula in words. */
   calc: string;
 }
 
 export interface CandleBar { t: number; o: number; h: number; l: number; c: number; v: number }
 export interface FillMark { id: string; t: number; price: number; side: 'buy' | 'sell' }
 
-/** Identity, series, and presentation hints that are not money math. */
 export interface BotDesk {
   metrics: BotMetrics;
   pair: string;
@@ -79,19 +83,18 @@ export interface BotDesk {
   chain: string;
   chainColor: string;
   dex: string;
-  /** Server hint for the status ring. The view does not infer "near". */
+  /** in / out / idle from the payload. "near" is only set when the server says so. */
   tone: 'in' | 'near' | 'out' | 'idle';
   spark: number[];
   levels: number[];
   candles: CandleBar[];
   fills: FillMark[];
-  /** Level price to glow. Null when nothing just filled. */
   flashLevel: number | null;
-  price: number;
-  change24h: number;
+  price: number | null;
+  change24h: number | null;
 }
 
-export interface TapePrice { symbol: string; price: number; change24h: number }
+export interface TapePrice { symbol: string; price: number | null; change24h: number | null }
 
 export interface ActivityItem {
   id: string;
@@ -103,26 +106,26 @@ export interface ActivityItem {
   tone: 'up' | 'down' | 'flat';
 }
 
-/**
- * Portfolio figures the per-bot payload does not include.
- * The desk snapshot carries them so Home does not add bots up itself.
- */
 export interface PortfolioSnapshot {
   asOf: number;
-  /** Live bots only. Home headline. */
-  dollarsMadeUsd: number;
-  paperDollarsMadeUsd: number;
-  priceChangeUsd: number;
-  currentValueUsd: number;
-  capitalInUsd: number;
-  feesTodayLiveUsd: number;
-  feesTodayPaperUsd: number;
+  /** Live bots. Null if a running live bot has no dollar figure. */
+  generatedUsd: number | null;
+  paperGeneratedUsd: number | null;
+  tokens: TokenQty[];
+  paperTokens: TokenQty[];
+  priceChangeUsd: number | null;
+  currentValueUsd: number | null;
+  capitalInUsd: number | null;
+  feesTodayLiveUsd: number | null;
+  feesTodayPaperUsd: number | null;
   botsRunning: number;
   botsTotal: number;
+  /** Real generated points only. Empty when the snapshot has no path. */
   madeSeries: number[];
 }
 
 export interface DeskSnapshot {
+  source: 'snapshot' | 'fixture';
   portfolio: PortfolioSnapshot;
   bots: BotDesk[];
   prices: TapePrice[];

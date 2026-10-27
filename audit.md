@@ -9,8 +9,8 @@ Numbers in the prototype are **demo data**.
 | Metric or section | Locations (screen > file) | Single home in v2 | Other copies |
 | --- | --- | --- | --- |
 | Net worth / book value | Home hero `src/ui/Home.tsx` (~106); header chip `src/ui/Header.tsx` (~141); Holdings | Home secondary line: `currentValueUsd` vs `capitalInUsd` | Header does not repeat it. Holdings and classic home stay on the classic route. |
-| Portfolio P&L (several formulas) | Home strip `Home.tsx` (~65–67, ~134) via `totalPnlUsd` in `botRow.tsx`; bot row P&L $ and % `botRow.tsx` `pnlParts` (~59) and columns (~279); desk table `DeskTable.tsx` (~13) via `botFacts` in `deskStats.ts` (~158) | Home headline is portfolio `dollarsMadeUsd` (live). Label **Dollars made**. | P&L % is not shown. `totalPnlUsd` lives only in the bot breakdown sheet. |
-| Bot profit / ROI / overall | Grid KPIs `GridDetail.tsx` (~251–269) plus `StatTable` (~246); LP KPIs and pace `LpDetail.tsx` (~109, ~191–219) plus `StatTable` (~225); trend profit and return `TrendDetail.tsx` (~86–90) plus `StatTable` (~101) | Bot page stat strip: `dollarsMadeUsd`, labeled **Dollars made** / **Made** | Sheet holds the cost breakdown. Estimates are not repeated under the chart. |
+| Portfolio P&L (several formulas) | Home strip `Home.tsx` (~65–67, ~134) via `totalPnlUsd` in `botRow.tsx`; bot row P&L $ and % `botRow.tsx` `pnlParts` (~59) and columns (~279); desk table `DeskTable.tsx` (~13) via `botFacts` in `deskStats.ts` (~158) | Home headline is live `generatedUsd`, labeled **Generated**, plus per-token chips. | P&L % is not shown. `totalPnlUsd` lives only in the breakdown sheet. |
+| Bot profit / ROI / overall | Grid KPIs `GridDetail.tsx` (~251–269) plus `StatTable` (~246); LP KPIs and pace `LpDetail.tsx` (~109, ~191–219) plus `StatTable` (~225); trend profit and return `TrendDetail.tsx` (~86–90) plus `StatTable` (~101) | Bot page stat strip: generated token units, USD underneath. | Sheet holds price change, value versus deposited, and the cost breakdown. |
 | Fees today | Home strip `Home.tsx` (~140); `feesTodayUsd` sums `trade.feeQuote` since midnight in `botRow.tsx` | Home strip only: `feesTodayLiveUsd`, with paper on a smaller line | Not on cards, not the headline. |
 | Fees, gas, swap, rebalance | Grid fee KPI; LP costs and move loss; trend fees+gas; StatTable fees earned / fees paid; desk Fees column | Breakdown sheet | Cards and the strip do not list them. |
 | Estimates and APR | StatTable est. 24h / 7d / 365d (`StatTable.tsx` ~41); desk Est. APR is `est.d365.pct` (`botRow.tsx` ~286), not a simple APR | Bot strip once: `aprPct`, `est.d1`, `est.d7`, `est.d365` | Sheet may show APR again as a line in the breakdown (the strip is the home of the three estimates). |
@@ -27,9 +27,9 @@ Client formulas that disagree with each other (classic only; v2 does not use the
 
 ## Per screen (v2)
 
-**Home.** Headline: live `portfolio.dollarsMadeUsd`, label Dollars made, rolling. Under it, smaller: `priceChangeUsd`, then value `currentValueUsd` and deposited `capitalInUsd` (both shown, not subtracted here). Paper dollars made is a separate smaller line. Equity curve is `madeSeries`. Strip, once: fees today (live, paper beside it) and bots running / total. Each card: spark, status ring, range track, **Made** = that bot's `dollarsMadeUsd`, then price change and value vs deposited. No ROI, no second P&L, no fees, age, or estimates.
+**Home.** Headline: live `generatedUsd`, label Generated. Under it, per-token chips from live bots. Paper generated dollars and paper chips are a separate row. Price change and value versus deposited are not on the hero. A generated-over-time curve is drawn only when the snapshot has real points. Strip: bots running / total. Each card: spark when fills exist, status ring, range track, **Generated** in token units, USD in small text. No second P&L.
 
-**Bot.** Same headline once in the stat strip, plus the two secondary lines. APR and est. d1 / d7 / d365 once, from the payload (based on dollars made; dash until `est.needs` says there is enough history). Chart and one range track. **Breakdown** sheet: `totalPnlUsd` = dollars made + price change, then fees collected, fees owed, gas, swap fees, taxes, rebalance loss, and realized trade profit for non-LP. Also age, moves, fills, range numbers, APR, `calc` tooltip. LP sheet includes the range/compounding slot. Estimates are not copied into the sheet.
+**Bot.** Headline once: generated token units, USD underneath. APR is `generatedUsd / capitalInUsd`. D1, D7, and D365 are generation rates in token units, with USD in small text, and a dash until about 28 minutes, 3.2 hours, and 7 days. Chart only when candles exist. **Breakdown** sheet: `totalPnlUsd` = generated + price change, then price change, value, deposited, fees collected, fees owed, gas, swap fees, taxes, rebalance loss, and realized trade profit for non-LP. Also age, moves, fills, range numbers, APR, `calc`. LP sheet includes the range/compounding slot.
 
 **Activity.** Feed of fills, re-centers, and fee lines. It does not repeat the headline.
 
@@ -39,40 +39,27 @@ Client formulas that disagree with each other (classic only; v2 does not use the
 
 ## BotMetrics
 
-Server stand-in: `settle()` in `src/v2/demo-book.ts`. Typed shape: `src/v2/metrics.ts`. Intended production home (not in this branch): `src/metrics/botMetrics.ts`, on each bot in `GET /api/bot/status`, and `GET /api/bot/:id/metrics`. The prototype reads `GET /api/v2/stream` (SSE `snapshot`, then `delta`).
+Adapter: `adaptStatus()` in `src/v2/adapt-status.ts`. Typed shape: `src/v2/metrics.ts`. It is replaced by `GET /api/bot/:id/metrics` and `metrics` on `GET /api/bot/status` when that endpoint lands. The prototype reads `GET /api/v2/stream`.
 
-USD unless noted. Percents are fractions. `est.*` are USD or null.
+Null means the figure was not in the payload. Percents are fractions. Estimates are token units plus a USD companion.
 
 | Field | Role |
 | --- | --- |
-| botId, mode, kind, status, startedAt, ageSec | Identity and age. |
-| capitalInUsd, currentValueUsd | Secondary line. Both displayed. |
-| realizedUsd | Realized trade profit. Grid, trend, token input. Shown in the sheet for those kinds. |
-| unrealizedUsd | Kept on the payload. v2 shows `priceChangeUsd` instead. They can differ. |
-| feesEarnedUsd, feesCollectedUsd, feesUncollectedUsd | Fees owed = uncollected. LP dollars made uses collected + uncollected. |
-| gasUsd, swapCostUsd, tokenTaxesUsd, realizedRebalanceLossUsd | Costs. All shown in the sheet. |
-| priceChangeUsd | Secondary line under the headline. |
-| dollarsMadeUsd | **Headline everywhere.** |
-| headline | Always `'dollarsMade'`. |
-| totalPnlUsd | `dollarsMadeUsd + priceChangeUsd`. Sheet only. |
-| totalPnlPct | Stored. Not shown (avoids a second ROI / P&L % label). |
-| aprPct | Simple APR on dollars made. Null until age ≥ 60s and capital > 0. Not compounded. |
-| est.d1, est.d7, est.d365, est.needs | Dollars made scaled to the window. Null until age ≥ 60s. |
-| moveCount, fillCount | A re-center counts as one move. Fills are separate. |
-| range { lower, upper, current, inRange } or null | Band and track. |
-| asOf, calc | Freshness and the formula tooltip. |
+| generated, generatedUsd | Headline. Token units, dollars underneath. |
+| headline | Always `'generated'`. |
+| est.d1, d7, d365 | Same units scaled to the window. Null until ~28 min, ~3.2 h, and 7 days. |
+| aprPct | `generatedUsd / capitalInUsd`. Not annualized. |
+| priceChangeUsd, currentValueUsd, capitalInUsd | Breakdown only. |
+| totalPnlUsd | `generatedUsd + priceChangeUsd` when both are known. Sheet only. |
+| feesCollected, feesOwed, gasUsd, swapCostUsd, tokenTaxesUsd, realizedRebalanceLossUsd | Sheet. Taxes stay null when the payload has no tax field. |
 
-Formulas, applied only in `settle()`:
+Mapping from the current status payload (not invented):
 
-- LP: `feesCollectedUsd + feesUncollectedUsd − gasUsd − swapCostUsd − tokenTaxesUsd − realizedRebalanceLossUsd`.
-- Grid, trend, token: `realizedUsd − feesCollectedUsd − gasUsd − tokenTaxesUsd`.
-- `totalPnlUsd = dollarsMadeUsd + priceChangeUsd`.
-- APR: `(dollarsMadeUsd / capitalInUsd) * (365 days / ageSec)` when age ≥ 60s.
-- Estimates: `dollarsMadeUsd * (window / ageSec)` for 1, 7, and 365 days. Otherwise null.
+- LP token units: fee coins in each token. Gas, swap fees, and rebalance loss are in the quote coin, so they come out of that leg. `generatedUsd` is engine `pnl.net` times `usdPerQuote`.
+- Grid token units: `pnl.realized` in the quote coin. That figure is already net of pool fees and gas, so fees are not subtracted again. `generatedUsd` is realized times `usdPerQuote`.
+- No dollar rate (`usdPerQuote` missing or not positive) leaves the dollar fields null.
 
-Rolling counters and the fee-accrual tween animate `dollarsMadeUsd`. The demo clock emits a new server value; `RollingUsd` only tweens the label. An LP with `range.inRange === false` does not accrue fees.
-
-Portfolio fields are **not** on the per-bot object. Home must not sum bots. `PortfolioSnapshot`: `dollarsMadeUsd` (live), `paperDollarsMadeUsd`, `priceChangeUsd`, `currentValueUsd`, `capitalInUsd`, `feesTodayLiveUsd`, `feesTodayPaperUsd`, `botsRunning`, `botsTotal`, `madeSeries`.
+Portfolio fields are not summed in the view. `PortfolioSnapshot` carries live `generatedUsd`, `paperGeneratedUsd`, `tokens`, `paperTokens`, and the context totals. `madeSeries` stays empty unless a real path exists. Fees today stays null: the snapshot has no single live-plus-LP figure for the day.
 
 ## Fields the screens need that BotMetrics does not have
 
@@ -83,4 +70,4 @@ Portfolio fields are **not** on the per-bot object. Home must not sum bots. `Por
 - Connection stale flag (client, from the stream).
 - Coin amounts, win rate, time in range, spacing, drawdown, profit factor, LP fee coins, pool share, position balances, gas-wallet balance, holdings net worth, opportunity expected %. Classic screens still show these from their own payloads. The contract is USD.
 
-`unrealizedUsd` remains on the object and is not the secondary line. `totalPnlPct` is stored and not labeled.
+`change24h` is null when the snapshot has no 24h change. The tape then shows the price only. Activity clocks use America/Detroit.

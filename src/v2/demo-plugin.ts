@@ -3,7 +3,8 @@
  * Handles /api itself so dev does not need the real bot server or a key.
  */
 import { classicAuto, classicCandles, classicHoldings, classicOpps, classicStatus, classicTrader } from './classic-fixture';
-import { createDesk } from './demo-clock';
+import { loadDesk } from './load-owner';
+import { createSnapshotDesk } from './snapshot-desk';
 
 interface DemoReq {
   url?: string;
@@ -18,7 +19,7 @@ interface DemoRes {
 
 /** Dev-only demo API. Typed without Vite's Plugin so vitest's nested Vite copy still accepts it. */
 export function demoPlugin() {
-  const desk = createDesk();
+  const desk = createSnapshotDesk(loadDesk());
   return {
     name: 'gridbot-v2-demo',
     configureServer(server: { middlewares: { use: (fn: (req: DemoReq, res: DemoRes, next: () => void) => void) => void } }) {
