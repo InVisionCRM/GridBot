@@ -94,7 +94,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         {t.positions.map((p: AnyObj) => (
           <div key={p.id} className="smart-bot" style={{ cursor: 'default' }}>
             <span className="smart-bot-name"><b>{p.label}</b> <ChainBadge c={chainOf(s, p.chainId)} testnet={false} /> <span className="tag">{p.source}</span></span>
-            <span className="small muted">in {num(p.entryPrice, 6)} · now {num(p.price, 6)} · {p.exitPlan}</span>
+            <span className="small muted">in {num(p.entryPrice, 6)} · now {num(p.price, 6)} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''} · {p.exitPlan}</span>
             <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.spentUsd ? p.pnlUsd / p.spentUsd : 0, 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
           </div>
         ))}
@@ -116,6 +116,11 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       </ul>
     </section>
   );
+}
+
+/** bps → "0.01%", "0.05%", "0.3%", "1%" */
+export function feePct(bps: number | null | undefined): string {
+  return bps == null || !Number.isFinite(bps) ? '?' : `${+(bps / 100).toFixed(4)}%`;
 }
 
 function numIn(v: string) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
