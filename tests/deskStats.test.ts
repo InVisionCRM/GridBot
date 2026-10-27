@@ -16,12 +16,21 @@ describe('desk stat math', () => {
     const age = 2 * DAY_MS;
     const day = extrapolate(10, 100, age, DAY_MS)!;
     const week = extrapolate(10, 100, age, 7 * DAY_MS)!;
-    const year = extrapolate(10, 100, age, 365 * DAY_MS)!;
+    const year = extrapolate(40, 100, 4 * age, 365 * DAY_MS)!;
     expect(day.amount).toBe(5); expect(day.pct).toBeCloseTo(0.05);
     expect(week.amount).toBe(35); expect(week.pct).toBeCloseTo(0.35);
     expect(year.amount).toBe(1825); expect(year.pct).toBeCloseTo(18.25);
     expect(extrapolate(10, 0, age, DAY_MS)).toEqual({ amount: 5, pct: null });
     expect(extrapolate(10, 100, 30_000, DAY_MS)).toBeNull();
+  });
+
+  it('refuses to stretch a short sample over a long window', () => {
+    // one minute of a −$1 swap cost must not become a −$525,600 yearly estimate
+    expect(extrapolate(-1, 100, 60_000, 365 * DAY_MS)).toBeNull();
+    expect(extrapolate(-1, 100, 60_000, DAY_MS)).toBeNull();
+    expect(extrapolate(10, 100, 2 * DAY_MS, 365 * DAY_MS)).toBeNull();
+    expect(extrapolate(10, 100, 7 * DAY_MS, 365 * DAY_MS)?.amount).toBeCloseTo(521.43, 2);
+    expect(extrapolate(1, 100, 30 * 60_000, DAY_MS)?.amount).toBe(48);
   });
 
   it('counts fills and re-centers from stored fields, and leaves a hole when they are absent', () => {
@@ -53,7 +62,7 @@ describe('desk stat math', () => {
     expect(f.realizedUsd).toBe(4);
     expect(f.unrealizedUsd).toBe(6);
     expect(f.est.h24).toEqual({ amount: 5, pct: 0.05 });
-    expect(f.est.d365?.pct).toBe(18.25);
+    expect(f.est.d365).toBeNull(); // two days of history is too short for a year
     expect(f.feesPaidUsd).toBeCloseTo(0.5);
     expect(f.feesEarnedUsd).toBeNull();
     expect(f.timeInRange).toBeNull();

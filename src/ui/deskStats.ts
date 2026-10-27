@@ -5,12 +5,18 @@ import { bookUsd, quoteUsd } from './series';
 
 export const MIN_AGE_MS = 60_000;
 export const DAY_MS = 86_400_000;
+/**
+ * Never stretch the sample more than this many times: 365d needs a week of history, 7d needs ~3.2h, 24h ~28 min.
+ * A 1-minute sample scaled to a year (×525,600) turned one swap's cost into a −$500k "estimate".
+ */
+export const MAX_SCALE = 365 / 7;
 
 export interface Extrapolation { amount: number; pct: number | null }
 
-/** Linear extrapolation of the P&L so far. Null until the bot has been running at least a minute. */
+/** Linear (simple, not compounded) extrapolation of the P&L so far. Null until the sample is long enough for the window. */
 export function extrapolate(pnl: number, invested: number, age: number, windowMs: number): Extrapolation | null {
   if (!(age >= MIN_AGE_MS) || !(windowMs > 0) || !Number.isFinite(pnl)) return null;
+  if (windowMs / age > MAX_SCALE) return null;
   const amount = pnl * (windowMs / age);
   if (!Number.isFinite(amount)) return null;
   const pct = invested > 0 && Number.isFinite(invested) ? (pnl / invested) * (windowMs / age) : null;
