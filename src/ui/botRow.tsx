@@ -11,6 +11,7 @@ import { useShowUsd } from './money';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { bookUsd, botSpark } from './series';
 import { StatTable } from './StatTable';
+import { MoneyDetails } from './MoneyDetails';
 
 export function listBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
   return [
@@ -304,7 +305,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
         </div>
         {bad && <p className="line-note">{b.lastError}</p>}
-        {open && <div className="desk-expand"><Expanded b={b} nav={nav} /><StatTable b={b} s={s} /></div>}
+        {open && <div className="desk-expand"><Expanded b={b} nav={nav} /><StatTable b={b} s={s} /><MoneyDetails b={b} /></div>}
       </div>
     );
   }

@@ -6,6 +6,7 @@ import { AnimatedNumber, StatusDot } from './motion';
 import { RangeBar } from './charts';
 import { Chart, EquityChart } from './Chart';
 import { StatTable } from './StatTable';
+import { MoneyDetails } from './MoneyDetails';
 import { metricsOf } from './deskStats';
 import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
@@ -197,7 +198,6 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const rs = rangeState(g);
   // Money figures come from the server's metrics (src/metrics/botMetrics.ts); nothing is added up here.
   const earned: number | null = m?.generated?.[q] ?? m?.quote.realized ?? null, open: number | null = m?.quote.unrealized ?? null, held: number = g.pnl.plsHeld;
-  const total: number | null = m?.quote.totalPnl ?? null;
   const running = g.status === 'running';
   const closing = !!g.closing;
   const remove = () => act(async () => { if (confirm(`Remove the ${gridName(g)} grid and its history? ${g.base} it still holds stays in your wallet.`)) { await botApi(`grids/${g.id}`, 'DELETE'); nav({ v: 'home' }); } });
@@ -263,15 +263,11 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <div className={`kpi-v ${cls(open)}`}>{held > 0 && open != null ? qty(open, q, 5) : '—'}</div>
           <span className="sub">{held > 0 ? <>{num(held, held < 10 ? 6 : 2)} {g.base} bought for {qty(g.pnl.costQuote, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now<Usd v={open} k={k} /></> : 'nothing waiting to sell'}</span>
         </div>
-        <div className="kpi">
-          <span><L tip={m?.calc ?? 'Total P&L'}>Total P&amp;L, in {q}</L></span>
-          <div className={`kpi-v ${cls(total)}`}>{total == null ? '—' : qty(total, q, 5)}</div>
-          <span className="sub">{m?.totalPnlPct == null ? 'generated + unrealized' : `${pct(m.totalPnlPct, 2, true)} of capital in`}{total != null && <Usd v={total} k={k} />}</span>
-        </div>
         <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg <Amt v={g.stats.avgNet} sym={q} k={k} sig={4} /> each · {g.stats.wins} profitable</span></div>
         <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>
         <div className="kpi"><span><L tip="Pool fees paid on this grid's fills, in the quote coin.">Fees</L></span><div className="kpi-v">{qty(((g.trades ?? []) as AnyObj[]).reduce((a, t) => a + (typeof t.feeQuote === 'number' ? t.feeQuote : 0), 0), q, 4, false)}</div><span className="sub">paid on fills</span></div>
       </div>
+      <MoneyDetails b={g} />
 
       {g.config && (
         <div className="card">

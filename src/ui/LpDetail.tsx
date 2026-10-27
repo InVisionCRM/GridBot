@@ -1,9 +1,10 @@
 /** One liquidity bot: range vs price, fees earned in each coin, what it cost, its coins and pool share, settings, its own log. */
 import { useEffect, useState } from 'react';
 import { botApi } from './api';
-import { AnimatedNumber, StatusDot } from './motion';
+import { StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
 import { StatTable } from './StatTable';
+import { MoneyDetails } from './MoneyDetails';
 import { ago, cls, dur, num, pct, px, qty, usd } from './fmt';
 import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
@@ -15,7 +16,7 @@ import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { Usd } from './money';
 import { showHalt } from './haltText';
-import { metricsOf } from './deskStats';
+import { metricsOf, unitsText } from './deskStats';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -104,37 +105,34 @@ function usdPrices(b: AnyObj, k: number | null): { base: number | null; quote: n
 }
 
 /**
- * What the open position earns at its own pace: its fees since it opened (collected + waiting), per hour, carried to a
- * day, a week and a month. Only this position's history; the time it spent out of range is in the pace.
+ * The bot's pace: Generated so far carried to a day, a week and a month, straight from the server's metrics
+ * (generatedRate / est). Same min-history rule as every estimate (window ÷ 365/7): a day needs ~28 min, a week ~3.2h,
+ * a month ~13.8h; until then a dash and "needs … of history". No client-side extrapolation.
  */
-function PositionPace({ b, k }: { b: AnyObj; k: number | null }) {
-  const pf = b.positionFees, base = b.base, q = b.quote;
-  if (!b.position || !pf) return null;
-  const ms = Date.now() - pf.since, hours = ms / 3_600_000;
-  const valQuote = pf.coins.base * (b.price ?? 0) + pf.coins.quote;
-  const per = (h: number) => ({ base: (pf.coins.base / hours) * h, quote: (pf.coins.quote / hours) * h, value: (valQuote / hours) * h });
-  const rows = [['A day', 24], ['A week', 168], ['A month', 720]] as const;
-  const $ = (x: number) => (k != null ? usd(x * k) : qty(x, q, 4, false));
+function GeneratedPace({ b }: { b: AnyObj }) {
+  const m = metricsOf(b);
+  if (!m || !m.generated) return null;
+  const rows = [['A day', m.generatedRate.d1, m.est.d1, m.generatedRate.needs.d1], ['A week', m.generatedRate.d7, m.est.d7, m.generatedRate.needs.d7], ['A month', m.generatedRate.d30, m.est.d30, m.generatedRate.needs.d30]] as const;
   return (
-    <div className="card pace">
+    <div className="card pace" data-testid="generated-pace">
       <div className="card-head">
-        <h3><L tip={`Fees this position has earned since it opened (collected plus waiting), carried forward at the same pace. It counts only this position: a range move starts a new one. Time the price spent outside the range is in the pace, so a pace from a calm stretch can run high. Valued at today's ${base} price.`}>This position's pace</L></h3>
-        <span className="muted small">open {dur(ms)}</span>
+        <h3><L tip={`${m.calc}`}>Pace</L></h3>
+        <span className="muted small">{m.ageSec != null ? `running ${dur(m.ageSec * 1000)}` : ''}</span>
       </div>
-      <p className="small">So far: <b>{px(pf.coins.base, 4)} {base}</b> + <b>{px(pf.coins.quote, 4)} {q}</b> ≈ <b className="pos">{$(valQuote)}</b></p>
-      {hours < 1
-        ? <p className="small muted">Measuring: the pace shows once the position has been open an hour.</p>
-        : <div className="pace-rows">{rows.map(([label, h]) => {
-          const x = per(h);
-          return (
-            <div key={label} className="pace-row">
-              <span className="k">{label}</span>
-              <b className="pos">≈ {$(x.value)}</b>
-              <span className="small muted">{px(x.base, 4)} {base} + {px(x.quote, 4)} {q}</span>
-            </div>
-          );
-        })}</div>}
-      <p className="muted small">If it keeps earning as it has since it opened{b.inRange === false ? '. It is out of range now, so it earns nothing until the price is back inside or the range moves' : ''}.</p>
+      <p className="small">Generated so far: <b>{unitsText(m.generated)}</b>{m.generatedUsd != null && <span className="muted"> ≈ {usd(m.generatedUsd, true)}</span>}</p>
+      <div className="pace-rows">{rows.map(([label, units, dollars, need]) => (
+        <div key={label} className="pace-row">
+          <span className="k">{label}</span>
+          {units ? <>
+            <b className={cls(dollars)}>{unitsText(units)}</b>
+            <span className="small muted">{dollars == null ? '' : `≈ ${usd(dollars, true)}`}</span>
+          </> : <>
+            <b className="muted">—</b>
+            <span className="small muted">{need ?? ''}</span>
+          </>}
+        </div>
+      ))}</div>
+      <p className="muted small">Generated so far carried forward at the same pace (simple, not compounded); not a forecast{b.inRange === false ? '. It is out of range now, so it earns nothing until the price is back inside or the range moves' : ''}.</p>
     </div>
   );
 }
@@ -205,27 +203,18 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <span className="sub">{pnl ? <>gas {qty(pnl.gas, q, 3, false)} · swaps {qty(pnl.swapCost, q, 3, false)} · range moves {qty(pnl.moveLoss, q, 3, false)} ({b.reranges} move{b.reranges === 1 ? '' : 's'})<Usd v={-(pnl.gas + pnl.swapCost + pnl.moveLoss)} k={k} /></> : ''}</span>
         </div>
         <div className="kpi">
-          <span><L tip={`Fees earned minus gas, swap fees and range-move losses, each in dollars at the time it happened. Generated is the same thing counted in coins and valued at today's price. From the server's metrics.`}>Dollars made</L></span>
-          <div className={`kpi-v ${cls(m?.dollarsMadeUsd)}`}>{m?.dollarsMadeUsd == null ? '—' : <AnimatedNumber value={m.dollarsMadeUsd} format={(x) => usd(x, true)} />}</div>
-          <span className="sub">at the price of each fee, swap and move</span>
-        </div>
-        <div className="kpi">
-          <span><L tip={m?.calc ?? 'Total P&L'}>Total P&amp;L</L></span>
-          <div className={`kpi-v ${cls(m?.quote.totalPnl)}`}>{m?.quote.totalPnl == null ? '—' : qty(m.quote.totalPnl, q, 5)}</div>
-          <span className="sub">{m?.totalPnlPct != null ? <>{pct(m.totalPnlPct, 2, true)} of capital in · price change {usd(m.priceChangeUsd, true)}</> : 'measuring…'}{m?.quote.totalPnl != null && <Usd v={m.quote.totalPnl} k={k} />}</span>
-        </div>
-        <div className="kpi">
           <span><L tip="The coins in the position right now (they change as the price moves inside the range), and its share of the liquidity trading at today's price, which is its share of every trade's fee. Out of range the share is 0.">Liquidity provided</L></span>
           <div className="kpi-v coins2">{b.coins ? <><b>{num(b.coins.base, 6)} {base}</b><b>{num(b.coins.quote, 6)} {q}</b></> : '—'}</div>
           <span className="sub">{b.poolShare != null ? <>{pct(b.poolShare, b.poolShare < 0.001 ? 4 : 2)} of the pool's active liquidity</> : 'once the position is open'}<Usd v={b.coins && b.price != null ? b.coins.base * b.price + b.coins.quote : null} k={k} sign={false} /></span>
         </div>
       </div>
+      <MoneyDetails b={b} />
 
-      <PositionPace b={b} k={k} />
+      <GeneratedPace b={b} />
 
       <div className="split wide-left">
         <div className="card">
-          <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact desk height={480} />
+          <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact desk mid height={480} />
           <p className="muted small">The amber lines are the position's range. It earns fees while the price is between them.</p>
           <StatTable b={b} s={s} />
         </div>

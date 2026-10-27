@@ -4,13 +4,6 @@ import { botFacts, unitsText } from './deskStats';
 import { ago, dur, pct, px, usd } from './fmt';
 import type { AnyObj } from './model';
 
-function money(v: number | null, p: number | null) {
-  if (v == null && p == null) return '—';
-  const d = v == null ? '—' : usd(v, true);
-  const r = p == null ? '' : ` · ${pct(p, 2, true)}`;
-  return d + r;
-}
-
 function est(v: { amount: number; pct: number | null } | null, hint: string | null) {
   if (!v) return hint ? `— (${hint})` : '—';
   return `${usd(v.amount, true)}${v.pct == null ? '' : ` · ${pct(v.pct, 2, true)}`}`;
@@ -21,6 +14,7 @@ function poolText(pool: string | null) {
   return pool.startsWith('0x') && pool.length > 12 ? `${pool.slice(0, 6)}…${pool.slice(-4)}` : pool;
 }
 
+/** Generated, its rates and the bot's facts. Total P&L, price change, unrealized and value vs deposit are in MoneyDetails. */
 export function StatTable({ b, s }: { b: AnyObj; s: AnyObj }) {
   const key = (b.stable || b.market || b.quote) as string | undefined;
   const market = key ? mk(s, key) : null;
@@ -40,13 +34,10 @@ export function StatTable({ b, s }: { b: AnyObj; s: AnyObj }) {
     ['Generated, today\'s value', f.generatedUsd == null ? '—' : usd(f.generatedUsd, true), calc],
     ['Per day', rate(gr?.d1, gr?.needs.d1), calc],
     ['Per week', rate(gr?.d7, gr?.needs.d7), calc],
+    ['Per month', rate(gr?.d30, gr?.needs.d30), calc],
     ['Per year', rate(gr?.d365, gr?.needs.d365), calc],
     ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pct(f.aprPct, 1, true), calc],
     ['Age', f.ageMs == null ? '—' : dur(f.ageMs)],
-    ['Unrealized', money(f.unrealizedUsd, null), calc],
-    ['Price change', f.priceChangeUsd == null ? '—' : usd(f.priceChangeUsd, true), calc],
-    ['Value vs deposit', f.valueUsd == null && f.investedUsd == null ? '—' : `${f.valueUsd == null ? '—' : usd(f.valueUsd)} now · ${f.investedUsd == null ? '—' : usd(f.investedUsd)} in`],
-    ['Total P&L', money(f.pnlUsd, f.pnlPct), calc],
     ['Est. 24h', est(f.est.h24, f.estHint.h24), calc],
     ['Est. 7d', est(f.est.d7, f.estHint.d7), calc],
     ['Est. 365d', est(f.est.d365, f.estHint.d365), calc],

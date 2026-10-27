@@ -206,7 +206,7 @@ describe('rates: linear, capped at 365/7 × the history', () => {
     expect(x.generatedRate.d365).toBeNull();
     expect(x.est.d365).toBeNull();
     expect(x.aprPct).toBeNull();
-    expect(x.est.needs).toEqual({ d1: null, d7: null, d365: 'needs 7d of history' });
+    expect(x.est.needs).toEqual({ d1: null, d7: null, d30: null, d365: 'needs 7d of history' });
   });
 });
 

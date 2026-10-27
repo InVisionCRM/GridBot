@@ -30,7 +30,7 @@ export type Headline = 'generated';
 /** What the bot header leads with (confirmed by the lead): units generated, per token. */
 export const HEADLINE: Headline = 'generated';
 
-type Needs = { d1: string | null; d7: string | null; d365: string | null };
+type Needs = { d1: string | null; d7: string | null; d30: string | null; d365: string | null };
 
 export interface BotMetrics {
   botId: string;
@@ -45,7 +45,7 @@ export interface BotMetrics {
   /** Σ generated units × today's mid price. */
   generatedUsd: number | null;
   /** Units per day / week / year at the pace so far (simple); null + `needs` until the history is long enough. */
-  generatedRate: { d1: Record<string, number> | null; d7: Record<string, number> | null; d365: Record<string, number> | null; needs: Needs };
+  generatedRate: { d1: Record<string, number> | null; d7: Record<string, number> | null; d30: Record<string, number> | null; d365: Record<string, number> | null; needs: Needs };
   capitalInUsd: number | null;
   currentValueUsd: number | null;
   /** Fees / profits / sale proceeds that left the bot. */
@@ -70,8 +70,8 @@ export interface BotMetrics {
   totalPnlPct: number | null;
   /** generatedUsd / capitalInUsd, annualized simply; null until 7 days of history. */
   aprPct: number | null;
-  /** generatedUsd scaled to 24h / 7d / 365d (dollars). */
-  est: { d1: number | null; d7: number | null; d365: number | null; needs: Needs };
+  /** generatedUsd scaled to 24h / 7d / 30d / 365d (dollars). 30d needs ~13.8h of history (30d ÷ 365/7). */
+  est: { d1: number | null; d7: number | null; d30: number | null; d365: number | null; needs: Needs };
   moveCount: number | null;
   fillCount: number | null;
   range: { lower: number; upper: number; current: number | null; inRange: boolean | null } | null;
@@ -151,7 +151,7 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
   return now - startedAt;
 }
 
-const RATES = 'Per day / week / year, the 24h/7d/365d estimates and APR (Generated ÷ capital in, annualized) scale Generated linearly, not compounded, and need 28 min / 3.2h / 7d of history.';
+const RATES = 'Per day / week / month / year, the 24h/7d/30d/365d estimates and APR (Generated ÷ capital in, annualized) scale Generated linearly, not compounded, and need 28 min / 3.2h / 13.8h / 7d of history.';
 const GENERATED_CALC: Record<MetricsKind, string> = {
   lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin), swap fees (in the coin swapped in) and range-move losses (in the coin the move sold, locked in at each move); dollars at today\'s mid price.',
   grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown as Unrealized. A close / stop cash-out sale is not a round trip; its result is in Price change.',
@@ -210,13 +210,13 @@ function finish(c: Core, now: number): BotMetrics {
   const need = (w: number): string | null => (genUsd == null && !c.generated ? null : estHint(age, w));
   const rateOf = (w: number) => (!c.generated || age == null || !extrapolate(1, 0, age, w) ? null
     : Object.fromEntries(Object.entries(c.generated).map(([s, u]) => [s, u * (w / age)])));
-  const needs = { d1: need(DAY_MS), d7: need(7 * DAY_MS), d365: need(365 * DAY_MS) };
+  const needs = { d1: need(DAY_MS), d7: need(7 * DAY_MS), d30: need(30 * DAY_MS), d365: need(365 * DAY_MS) };
   const y = est(365 * DAY_MS);
   return {
     botId: c.id, mode: c.mode, kind: c.kind, status: c.status, startedAt: c.startedAt, ageSec: age == null ? null : Math.floor(age / 1000),
     headline: HEADLINE,
     generated: c.generated, generatedUsd: genUsd,
-    generatedRate: { d1: rateOf(DAY_MS), d7: rateOf(7 * DAY_MS), d365: rateOf(365 * DAY_MS), needs },
+    generatedRate: { d1: rateOf(DAY_MS), d7: rateOf(7 * DAY_MS), d30: rateOf(30 * DAY_MS), d365: rateOf(365 * DAY_MS), needs },
     capitalInUsd: capUsd, currentValueUsd: usd(c.currentValue), paidOutUsd: usd(c.paidOut),
     realizedUsd: usd(c.realized), unrealizedUsd: usd(c.unrealized),
     priceChangeUsd: totalUsd == null || genUsd == null ? null : totalUsd - genUsd,
@@ -226,7 +226,7 @@ function finish(c: Core, now: number): BotMetrics {
     realizedRebalanceLossUsd: usd(c.rebalanceLoss), tokenTaxesUsd: usd(c.taxes),
     totalPnlUsd: totalUsd, totalPnlPct: totalUsd == null ? null : pct,
     aprPct: y?.pct ?? null,
-    est: { d1: est(DAY_MS)?.amount ?? null, d7: est(7 * DAY_MS)?.amount ?? null, d365: y?.amount ?? null, needs },
+    est: { d1: est(DAY_MS)?.amount ?? null, d7: est(7 * DAY_MS)?.amount ?? null, d30: est(30 * DAY_MS)?.amount ?? null, d365: y?.amount ?? null, needs },
     moveCount: c.moveCount, fillCount: c.fillCount, range: c.range, asOf: now,
     bridgeCosts: bridge, inTransitUsd: c.inTransitUsd ?? null,
     calc: `${GENERATED_CALC[c.kind]} ${RATES} ${TOTAL_CALC[c.kind]}`,

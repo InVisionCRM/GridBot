@@ -7,6 +7,7 @@ import { ago, num, pct } from './fmt';
 import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj } from './model';
 import { haltText } from './haltText';
+import { MoneyDetails } from './MoneyDetails';
 
 const usd = (n: number) => `$${num(Math.abs(n), Math.abs(n) >= 100 ? 0 : 2)}`;
 
@@ -91,9 +92,10 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       {t.metrics && (
         <p className="small" title={t.metrics.calc}>
           Generated <b className={(t.metrics.generatedUsd ?? 0) >= 0 ? 'pos' : 'neg'}>{t.metrics.generatedUsd == null ? '—' : `${t.metrics.generatedUsd < 0 ? '−' : '+'}${usd(t.metrics.generatedUsd)}`}</b>
-          <span className="muted"> from closed sells · unrealized {t.metrics.unrealizedUsd == null ? '—' : `${t.metrics.unrealizedUsd < 0 ? '−' : '+'}${usd(t.metrics.unrealizedUsd)}`} · {t.metrics.fillCount ?? 0} trades</span>
+          <span className="muted"> from closed sells · {t.metrics.fillCount ?? 0} trades</span>
         </p>
       )}
+      {t.metrics && <MoneyDetails b={t} />}
       <h3 className="small" style={{ marginTop: 14 }}>Open</h3>
       {!t.positions.length && <p className="muted small">No open positions.</p>}
       <div className="smart-bots">
