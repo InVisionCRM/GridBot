@@ -370,10 +370,10 @@ describe('owner gateway', () => {
     const srv = http.createServer(createGateway(deps));
     srv.on('upgrade', (req, socket, head) => proxyUpgrade(deps, req, socket, head));
     const gw = await listen(srv);
-    const open = (cookie: string, extra: Record<string, string> = {}) => new Promise<string>((resolve, reject) => {
+    const open = (cookie: string, origin: string | null = `https://${PUBLIC}`, extra: Record<string, string> = {}) => new Promise<string>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1', port: gw, path: '/ws',
-        headers: { Host: PUBLIC, Connection: 'Upgrade', Upgrade: 'websocket', Cookie: cookie, 'X-Forwarded-For': '100.101.2.3', ...extra },
+        headers: { Host: PUBLIC, Connection: 'Upgrade', Upgrade: 'websocket', Cookie: cookie, 'X-Forwarded-For': '100.101.2.3', ...(origin ? { Origin: origin } : {}), ...extra },
       });
       req.on('response', (res) => resolve(`status ${res.statusCode}`));
       req.on('upgrade', (_res, socket, head) => {
@@ -387,7 +387,9 @@ describe('owner gateway', () => {
     });
     const ownerCookie = `gb_session=${signSession(sessionKey, { f: HOST_ID, s: 1, e: Date.now() + 1e9, role: 'host' })}`;
     // through Funnel the owner's socket is refused and never reaches the host app
-    expect(await open(ownerCookie, { 'Tailscale-Funnel-Request': '?1' }).catch((e) => String(e))).not.toContain('hello-ws');
+    expect(await open(ownerCookie, `https://${PUBLIC}`, { 'Tailscale-Funnel-Request': '?1' }).catch((e) => String(e))).not.toContain('hello-ws');
+    // Cross-site WebSocket: another page's Origin (or none) is refused before the host sees anything
+    for (const o of ['https://evil.example', null]) expect(await open(ownerCookie, o).catch((e) => String(e))).not.toContain('hello-ws');
     expect(hostSeen).toHaveLength(0);
     expect(await open(ownerCookie)).toContain('hello-ws');
     expect(hostSeen[0].cookie).toBeUndefined();

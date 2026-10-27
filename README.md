@@ -425,7 +425,7 @@ PnL is shown in ≈USD (each bot's quote converted at today's rate), with the qu
 - One grid per pair and range: PLS/DAI, PLS/USDC, PLS/USDT, **PLS/HEX**, **PLS/eHEX**, **PLS/PLSX**, the Ethereum and Robinhood markets, and custom tokens. Each has its own range, level count (2–50) and amount (entered in the coin it spends). The default custom range is ±8% × 12 (1.25% between levels).
 - Per-grid **Stop** / **Resume**. **Stop all** halts every bot. One tx is in flight per chain.
 - **Change range** (bot detail) restarts a stopped grid on its own pair and mode; the server refuses a pair change, and a live restart re-checks that the wallet covers it.
-- State lives in `data/state.json` (all grids). A restart resumes them.
+- State lives in `data/state.json` (all grids). A restart resumes them. Routine changes (prices, P&L) are written at most every 0.5 s and off the tick path. A change to a bot's status, config, in-flight transaction, halt or last trade is written at once, before the next send. Every write is fsynced, and the previous file is kept as `state.json.bak`; if `state.json` won't parse at boot, the backup is loaded.
 - Paper mode needs no key. Live needs `PRIVATE_KEY` in `.env` (never sent to the UI).
 
 Limits: price-impact cap (≤5%), slippage, deadline. No dollar limits.
@@ -575,7 +575,7 @@ Tools → Charts also has backfill buttons when a pair has no data.
 
 - **Charts.** lightweight-charts v5 with pair/timeframe switches; EMA/Donchian/Bollinger overlays; RSI/MACD panes; grid levels and fills; trend entries/exits; stop/TP/trail lines; equity + drawdown per bot and for the whole portfolio. The last candle follows live ticks.
 - **Analytics.** Portfolio ≈USD (live PLS/DAI cross), today/7d/all-time, vs HODL, allocation, funds coverage, per-bot stats, journal with filters and `/api/analytics/journal.csv`. Market panels show depth, volume, ATR%, trend and a regime hint (efficiency ratio).
-- **Live.** Server-sent events (`/api/bot/stream`) with a 3 s polling fallback; Activity drawer; status dots that dim when a price read is stale; a short highlight when a fill lands. Routine price ticks update quietly.
+- **Live.** Server-sent events (`/api/bot/stream?v=2`): one snapshot, then only the changes, plus a 5 s heartbeat; see [docs/stream-v2.md](docs/stream-v2.md). If nothing arrives for 15 s, a banner says the data may be stale. There is a 3 s polling fallback; Activity drawer; status dots that dim when a price read is stale; a short highlight when a fill lands. Routine price ticks update quietly.
 - **Notifications and alerts.** Opt-in browser notifications (tab must be open). Alerts: price above/below, RSI above/below, grid out of range. All motion respects `prefers-reduced-motion`.
 
 ## Checks
