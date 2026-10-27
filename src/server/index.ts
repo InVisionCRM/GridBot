@@ -5,7 +5,7 @@ import { MultiBot, type MultiState } from './bot/multi';
 import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
 import { ActivityBus } from './bot/activity';
-import { createSigners, loadEnv, readCopy, readSettings, takeFriendsSecret, takeHostAuth } from './env';
+import { createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, takeFriendsSecret, takeHostAuth } from './env';
 import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
@@ -37,8 +37,10 @@ const copy = readCopy();
 // Every configured chain gets a fallback RPC reader; signers come from PRIVATE_KEY / PRIVATE_KEY_<SLUG> (env.ts only).
 const dataDir = path.dirname(cfg.stateFile);
 log.attach(path.join(dataDir, 'server.log'));
+// A friend's copy gets its key from the host over IPC (never through its environment).
+const friendKey = copy ? await receiveFriendKey() : undefined;
 const { hub, readers } = buildHub({
-  net: cfg.net, env: process.env, signerFactory: createSigners,
+  net: cfg.net, env: process.env, signerFactory: (chains) => (copy ? createSigners(chains, { friendKey }) : createSigners(chains)),
   custom: new JsonStore<CustomFile>(path.join(dataDir, 'custom.json')),
 });
 const legacyReader = readers.get(cfg.net.chainId)!;
