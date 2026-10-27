@@ -1,7 +1,9 @@
-import { QUOTE_HOLD_SEC } from './cache';
+import { LIFI_DIAMOND, assertDepositTarget, capApproval } from './allow';
+import { QUOTE_HOLD_SEC, loadQuote } from './cache';
 import type { BridgeDeps } from './deps';
+import { sanitizeText } from './errors';
 import { baseHeaders, requestJson } from './http';
-import { bad, fractionToBps, lifiFeeAmount, needAddress, needChain, needHex, needId, needInt, needPositive, needToken, needUint, needValue, normalizeRequest, normalizeStatusQuery, nowSec, quoteKey, sameAddress, tokensMatch } from './parse';
+import { bad, lifiFeeAmount, needAddress, needChain, needHex, needId, needInt, needPositive, needToken, needUint, needValue, normalizeRequest, normalizeStatusQuery, nowSec, quoteKey, readGasLimit, sameAddress, tokensMatch, tryWholeBps } from './parse';
 import type { BridgeProvider, BridgeQuote, BridgeQuoteRequest, BridgeStatus, BridgeStatusQuery, FeeComponent, ReceivedFill, UnsignedTx } from './types';
 import { encodeApprove } from './tx';
 import { assertQuoteMatches } from './validate';
@@ -20,20 +22,22 @@ import { assertQuoteMatches } from './validate';
  */
 export const LIFI_API = 'https://li.quest/v1';
 
-/** Li.Fi Diamond. Same address on the EVM chains this desk uses. */
-export const LIFI_DIAMOND = '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE';
+export { LIFI_DIAMOND };
 
 const P = 'lifi';
 
 export class LifiClient implements BridgeProvider {
   readonly id = 'lifi' as const;
+  private readonly inflight = new Map<string, Promise<BridgeQuote>>();
   constructor(private readonly d: BridgeDeps) {}
 
-  async quote(req: BridgeQuoteRequest): Promise<BridgeQuote> {
+  quote(req: BridgeQuoteRequest): Promise<BridgeQuote> {
     const norm = normalizeRequest(P, req);
     const key = quoteKey(this.id, norm);
-    const hit = this.d.cache.get(key);
-    if (hit) return hit;
+    return loadQuote(this.d.cache, this.inflight, key, () => this.fetchQuote(norm));
+  }
+
+  private async fetchQuote(norm: BridgeQuoteRequest): Promise<BridgeQuote> {
     const params = new URLSearchParams({
       fromChain: String(norm.srcChain),
       toChain: String(norm.dstChain),
@@ -50,6 +54,7 @@ export class LifiClient implements BridgeProvider {
       http: this.d.http,
       sleep: this.d.sleep,
       secrets: this.d.secrets,
+      now: this.d.now,
       log: this.d.log,
       url: `${LIFI_API}/quote?${params}`,
       method: 'GET',
@@ -57,7 +62,6 @@ export class LifiClient implements BridgeProvider {
     }));
     const quote = parseQuote(norm, body, nowSec(this.d.now()));
     assertQuoteMatches(norm, quote, this.d.now());
-    this.d.cache.set(key, quote);
     return quote;
   }
 
@@ -76,6 +80,7 @@ export class LifiClient implements BridgeProvider {
       http: this.d.http,
       sleep: this.d.sleep,
       secrets: this.d.secrets,
+      now: this.d.now,
       log: this.d.log,
       url: `${LIFI_API}/status?${params}`,
       method: 'GET',
@@ -84,17 +89,18 @@ export class LifiClient implements BridgeProvider {
     const status = typeof body.status === 'string' ? body.status : bad(P, 'status is missing');
     const sub = typeof body.substatus === 'string' ? body.substatus : '';
     const depositId = body.transactionId == null ? null : needId(P, body.transactionId, 'deposit id');
+    const raw = clip(status, this.d.secrets);
     if (status === 'NOT_FOUND') return base('pending', false, null, depositId, 'not indexed yet');
     if (status === 'PENDING') return base('pending', false, null, depositId, sub || 'pending');
     if (status === 'FAILED') return base('failed', true, null, depositId, 'failed');
-    if (status !== 'DONE') bad(P, 'status is missing');
+    if (status !== 'DONE') return base('pending', false, null, depositId, `unknown: ${raw}`);
     if (sub === 'COMPLETED') return base('filled', true, readReceived(body.receiving, false), depositId, 'filled');
     if (sub === 'REFUNDED') return { ...base('refunded', true, readReceived(body.receiving, false), depositId, 'refunded'), refundTx: receivedTx(body.receiving) };
     if (sub === 'PARTIAL') {
       const received = readReceived(body.receiving, true);
       return base('partial', true, received, depositId, 'different token arrived');
     }
-    bad(P, 'substatus is missing');
+    return base('pending', false, readReceived(body.receiving, false), depositId, `unknown: ${clip(sub || status, this.d.secrets)}`);
   }
 }
 
@@ -128,17 +134,20 @@ function parseQuote(req: BridgeQuoteRequest, body: Record<string, unknown>, sec:
     data: needHex(P, tx.data, 'deposit'),
     value: needValue(P, tx.value, 'deposit value'),
   };
-  if (tx.gasLimit != null) deposit.gasLimit = needPositive(P, String(tx.gasLimit), 'gas');
+  const gas = readGasLimit(P, tx.gasLimit);
+  if (gas != null) deposit.gasLimit = gas;
+  assertDepositTarget(P, req.srcChain, deposit.to);
   const approvalAddress = needAddress(P, estimate.approvalAddress, 'approval');
-  const approval = encodeApprove(req.tokenIn.address, approvalAddress, req.amountIn, req.srcChain);
+  if (!sameAddress(approvalAddress, deposit.to)) bad(P, 'approval spender does not match the deposit');
+  const approval = capApproval(P, encodeApprove(req.tokenIn.address, approvalAddress, req.amountIn, req.srcChain), req.tokenIn.address, req.amountIn);
   const seconds = needInt(P, estimate.executionDuration, 'fill time', 0, 30 * 24 * 60 * 60);
   const fees = splitFees(estimate.feeCosts, estimate.gasCosts, req);
   return {
     provider: P,
     srcChain: req.srcChain,
     dstChain: req.dstChain,
-    tokenIn: req.tokenIn,
-    tokenOut: req.tokenOut,
+    tokenIn: fromToken,
+    tokenOut: toToken,
     amountIn: req.amountIn,
     amountOut,
     minOut,
@@ -148,15 +157,23 @@ function parseQuote(req: BridgeQuoteRequest, body: Record<string, unknown>, sec:
     approval,
     deposit,
     quoteId: needId(P, body.id, 'quote id'),
-    recipient: req.recipient,
+    recipient,
     sender: req.sender,
     discoveryOnly: true,
     sameAsset: req.sameAsset,
   };
 }
 
+function feeKey(chainId: number, token: string, amount: bigint): string {
+  return `${chainId}:${token.toLowerCase()}:${amount}`;
+}
+
 function splitFees(feeCosts: unknown, gasCosts: unknown, req: BridgeQuoteRequest): BridgeQuote['fees'] {
   const expected = lifiFeeAmount(req.amountIn);
+  const gas = splitGas(gasCosts, req);
+  const taken = new Set<string>();
+  if (gas.source.amount > 0n) taken.add(feeKey(gas.source.chainId, gas.source.token, gas.source.amount));
+  if (gas.destination && gas.destination.amount > 0n) taken.add(feeKey(gas.destination.chainId, gas.destination.token, gas.destination.amount));
   let bridge: FeeComponent | null = null;
   let relayerAmount = 0n;
   let relayerToken = req.tokenIn.address;
@@ -170,8 +187,8 @@ function splitFees(feeCosts: unknown, gasCosts: unknown, req: BridgeQuoteRequest
       const amount = needUint(P, o.amount, 'bridge fee');
       const token = needToken(P, o.token, 'bridge fee');
       const name = typeof o.name === 'string' ? o.name : '';
-      const pct = o.percentage == null ? null : fractionToBps(P, o.percentage, 'bridge fee');
-      const isLifi = pct === 25n || /lifi/i.test(name);
+      const pct = tryWholeBps(o.percentage);
+      const isLifi = /lifi/i.test(name) || pct === 25n;
       if (isLifi) {
         if (bridge) bad(P, 'bridge fee is missing');
         if (pct != null && pct !== 25n) bad(P, 'fee is not 0.25%');
@@ -180,6 +197,11 @@ function splitFees(feeCosts: unknown, gasCosts: unknown, req: BridgeQuoteRequest
         if (delta > 1n) bad(P, 'fee amount does not match 0.25%');
         bridge = { label: 'lifi-0.25%', amount, decimals: token.decimals, token: token.address, chainId: token.chainId };
       } else {
+        const key = feeKey(token.chainId, token.address, amount);
+        if (o.included === true) {
+          if (taken.has(key)) continue;
+          taken.add(key);
+        }
         if (sawOther && (token.chainId !== relayerChain || !sameAddress(token.address, relayerToken))) bad(P, 'relayer fee is missing');
         sawOther = true;
         relayerAmount += amount;
@@ -189,7 +211,6 @@ function splitFees(feeCosts: unknown, gasCosts: unknown, req: BridgeQuoteRequest
       }
     }
   }
-  const gas = splitGas(gasCosts, req);
   return {
     bridge: bridge ?? { label: 'lifi-0.25%', amount: expected, decimals: req.tokenIn.decimals, token: req.tokenIn.address, chainId: req.srcChain },
     relayer: { label: 'solver', amount: relayerAmount, decimals: relayerDecimals, token: relayerToken, chainId: relayerChain },
@@ -261,6 +282,10 @@ function base(state: BridgeStatus['state'], final: boolean, received: ReceivedFi
 
 function asObj(v: unknown): Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : bad(P, 'response is missing');
+}
+
+function clip(v: string, secrets: readonly string[]): string {
+  return sanitizeText(v, secrets).replace(/\s+/g, ' ').slice(0, 80);
 }
 
 function bpsFraction(bps: number): string {

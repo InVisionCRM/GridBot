@@ -12,6 +12,7 @@
  * follow that table's relation `same-asset`. Ethereum USDC and Robinhood USDG are not the same
  * coin. Canonical slow routes are not a provider here and must not be added as one.
  */
+import { redact, registerSecret } from '../bot/logger';
 import { QuoteCache, QUOTE_CACHE_TTL_MS } from './cache';
 import type { BridgeDeps } from './deps';
 import { AcrossClient } from './across';
@@ -48,7 +49,7 @@ export interface BridgeClients {
 
 export function createBridgeProviders(o: BridgeClientOptions = {}): BridgeClients {
   const now = o.now ?? Date.now;
-  const http = o.http ?? createFetchHttp(o.fetch ?? fetch, o.timeoutMs ?? 10_000);
+  const http = o.http ?? createFetchHttp(o.fetch ?? fetch, o.timeoutMs ?? 10_000, now);
   const cache = o.cache ?? new QuoteCache(QUOTE_CACHE_TTL_MS, now);
   const limits = o.limits ?? DEFAULT_LIMITS;
   const keys = {
@@ -57,8 +58,10 @@ export function createBridgeProviders(o: BridgeClientOptions = {}): BridgeClient
     lifi: optionalKey(o.keys?.lifi, 'lifi'),
   };
   const secrets = [keys.across, keys.relay, keys.lifi].filter((s): s is string => !!s);
+  for (const secret of secrets) registerSecret(secret);
   const sleep = o.sleep ?? delay;
-  const common = { http, cache, now, sleep, secrets, log: o.log };
+  const log = o.log ? (level: 'info' | 'warn' | 'error', msg: string) => o.log!(level, redact(msg)) : undefined;
+  const common = { http, cache, now, sleep, secrets, log };
   return {
     across: new AcrossClient(deps(common, new RateLimiter(limits.across, now), keys.across)),
     relay: new RelayClient(deps(common, new RateLimiter(limits.relay, now), keys.relay)),
@@ -84,9 +87,10 @@ function client(clients: BridgeClients, provider: BridgeId): BridgeProvider {
   return c;
 }
 
-export { AcrossClient, ACROSS_API, ACROSS_SPOKE } from './across';
+export { AcrossClient, ACROSS_API, ACROSS_SPOKE, ACROSS_PERIPHERY } from './across';
 export { RelayClient, RELAY_API } from './relay';
 export { LifiClient, LIFI_API, LIFI_DIAMOND } from './lifi';
+export { RELAY_PROXY_V3, RELAY_ROUTER_V3 } from './allow';
 export { QuoteCache, QUOTE_CACHE_TTL_MS, QUOTE_HOLD_SEC } from './cache';
 export { RateLimiter, DEFAULT_LIMITS } from './rateLimit';
 export { withinEta, filterByEta } from './eta';

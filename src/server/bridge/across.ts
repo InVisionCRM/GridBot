@@ -1,9 +1,12 @@
-import { Interface, getAddress } from 'ethers';
+import { getAddress } from 'ethers';
+import { ACROSS_PERIPHERY, ACROSS_SPOKE, DEPOSIT_V3, assertDepositTarget, capApproval, decodeDeposit } from './allow';
+import { loadQuote } from './cache';
 import type { BridgeDeps } from './deps';
+import { sanitizeText } from './errors';
 import { baseHeaders, requestJson } from './http';
-import { bad, needAddress, needHex, needId, needPositive, needToken, needUint, needUint32, needValue, normalizeRequest, normalizeStatusQuery, nowSec, quoteKey, sameAddress, tokensMatch } from './parse';
+import { bad, needAddress, needHex, needId, needPositive, needToken, needUint, needUint32, needValue, normalizeRequest, normalizeStatusQuery, nowSec, quoteKey, readGasLimit, sameAddress, tokensMatch } from './parse';
 import type { BridgeProvider, BridgeQuote, BridgeQuoteRequest, BridgeStatus, BridgeStatusQuery, FeeComponent, UnsignedTx } from './types';
-import { decodeApprove, encodeApprove } from './tx';
+import { encodeApprove } from './tx';
 import { assertQuoteMatches } from './validate';
 
 /**
@@ -23,15 +26,7 @@ import { assertQuoteMatches } from './validate';
  */
 export const ACROSS_API = 'https://app.across.to/api';
 
-/** SpokePool per chain. Duplicated from the route table so this module does not import unmerged code. */
-export const ACROSS_SPOKE: Readonly<Record<number, string>> = {
-  1: getAddress('0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5'),
-  4663: getAddress('0xD29C85F15DF544bA632C9E25829fd29d767d7978'),
-};
-
-const DEPOSIT = new Interface([
-  'function depositV3(address depositor, address recipient, address inputToken, address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 destinationChainId, address exclusiveRelayer, uint32 quoteTimestamp, uint32 fillDeadline, uint32 exclusivityDeadline, bytes message) payable',
-]);
+export { ACROSS_SPOKE, ACROSS_PERIPHERY };
 
 const QUOTE_WINDOW_SEC = 600;
 const P = 'across';
@@ -51,17 +46,17 @@ function fillSeconds(body: Record<string, unknown>): number {
 
 export class AcrossClient implements BridgeProvider {
   readonly id = 'across' as const;
+  private readonly inflight = new Map<string, Promise<BridgeQuote>>();
   constructor(private readonly d: BridgeDeps) {}
 
-  async quote(req: BridgeQuoteRequest): Promise<BridgeQuote> {
+  quote(req: BridgeQuoteRequest): Promise<BridgeQuote> {
     const norm = normalizeRequest(P, req);
     const key = quoteKey(this.id, norm);
-    const hit = this.d.cache.get(key);
-    if (hit) return hit;
-    const quote = norm.sameAsset ? await this.fromSuggestedFees(norm) : await this.fromSwap(norm);
-    assertQuoteMatches(norm, quote, this.d.now());
-    this.d.cache.set(key, quote);
-    return quote;
+    return loadQuote(this.d.cache, this.inflight, key, async () => {
+      const quote = norm.sameAsset ? await this.fromSuggestedFees(norm) : await this.fromSwap(norm);
+      assertQuoteMatches(norm, quote, this.d.now());
+      return quote;
+    });
   }
 
   async status(q: BridgeStatusQuery): Promise<BridgeStatus> {
@@ -73,16 +68,30 @@ export class AcrossClient implements BridgeProvider {
     const status = typeof body.status === 'string' ? body.status : bad(P, 'status is missing');
     const origin = needUint32(P, body.originChainId, 'origin chain');
     if (origin !== query.originChainId) bad(P, 'origin chain does not match');
+    if (query.destinationChainId != null) {
+      const dest = needUint32(P, body.destinationChainId, 'destination chain');
+      if (dest !== query.destinationChainId) bad(P, 'destination chain does not match');
+    }
     const depositId = body.depositId == null ? query.depositId ?? null : needId(P, String(body.depositId), 'deposit id');
     const fillTx = txOrNull(body.fillTx ?? body.fillTxnRef);
     const refundTx = txOrNull(body.depositRefundTxHash ?? body.depositRefundTxnRef);
-    if (status === 'pending' || status === 'received') {
-      return row('pending', false, false, fillTx, refundTx, depositId ?? null, status === 'received' ? 'received, waiting for fill' : 'pending');
+    const id = depositId ?? null;
+    let mapped: BridgeStatus;
+    if (status === 'pending' || status === 'received' || status === 'slowFillRequested' || status === 'unfilled' || status === 'auto-refund-pending') {
+      const detail = status === 'received' ? 'received, waiting for fill' : status === 'pending' ? 'pending' : status;
+      mapped = row('pending', false, false, fillTx, refundTx, id, detail);
+    } else if (status === 'filled' || status === 'slowFilled') {
+      mapped = row('filled', true, false, fillTx, refundTx, id, status === 'slowFilled' ? 'slowFilled' : 'filled');
+    } else if (status === 'expired') {
+      mapped = row('expired', false, true, fillTx, refundTx, id, 'awaiting refund');
+    } else if (status === 'refunded') {
+      mapped = row('refunded', true, false, fillTx, refundTx, id, 'refunded');
+    } else {
+      mapped = row('pending', false, false, fillTx, refundTx, id, `unknown: ${clip(status, this.d.secrets)}`);
     }
-    if (status === 'filled') return row('filled', true, false, fillTx, refundTx, depositId ?? null, 'filled');
-    if (status === 'expired') return row('expired', false, true, fillTx, refundTx, depositId ?? null, 'awaiting refund');
-    if (status === 'refunded') return row('refunded', true, false, fillTx, refundTx, depositId ?? null, 'refunded');
-    bad(P, 'status is missing');
+    if (body.actionsSucceeded !== false) return mapped;
+    if (mapped.state === 'filled') return { ...mapped, state: 'pending', final: false, detail: 'needs attention' };
+    return { ...mapped, detail: `${mapped.detail}; needs attention` };
   }
 
   private async fromSuggestedFees(req: BridgeQuoteRequest): Promise<BridgeQuote> {
@@ -123,9 +132,9 @@ export class AcrossClient implements BridgeProvider {
     if (exclusive === sameAddress(exclusiveRelayer, '0x0000000000000000000000000000000000000000')) bad(P, 'exclusive relayer is missing');
     const sec = nowSec(this.d.now());
     if (timestamp > sec + 120) bad(P, 'quote timestamp is missing');
-    const expiresAt = timestamp + QUOTE_WINDOW_SEC;
+    const expiresAt = Math.min(timestamp + QUOTE_WINDOW_SEC, fillDeadline);
     const seconds = fillSeconds(body);
-    const data = DEPOSIT.encodeFunctionData('depositV3', [
+    const data = DEPOSIT_V3.encodeFunctionData('depositV3', [
       req.sender,
       req.recipient,
       req.tokenIn.address,
@@ -140,13 +149,14 @@ export class AcrossClient implements BridgeProvider {
       '0x',
     ]).toLowerCase();
     const deposit: UnsignedTx = { chainId: req.srcChain, to: spoke, data, value: 0n };
-    const approval = encodeApprove(req.tokenIn.address, spoke, req.amountIn, req.srcChain);
+    assertDepositTarget(P, req.srcChain, deposit.to);
+    const approval = capApproval(P, encodeApprove(req.tokenIn.address, spoke, req.amountIn, req.srcChain), req.tokenIn.address, req.amountIn);
     return {
       provider: P,
       srcChain: req.srcChain,
       dstChain: req.dstChain,
-      tokenIn: req.tokenIn,
-      tokenOut: req.tokenOut,
+      tokenIn: input,
+      tokenOut: output,
       amountIn: req.amountIn,
       amountOut,
       minOut: amountOut,
@@ -197,9 +207,11 @@ export class AcrossClient implements BridgeProvider {
       chainId: req.srcChain,
       to: needAddress(P, swapTx.to, 'deposit'),
       data: needHex(P, swapTx.data, 'deposit'),
-      value: needValue(P, swapTx.value, 'deposit value'),
+      value: swapTx.value == null ? 0n : needValue(P, swapTx.value, 'deposit value'),
     };
-    if (swapTx.gas != null) deposit.gasLimit = needPositive(P, swapTx.gas, 'gas');
+    const gas = readGasLimit(P, swapTx.gas);
+    if (gas != null) deposit.gasLimit = gas;
+    assertDepositTarget(P, req.srcChain, deposit.to);
     const approval = readApproval(body.approvalTxns, req);
     const details = asObj(asObj(asObj(asObj(body.steps).bridge).fees).details);
     const lp = readFee(asObj(details.lp), req, 'bridge fee');
@@ -208,22 +220,26 @@ export class AcrossClient implements BridgeProvider {
     const origin = readOriginGas(body.fees, req);
     const seconds = needUint32(P, body.expectedFillTime, 'fill time');
     const p90 = body.expectedFillTimeP90 == null ? seconds : needUint32(P, body.expectedFillTimeP90, 'fill time');
+    let expiresAt = needUint32(P, body.quoteExpiryTimestamp, 'expiry');
+    if (body.fillDeadline != null) expiresAt = Math.min(expiresAt, needUint32(P, body.fillDeadline, 'fill deadline'));
+    const decodedDeadline = decodeDeposit(P, deposit.data, req).fillDeadline;
+    if (decodedDeadline != null) expiresAt = Math.min(expiresAt, decodedDeadline);
     return {
       provider: P,
       srcChain: req.srcChain,
       dstChain: req.dstChain,
-      tokenIn: req.tokenIn,
-      tokenOut: req.tokenOut,
+      tokenIn: input,
+      tokenOut: output,
       amountIn: req.amountIn,
       amountOut,
       minOut,
       fees: { bridge: lp, relayer: capital, sourceGas: origin, destinationGas: dest },
       eta: { p50Sec: seconds, p90Sec: Math.max(seconds, p90) },
-      expiresAt: needUint32(P, body.quoteExpiryTimestamp, 'expiry'),
+      expiresAt,
       approval,
       deposit,
       quoteId: needId(P, body.id, 'quote id'),
-      recipient: req.recipient,
+      recipient,
       sender: req.sender,
       discoveryOnly: false,
       sameAsset: false,
@@ -237,6 +253,7 @@ export class AcrossClient implements BridgeProvider {
       http: this.d.http,
       sleep: this.d.sleep,
       secrets: this.d.secrets,
+      now: this.d.now,
       log: this.d.log,
       url: `${ACROSS_API}${path}`,
       method: 'GET',
@@ -284,10 +301,13 @@ function readApproval(v: unknown, req: BridgeQuoteRequest): UnsignedTx | null {
   const to = needAddress(P, tx.to, 'approval');
   if (!sameAddress(to, req.tokenIn.address)) bad(P, 'approval is not for the input token');
   const data = needHex(P, tx.data, 'approval');
-  if (decodeApprove(P, data).amount < req.amountIn) bad(P, 'approval is below the input');
   const value = tx.value == null ? 0n : needValue(P, tx.value, 'approval value');
   if (value !== 0n) bad(P, 'approval value must be zero');
-  return { chainId, to, data, value };
+  return capApproval(P, { chainId, to, data, value }, req.tokenIn.address, req.amountIn);
+}
+
+function clip(v: string, secrets: readonly string[]): string {
+  return sanitizeText(v, secrets).replace(/\s+/g, ' ').slice(0, 80);
 }
 
 function txOrNull(v: unknown): string | null {

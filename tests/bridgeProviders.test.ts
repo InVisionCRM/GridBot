@@ -3,15 +3,16 @@ import { join } from 'node:path';
 import { Interface, getAddress } from 'ethers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  ACROSS_API, ACROSS_SPOKE, DEFAULT_LIMITS, LIFI_API, LIFI_DIAMOND, RELAY_API,
+  ACROSS_API, ACROSS_PERIPHERY, ACROSS_SPOKE, DEFAULT_LIMITS, LIFI_API, LIFI_DIAMOND, RELAY_API, RELAY_PROXY_V3, RELAY_ROUTER_V3,
   assertQuoteMatches,   createBridgeProviders, createFetchHttp, filterByEta, lifiFeeAmount, withinEta,
   type BridgeId, type BridgeQuote, type HttpClient,
 } from '../src/server/bridge';
+import { encodeRelayDeposit } from '../src/server/bridge/allow';
 import { BridgeError } from '../src/server/bridge/errors';
 import {
   ETH_CAPITAL, ETH_DEST_GAS, ETH_IN, ETH_LP, ETH_OUT, FILL_TX, LEGS, NOW_MS, NOW_SEC, ORIGIN_GAS,
   OTHER, RECIPIENT, RELAYER, REQUEST_ID, SENDER, USDC_CAPITAL, USDC_DEST_GAS, USDC_IN, USDC_LP, USDC_MIN, USDC_OUT,
-  WETH_ETH, WETH_HOOD, acrossSuggested, acrossSwap, lifiQuote, relayQuote, requestOf,
+  WETH_ETH, WETH_HOOD, acrossSuggested, acrossSwap, approveData, lifiQuote, relayQuote, requestOf,
   type Leg,
 } from './fixtures/bridgeFixtures';
 
@@ -129,7 +130,7 @@ describe('bridge quote normalization', () => {
           expect(quote.deposit.gasLimit).toBe(250_000n);
           expect(h.calls.at(-1)!.url).toContain('/swap/approval');
           const [spender, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);
-          expect(getAddress(String(spender))).toBe(OTHER);
+          expect(getAddress(String(spender))).toBe(ACROSS_PERIPHERY);
           expect(amount).toBe(leg.amountIn);
         }
         if (id === 'relay') {
@@ -202,10 +203,37 @@ describe('bridge status', () => {
     expect(h.calls.at(-1)!.url).toContain('depositId=42');
   });
 
-  it('rejects an unknown Across status instead of guessing', async () => {
+  it('maps Across slow fills and keeps unknown statuses pending', async () => {
     const h = harness();
-    h.queue.push(ok({ status: 'mystery', originChainId: 1, depositId: '42' }));
-    await expect(h.clients.across.status(origin)).rejects.toThrow(/status is missing/);
+    const cases: Array<[string, string, boolean]> = [
+      ['slowFilled', 'filled', true],
+      ['slowFillRequested', 'pending', false],
+      ['unfilled', 'pending', false],
+      ['auto-refund-pending', 'pending', false],
+      ['mystery', 'pending', false],
+    ];
+    for (const [status, state, final] of cases) {
+      h.queue.push(ok({ status, originChainId: 1, depositId: '42', destinationChainId: 4663 }));
+      const st = await h.clients.across.status({ ...origin, destinationChainId: 4663 });
+      expect(st.state, status).toBe(state);
+      expect(st.final, status).toBe(final);
+      if (status === 'mystery') expect(st.detail).toContain('mystery');
+      if (status === 'expired') expect(st.awaitingRefund).toBe(true);
+    }
+    h.queue.push(ok({ status: 'expired', originChainId: 1, depositId: '42', destinationChainId: 4663 }));
+    const expired = await h.clients.across.status({ ...origin, destinationChainId: 4663 });
+    expect(expired.state).toBe('expired');
+    expect(expired.awaitingRefund).toBe(true);
+    expect(expired.final).toBe(false);
+
+    h.queue.push(ok({ status: 'filled', originChainId: 1, depositId: '42', destinationChainId: 4663, fillTx: FILL_TX, actionsSucceeded: false }));
+    const attention = await h.clients.across.status({ ...origin, destinationChainId: 4663 });
+    expect(attention.state).not.toBe('filled');
+    expect(attention.final).toBe(false);
+    expect(attention.detail).toMatch(/needs attention/);
+
+    h.queue.push(ok({ status: 'filled', originChainId: 1, depositId: '42', destinationChainId: 1, fillTx: FILL_TX }));
+    await expect(h.clients.across.status({ ...origin, destinationChainId: 4663 })).rejects.toThrow(/destination chain/);
   });
 
   it('maps Relay progress, and treats only success and refund as final', async () => {
@@ -235,6 +263,12 @@ describe('bridge status', () => {
     expect(failed.final).toBe(false);
     expect(failed.detail).toContain('may still retry');
     expect(failed.detail).toContain('SLIPPAGE');
+
+    h.queue.push(ok({ status: 'mystery-relay' }));
+    const unknown = await h.clients.relay.status(q);
+    expect(unknown.state).toBe('pending');
+    expect(unknown.final).toBe(false);
+    expect(unknown.detail).toContain('mystery-relay');
     expect(h.calls.at(-1)!.url).toContain('/intents/status/v3');
   });
 
@@ -275,7 +309,16 @@ describe('bridge status', () => {
     expect(failed.final).toBe(true);
 
     h.queue.push(ok({ status: 'DONE', transactionId: 'tx-1' }));
-    await expect(h.clients.lifi.status(q)).rejects.toThrow(/substatus is missing/);
+    const doneBare = await h.clients.lifi.status(q);
+    expect(doneBare.state).toBe('pending');
+    expect(doneBare.final).toBe(false);
+    expect(doneBare.detail).toContain('DONE');
+
+    h.queue.push(ok({ status: 'SOMETHING_NEW', transactionId: 'tx-1', substatus: 'EXTRA' }));
+    const unknown = await h.clients.lifi.status(q);
+    expect(unknown.state).toBe('pending');
+    expect(unknown.final).toBe(false);
+    expect(unknown.detail).toContain('SOMETHING_NEW');
 
     h.queue.push(ok({ status: 'DONE', substatus: 'PARTIAL', transactionId: 'tx-1' }));
     await expect(h.clients.lifi.status(q)).rejects.toThrow(/received token is missing/);
@@ -293,7 +336,12 @@ describe('quote cache, rate limit, and retries', () => {
     h.queue.push(ok(acrossSuggested(leg)));
     const first = await h.clients.across.quote(requestOf(leg));
     const second = await h.clients.across.quote(requestOf(leg));
-    expect(second).toBe(first);
+    expect(second).toEqual(first);
+    expect(second).not.toBe(first);
+    first.amountOut = 1n;
+    const third = await h.clients.across.quote(requestOf(leg));
+    expect(third.amountOut).toBe(ETH_OUT);
+    expect(third).not.toBe(first);
     expect(h.calls).toHaveLength(1);
     h.advance(60_000);
     await h.clients.across.quote(requestOf(leg));
@@ -365,7 +413,9 @@ describe('quote cache, rate limit, and retries', () => {
 
     h.advance(61_000);
     for (let i = 0; i < 3; i++) h.queue.push({ status: 429, body: { message: 'later' }, retryAfterMs: null });
-    await expect(ask()).rejects.toThrow(/HTTP 429/);
+    const limited = await ask().then(() => { throw new Error('expected a rate limit'); }, (e: unknown) => e);
+    expect(limited).toBeInstanceOf(BridgeError);
+    expect((limited as BridgeError).code).toBe('rate_limit');
     expect(h.calls).toHaveLength(8);
     expect(h.sleeps).toEqual([50, 200, 200, 400]);
   });
@@ -533,7 +583,8 @@ describe('bridge module boundaries', () => {
     for (const f of files) {
       const code = readFileSync(join(dir, f), 'utf8');
       expect(code, f).not.toMatch(/process\.env/);
-      expect(code, f).not.toMatch(/sendTransaction|eth_sendRawTransaction|new\s+Wallet/);
+      expect(code, f).not.toMatch(/sendTransaction|eth_sendRawTransaction|broadcastTransaction|getSigner|JsonRpcProvider/);
+      expect(code, f).not.toMatch(/\bsign[A-Z]\w*|\.sign\s*\(|\.send\s*\(|\bWallet\b/);
       expect(code, f).not.toMatch(/ACROSS_API_KEY|RELAY_API_KEY|LIFI_API_KEY/);
     }
   });
@@ -560,6 +611,159 @@ describe('bridge module boundaries', () => {
   });
 });
 
+describe('QA review of quote safety', () => {
+  it('accepts a Li.Fi quote with hex gas, a fractional relayer fee, and does not double-count an included fee', async () => {
+    const h = harness();
+    const leg = LEGS[2];
+    const body = lifiQuote(leg) as {
+      transactionRequest: { gasLimit: string };
+      estimate: { feeCosts: Array<Record<string, unknown>> };
+    };
+    body.transactionRequest.gasLimit = '0x425a5';
+    const relayer = body.estimate.feeCosts[1];
+    relayer.name = 'Relayer gas fee';
+    relayer.percentage = '0.000850';
+    relayer.included = true;
+    body.estimate.feeCosts.push({ ...relayer });
+    h.queue.push(ok(body));
+    const quote = await h.clients.lifi.quote(requestOf(leg));
+    expect(quote.deposit.gasLimit).toBe(0x425a5n);
+    expect(quote.fees.bridge.amount).toBe(lifiFeeAmount(USDC_IN));
+    expect(quote.fees.relayer.amount).toBe(USDC_CAPITAL);
+
+    const h2 = harness();
+    const gasDup = lifiQuote(leg) as { estimate: { feeCosts: Array<Record<string, unknown>> } };
+    gasDup.estimate.feeCosts[1] = {
+      name: 'Relayer gas fee',
+      percentage: '0.000850',
+      amount: ORIGIN_GAS.toString(),
+      included: true,
+      token: { address: '0x0000000000000000000000000000000000000000', decimals: 18, chainId: leg.src.chainId },
+    };
+    h2.queue.push(ok(gasDup));
+    const once = await h2.clients.lifi.quote(requestOf(leg));
+    expect(once.fees.sourceGas.amount).toBe(ORIGIN_GAS);
+    expect(once.fees.relayer.amount).toBe(0n);
+  });
+
+  it('rejects an unknown deposit target and never returns an unlimited approval', async () => {
+    const h = harness();
+    const usd = LEGS[2];
+    const poisoned = acrossSwap(usd) as { swapTx: { to: string }; approvalTxns: Array<{ data: string }> };
+    poisoned.swapTx.to = OTHER;
+    poisoned.approvalTxns[0].data = approveData(OTHER, 2n ** 256n - 1n);
+    h.queue.push(ok(poisoned));
+    await expect(h.clients.across.quote(requestOf(usd))).rejects.toThrow(/allowlist/);
+
+    const relay = relayQuote(usd) as { steps: Array<{ items: Array<{ data: { to: string; data: string } }> }> };
+    relay.steps[0].items[1].data.to = OTHER;
+    h.queue.push(ok(relay));
+    await expect(h.clients.relay.quote(requestOf(usd))).rejects.toThrow(/allowlist/);
+
+    const capped = acrossSwap(usd) as { approvalTxns: Array<{ data: string; to?: string }> };
+    const spender = getAddress('0x97CCDBea4632140639aD5eA9b944aa034eb15fD4');
+    capped.approvalTxns[0].data = approveData(spender, 2n ** 256n - 1n);
+    h.queue.push(ok(capped));
+    const quote = await h.clients.across.quote(requestOf(usd));
+    const [, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);
+    expect(amount).toBe(USDC_IN);
+    expect(amount).not.toBe(2n ** 256n - 1n);
+  });
+
+  it('floors minOut at amountOut times one minus slippage', () => {
+    const req = requestOf(LEGS[2]);
+    const quote = baseQuote(req);
+    quote.amountOut = USDC_OUT;
+    const floor = (USDC_OUT * 9_950n) / 10_000n;
+    quote.minOut = floor;
+    expect(() => assertQuoteMatches(req, quote, NOW_MS)).not.toThrow();
+    expect(() => assertQuoteMatches(req, { ...quote, minOut: floor - 1n }, NOW_MS)).toThrow(/slippage floor/);
+  });
+
+  it('stops on a long Retry-After, cools that provider down, and treats a final 429 as rate_limit', async () => {
+    const h = harness();
+    const leg = LEGS[0];
+    h.queue.push({ status: 429, body: { message: 'later' }, retryAfterMs: 30_000 });
+    const err = await h.clients.across.quote(requestOf(leg)).then(() => { throw new Error('expected a rate limit'); }, (e: unknown) => e);
+    expect(err).toBeInstanceOf(BridgeError);
+    expect((err as BridgeError).code).toBe('rate_limit');
+    expect(h.calls).toHaveLength(1);
+    expect(h.sleeps).toEqual([]);
+    await expect(h.clients.across.quote(requestOf(leg))).rejects.toMatchObject({ code: 'rate_limit' });
+    expect(h.calls).toHaveLength(1);
+    h.advance(30_000);
+    h.queue.push(ok(acrossSuggested(leg)));
+    expect((await h.clients.across.quote(requestOf(leg))).amountOut).toBe(ETH_OUT);
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it('parses Retry-After seconds and HTTP-date, and refuses an oversized body', async () => {
+    const now = Date.parse('2026-06-01T00:00:00Z');
+    const dated = vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 429,
+      headers: { 'retry-after': new Date(now + 3_000).toUTCString() },
+    }));
+    const http = createFetchHttp(dated as unknown as typeof fetch, 1_000, () => now);
+    const res = await http({ url: 'https://example.test/quote', method: 'GET', headers: {} });
+    expect(res.retryAfterMs).toBe(3_000);
+
+    const seconds = vi.fn(async () => new Response('{"ok":true}', { status: 429, headers: { 'retry-after': '2' } }));
+    const secHttp = createFetchHttp(seconds as unknown as typeof fetch, 1_000, () => now);
+    expect((await secHttp({ url: 'https://example.test/quote', method: 'GET', headers: {} })).retryAfterMs).toBe(2_000);
+
+    const huge = vi.fn(async () => new Response('{}', { status: 200, headers: { 'content-length': String(2_000_000) } }));
+    const hugeHttp = createFetchHttp(huge as unknown as typeof fetch, 1_000, () => now);
+    await expect(hugeHttp({ url: 'https://example.test/quote', method: 'GET', headers: {} })).rejects.toThrow(/response too large/);
+
+    const stream = new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(600_000));
+        controller.enqueue(new Uint8Array(600_000));
+        controller.close();
+      },
+    });
+    const fat = vi.fn(async () => new Response(stream, { status: 200 }));
+    const fatHttp = createFetchHttp(fat as unknown as typeof fetch, 1_000, () => now);
+    await expect(fatHttp({ url: 'https://example.test/quote', method: 'GET', headers: {} })).rejects.toThrow(/response too large/);
+  });
+
+  it('defaults a missing Across swap value to 0 and treats gas 0 as unestimated', async () => {
+    const h = harness();
+    const usd = LEGS[2];
+    const body = acrossSwap(usd) as { swapTx: { value?: string; gas?: string } };
+    delete body.swapTx.value;
+    body.swapTx.gas = '0';
+    h.queue.push(ok(body));
+    const quote = await h.clients.across.quote(requestOf(usd));
+    expect(quote.deposit.value).toBe(0n);
+    expect(quote.deposit.gasLimit).toBeUndefined();
+  });
+
+  it('caps Across expiry by fillDeadline and shares one in-flight quote', async () => {
+    const h = harness();
+    const eth = LEGS[0];
+    const body = acrossSuggested(eth) as { fillDeadline: string; timestamp: string };
+    const ts = Number(body.timestamp);
+    body.fillDeadline = String(ts + 200);
+    h.queue.push(ok(body));
+    const quote = await h.clients.across.quote(requestOf(eth));
+    expect(quote.expiresAt).toBe(ts + 200);
+
+    const leg = LEGS[0];
+    h.queue.push(ok(acrossSuggested(leg)));
+    const req = { ...requestOf(leg), slippageBps: 40 };
+    const before = h.calls.length;
+    const [a, b] = await Promise.all([
+      h.clients.across.quote(req),
+      h.clients.across.quote(req),
+    ]);
+    expect(a.amountOut).toBe(ETH_OUT);
+    expect(b.amountOut).toBe(ETH_OUT);
+    expect(a).not.toBe(b);
+    expect(h.calls.length - before).toBe(1);
+  });
+});
+
 function baseQuote(req: ReturnType<typeof requestOf>): BridgeQuote {
   const fee = { amount: 0n, decimals: req.tokenIn.decimals, token: req.tokenIn.address, chainId: req.srcChain, label: 'lp' };
   return {
@@ -580,7 +784,18 @@ function baseQuote(req: ReturnType<typeof requestOf>): BridgeQuote {
     eta: { p50Sec: 5, p90Sec: 5 },
     expiresAt: NOW_SEC + 30,
     approval: null,
-    deposit: { chainId: req.srcChain, to: req.tokenIn.address, data: '0x12345678', value: 0n },
+    deposit: {
+      chainId: req.srcChain,
+      to: RELAY_PROXY_V3,
+      data: encodeRelayDeposit({
+        token: req.tokenIn.address,
+        amount: req.amountIn,
+        recipient: req.recipient,
+        sender: req.sender,
+        router: RELAY_ROUTER_V3,
+      }),
+      value: 0n,
+    },
     quoteId: 'q',
     recipient: req.recipient,
     sender: req.sender,

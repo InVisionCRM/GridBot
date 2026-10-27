@@ -1,8 +1,8 @@
+import { assertGuarded } from './allow';
 import { BridgeError } from './errors';
 import { APPROVE_SELECTOR } from './tx';
-import { bad, needAddress, nowSec, sameAddress, sameAssetSurplus } from './parse';
+import { DEFAULT_SLIPPAGE_BPS, MAX_ETA_SEC, bad, needAddress, nowSec, sameAddress, sameAssetSurplus } from './parse';
 import type { BridgeQuote, BridgeQuoteRequest, FeeComponent, UnsignedTx } from './types';
-import { MAX_ETA_SEC } from './parse';
 
 function feeOk(provider: string, fee: FeeComponent, label: string, chains: number[]) {
   if (fee == null || typeof fee.amount !== 'bigint' || fee.amount < 0n) bad(provider, `${label} is missing`);
@@ -42,6 +42,9 @@ export function assertQuoteMatches(req: BridgeQuoteRequest, quote: BridgeQuote, 
   if (typeof quote.amountOut !== 'bigint' || quote.amountOut <= 0n) bad(p, 'amountOut must be positive');
   if (typeof quote.minOut !== 'bigint' || quote.minOut <= 0n) bad(p, 'minOut must be positive');
   if (quote.minOut > quote.amountOut) bad(p, 'minOut exceeds amountOut');
+  const slippage = req.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
+  const floor = (quote.amountOut * BigInt(10_000 - slippage)) / 10_000n;
+  if (quote.minOut < floor) bad(p, 'minOut is below the slippage floor');
   if (req.sameAsset && sameAssetSurplus(req.amountIn, req.tokenIn.decimals, quote.amountOut, req.tokenOut.decimals)) {
     bad(p, 'same-asset output exceeds the input');
   }
@@ -64,4 +67,5 @@ export function assertQuoteMatches(req: BridgeQuoteRequest, quote: BridgeQuote, 
       throw new BridgeError(p, 'invalid', `${p}: approval is not an ERC-20 approve`);
     }
   }
+  assertGuarded(p, req, quote.deposit, quote.approval, quote.minOut);
 }

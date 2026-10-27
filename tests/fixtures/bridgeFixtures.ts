@@ -5,7 +5,8 @@
  */
 import { Interface, getAddress } from 'ethers';
 import { chainById } from '../../src/live/chains';
-import { ACROSS_SPOKE, LIFI_DIAMOND, lifiFeeAmount } from '../../src/server/bridge';
+import { ACROSS_PERIPHERY, ACROSS_SPOKE, LIFI_DIAMOND, RELAY_PROXY_V3, RELAY_ROUTER_V3, lifiFeeAmount } from '../../src/server/bridge';
+import { encodeAcrossSwap, encodeLifiDeposit, encodeRelayDeposit } from '../../src/server/bridge/allow';
 import type { BridgeQuoteRequest, BridgeToken } from '../../src/server/bridge';
 
 export const NOW_MS = 1_800_000_000_000;
@@ -113,15 +114,25 @@ export function acrossSwap(leg: Leg, patch: Record<string, unknown> = {}): unkno
     swapTx: {
       simulationSuccess: true,
       chainId: leg.src.chainId,
-      to: OTHER,
-      data: `0x${'ee'.repeat(36)}`,
+      to: ACROSS_PERIPHERY,
+      data: encodeAcrossSwap({
+        swapToken: leg.src.address,
+        amount: leg.amountIn,
+        outputToken: leg.dst.address,
+        outputAmount: out,
+        depositor: SENDER,
+        recipient: RECIPIENT,
+        dstChain: leg.dst.chainId,
+        spoke: ACROSS_SPOKE[leg.src.chainId],
+        fillDeadline: NOW_SEC + 10_000,
+      }),
       value: '0',
       gas: '250000',
     },
     approvalTxns: [{
       chainId: leg.src.chainId,
       to: leg.src.address,
-      data: approveData(OTHER, leg.amountIn),
+      data: approveData(ACROSS_PERIPHERY, leg.amountIn),
     }],
     steps: {
       bridge: {
@@ -163,7 +174,7 @@ export function relayQuote(leg: Leg, patch: { amountOut?: bigint; minOut?: bigin
           data: {
             from: SENDER,
             to: leg.src.address,
-            data: approveData(OTHER, leg.amountIn),
+            data: approveData(RELAY_PROXY_V3, leg.amountIn),
             value: '0',
             chainId: leg.src.chainId,
           },
@@ -172,8 +183,14 @@ export function relayQuote(leg: Leg, patch: { amountOut?: bigint; minOut?: bigin
           status: 'incomplete',
           data: {
             from: SENDER,
-            to: OTHER,
-            data: `0x${'ab'.repeat(20)}`,
+            to: RELAY_PROXY_V3,
+            data: encodeRelayDeposit({
+              token: leg.src.address,
+              amount: leg.amountIn,
+              recipient: RECIPIENT,
+              sender: SENDER,
+              router: RELAY_ROUTER_V3,
+            }),
             value: '0',
             chainId: leg.src.chainId,
           },
@@ -210,8 +227,8 @@ export function lifiQuote(leg: Leg, opts: { omitLifiFee?: boolean; feeAmount?: b
       token: apiToken(leg.src),
     }]),
     {
-      name: 'Across bridge fee',
-      percentage: '0.001',
+      name: 'Relayer gas fee',
+      percentage: '0.000850',
       amount: (leg.sameAsset ? ETH_CAPITAL : USDC_CAPITAL).toString(),
       included: true,
       token: apiToken(leg.src),
@@ -247,9 +264,15 @@ export function lifiQuote(leg: Leg, opts: { omitLifiFee?: boolean; feeAmount?: b
       from: SENDER,
       to: opts.diamond ?? LIFI_DIAMOND,
       chainId: leg.src.chainId,
-      data: `0x${'cd'.repeat(16)}`,
+      data: encodeLifiDeposit({
+        token: leg.src.address,
+        recipient: RECIPIENT,
+        sender: SENDER,
+        minOut,
+        dstChain: leg.dst.chainId,
+      }),
       value: '0',
-      gasLimit: '250000',
+      gasLimit: '0x425a5',
     },
   };
 }

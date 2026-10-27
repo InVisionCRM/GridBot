@@ -19,9 +19,15 @@ export type HttpClient = (req: HttpRequest) => Promise<HttpResult>;
 
 export const HTTP_MAX_ATTEMPTS = 3;
 
+/** A Retry-After longer than this is not slept off. The provider is cooled down instead. */
+export const MAX_RETRY_WAIT_MS = 5_000;
+
+/** About 1 MiB. Declared and streamed bodies both stop here. */
+export const MAX_BODY_BYTES = 1_048_576;
+
 function retryWait(attempt: number, retryAfterMs: number | null): number {
-  if (retryAfterMs != null && Number.isFinite(retryAfterMs) && retryAfterMs >= 0 && retryAfterMs <= 5_000) return retryAfterMs;
-  return Math.min(5_000, 200 * 2 ** attempt);
+  if (retryAfterMs != null && Number.isFinite(retryAfterMs) && retryAfterMs >= 0 && retryAfterMs <= MAX_RETRY_WAIT_MS) return retryAfterMs;
+  return Math.min(MAX_RETRY_WAIT_MS, 200 * 2 ** attempt);
 }
 
 function retryable(status: number): boolean {
@@ -53,6 +59,7 @@ export async function requestJson(o: {
   http: HttpClient;
   sleep: (ms: number) => Promise<void>;
   secrets: readonly string[];
+  now: () => number;
   log?: BridgeLog;
   url: string;
   method: 'GET' | 'POST';
@@ -81,17 +88,67 @@ export async function requestJson(o: {
       return res.body;
     }
     last = failureText(o.provider, res.status, res.body, o.secrets);
+    if (retryable(res.status) && res.retryAfterMs != null && res.retryAfterMs > MAX_RETRY_WAIT_MS) {
+      o.limiter.hold(o.now() + res.retryAfterMs);
+      throwLogged(o.provider, 'rate_limit', `${o.provider}: rate limit`, o.log);
+    }
     if (retryable(res.status) && attempt < HTTP_MAX_ATTEMPTS - 1) {
       await o.sleep(retryWait(attempt, res.retryAfterMs));
       continue;
     }
-    throwLogged(o.provider, 'http', last, o.log);
+    throwLogged(o.provider, res.status === 429 ? 'rate_limit' : 'http', last, o.log);
   }
   throwLogged(o.provider, 'http', last || `${o.provider}: request failed`, o.log);
 }
 
+/** Seconds ("2") or an HTTP-date. A past date is zero. An unreadable value is ignored. */
+export function parseRetryAfter(header: string | null, now: number): number | null {
+  if (!header) return null;
+  const v = header.trim();
+  if (/^\d+$/.test(v)) return Number(v) * 1000;
+  const at = Date.parse(v);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, at - now);
+}
+
+async function readCapped(res: Response): Promise<string> {
+  const declared = res.headers.get('content-length');
+  if (declared && /^\d+$/.test(declared.trim()) && Number(declared) > MAX_BODY_BYTES) {
+    throw new Error('response too large');
+  }
+  if (!res.body) {
+    const text = await res.text();
+    if (Buffer.byteLength(text) > MAX_BODY_BYTES) throw new Error('response too large');
+    return text;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const step = await reader.read();
+      if (step.done) break;
+      total += step.value.byteLength;
+      if (total > MAX_BODY_BYTES) {
+        await reader.cancel();
+        throw new Error('response too large');
+      }
+      chunks.push(step.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(out);
+}
+
 /** fetch wrapper used outside tests. Redirects are refused. The thrown text never includes the URL. */
-export function createFetchHttp(fetchImpl: typeof fetch, timeoutMs: number): HttpClient {
+export function createFetchHttp(fetchImpl: typeof fetch, timeoutMs: number, now: () => number = Date.now): HttpClient {
   return async (req) => {
     let res: Response;
     try {
@@ -107,9 +164,8 @@ export function createFetchHttp(fetchImpl: typeof fetch, timeoutMs: number): Htt
       if (name === 'TimeoutError' || name === 'AbortError') throw new Error('timed out');
       throw new Error('network request failed');
     }
-    const retry = res.headers.get('retry-after');
-    const retryAfterMs = retry && /^\d+$/.test(retry) ? Number(retry) * 1000 : null;
-    const text = await res.text();
+    const retryAfterMs = parseRetryAfter(res.headers.get('retry-after'), now());
+    const text = await readCapped(res);
     let body: unknown = null;
     if (text) {
       try { body = JSON.parse(text) as unknown; } catch { body = null; }

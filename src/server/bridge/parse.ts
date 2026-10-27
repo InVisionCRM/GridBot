@@ -104,15 +104,45 @@ export function lifiFeeAmount(amountIn: bigint): bigint {
   return (amountIn * LIFI_FEE_BPS) / BPS;
 }
 
-/** "0.0025" → 25. Rejects fractions that are not a whole number of basis points. */
-export function fractionToBps(provider: string, v: unknown, label: string): bigint {
-  if (typeof v !== 'string' || !/^\d+(\.\d+)?$/.test(v)) bad(provider, `${label} is missing`);
+/**
+ * Decimal fraction to whole basis points. "0.0025" → 25.
+ * A fraction that is not a whole number of basis points (8.5 bps) returns null.
+ * Only the Li.Fi 0.25% integrator row requires a whole number. Other fee rows keep
+ * the token amount, which already has the protocol's exact precision.
+ */
+export function tryWholeBps(v: unknown): bigint | null {
+  if (typeof v !== 'string' || !/^\d+(\.\d+)?$/.test(v)) return null;
   const [whole, frac = ''] = v.split('.');
   const digits = (whole + frac).replace(/^0+/, '') || '0';
   const num = BigInt(digits) * BPS;
   const den = 10n ** BigInt(frac.length);
-  if (num % den !== 0n) bad(provider, `${label} is missing`);
+  if (num % den !== 0n) return null;
   return num / den;
+}
+
+/** "0.0025" → 25. Rejects fractions that are not a whole number of basis points. */
+export function fractionToBps(provider: string, v: unknown, label: string): bigint {
+  const bps = tryWholeBps(v);
+  if (bps == null) bad(provider, `${label} is missing`);
+  return bps;
+}
+
+/**
+ * Gas limit as hex ("0x425a5") or decimal. Zero and a missing field mean the caller
+ * still has to estimate gas. A positive value is returned as a bigint.
+ */
+export function readGasLimit(provider: string, v: unknown): bigint | null {
+  if (v == null) return null;
+  let n: bigint;
+  if (typeof v === 'number') {
+    if (!Number.isSafeInteger(v) || v < 0) bad(provider, 'gas is missing');
+    n = BigInt(v);
+  } else if (typeof v === 'string' && (v === '0' || /^0x0*$/i.test(v))) {
+    return null;
+  } else {
+    n = needValue(provider, v, 'gas');
+  }
+  return n === 0n ? null : n;
 }
 
 /** Basis points as a decimal fraction without floating point. 50 → "0.005". */

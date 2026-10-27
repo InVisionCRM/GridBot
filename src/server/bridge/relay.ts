@@ -1,10 +1,11 @@
-import { QUOTE_HOLD_SEC } from './cache';
+import { assertDepositTarget, capApproval } from './allow';
+import { QUOTE_HOLD_SEC, loadQuote } from './cache';
 import type { BridgeDeps } from './deps';
 import { baseHeaders, requestJson } from './http';
 import { sanitizeText } from './errors';
-import { bad, needAddress, needChain, needHex, needId, needPositive, needToken, needUint, needUint32, needValue, normalizeRequest, normalizeStatusQuery, nowSec, quoteKey, sameAddress, tokensMatch } from './parse';
+import { bad, needAddress, needChain, needHex, needId, needPositive, needToken, needUint, needUint32, needValue, normalizeRequest, normalizeStatusQuery, nowSec, quoteKey, readGasLimit, sameAddress, tokensMatch } from './parse';
 import type { BridgeProvider, BridgeQuote, BridgeQuoteRequest, BridgeStatus, BridgeStatusQuery, FeeComponent, UnsignedTx } from './types';
-import { APPROVE_SELECTOR, decodeApprove } from './tx';
+import { APPROVE_SELECTOR } from './tx';
 import { assertQuoteMatches } from './validate';
 
 /**
@@ -22,19 +23,23 @@ const P = 'relay';
 
 export class RelayClient implements BridgeProvider {
   readonly id = 'relay' as const;
+  private readonly inflight = new Map<string, Promise<BridgeQuote>>();
   constructor(private readonly d: BridgeDeps) {}
 
-  async quote(req: BridgeQuoteRequest): Promise<BridgeQuote> {
+  quote(req: BridgeQuoteRequest): Promise<BridgeQuote> {
     const norm = normalizeRequest(P, req);
     const key = quoteKey(this.id, norm);
-    const hit = this.d.cache.get(key);
-    if (hit) return hit;
+    return loadQuote(this.d.cache, this.inflight, key, () => this.fetchQuote(norm));
+  }
+
+  private async fetchQuote(norm: BridgeQuoteRequest): Promise<BridgeQuote> {
     const body = asObj(await requestJson({
       provider: P,
       limiter: this.d.limiter,
       http: this.d.http,
       sleep: this.d.sleep,
       secrets: this.d.secrets,
+      now: this.d.now,
       log: this.d.log,
       url: `${RELAY_API}/quote`,
       method: 'POST',
@@ -53,7 +58,6 @@ export class RelayClient implements BridgeProvider {
     }));
     const quote = parseQuote(norm, body, nowSec(this.d.now()));
     assertQuoteMatches(norm, quote, this.d.now());
-    this.d.cache.set(key, quote);
     return quote;
   }
 
@@ -67,6 +71,7 @@ export class RelayClient implements BridgeProvider {
       http: this.d.http,
       sleep: this.d.sleep,
       secrets: this.d.secrets,
+      now: this.d.now,
       log: this.d.log,
       url: `${RELAY_API}/intents/status/v3?${params}`,
       method: 'GET',
@@ -86,7 +91,7 @@ export class RelayClient implements BridgeProvider {
       const detail = reason ? `failure may still retry (${reason})` : 'failure may still retry';
       return base('failed', false, fillTx, depositId, detail);
     }
-    bad(P, 'status is missing');
+    return base('pending', false, fillTx, depositId, `unknown: ${sanitizeText(status, this.d.secrets).replace(/\s+/g, ' ').slice(0, 80)}`);
   }
 }
 
@@ -118,8 +123,8 @@ function parseQuote(req: BridgeQuoteRequest, body: Record<string, unknown>, sec:
     provider: P,
     srcChain: req.srcChain,
     dstChain: req.dstChain,
-    tokenIn: req.tokenIn,
-    tokenOut: req.tokenOut,
+    tokenIn: currencyIn.token,
+    tokenOut: currencyOut.token,
     amountIn: req.amountIn,
     amountOut,
     minOut,
@@ -134,7 +139,7 @@ function parseQuote(req: BridgeQuoteRequest, body: Record<string, unknown>, sec:
     approval: built.approval,
     deposit: built.deposit,
     quoteId: built.requestId,
-    recipient: req.recipient,
+    recipient,
     sender: req.sender,
     discoveryOnly: false,
     sameAsset: req.sameAsset,
@@ -171,13 +176,12 @@ function readSteps(body: Record<string, unknown>, req: BridgeQuoteRequest): { ap
       const tx = readTx(data, req);
       if (tx.data.startsWith(APPROVE_SELECTOR)) {
         if (approval) bad(P, 'approval is missing');
-        const decoded = decodeApprove(P, tx.data);
         if (!sameAddress(tx.to, req.tokenIn.address)) bad(P, 'approval is not for the input token');
-        if (decoded.amount < req.amountIn) bad(P, 'approval is below the input');
-        approval = tx;
+        approval = capApproval(P, tx, req.tokenIn.address, req.amountIn);
       } else if (deposit) {
         bad(P, 'deposit is missing');
       } else {
+        assertDepositTarget(P, req.srcChain, tx.to);
         deposit = tx;
       }
     }
@@ -195,7 +199,8 @@ function readTx(data: Record<string, unknown>, req: BridgeQuoteRequest): Unsigne
     data: needHex(P, data.data, 'deposit'),
     value: data.value == null ? 0n : needValue(P, data.value, 'deposit value'),
   };
-  if (data.gas != null) tx.gasLimit = needPositive(P, String(data.gas), 'gas');
+  const gas = readGasLimit(P, data.gas);
+  if (gas != null) tx.gasLimit = gas;
   return tx;
 }
 
