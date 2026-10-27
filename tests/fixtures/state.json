@@ -1,0 +1,99 @@
+{
+  "version": 4,
+  "privateKey": "test-private-key-value",
+  "mnemonic": "test-mnemonic-value",
+  "secret": "test-secret-value",
+  "seed": "test-seed-value",
+  "grids": [
+    {
+      "id": "g-paper",
+      "mode": "paper",
+      "network": "pulsechain",
+      "stable": "USDC",
+      "status": "stopped",
+      "pool": "pool-a",
+      "profits": { "mode": "reinvest" },
+      "wallet": { "secret": "nested-secret-value" },
+      "config": { "lowerPrice": 90, "upperPrice": 110, "gridCount": 2, "totalCapitalUsd": 1000 },
+      "trades": [
+        {
+          "id": "f1",
+          "network": "pulsechain",
+          "side": "buy",
+          "intervalIndex": 1,
+          "stable": "USDC",
+          "plsAmount": 4.965050241378596,
+          "stableAmount": 500,
+          "price": 100.70391550784589,
+          "execPrice": 100.70391550784589,
+          "levelPrice": 100,
+          "feeQuote": 1.5,
+          "feeBps": 30,
+          "dex": "pulsex-v2",
+          "gasPls": 0,
+          "gasUsd": 0,
+          "txHash": "paper",
+          "timestamp": 1700003600,
+          "realizedPnlUsd": 0,
+          "paper": true
+        },
+        {
+          "id": "f2",
+          "network": "pulsechain",
+          "side": "buy",
+          "intervalIndex": 0,
+          "stable": "USDC",
+          "plsAmount": 5.5167210050696935,
+          "stableAmount": 500,
+          "price": 90.63354835970782,
+          "execPrice": 90.63354835970782,
+          "levelPrice": 90,
+          "feeQuote": 1.5,
+          "feeBps": 30,
+          "dex": "pulsex-v2",
+          "gasPls": 0,
+          "gasUsd": 0,
+          "txHash": "paper",
+          "timestamp": 1700007200,
+          "realizedPnlUsd": 0,
+          "paper": true
+        },
+        {
+          "id": "f3",
+          "network": "pulsechain",
+          "side": "sell",
+          "intervalIndex": 0,
+          "stable": "USDC",
+          "plsAmount": 5.5167210050696935,
+          "stableAmount": 551.1173926095332,
+          "price": 99.89944970990442,
+          "execPrice": 99.89944970990442,
+          "levelPrice": 100,
+          "feeQuote": 1.6599962903920842,
+          "feeBps": 30,
+          "dex": "pulsex-v2",
+          "gasPls": 0,
+          "gasUsd": 0,
+          "txHash": "paper",
+          "timestamp": 1700014400,
+          "realizedPnlUsd": 51,
+          "paper": true
+        }
+      ]
+    },
+    { "id": "g-idle", "network": "pulsechain", "stable": "USDC", "config": null, "trades": [] }
+  ],
+  "trends": [],
+  "lps": [
+    {
+      "id": "lp-1",
+      "kind": "lp",
+      "network": "ethereum",
+      "market": "USDC",
+      "dex": "uniswap-v3",
+      "pool": "pool-b",
+      "feeTier": 500,
+      "config": { "bandPct": 0.02, "capital": 1000, "baseAmount": 0, "rerange": false }
+    }
+  ]
+}

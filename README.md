@@ -534,6 +534,12 @@ Tools → Charts also has backfill buttons when a pair has no data.
 - **Sweep.** Two-parameter heatmap with an in-sample/overfitting warning. "Use these settings" starts a paper bot.
 - **Grid configs.** Can be backtested too; fills at exact level prices are optimistic.
 
+### Harness
+
+`npm run backtest:harness` replays the bots saved in `data/state.json` (the file the app reads and writes). It loads each bot's config and its recorded fills, fits the fee scale and the fill slippage so a replay of that config reproduces those fills, and prints the calibration error. The lead numbers are token units per day after swap fees, gas, taxes and realized rebalancing losses (USDC/day and WETH/day). USD/day is a smaller line under that. The default window is the last 30 days. A longer, shorter or in-sample window is a footnote.
+
+If `data/state.json` is missing, the command says so and runs two built-in examples instead of a saved bot: ETH/USDC 0.05% on Ethereum and HEX/WPLS 0.25% on 9mm V3. It does not read the process environment. A router imports `scoreOpportunity` from `src/backtest/index.ts`.
+
 ### Real backtest: PLS/DAI, Oct 8 2026
 
 **Data.** On-chain rebuild of the PulseX V2 WPLS/DAI pair: blocks ~26.99M–27.74M, 66,551 1m candles. That gives 2,184 1h candles (Jul 9 04:00 → Oct 8 03:00 EDT, 1 empty hour) and 546 4h candles.
