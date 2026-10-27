@@ -8,6 +8,7 @@
  */
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
+import { unverifiedOwnerReport, type OwnerReport } from '../../market/ownerPowers';
 import {
   decideExit, filterFresh, gateToken, sizeBuy, splitSell, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SNIPER_MIN_LIQ_USD,
   type FreshPool, type GateInput,
@@ -41,6 +42,11 @@ export interface TraderOptions {
   risk: 'safe' | 'medium' | 'any';
   maxImpact: number;
   maxPoolShare: number;
+  /**
+   * When on, safe and medium skip a non-renounced owner who can mint, blacklist, pause, or set tax or limits,
+   * and a proxy a live admin can upgrade. Off: the gate ignores this and the trader makes no extra reads.
+   */
+  enforceOwnerPowers: boolean;
   sniper: SniperOptions;
 }
 
@@ -110,7 +116,7 @@ const TRADE_MAX = 200;
 
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
-  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
+  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE, enforceOwnerPowers: false,
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
 
@@ -139,6 +145,11 @@ export class TokenTrader {
     sniper?: PoolSniper;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
+    /**
+     * Owner / proxy-admin / setter scan. Called only when enforceOwnerPowers is on.
+     * A throw, or a missing callback while the flag is on, is unverified.
+     */
+    ownerPowers?: (pool: FreshPool) => Promise<OwnerReport>;
   }) {
     const loaded = d.store.load();
     this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } } } : fresh();
@@ -286,14 +297,26 @@ export class TokenTrader {
     if (this.state.feed.length > FEED_MAX) this.state.feed.length = FEED_MAX;
   }
 
-  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number }> {
-    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0 };
+  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; note: string | null }> {
+    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, note: null };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
-    const r = gateToken({ ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) });
-    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0 };
+    const base: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
+    let report: OwnerReport | null = null;
+    if (this.state.options.enforceOwnerPowers) {
+      try {
+        report = this.d.ownerPowers ? await this.d.ownerPowers(pool) : unverifiedOwnerReport('owner powers could not be verified');
+      } catch {
+        report = unverifiedOwnerReport('owner powers could not be verified');
+      }
+      base.enforceOwnerPowers = true;
+      base.ownerPowersUnverified = report.unverified;
+      base.ownerPowersWhy = report.why;
+    }
+    const r = gateToken(base);
+    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, note: r.ok ? report?.note ?? null : null };
   }
 
-  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number) {
+  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, note: string | null) {
     const o = this.state.options;
     if (this.state.positions.some((p) => p.pool.toLowerCase() === pool.pool.toLowerCase() && p.chainId === pool.chainId)) return;
     // Checked again after the safety check's awaits: a Stop all that landed meanwhile wins.
@@ -319,7 +342,7 @@ export class TokenTrader {
       tokenReserve: pool.tokenReserve, usdPerSpend: pool.usdPerSpend, buyTax, tp1Done: false, tp2Done: false, source, exitPlan: 'hold',
     };
     this.state.positions.push(pos);
-    const why = `buy ${sized.why}`;
+    const why = note ? `buy ${sized.why}; ${note}` : `buy ${sized.why}`;
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price, why, pnlUsd: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success');
@@ -333,7 +356,7 @@ export class TokenTrader {
     if (this.entriesStopped(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); return; }
     const a = await this.assess(pool);
     if (!a.ok) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
-    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax);
+    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.note);
   }
 
   private async scanEntries() {

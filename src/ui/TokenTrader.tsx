@@ -73,6 +73,10 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       </div>
 
       <div className="tt-row" style={{ marginTop: 10 }}>
+        <label className="check"><input type="checkbox" checked={!!o.enforceOwnerPowers} onChange={(e) => void save({ enforceOwnerPowers: e.target.checked })} /><span>Owner powers</span></label>
+        <span className="muted small">Off leaves the gate as it is. On, safe and medium skip when a non-renounced owner can mint, blacklist, pause, or change tax or limits, or a live admin can upgrade the contract. A failed read skips those modes too.</span>
+      </div>
+      <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.sniper.on} onChange={(e) => void save({ sniper: { ...o.sniper, on: e.target.checked } })} /><span>Sniper</span></label>
         <label className="smart-field"><span className="k">Min liquidity</span><input value={o.sniper.minLiquidityUsd} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, minLiquidityUsd: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>
         <label className="smart-field"><span className="k">Delay blocks</span><input value={o.sniper.delayBlocks} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, delayBlocks: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>

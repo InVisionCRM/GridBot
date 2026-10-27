@@ -101,6 +101,15 @@ export interface GateInput {
   recentLiqPull: boolean;
   /** The existing safety classifier. Live still requires this. */
   liveAllowed: boolean;
+  /**
+   * Owner, EIP-1967 admin, and setter scan. Ignored unless this is true, so a gate call that
+   * leaves it off matches the gate from before this check existed.
+   */
+  enforceOwnerPowers?: boolean;
+  /** A read we needed failed. Safe and medium skip when the flag is on. */
+  ownerPowersUnverified?: boolean;
+  /** Skip text when a non-renounced owner holds a blocking power, or a live admin can upgrade. */
+  ownerPowersWhy?: string | null;
 }
 
 export interface GateResult { ok: boolean; liveOk: boolean; reason: string | null }
@@ -132,6 +141,10 @@ export function gateToken(g: GateInput): GateResult {
     if (g.canBlacklist === true) return hard('owner can blacklist');
     if (tax > TAX_TOLERANCE) return hard(`tax ${(tax * 100).toFixed(2)}% (safe allows none)`);
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
+  }
+  if ((g.risk === 'safe' || g.risk === 'medium') && g.enforceOwnerPowers) {
+    if (g.ownerPowersUnverified) return hard(g.ownerPowersWhy || 'owner powers could not be verified');
+    if (g.ownerPowersWhy) return hard(g.ownerPowersWhy);
   }
   // Honeypot and a failed sell already returned above, so live only still needs the classifier and the tax cap.
   return { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null };

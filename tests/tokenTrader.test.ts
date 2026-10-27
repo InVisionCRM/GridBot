@@ -75,6 +75,24 @@ describe('safety gate', () => {
     expect(gateToken(clean({ risk: 'medium', sellTax: 0.2 })).reason).toMatch(/over the/);
   });
 
+  it('owner-power fields do nothing until the flag is on', () => {
+    const extra = { ownerPowersUnverified: true, ownerPowersWhy: 'owner 0xabcd… holds mint(uint256)' };
+    expect(gateToken(clean(extra))).toEqual(gateToken(clean()));
+    expect(gateToken(clean({ ...extra, enforceOwnerPowers: false }))).toEqual(gateToken(clean()));
+    expect(gateToken(clean({ proxy: true, enforceOwnerPowers: true })).reason).toBe('contract is upgradeable');
+  });
+
+  it('with owner powers on, safe and medium skip a live blocking owner or an unverified read; any does not', () => {
+    const why = 'owner 0xabcd… holds mint(uint256)';
+    expect(gateToken(clean({ enforceOwnerPowers: true, ownerPowersWhy: why })).reason).toBe(why);
+    expect(gateToken(clean({ risk: 'medium', enforceOwnerPowers: true, ownerPowersWhy: why })).reason).toBe(why);
+    expect(gateToken(clean({ risk: 'any', enforceOwnerPowers: true, ownerPowersWhy: why, ownerPowersUnverified: true })).ok).toBe(true);
+    expect(gateToken(clean({ enforceOwnerPowers: true, ownerPowersUnverified: true })).reason).toMatch(/could not be verified/);
+    expect(gateToken(clean({ risk: 'medium', enforceOwnerPowers: true, ownerPowersUnverified: true, ownerPowersWhy: 'owner powers could not be verified: bytecode unread' })).reason).toMatch(/bytecode unread/);
+    expect(gateToken(clean({ risk: 'medium', proxy: true, enforceOwnerPowers: true })).ok).toBe(true);
+    expect(gateToken(clean({ enforceOwnerPowers: true, ownerPowersWhy: null })).ok).toBe(true);
+  });
+
   it('any blocks only the hard failures, and live still needs the existing classifier', () => {
     expect(gateToken(clean({ risk: 'any', proxy: true, canPause: true, canBlacklist: true, sellTax: 0.05, lpUnlocked: true })).ok).toBe(true);
     expect(gateToken(clean({ mode: 'live', risk: 'any', liveAllowed: false })).reason).toMatch(/does not allow live/);

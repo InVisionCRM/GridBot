@@ -7,6 +7,7 @@ import { JsonRpcProvider } from 'ethers';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
+import { readOwnerPowers } from './ownerRead';
 import { ROUTER } from '../dex/abis';
 import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
 import type { SafetyLimits } from '../../live/limits';
@@ -92,6 +93,7 @@ export function createTokenTrader(o: {
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk),
     resolve: (hit) => resolveHit(o.hub, hit),
+    ownerPowers: (pool) => readOwnerPowers(o.hub.rt(pool.chainId).reader, pool.chainId, pool.token),
     live: {
       buy: async (pool, spend, limits) => {
         const draft = await draftOf(o.hub, pool);
