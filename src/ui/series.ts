@@ -31,8 +31,9 @@ export function botSpark(b: AnyObj): number[] {
 export function bookUsd(b: AnyObj): number | null {
   const hist = equityPoints(b);
   if (hist.length) return hist[hist.length - 1][1];
-  if (b.kind === 'grid' && typeof b.config?.totalCapitalUsd === 'number') return b.config.totalCapitalUsd;
   const k = quoteUsd(b);
+  // totalCapitalUsd is in the quote coin (see deskStats); without a dollar rate there is no dollar value.
+  if (b.kind === 'grid' && typeof b.config?.totalCapitalUsd === 'number') return k ? b.config.totalCapitalUsd * k : null;
   if (b.kind === 'trend' && k && typeof b.capital === 'number') return b.capital * k;
   if (b.kind === 'lp' && k && typeof b.config?.capital === 'number') return b.config.capital * k;
   if ((b.kind === 'trader' || b.kind === 'sniper') && typeof b.spentUsd === 'number') {
