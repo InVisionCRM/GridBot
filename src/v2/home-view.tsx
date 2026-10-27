@@ -100,7 +100,6 @@ export function HomeView({
               ? <TokenHeadline tokens={portfolio.tokens} usd={portfolio.generatedUsd} />
               : '—'}
           </div>
-          <Chips tokens={portfolio.tokens} />
         </div>
         <p className="hero-rate">
           {portfolio.generatedPerDay == null ? '—' : portfolio.generatedPerDay.length ? <TokenLine tokens={portfolio.generatedPerDay} /> : '0'}
@@ -123,7 +122,7 @@ export function HomeView({
           </div>
         )}
         <div className="hero-curve">
-          <RangeSelect value={span} onChange={setSpan} />
+          <RangeSelect value={span} onChange={setSpan} timed={false} />
           {series.length > 1 ? <EquityCurve points={series} /> : <p className="curve-empty">Chart fills in as history builds</p>}
         </div>
       </section>

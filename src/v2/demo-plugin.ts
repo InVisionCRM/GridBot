@@ -1,8 +1,9 @@
 /**
- * Vite middleware: demo SSE for v2 and a frozen classic API for before-screenshots.
- * Handles /api itself so dev does not need the real bot server or a key.
+ * Opt-in Vite middleware for the v2 desk when the bot server is not running.
+ * Off unless GRIDBOT_V2_FIXTURE=1. When on, it answers only GET /api/v2/stream
+ * from the local snapshot (or the sanitized fixture). Every other /api route,
+ * including POST/PUT/DELETE, falls through to the real proxy.
  */
-import { classicAuto, classicCandles, classicHoldings, classicOpps, classicStatus, classicTrader } from './classic-fixture';
 import { loadDesk } from './load-owner';
 import { createSnapshotDesk } from './snapshot-desk';
 
@@ -16,66 +17,45 @@ interface DemoRes {
   write: (chunk: string) => void;
   end: (chunk?: string) => void;
 }
+type Next = () => void;
+export type FixtureMiddleware = (req: DemoReq, res: DemoRes, next: Next) => void;
 
-/** Dev-only demo API. Typed without Vite's Plugin so vitest's nested Vite copy still accepts it. */
-export function demoPlugin() {
+export function v2FixtureEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.GRIDBOT_V2_FIXTURE === '1';
+}
+
+/** Null when the fixture is off, so the dev server installs nothing. */
+export function v2FixtureMiddleware(enabled = v2FixtureEnabled()): FixtureMiddleware | null {
+  if (!enabled) return null;
   const desk = createSnapshotDesk(loadDesk());
+  return (req, res, next) => {
+    const method = (req.method ?? 'GET').toUpperCase();
+    const path = (req.url ?? '').split('?')[0];
+    if (method !== 'GET' || path !== '/api/v2/stream') return next();
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+    });
+    const send = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    send('snapshot', desk.snapshot());
+    const timer = setInterval(() => {
+      send('delta', desk.tick());
+      send('hb', { t: Date.now() });
+    }, 900);
+    req.on('close', () => clearInterval(timer));
+  };
+}
+
+/** Dev-only. Typed without Vite's Plugin so vitest's nested Vite copy still accepts it. */
+export function demoPlugin(enabled = v2FixtureEnabled()) {
+  const handler = v2FixtureMiddleware(enabled);
   return {
     name: 'gridbot-v2-demo',
-    configureServer(server: { middlewares: { use: (fn: (req: DemoReq, res: DemoRes, next: () => void) => void) => void } }) {
-      server.middlewares.use((req, res, next) => {
-        const url = req.url ?? '';
-        if (!url.startsWith('/api/')) return next();
-        const path = url.split('?')[0];
-
-        if (path === '/api/v2/stream') {
-          res.writeHead(200, {
-            'content-type': 'text/event-stream',
-            'cache-control': 'no-cache, no-transform',
-            connection: 'keep-alive',
-          });
-          const send = (event: string, data: unknown) => {
-            res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-          };
-          send('snapshot', desk.snapshot());
-          const timer = setInterval(() => send('delta', desk.tick()), 900);
-          req.on('close', () => clearInterval(timer));
-          return;
-        }
-
-        if (path === '/api/bot/stream') {
-          res.writeHead(200, {
-            'content-type': 'text/event-stream',
-            'cache-control': 'no-cache, no-transform',
-            connection: 'keep-alive',
-          });
-          const send = (event: string, data: unknown) => {
-            res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-          };
-          send('hello', { t: Date.now(), network: 'demo', recent: [] });
-          send('status', classicStatus());
-          const timer = setInterval(() => {
-            send('ticks', { t: Date.now(), prices: { USDC: 3248.2, HEX: 1420, DAI: 0.00482 } });
-          }, 2000);
-          req.on('close', () => clearInterval(timer));
-          return;
-        }
-
-        const json = (body: unknown) => {
-          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-          res.end(JSON.stringify(body));
-        };
-        if (path === '/api/bot/status') return json(classicStatus());
-        if (path === '/api/holdings') return json(classicHoldings());
-        if (path === '/api/autopilot') return json(classicAuto());
-        if (path === '/api/token-trader') return json(classicTrader());
-        if (path === '/api/opportunities') return json(classicOpps());
-        if (path === '/api/market/candles') return json(classicCandles());
-        if (path === '/api/activity') return json({ events: [] });
-        if (path === '/api/system/version') return json({ state: 'current', title: 'Demo', detail: 'Demo data', steps: [], v: null });
-        if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') return json({ ok: true, demo: true });
-        return json({ demo: true });
-      });
+    configureServer(server: { middlewares: { use: (fn: FixtureMiddleware) => void } }) {
+      if (handler) server.middlewares.use(handler);
     },
   };
 }

@@ -6,8 +6,8 @@
 import type { ActivityItem, BotDesk, BotKind, BotMetrics, BotMode, BotStatus, DeskSnapshot, EstimateBlock, PortfolioSnapshot, RangeBlock, TokenQty } from './metrics';
 
 const DAY = 86_400;
-/** 24h needs ~28 min, 7d ~3.2h, 365d 7 days: about 1/52 of each window. */
-const MIN_AGE = { d1: 28 * 60, d7: 3.2 * 3600, d365: 7 * DAY };
+/** 24h needs ~28 min, 7d ~3.2h, 365d 30 days. A week of history is not a year. */
+const MIN_AGE = { d1: 28 * 60, d7: 3.2 * 3600, d365: 30 * DAY };
 const WIN = { d1: DAY, d7: 7 * DAY, d365: 365 * DAY };
 
 type Rec = Record<string, unknown>;
@@ -93,7 +93,7 @@ function estimates(age: number | null, tokens: TokenQty[], usd: number | null): 
     usd: { d1: d1.usd, d7: d7.usd, d365: d365.usd },
     needs: ready === 3
       ? 'Extrapolates units generated so far. Not a forecast.'
-      : 'D1 needs about 28 minutes, D7 about 3.2 hours, D365 7 days.',
+      : 'D1 needs about 28 minutes, D7 about 3.2 hours, D365 30 days.',
   };
 }
 

@@ -11,7 +11,7 @@ export function ActivityTape({ items, full = false }: { items: ActivityItem[]; f
   const open = items.find((item) => item.id === openId) ?? null;
   return (
     <div className="tape-wrap">
-      {full ? <VirtualTape items={items} openId={openId} onOpen={setOpenId} /> : <Peek items={items} openId={openId} onOpen={setOpenId} />}
+      {full ? <FullTape items={items} openId={openId} onOpen={setOpenId} /> : <Peek items={items} openId={openId} onOpen={setOpenId} />}
       {open && <p className="tape-detail">{open.text}</p>}
     </div>
   );
@@ -61,7 +61,7 @@ function Row({ item, open, onOpen }: { item: ActivityItem; open: boolean; onOpen
   );
 }
 
-function VirtualTape({ items, openId, onOpen }: { items: ActivityItem[]; openId: string | null; onOpen: (id: string | null) => void }) {
+function FullTape({ items, openId, onOpen }: { items: ActivityItem[]; openId: string | null; onOpen: (id: string | null) => void }) {
   return (
     <div className="tape tape-full" aria-label="Activity">
       {items.map((item) => (

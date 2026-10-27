@@ -40,7 +40,6 @@ function Estimates({ est }: { est: EstimateBlock }) {
   return (
     <>
       <dl className="ests">
-        <EstCell label="D1" tokens={est.d1} usd={est.usd.d1} />
         <EstCell label="D7" tokens={est.d7} usd={est.usd.d7} />
         <EstCell label="D365" tokens={est.d365} usd={est.usd.d365} />
       </dl>
@@ -65,6 +64,7 @@ export function BotView({
   const [span, setSpan] = useState<RangeKey>('ALL');
   const phone = usePhone();
   const m = bot.metrics;
+  const timed = bot.candles.length > 0 && bot.candles.every((c) => c.t > 0);
   const candles = candlesInRange(bot.candles, span, m.asOf);
   const formula = 'Total P&L = generated + price change';
   return (
@@ -103,7 +103,7 @@ export function BotView({
         <Estimates est={m.est} />
       </section>
       <div className={candles.length > 1 ? 'chart-frame' : 'chart-frame is-empty'}>
-        <RangeSelect value={span} onChange={setSpan} />
+        <RangeSelect value={span} onChange={setSpan} timed={timed} />
         {candles.length > 1
           ? <CandlePane candles={candles} levels={bot.levels} fills={bot.fills} flashLevel={bot.flashLevel} />
           : <p className="curve-empty">Chart fills in as history builds</p>}

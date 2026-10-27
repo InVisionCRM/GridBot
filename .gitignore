@@ -5,6 +5,8 @@
 
 # Bot state, fills and candle history (local to your machine)
 data/
+# Owner desk snapshot (real bots, addresses, tx hashes). Never commit.
+data/owner-snapshot/
 
 # Dependencies and build output
 node_modules/

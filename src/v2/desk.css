@@ -79,6 +79,39 @@
   padding: 2px 8px;
   font-weight: 600;
 }
+.v2 .source-badge {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--label);
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+.v2 .source-badge.source-fixture { color: #1a1206; background: #f0b90b; border-color: #f0b90b; font-weight: 700; }
+.v2 .sample-banner {
+  position: relative;
+  z-index: 2;
+  margin: 0 16px 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f0b90b;
+  color: #1a1206;
+  font-size: 14px;
+  font-weight: 700;
+}
+.v2 .stream-error {
+  position: relative;
+  z-index: 2;
+  margin: 12px 16px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--loss);
+}
+.v2 .stream-error p { margin: 0 0 10px; }
+.v2 .stream-error a, .v2 .stale-banner a { color: var(--accent-2); font-weight: 600; }
 .v2 .live-chip { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--secondary); }
 .v2 .live-dot {
   width: 8px; height: 8px; border-radius: 50%; background: var(--profit);
@@ -335,6 +368,7 @@
 .v2 .slot-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; font-size: 13px; }
 .v2 .seg { display: flex; flex-wrap: wrap; gap: 4px; }
 .v2 .seg button { border: 1px solid var(--line); background: transparent; color: var(--secondary); border-radius: 8px; padding: 4px 8px; cursor: pointer; }
+.v2 .seg button:disabled { opacity: 0.35; cursor: default; }
 .v2 .seg button.on { background: var(--sel); color: var(--accent-2); border-color: var(--warn-line); }
 .v2 .push-list { list-style: none; padding: 0; display: grid; gap: 6px; }
 
@@ -449,7 +483,9 @@
   .v2 .hero.glass { padding: 18px 14px 16px; gap: 12px; }
   .v2 .hero-units { font-size: 28px; line-height: 1.15; white-space: normal; }
   .v2 .hero-rate { font-size: 15px; margin: 0; white-space: normal; }
-  .v2 .hero-curve .seg button { padding: 1px 5px; font-size: 10px; }
+  .v2 .hero-curve { flex-wrap: wrap; }
+  .v2 .hero-curve .seg button,
+  .v2 .chart-frame .seg button { min-height: 44px; min-width: 44px; padding: 0 8px; font-size: 12px; }
   .v2 .hero-curve .curve-empty { font-size: 12px; }
   .v2 .hero-gen { font-size: 20px; }
   .v2 .ests { grid-template-columns: 1fr; }

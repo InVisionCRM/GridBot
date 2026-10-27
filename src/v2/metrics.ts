@@ -5,7 +5,7 @@
  * Home's headline is live `generatedUsd` plus per-token chips. Paper is separate.
  * Price change and value versus capital are breakdown context, not the hero.
  * est.d1 / d7 / d365 are generation rates in token units. Null until the window has enough history:
- * about 28 minutes, 3.2 hours, and 7 days. APR is generatedUsd / capitalInUsd once the bot
+ * about 28 minutes, 3.2 hours, and 30 days. APR is generatedUsd / capitalInUsd once the bot
  * is at least ~28 minutes old and, when a fill count exists, has at least two fills.
  * Otherwise APR is null. Not compounded and not annualized.
  * Percents are fractions. Null means the snapshot did not carry the figure.
@@ -133,7 +133,8 @@ export interface PortfolioSnapshot {
 }
 
 export interface DeskSnapshot {
-  source: 'snapshot' | 'fixture';
+  /** live: the bot server. snapshot: the gitignored owner file. fixture: the AAA/BBB sample. */
+  source: 'live' | 'snapshot' | 'fixture';
   portfolio: PortfolioSnapshot;
   bots: BotDesk[];
   prices: TapePrice[];
@@ -143,7 +144,10 @@ export interface DeskSnapshot {
 export interface DeskDelta {
   asOf: number;
   portfolio: PortfolioSnapshot;
+  /** Bots to add or replace, keyed by metrics.botId. Empty means no bot edits. */
   bots: BotDesk[];
+  /** Bot ids that left the desk. Empty means nobody was removed. */
+  removedIds?: string[];
   prices: TapePrice[];
   activity: ActivityItem[];
 }

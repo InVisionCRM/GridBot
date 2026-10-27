@@ -8,21 +8,31 @@ const WINDOW_MS: Record<Exclude<RangeKey, 'ALL'>, number> = {
   '1M': 30 * 86_400_000,
 };
 
-export function RangeSelect({ value, onChange }: { value: RangeKey; onChange: (next: RangeKey) => void }) {
+/** Short ranges need timestamps. A plain series can only draw ALL. */
+export function rangeLocked(key: RangeKey, timed: boolean): boolean {
+  return !timed && key !== 'ALL';
+}
+
+export function RangeSelect({ value, onChange, timed = true }: { value: RangeKey; onChange: (next: RangeKey) => void; timed?: boolean }) {
   return (
     <div className="seg" role="tablist" aria-label="Chart range">
-      {RANGES.map((key) => (
-        <button
-          key={key}
-          type="button"
-          role="tab"
-          aria-selected={value === key}
-          className={key === value ? 'on' : ''}
-          onClick={() => onChange(key)}
-        >
-          {key}
-        </button>
-      ))}
+      {RANGES.map((key) => {
+        const locked = rangeLocked(key, timed);
+        return (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={value === key}
+            aria-disabled={locked}
+            disabled={locked}
+            className={key === value ? 'on' : ''}
+            onClick={() => { if (!locked) onChange(key); }}
+          >
+            {key}
+          </button>
+        );
+      })}
     </div>
   );
 }

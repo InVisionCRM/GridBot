@@ -96,6 +96,31 @@ describe('adaptStatus', () => {
     expect(d.est.d365).toBeNull();
     expect(d.est.usd.d365).toBeNull();
     expect(d.aprPct).toBeNull();
+
+    const week = adaptStatus({
+      spotsAt: now,
+      grids: [{
+        id: 'week', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
+        usdPerQuote: 1, price: 1, startedAt: now - 8 * 86_400_000,
+        config: { totalCapitalUsd: 100 },
+        pnl: { realized: 3, unrealized: 0, gasUsd: 0 },
+        stats: { roundTrips: 2, totalFees: 0 },
+      }],
+    }, [], now);
+    expect(week.bots[0].metrics.est.d7).not.toBeNull();
+    expect(week.bots[0].metrics.est.d365).toBeNull();
+
+    const month = adaptStatus({
+      spotsAt: now,
+      grids: [{
+        id: 'month', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
+        usdPerQuote: 1, price: 1, startedAt: now - 30 * 86_400_000,
+        config: { totalCapitalUsd: 100 },
+        pnl: { realized: 3, unrealized: 0, gasUsd: 0 },
+        stats: { roundTrips: 2, totalFees: 0 },
+      }],
+    }, [], now);
+    expect(month.bots[0].metrics.est.d365?.[0].amount).toBeCloseTo(3 * 365 / 30);
   });
 
   it('rounds each live bot to cents before the home total', () => {

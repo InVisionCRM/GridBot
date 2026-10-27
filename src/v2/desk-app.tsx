@@ -10,8 +10,10 @@ import { useDesk } from './use-desk';
 
 type Page = { v: 'home' } | { v: 'bot'; id: string } | { v: 'activity' } | { v: 'more' };
 
+const SOURCE_LABEL = { live: 'Live', snapshot: 'Owner snapshot', fixture: 'Fixture' } as const;
+
 export function DeskApp() {
-  const { snap, stale } = useDesk();
+  const { snap, stale, failed } = useDesk();
   const [page, setPage] = useState<Page>({ v: 'home' });
   const bot = snap && page.v === 'bot' ? snap.bots.find((b) => b.metrics.botId === page.id) : undefined;
   const go = (next: Page) => { press(); setPage(next); };
@@ -23,12 +25,19 @@ export function DeskApp() {
           {snap && <Ticker prices={snap.prices} />}
           <header className="v2-head">
             <strong>GridBot</strong>
+            {snap && <span className={`source-badge source-${snap.source}`}>{SOURCE_LABEL[snap.source]}</span>}
             <span className={`live-chip ${stale ? 'stale' : ''}`}><i className="live-dot" /> {stale ? 'Stale' : 'Live'}</span>
           </header>
-          {stale && <p className="stale-banner" role="status">Connection dropped. Numbers are frozen until the stream returns.</p>}
+          {snap?.source === 'fixture' && <p className="sample-banner" role="status">Sample data, not your bots</p>}
+          {failed && !snap && <StreamError />}
+          {stale && snap && (
+            <p className="stale-banner" role="status">
+              Connection dropped. Numbers are frozen until the stream returns. <a href="/?classic=1">Open classic view</a>
+            </p>
+          )}
           <div className="v2-body">
             <main>
-              {!snap && <Skeleton />}
+              {!snap && !failed && <Skeleton />}
               {snap && page.v === 'home' && (
                 <HomeView portfolio={snap.portfolio} bots={snap.bots} onOpen={(id) => go({ v: 'bot', id })} />
               )}
@@ -75,6 +84,15 @@ export function DeskApp() {
         </div>
       </LayoutGroup>
     </MotionConfig>
+  );
+}
+
+function StreamError() {
+  return (
+    <div className="stream-error" role="alert">
+      <p>The desk stream didn't connect. Nothing here is live.</p>
+      <a href="/?classic=1">Open classic view</a>
+    </div>
   );
 }
 
