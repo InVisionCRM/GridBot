@@ -35,7 +35,7 @@ import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Execu
 import { checkProfitMode, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
-import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
+import { requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import { noKey } from '../words';
@@ -123,6 +123,8 @@ export interface LpState {
   archivedAt?: number | null;
   /** Why this bot last stopped or closed. Absent on state saved before this field existed. */
   halt?: Halt | null;
+  /** This run was started LIVE with Start anyway (no completed safety check): who pressed it and why. Null otherwise. */
+  startOverride?: StartOverride | null;
 }
 
 export interface LpStartParams {
@@ -137,6 +139,8 @@ export interface LpStartParams {
   limits?: Partial<SafetyLimits>;
   /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
   guard?: () => Halt | null;
+  /** LIVE only: go ahead when the safety check couldn't complete (never when it completed and failed). Audited. */
+  startAnyway?: boolean;
 }
 
 export interface LpDeps {
@@ -302,7 +306,15 @@ export class LpEngine {
     this.executor = this.makeExecutor();
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
     const v = await this.lp().view(); // fails fast on a pool that can't hold a position
-    if (p.mode === 'live' && this.def?.safety && !(await this.hub.recheck(p.market)).liveAllowed) throw new Error(`LIVE blocked — ${this.label} failed the safety check`);
+    // LIVE needs a fresh, completed safety check (Hub.liveCheck, 3 tries); Start anyway only when it couldn't complete.
+    let override: StartOverride | null = null;
+    if (p.mode === 'live' && this.def?.safety) {
+      const info = (await this.hub.liveCheck(p.market, { startAnyway: !!p.startAnyway })).override;
+      if (info) {
+        override = startOverride(info, this.now());
+        this.ev('info', `Liquidity ${this.label}: Start anyway — LIVE without a completed safety check (${info.blockedBy})`, { level: 'warn', notify: true, data: { startOverride: override } });
+      }
+    }
     if (profits.mode === 'send' && this.signer && sameAddr(await this.signer.getAddress(), profits.to)) throw new Error('That is the bot\'s own wallet: fees already stay there when reinvested.');
     const stoppedBy = p.guard?.();
     if (stoppedBy) {
@@ -316,7 +328,7 @@ export class LpEngine {
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },
       step: { action: 'open', stage: 'swap', tries: 0 }, outSince: null, lastRerangeAt: null, reranges: 0, seen: null,
       totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: this.now(), startPrice: v.price, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital + baseAmount * v.price]],
-      closing: false, archivedAt: null, halt: null,
+      closing: false, archivedAt: null, halt: null, startOverride: override,
     };
     this.lastError = null;
     this.save();
@@ -1031,7 +1043,7 @@ export class LpEngine {
     return {
       kind: 'lp' as const, id: s.id, mode: s.mode, market: s.market, label: this.label, chainId: this.chainId, base: this.baseSym, quote: this.quoteSym,
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
-      status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
+      status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
       outSince: s.outSince, move: this.moveStatus(), positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),

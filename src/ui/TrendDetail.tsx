@@ -9,7 +9,7 @@ import { ChainBadge, DexTag, chainOf, dexName } from './chains';
 import { STRATEGIES } from '../market/strategy';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
-import { showHalt } from './haltText';
+import { overrideText, showHalt } from './haltText';
 import { strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
 import { T } from './theme';
@@ -77,6 +77,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
       </div>
       {showHalt(t, closing) && <p className="bot-why">{showHalt(t, closing)}</p>}
+      {overrideText(t) && <p className="bot-why">{overrideText(t)}</p>}
 
       <div className="notices">
         {t.lastError && <div className="banner error"><span className="grow">{t.lastError}</span></div>}

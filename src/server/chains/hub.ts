@@ -39,6 +39,18 @@ export interface InspectResult {
   existing: string | null;
 }
 
+/** How many tries a live start's safety check gets (Hub.liveCheck). */
+export const LIVE_CHECK_TRIES = 3;
+/** What a Start anyway went ahead on (audited on the bot: who, when and why it was blocked). */
+export interface StartAnywayInfo { blockedBy: string; tries: number; lastKnownAt: number; lastKnownRisk: SafetyReport['risk'] }
+/** A live start whose safety check completed and failed. There is no Start anyway for this. */
+export class SafetyBlocked extends Error { readonly code = 'SAFETY_BLOCKED'; }
+/** A live start whose safety check couldn't complete (RPC trouble). `canStartAnyway`: the last measured report passed. */
+export class SafetyIncomplete extends Error {
+  readonly code = 'SAFETY_INCOMPLETE';
+  constructor(msg: string, readonly blockedBy: string, readonly canStartAnyway: boolean) { super(msg); }
+}
+
 export class Hub {
   readonly spots: Record<string, number> = {};
   readonly spotAt: Record<string, number> = {};
@@ -48,7 +60,7 @@ export class Hub {
   private custom: CustomFile = { version: 1, tokens: [], markets: [] };
   private tvlCache = new Map<string, { at: number; v: number | null }>();
 
-  constructor(private readonly o: { runtimes: ChainRuntime[]; markets: MarketDef[]; legacyNet: LiveNetwork; custom?: Store<CustomFile>; now?: () => number }) {
+  constructor(private readonly o: { runtimes: ChainRuntime[]; markets: MarketDef[]; legacyNet: LiveNetwork; custom?: Store<CustomFile>; now?: () => number; safetyRetryMs?: number[] }) {
     for (const r of o.runtimes) this.rts.set(r.cfg.id, r);
     // Shallow copies: the hub owns its defs (pool switches replace d.pool in place so live Quoters follow).
     for (const m of o.markets) if (this.rts.has(m.chainId)) this.defs.set(m.key, { ...m });
@@ -453,6 +465,39 @@ export class Hub {
     this.persist();
     if (was) this.onSafetyFresh?.(key, fresh);
     return fresh;
+  }
+
+  /**
+   * The safety check a LIVE start needs: a fresh check that completes. Up to 3 tries, waiting `safetyRetryMs` between
+   * them (each read already rotates across the chain's RPCs, #41). A try "doesn't complete" when it throws, returns no
+   * report, or its simulation didn't run (and found no honeypot / paused flag); the stored measured report is then kept,
+   * labelled stale (keepMeasured).
+   * - Completed and passing → returned.
+   * - Completed and failing (honeypot, tax over the cap, paused, thin pool, …) → SafetyBlocked. Never bypassable.
+   * - Didn't complete after 3 tries → SafetyIncomplete. `startAnyway` lets the start go ahead on the last known report,
+   *   but only when that report was measured and passed; a token that never passed a check can't be started live.
+   */
+  async liveCheck(key: string, o: { startAnyway?: boolean } = {}): Promise<{ report: SafetyReport; override: StartAnywayInfo | null }> {
+    key = unflipKey(key);
+    const label = this.label(key);
+    const waits = this.o.safetyRetryMs ?? [1000, 2000];
+    let why = 'no answer';
+    for (let n = 0; n < LIVE_CHECK_TRIES; n++) {
+      if (n > 0 && waits[n - 1]) await new Promise((r) => setTimeout(r, waits[n - 1]));
+      let r: SafetyReport;
+      try { r = await this.recheck(key, { keepMeasured: true }); } catch (e) { why = (e as Error).message.slice(0, 160); continue; }
+      if (r.stale) { why = r.stale.why; continue; }
+      if (isInconclusive(r) && r.honeypot !== true && r.paused !== true) { why = (r.reasons[0] ?? 'simulation unavailable').slice(0, 160); continue; }
+      if (!r.liveAllowed) throw new SafetyBlocked(`LIVE blocked — ${label} safety ${r.risk}: ${r.reasons.join(' ') || 'failed the safety check'}`);
+      return { report: r, override: null };
+    }
+    const known = this.def(key).safety ?? null;
+    const canStartAnyway = !!known && !isInconclusive(known) && known.liveAllowed;
+    if (o.startAnyway && canStartAnyway) return { report: known!, override: { blockedBy: why, tries: LIVE_CHECK_TRIES, lastKnownAt: known!.at, lastKnownRisk: known!.risk } };
+    const tail = canStartAnyway
+      ? `It last passed on ${new Date(known!.at).toISOString()} (${known!.risk} risk): you can Start anyway.`
+      : 'It has never passed a safety check, so it can\'t be started live.';
+    throw new SafetyIncomplete(`LIVE blocked — couldn't complete the safety check for ${label} after ${LIVE_CHECK_TRIES} tries (${why}). ${tail}`, why, canStartAnyway);
   }
 
   /** Keep the stored report's values, label them stale. */

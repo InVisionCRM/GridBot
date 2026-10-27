@@ -95,7 +95,13 @@ export function createApp(o: AppOpts) {
       const out = await fn(req, res);
       if (!res.headersSent) res.json(out ?? { ok: true });
     } catch (e) {
-      if (!res.headersSent) res.status(400).json({ error: (e as Error).message });
+      // A live start's safety block carries a code: SAFETY_BLOCKED (completed and failed, no bypass) or SAFETY_INCOMPLETE
+      // (couldn't complete; canStartAnyway says whether the page may offer Start anyway).
+      const x = e as Error & { code?: unknown; canStartAnyway?: unknown; blockedBy?: unknown };
+      const safety = x.code === 'SAFETY_BLOCKED' || x.code === 'SAFETY_INCOMPLETE'
+        ? { code: x.code, canStartAnyway: x.canStartAnyway === true, ...(typeof x.blockedBy === 'string' ? { blockedBy: x.blockedBy } : {}) }
+        : {};
+      if (!res.headersSent) res.status(400).json({ error: x.message, ...safety });
     }
   };
   const num = (v: unknown) => (v == null || v === '' ? undefined : Number(v));
@@ -123,6 +129,7 @@ export function createApp(o: AppOpts) {
       limits: b.limits as never,
       recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined,
       profits: profitsBody(b.profits),
+      startAnyway: b.startAnyway === true,
     };
   }
   /** { mode: 'reinvest' } | { mode: 'send', to } — checked by the grid (checkProfitMode); omitted = keep. */
@@ -167,7 +174,7 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     if (mode === 'live' && !bot.hasSigner) throw new Error(noKey());
-    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined, profits: profitsBody(b.profits) });
+    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined, profits: profitsBody(b.profits), startAnyway: b.startAnyway === true });
     void bot.tickAll();
     return { ok: true, ...out };
   }));
@@ -268,7 +275,7 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     const quote = String(b.quote ?? net.defaultQuote);
-    const id = await bot.addTrend({ mode, quote, tf: String(b.tf ?? '1h') as never, cfg: b.cfg ?? {}, capital: num(b.capital) ?? 0, name: b.name, limits: b.limits });
+    const id = await bot.addTrend({ mode, quote, tf: String(b.tf ?? '1h') as never, cfg: b.cfg ?? {}, capital: num(b.capital) ?? 0, name: b.name, limits: b.limits, startAnyway: b.startAnyway === true });
     void bot.tickAll();
     return { ok: true, id };
   }));
@@ -287,6 +294,7 @@ export function createApp(o: AppOpts) {
       mode: b.mode === 'live' ? 'live' : 'paper', market: String(b.market ?? ''), bandPct: Number(b.bandPct), capital: Number(b.capital ?? 0),
       baseAmount: b.baseAmount == null ? undefined : Number(b.baseAmount),
       rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined, profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
+      startAnyway: b.startAnyway === true,
     });
     void bot.tickAll();
     return { ok: true, id };

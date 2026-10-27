@@ -21,7 +21,7 @@ import {
 import { tradeStats, pushCapped, drawdown } from '../../market/stats';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type ChainReader, type Executor, type Fill, type MarketSnapshot, type Quote, type TxSender } from './chain';
 import type { Emit } from './activity';
-import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
+import { requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import type { SharedNonce, TxGate } from './txGate';
@@ -114,6 +114,8 @@ export interface TrendState {
   archivedAt?: number | null;
   /** Why this bot last stopped or closed. Absent on state saved before this field existed. */
   halt?: Halt | null;
+  /** This run was started LIVE with Start anyway (no completed safety check): who pressed it and why. Null otherwise. */
+  startOverride?: StartOverride | null;
 }
 
 export interface TrendDeps {
@@ -150,6 +152,8 @@ export interface TrendStartParams {
   limits?: Partial<SafetyLimits>;
   /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
   guard?: () => Halt | null;
+  /** LIVE only: go ahead when the safety check couldn't complete (never when it completed and failed). Audited. */
+  startAnyway?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -247,11 +251,15 @@ export class TrendEngine {
     const def = this.hub.def(p.quote);
     if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push(noKey());
     if (errs.length) throw new Error(errs.join('; '));
+    // LIVE needs a fresh, completed safety check (Hub.liveCheck, 3 tries); Start anyway only when it couldn't complete.
+    let override: StartOverride | null = null;
     if (p.mode === 'live' && def.safety) {
-      let sf = def.safety ?? null;
-      try { sf = await this.hub.recheck(p.quote); } catch (e) { sf = this.hub.def(p.quote).safety ?? sf; this.log('warn', `safety re-check failed: ${(e as Error).message}`); }
-      if (sf?.stale && sf.liveAllowed) this.log('warn', `starting on the last known safety report from ${new Date(sf.at).toISOString()} (stale: ${sf.stale.why})`);
-      if (!sf?.liveAllowed) throw new Error(`LIVE blocked — ${this.hub.label(p.quote)} safety ${sf?.risk ?? 'unknown'}: ${(sf?.reasons ?? ['no safety check']).join(' ')}`);
+      const info = (await this.hub.liveCheck(p.quote, { startAnyway: !!p.startAnyway })).override;
+      if (info) {
+        override = startOverride(info, this.now());
+        this.log('warn', `Start anyway: starting LIVE without a completed safety check (${info.blockedBy}), on the report from ${new Date(info.lastKnownAt).toISOString()}`);
+        this.emit('info', `${p.name || this.hub.label(p.quote)}: Start anyway — LIVE without a completed safety check (${info.blockedBy})`, { level: 'warn', notify: true, data: { startOverride: override } });
+      }
     }
     const executor = this.makeExecutor(p.mode, p.quote);
     if (p.mode === 'live' && def.quote.native) {
@@ -275,7 +283,7 @@ export class TrendEngine {
       status: 'running', cfg, limits, capital: p.capital, cash: p.capital, position: null, queue: [], inFlight: null,
       trades: p.mode === 'paper' ? [] : keepTrades, signals: [], lastBarT: null, cooldownUntil: 0, lastPrice: price, lastPriceAt: this.now(),
       lastNote: 'waiting for the next closed candle', blocked: 0, startedAt: this.now(), startPrice: price, equity: [[this.now(), p.capital]],
-      closing: false, archivedAt: null, halt: null,
+      closing: false, archivedAt: null, halt: null, startOverride: override,
     };
     // Don't act on the candle that closed before start: wait for the next close.
     const k = closedOnly(this.d.candles(p.quote, p.tf), p.tf, Math.floor(this.now() / 1000));
@@ -734,7 +742,7 @@ export class TrendEngine {
       moveCount: trades.filter((t) => !t.failed).length,
       lastMoveAt: trades.reduce((m, t) => (!t.failed ? Math.max(m, t.timestamp || 0) : m), 0) || null,
       equityHist: s.equity.slice(-600),
-      blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, lastError: this.lastError,
+      blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, lastError: this.lastError,
     };
   }
 }

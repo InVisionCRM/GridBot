@@ -24,7 +24,7 @@ import { pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, type RecenterState } from '../../live/recenter';
 import { noKey } from '../words';
-import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
+import { requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
 
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
@@ -92,6 +92,8 @@ export interface BotState {
   archivedAt?: number | null;
   /** Why this bot last stopped or closed. Absent on state saved before this field existed. */
   halt?: Halt | null;
+  /** This run was started LIVE with Start anyway (no completed safety check): who pressed it and why. Null otherwise. */
+  startOverride?: StartOverride | null;
 }
 
 
@@ -139,6 +141,8 @@ export interface StartParams extends GridConfig {
   profits?: ProfitMode;
   /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
   guard?: () => Halt | null;
+  /** LIVE only: go ahead when the safety check couldn't complete (never when it completed and failed). Audited. */
+  startAnyway?: boolean;
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -295,7 +299,7 @@ export class GridEngine {
     const def = this.hub.def(stable);
     if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push(noKey());
     if (errs.length) throw new Error(errs.join('; '));
-    if (p.mode === 'live' && def.safety) await this.requireLiveSafety(stable);
+    const override = p.mode === 'live' && def.safety ? await this.requireLiveSafety(stable, !!p.startAnyway) : null;
 
     // Economics (worst interval: the pool's round-trip fee + impact at level size + gas (+ L2 L1 fee)). Never blocks
     // a start: a grid that doesn't clear its costs starts with a warning saying so.
@@ -332,7 +336,7 @@ export class GridEngine {
       spacingWarn: warn, econ,
       startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalUsd]],
       recenter: { enabled: p.recenter ?? this.state.recenter?.enabled ?? false, aboveSince: null, lastAt: this.state.recenter?.lastAt ?? null, count: this.state.recenter?.count ?? 0 },
-      profits, closing: false, archivedAt: null, halt: null,
+      profits, closing: false, archivedAt: null, halt: null, startOverride: override,
       ...(paperReset ? { payoutPending: 0, payoutInFlight: null, payouts: this.state.payouts.filter((x) => !x.paper) } : {}),
     };
     this.seedUpper(price);
@@ -353,15 +357,18 @@ export class GridEngine {
     throw new StartStopped(h);
   }
 
-  /** Markets with a safety report (custom tokens, verified built-ins): re-run the eth_call buy/sell simulation before going live; honeypot / tax / unknown → refuse. */
-  private async requireLiveSafety(key: string) {
-    let s = this.hub.def(key).safety ?? null;
-    try { s = await this.hub.recheck(key); } catch (e) { s = this.hub.def(key).safety ?? null; this.tag('warn', `safety re-check failed: ${(e as Error).message}`); }
-    // Couldn't re-check: decided on the last known report (as before), and said so.
-    if (s?.stale && s.liveAllowed) this.tag('warn', `starting on the last known safety report from ${new Date(s.at).toISOString()} (stale: ${s.stale.why})`);
-    if (!s?.liveAllowed) {
-      throw new Error(`LIVE blocked — ${this.hub.label(key)} safety ${s?.risk ?? 'unknown'}: ${(s?.reasons ?? ['no safety check']).join(' ')}`);
-    }
+  /**
+   * Markets with a safety report (custom tokens, verified built-ins): a LIVE start needs a fresh, completed check
+   * (Hub.liveCheck: 3 tries). A completed fail is refused; a check that couldn't complete is refused unless Start anyway
+   * was pressed, which is then audited (returned, stored on the grid, and in the activity log).
+   */
+  private async requireLiveSafety(key: string, startAnyway: boolean): Promise<StartOverride | null> {
+    const { override } = await this.hub.liveCheck(key, { startAnyway });
+    if (!override) return null;
+    const audit = startOverride(override, this.now());
+    this.tag('warn', `Start anyway: starting LIVE without a completed safety check (${override.blockedBy}), on the report from ${new Date(override.lastKnownAt).toISOString()}`);
+    this.ev('info', `Grid ${this.label}: Start anyway — LIVE without a completed safety check (${override.blockedBy})`, { level: 'warn', notify: true, data: { startOverride: audit } });
+    return audit;
   }
 
   resume() {
@@ -946,7 +953,7 @@ export class GridEngine {
       gasReserve: m?.quote.native && this.state.config ? gasReserve(this.state.config.totalCapitalUsd, reserveCfg(this.state.limits)) : null,
       dex: m?.pool.dex ?? null, dexName: m ? (c?.dexes.find((x) => x.id === m.pool.dex)?.name ?? m.pool.dex) : null, feeTier: m?.pool.feeTier ?? null, poolMode: m?.poolMode ?? null, custom: !!m?.custom, risk: m?.safety?.risk ?? null, available: !(this.executor instanceof UnavailableExecutor),
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol), stable: this.state.stable,
-      hasSigner: this.hasSigner, status: this.state.status, closing: !!this.state.closing, archivedAt: this.state.archivedAt ?? null, halt: this.state.halt ?? null, config: this.state.config, limits: this.state.limits,
+      hasSigner: this.hasSigner, status: this.state.status, closing: !!this.state.closing, archivedAt: this.state.archivedAt ?? null, halt: this.state.halt ?? null, startOverride: this.state.startOverride ?? null, config: this.state.config, limits: this.state.limits,
       price: this.state.lastPrice, priceAt: this.state.lastPriceAt, balances: this.balances, walletBalances: this.walletBalances,
       intervals: this.state.intervals, usdPerBuy: this.state.usdPerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
       trades: trades.slice(-100).reverse(),

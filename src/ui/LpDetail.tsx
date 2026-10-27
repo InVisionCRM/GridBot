@@ -14,7 +14,7 @@ import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { Usd } from './money';
-import { showHalt } from './haltText';
+import { overrideText, showHalt } from './haltText';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -180,6 +180,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
       </div>
       {showHalt(b, closing) && <p className="bot-why">{showHalt(b, closing)}</p>}
+      {overrideText(b) && <p className="bot-why">{overrideText(b)}</p>}
 
       <div className="notices">
         {b.lastError && <div className="banner error"><span className="grow">{b.lastError}</span></div>}

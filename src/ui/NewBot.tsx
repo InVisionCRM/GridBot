@@ -9,7 +9,7 @@ import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
 import { LP_BAND, LP_MIN_SWAP_SHARE } from '../market/lp';
 import { rangeBaseShare } from '../live/v3Liquidity';
 import { L } from './Tip';
-import { botApi } from './api';
+import { botApi, offersStartAnyway } from './api';
 import { pct, px } from './fmt';
 import { ChainBadge, Orientation, PairPicker, chainOf, feeLabel, marketsOf, mk, unflipKey, useChainFilter } from './chains';
 import { TrendConfigEditor, strategyRule } from './TrendConfig';
@@ -18,6 +18,37 @@ import { LpReplay } from './LpReplay';
 import { coinFunds, errMsg, floorSig, spendFunds, type AnyObj, type BotKind, type Funds, type GridPrefill, type LpPrefill, type Nav, type TrendPrefill } from './model';
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
+
+/** Extra body for a start request, and the button name the server records (audit). */
+type Send = (extra: { startAnyway?: true }, from?: string) => Promise<unknown>;
+/**
+ * A LIVE start whose safety check couldn't complete after 3 tries is refused with the reason. When the token's last
+ * measured check passed, the server offers Start anyway: shown here as a button that asks for a confirm, then sends
+ * the same start with startAnyway (recorded on the bot: who pressed it and why it was blocked). A check that
+ * completed and failed has no Start anyway; its reason shows like any other error.
+ */
+function useLiveStart(act: Common['act'], busy: boolean) {
+  const [blocked, setBlocked] = useState<{ msg: string; send: Send } | null>(null);
+  const run = (send: Send) => act(async () => {
+    setBlocked(null);
+    try { await send({}); } catch (e) {
+      if (offersStartAnyway(e)) { setBlocked({ msg: e.message, send }); return; }
+      throw e;
+    }
+  });
+  const anyway = () => {
+    const b = blocked;
+    if (!b || !confirm(`${b.msg}\n\nStart anyway? It starts LIVE on the last known safety report, without a fresh check. Who pressed it (this computer, the phone or a friend copy), when, and why the check was blocked are recorded on the bot.`)) return;
+    act(async () => { await b.send({ startAnyway: true }, 'start-anyway'); setBlocked(null); });
+  };
+  const banner = blocked && (
+    <div className="banner error">
+      <span>{blocked.msg}</span>{' '}
+      <button type="button" className="btn live small-btn" disabled={busy} onClick={anyway}>Start anyway</button>
+    </div>
+  );
+  return { run, banner };
+}
 type Mode = 'paper' | 'live';
 interface Econ {
   ok: boolean; reasons: string[]; levelSize: number; buyLevels: number; spacingPct: number; roundTripFeePct: number;
@@ -212,22 +243,27 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
 
   const confirmLive = (what: string) => mode !== 'live' || confirm(`Start a LIVE ${what}? It signs real swaps from ${chainOf(s, m.chainId)?.address ?? s.address}.`);
 
-  const startCustom = () => act(async () => {
+  const live = useLiveStart(act, busy);
+  const startCustom = () => {
     if (!confirmLive(`grid on ${m.label}`)) return;
-    const r = await botApi('grids', 'POST', {
-      mode, stable: pair, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: +amount,
-      limits: limitsBody(limits, !!m.quoteNative), recenter: follow, profits: profitsBody(profits),
+    live.run(async (extra, from) => {
+      const r = await botApi('grids', 'POST', {
+        mode, stable: pair, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: +amount,
+        limits: limitsBody(limits, !!m.quoteNative), recenter: follow, profits: profitsBody(profits), ...extra,
+      }, from);
+      nav({ v: 'grid', id: r.id });
     });
-    nav({ v: 'grid', id: r.id });
-  });
+  };
   const legQuoteNative = !!legs?.some((l) => mk(s, l.quote).quoteNative);
-  const startPreset = () => act(async () => {
+  const startPreset = () => {
     if (!confirmLive(`${preset.name} preset`)) return;
-    const r = await botApi(`presets/${presetId}/start`, 'POST', {
-      mode, quote: pair, amounts: JSON.parse(amountsKey), limits: limitsBody(limits, legQuoteNative), recenter: follow, profits: profitsBody(profits),
+    live.run(async (extra, from) => {
+      const r = await botApi(`presets/${presetId}/start`, 'POST', {
+        mode, quote: pair, amounts: JSON.parse(amountsKey), limits: limitsBody(limits, legQuoteNative), recenter: follow, profits: profitsBody(profits), ...extra,
+      }, from);
+      nav(r.ids?.length === 1 ? { v: 'grid', id: r.ids[0] } : { v: 'home' });
     });
-    nav(r.ids?.length === 1 ? { v: 'grid', id: r.ids[0] } : { v: 'home' });
-  });
+  };
   const customize = (l: Leg) => {
     setPair(l.quote); setLower(String(l.lowerPrice)); setUpper(String(l.upperPrice)); setCount(String(l.gridCount)); setAmount(legAmounts[l.quote] ?? ''); setTab('custom');
   };
@@ -308,6 +344,7 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
         <LimitsFields l={limits} set={setLimits} quoteNative={tab === 'preset' ? legQuoteNative : !!m.quoteNative} quote={mk(s, startKey).quote} />
       </details>
 
+      {live.banner}
       <StartRow s={s} pairKey={startKey} mode={mode} setMode={setMode} busy={busy} disabled={!canStart} problem={problem}
         label={mode === 'live' ? 'Start live grid' : 'Start paper grid'} onStart={tab === 'custom' ? startCustom : startPreset} />
     </div>
@@ -332,11 +369,14 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
   const rt = 1 - (1 - m.feeBps / 10_000) ** 2;
   const funds = spendFunds(s, pair, +amount || 0, parseGasRes(limits.gasRes) ?? DEFAULT_GAS_RESERVE);
   const noBuyLine = cfg.strategy === 'lines' && !cfg.lines.some((l) => l.rule.startsWith('buy')) ? 'Draw at least one line that buys.' : null;
-  const start = () => act(async () => {
+  const live = useLiveStart(act, busy);
+  const start = () => {
     if (mode === 'live' && !confirm(`Start a LIVE trend bot on ${m.label} (${tf})? It signs real swaps from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
-    const r = await botApi('trends', 'POST', { mode, quote: pair, tf, cfg, capital: +amount, name: name || undefined, limits: limitsBody(limits, !!m.quoteNative) });
-    nav({ v: 'trend', id: r.id });
-  });
+    live.run(async (extra, from) => {
+      const r = await botApi('trends', 'POST', { mode, quote: pair, tf, cfg, capital: +amount, name: name || undefined, limits: limitsBody(limits, !!m.quoteNative), ...extra }, from);
+      nav({ v: 'trend', id: r.id });
+    });
+  };
 
   return (
     <div className="card">
@@ -362,6 +402,7 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
       <div className="actions">
         <button type="button" className="btn" onClick={() => nav({ v: 'tools', tab: 'backtest', btPrefill: { pair, tf, cfg, nonce: Date.now() } })}>Backtest these settings first</button>
       </div>
+      {live.banner}
       <StartRow s={s} pairKey={pair} mode={mode} setMode={setMode} busy={busy} disabled={!(+amount > 0) || !!noBuyLine} problem={noBuyLine ?? fundsProblem(funds, +amount || 0, mode)}
         label={mode === 'live' ? 'Start live trend bot' : 'Start paper trend bot'} onStart={start} />
     </div>
@@ -417,13 +458,16 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const funds = spendFunds(s, pair, q, gasCfg), baseFunds = coinFunds(s, pair, 'base', a, gasCfg);
   const plan = spot && bandOk && q + a > 0 ? swapPlan(spot, b, q, a) : null;
   const impact = Number(limits.impact) / 100, impactOk = impact > 0 && impact < 1;
-  const start = () => act(async () => {
+  const live = useLiveStart(act, busy);
+  const start = () => {
     if (mode === 'live' && !confirm(`Start a LIVE liquidity position on ${m.label}? It signs real transactions from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
-    const r = await botApi('lps', 'POST', {
-      mode, market: pair, bandPct: b, capital: q, baseAmount: a, rerange, profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative),
+    live.run(async (extra, from) => {
+      const r = await botApi('lps', 'POST', {
+        mode, market: pair, bandPct: b, capital: q, baseAmount: a, rerange, profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative), ...extra,
+      }, from);
+      nav({ v: 'lp', id: r.id });
     });
-    nav({ v: 'lp', id: r.id });
-  });
+  };
 
   return (
     <div className="card">
@@ -453,6 +497,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
         <summary>Advanced</summary>
         <LimitsFields l={limits} set={setLimits} quoteNative={!!m.quoteNative} quote={m.quote} />
       </details>
+      {live.banner}
       <StartRow s={s} pairKey={pair} mode={mode} setMode={setMode} busy={busy} disabled={!(q + a > 0) || q < 0 || a < 0 || !bandOk || !(profits.mode === 'reinvest' || isAddress(profits.to))}
         problem={fundsProblem(funds, q, mode) ?? fundsProblem(baseFunds, a, mode)} label={mode === 'live' ? 'Open live position' : 'Open paper position'} onStart={start} />
     </div>

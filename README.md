@@ -137,7 +137,7 @@ Tools → Markets → *Add custom token*: pick a chain, paste an address, option
 
 **Fee-on-transfer policy: support on V2, prove-or-block on V3.** Buy / transfer / sell taxes are measured separately. On V2 forks (PulseX V1/V2, 9mm V2, Uniswap V2) a tax up to `MAX_TOKEN_TAX_PCT` (default 10%) per side is allowed live: swaps use the router's `*SupportingFeeOnTransferTokens` methods, `amountOutMin` is set **after** tax, both taxes are part of every cost / start / spacing / trend / backtest gate, and PnL is booked from the wallet's balance change (actual received). On V3, a taxed token is live only if the simulated buy → transfer → sell through that exact pool succeeded (`v3-proven`); otherwise paper-only. A tax above the cap, a honeypot, paused trading, or an unverifiable simulation is paper-only. While a bot runs on a custom token the tax test re-runs every `TAX_RECHECK_MIN` minutes (default 30) and immediately after a reverted swap or a fill short of the post-tax quote; a rising tax (or honeypot / pause) pauses every bot on that market with an alert. Tested in `tests/decimalsTaxes.test.ts` + `tests/multichain.test.ts`; on-chain, STA (Statera, Ethereum) is measured as a 1% tax token.
 
-**Stale safety reports.** A re-check that fails (RPC error), finds no usable pool, or (on the 30-minute schedule) can't run its simulation measures nothing new. It doesn't silently reuse the old report:
+**Stale safety reports.** A re-check that fails (RPC error), finds no usable pool, or (on the 30-minute schedule or from the **Re-check** button) can't run its simulation measures nothing new. It doesn't silently reuse the old report:
 
 - The last known values stay. They are shown, and their taxes are still used in quotes.
 - The values are labelled **stale**, with when the problem started and why. The labels show in:
@@ -149,11 +149,22 @@ Tools → Markets → *Add custom token*: pick a chain, paste an address, option
 
 What doesn't change:
 
-- A live start (grid, trend) decides on the last known report, as it already did when the re-check threw, and logs that the report is stale.
-- A liquidity-bot live start is still refused when the re-check throws.
 - A re-check that runs and finds a problem (honeypot, tax rise, paused, blocked) still pauses as before.
-- After a suspicious event (a reverted swap, a short fill) or a manual re-check, a re-check that throws still fails closed and pauses, as before. One that returns nothing only warns.
-- The next measured re-check replaces the stale report and clears the label. Tested in `tests/safetyStale.test.ts`.
+- **Re-check button:** an RPC hiccup (transport error, timeout, rate limit, the simulation not running) marks the market stale and shows the warning. It does **not** pause. Any other error from a manual re-check still pauses.
+- After a suspicious event (a reverted swap, a short fill), a re-check that throws or can't run its simulation still fails closed and pauses, as before. One that returns nothing only warns.
+- The next measured re-check replaces the stale report and clears the label. Tested in `tests/safetyStale.test.ts` and `tests/liveStartSafety.test.ts`.
+
+**Live starts need a fresh, completed safety check** (grid, preset, trend, liquidity; `Hub.liveCheck`). Paper starts are unchanged and don't check.
+
+- Up to **3 tries**, 1 s then 2 s apart. Each try already rotates across the chain's RPCs.
+- A try *doesn't complete* when it throws, returns no report, or its simulation doesn't run. A real honeypot or `paused()` found by an inconclusive run counts as completed.
+- **Completed and passing:** the bot starts.
+- **Completed and failing** (honeypot, tax over the cap, paused, thin pool, …): refused with the reasons, API `400 {code: 'SAFETY_BLOCKED'}`. There is **no** Start anyway.
+- **Not completed after 3 tries:** refused with the reason, API `400 {code: 'SAFETY_INCOMPLETE', canStartAnyway, blockedBy}`. The stored measured report is kept, labelled stale.
+  - `canStartAnyway` is true only when the last known report was a measured pass. A token that never passed (or last failed) can't be started live.
+  - New bot then shows the reason with a **Start anyway** button. It asks for a confirm, then sends the same start with `startAnyway: true` (header `X-GridBot-From: start-anyway`). The server still runs the 3 tries first.
+  - The bot stores `startOverride`: who pressed it (origin: this computer / phone / friend copy, endpoint, browser), when, why the check was blocked, the tries and the last report's date and risk. It shows on the bot's page, in `status`, and as a notifying warning in the activity log.
+- The autopilot's own live opens never use Start anyway. **Resume** of a stopped bot still uses the stored report (unchanged).
 
 Custom markets persist in `data/custom.json` and work in grids, trend bots, backtests (GeckoTerminal with on-chain V2/V3 rebuild fallback), charts, market panels, alerts and analytics. **Re-check** re-runs the safety probe. **Remove** works once no bot or alert uses the market. A pool that is already a pair can't be added a second time (before, re-adding a coin's second pool made a duplicate pair).
 

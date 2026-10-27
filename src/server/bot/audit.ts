@@ -33,6 +33,7 @@ const FROM: Record<string, { what: string; detail: string }> = {
   'row-pause': { what: 'button', detail: 'Pause button' },
   'row-close': { what: 'button', detail: 'Close button' },
   'close-all': { what: 'button', detail: 'Close all button' },
+  'start-anyway': { what: 'button', detail: 'Start anyway button' },
 };
 
 export function systemHalt(what: string, detail: string, at: number): Halt {
@@ -64,6 +65,21 @@ export function isHalt(v: unknown): v is Halt {
   const o = v as Halt;
   return typeof o.at === 'number' && typeof o.what === 'string' && typeof o.detail === 'string'
     && (o.origin === 'localhost' || o.origin === 'gateway-owner' || o.origin === 'friend-copy' || o.origin === 'system');
+}
+
+/**
+ * A LIVE start that went ahead without a completed safety check (Start anyway, after 3 tries couldn't complete it).
+ * Who pressed it (origin, endpoint, browser), when, why the check was blocked, and the last report it relied on.
+ */
+export interface StartOverride extends Halt {
+  blockedBy: string;
+  tries: number;
+  lastKnownAt: number;
+  lastKnownRisk: string;
+}
+
+export function startOverride(info: { blockedBy: string; tries: number; lastKnownAt: number; lastKnownRisk: string }, at: number): StartOverride {
+  return { ...requestHalt('start-anyway', 'Start anyway (API)', at), ...info };
 }
 
 /** A start that a Stop all / STOP chain overtook while it was under way. It is refused; `halt` is that press. */

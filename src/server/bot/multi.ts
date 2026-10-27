@@ -15,7 +15,7 @@ import { FEE_BPS } from '../../live/economics';
 import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
 import { LpEngine, freshLp, upgradeLp, type LpStartParams, type LpState } from './lpEngine';
-import { TaxWatch } from './taxWatch';
+import { MANUAL_CHECK, TaxWatch } from './taxWatch';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import { SharedNonce, TxGate } from './txGate';
@@ -207,7 +207,7 @@ export class MultiBot {
       now: () => this.now(),
       markets: () => this.watchedSafetyKeys(),
       current: (k) => this.hub.def(k).safety,
-      recheck: (k, why) => this.hub.recheck(k, { keepMeasured: why === 'scheduled' }),
+      recheck: (k, why) => this.hub.recheck(k, { keepMeasured: why === 'scheduled' || why === MANUAL_CHECK }),
       pause: (k, why) => this.pauseMarket(k, why),
       alert: (k, level, msg, notify) => this.activity.emitEvent({ type: 'alert', kind: 'system', level, notify, pair: k, chainId: this.hub.def(k).chainId, msg }),
       label: (k) => this.hub.label(k),
@@ -1313,7 +1313,7 @@ export class MultiBot {
 
   async startPreset(
     id: string,
-    opts: { mode: Mode; quote?: string; amounts: Record<string, number>; limits?: Parameters<GridEngine['start']>[0]['limits']; recenter?: boolean; profits?: ProfitMode },
+    opts: { mode: Mode; quote?: string; amounts: Record<string, number>; limits?: Parameters<GridEngine['start']>[0]['limits']; recenter?: boolean; profits?: ProfitMode; startAnyway?: boolean },
   ): Promise<{ ids: string[]; legs: ResolvedLeg[] }> {
     const { legs } = await this.previewPreset(id, opts);
     const missing = legs.filter((l) => l.capital == null).map((l) => l.label);
@@ -1324,7 +1324,7 @@ export class MultiBot {
       for (const leg of legs) {
         ids.push(await this.add({
           mode: opts.mode, stable: leg.quote, lowerPrice: leg.lowerPrice, upperPrice: leg.upperPrice, gridCount: leg.gridCount,
-          totalCapitalUsd: leg.capital!, limits: opts.limits, recenter: opts.recenter, profits: opts.profits,
+          totalCapitalUsd: leg.capital!, limits: opts.limits, recenter: opts.recenter, profits: opts.profits, startAnyway: opts.startAnyway,
         }));
       }
     } catch (e) {
@@ -1401,7 +1401,8 @@ export class MultiBot {
   }
   async recheckMarket(key: string) {
     // Route through TaxWatch so a rising tax / honeypot on a live market pauses bots the same way a scheduled check would.
-    const c = await this.taxWatch.check(key, 'manual');
+    const c = await this.taxWatch.check(key, MANUAL_CHECK);
+    // An RPC hiccup on this check warns, marks the market stale and returns the last known report: no pause.
     if (c?.report) return c.report;
     const r = await this.hub.recheck(key);
     this.activity.emitEvent({ type: 'info', kind: 'system', level: r.liveAllowed ? 'info' : 'warn', pair: key, chainId: this.hub.def(key).chainId, msg: `Safety re-check ${this.hub.label(key)}: ${r.risk}${r.liveAllowed ? '' : ' — live trading blocked'}` });

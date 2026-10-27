@@ -18,7 +18,7 @@ import { recenterAt } from '../live/recenter';
 import { LiveLevels, livePrice } from './live';
 import { L, Tip } from './Tip';
 import { Amt, Usd } from './money';
-import { showHalt } from './haltText';
+import { overrideText, showHalt } from './haltText';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -224,6 +224,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
       </div>
       {showHalt(g, closing) && <p className="bot-why">{showHalt(g, closing)}</p>}
+      {overrideText(g) && <p className="bot-why">{overrideText(g)}</p>}
 
       <div className="notices">
         {g.available === false && <div className="banner error"><span className="grow">This market isn't available on the running server (its chain may be turned off {s.copy ? `by ${s.copy.host}` : 'in .env'}).</span></div>}
