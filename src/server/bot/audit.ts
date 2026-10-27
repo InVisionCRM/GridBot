@@ -65,3 +65,8 @@ export function isHalt(v: unknown): v is Halt {
   return typeof o.at === 'number' && typeof o.what === 'string' && typeof o.detail === 'string'
     && (o.origin === 'localhost' || o.origin === 'gateway-owner' || o.origin === 'friend-copy' || o.origin === 'system');
 }
+
+/** A start that a Stop all / STOP chain overtook while it was under way. It is refused; `halt` is that press. */
+export class StartStopped extends Error {
+  constructor(readonly halt: Halt) { super(`Not started: ${halt.detail} was pressed while it was starting.`); }
+}
