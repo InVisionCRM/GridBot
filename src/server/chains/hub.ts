@@ -13,6 +13,7 @@ import { ChainRuntime } from './runtime';
 import { discoverPools, type DiscoveredPool } from '../dex/discovery';
 import { readTokenMeta, type TokenMeta } from '../dex/tokens';
 import { classify, depthAt, hopFor, simulateRoundTrip, type ProbeResult } from '../dex/safety';
+import { isInconclusive } from '../bot/taxWatch';
 import { sameAddr } from '../dex/types';
 import { toUnits } from '../../live/swapMath';
 import { readDecimals } from '../../live/decimals';
@@ -412,12 +413,19 @@ export class Hub {
     return r.draft;
   }
 
-  async recheck(key: string): Promise<SafetyReport> {
+  /**
+   * Re-run the safety probe. `keepMeasured` (the tax watcher's periodic check): a re-check whose simulation didn't run
+   * (an RPC hiccup) measured nothing, so the market keeps its last measured report (and the taxes its quotes use) and
+   * the caller gets the fresh one. Without it (a live start, a manual re-check) the fresh report always replaces it.
+   */
+  async recheck(key: string, o: { keepMeasured?: boolean } = {}): Promise<SafetyReport> {
     key = unflipKey(key);
     const d = this.def(key);
     if (!d.safety) throw new Error(`${this.label(key)} has no safety check (built-in PulseChain market)`);
     const r = await this.inspect({ chainId: d.chainId, address: d.base.address, quote: d.quote.address, pool: d.pool.address });
-    d.safety = r.safety ?? d.safety;
+    const fresh = r.safety ?? null;
+    if (o.keepMeasured && fresh && isInconclusive(fresh) && d.safety && !isInconclusive(d.safety)) return fresh;
+    d.safety = fresh ?? d.safety;
     this.persist();
     return d.safety!;
   }
