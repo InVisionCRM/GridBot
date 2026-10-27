@@ -98,7 +98,8 @@ export function createTokenTrader(o: {
         if (q.block) throw new Error(q.block);
         if (!q.balanceOk) throw new Error(q.balanceNote ?? 'balance');
         if (q.priceImpact > limits.maxPriceImpact) throw new Error(`price impact ${(q.priceImpact * 100).toFixed(2)}% is over the cap`);
-        const fill = await ex.execute(q, { canSend: () => trader.status().on, onSent: () => undefined });
+        // A Stop all that lands between the quote and the send stops the buy (sells keep running: they are exits).
+        const fill = await ex.execute(q, { canSend: () => trader.canBuy(pool.chainId), onSent: () => undefined });
         const usd = fill.amountInHuman * pool.usdPerSpend;
         return { tokens: fill.amountOutHuman, spent: fill.amountInHuman, spentUsd: usd, price: fill.amountOutHuman > 0 ? fill.amountInHuman / fill.amountOutHuman : pool.price, impact: q.priceImpact, tx: fill.txHash };
       },
