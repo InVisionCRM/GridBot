@@ -262,6 +262,18 @@ The owner log-in is not a friend. Invite links cannot create it. A friend's cook
 
 Tailscale deletes client-sent `Tailscale-*` headers and replaces `X-Forwarded-For`, so a visitor can't hide either sign. The gateway treats a request with the Funnel header **or** a forwarded address that is not loopback/tailnet as Funnel. (Funnel in raw TCP mode, `tailscale funnel --tcp`, sets no headers at all; don't use it for the gateway.)
 
+**People you share this computer with can reach the owner log-in page.** Tailscale node sharing (how friends get in, see "Friends" below) gives the friend's device the same `https://<mac>.<tailnet>.ts.net` address. The gateway shows that device the same log-in page, and it accepts the owner name there just as it does from your phone. Funnel is the only thing it refuses. Tailscale stops strangers on the internet, but it does not stop anyone you shared with from guessing the owner password. Treat the password as the only thing between a shared device and your bots and keys:
+
+- **Use a long, random password**, such as a password-manager-generated one of 20+ characters or a 5-6 word random passphrase. `npm run host:password` requires at least 12 characters, but that is a floor and not a recommendation. Don't reuse a password a friend might know.
+- **Consider a log-in name other than `owner`.** `npm run host:password` asks for one and stores it as `HOST_LOGIN`. Guesses are counted per name, so an unknown name means a guesser has to find the name first. This doesn't replace a strong password.
+- **What the lockout does** (`src/server/friends/accounts.ts`, shared by friend and owner log-ins):
+  - 5 wrong passwords for a name lock that name for 15 minutes. After the lock ends, 5 more tries are allowed. That is about 480 guesses a day, so the lockout slows guessing but does not stop it, which is why the password must be strong.
+  - When more than 30 log-ins failed in the last minute (any names, any devices), every log-in pauses until the minute passes.
+  - The counters are kept in memory. A restart clears them.
+  - The lock is per name, not per device. Someone guessing at your name also locks **you** out for those 15 minutes. If that happens, wait it out, or restart the app to clear the lock.
+  - A guess through Funnel is refused before the password is checked, so it never counts toward the lock.
+- **If you suspect guessing:** run `npm run host:password` again to set a new password (it also ends existing owner log-ins after a restart), and remove the share in the [admin console](https://login.tailscale.com/admin/machines) (this computer → Share).
+
 ## Friends' copies (Tools → Friends)
 
 Friends get their own copy of the app on your computer and open it on their phone: their own bots, key, history and log-in (`src/server/friends`). Your app and your key are unchanged and stay on 127.0.0.1; friends only ever reach the friends' gateway. Your own phone uses the same gateway, with the owner log-in from Phone access, and is proxied to your app rather than to a copy.
