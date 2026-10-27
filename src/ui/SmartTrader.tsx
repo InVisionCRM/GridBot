@@ -42,7 +42,9 @@ export function SmartTrader({ s, nav }: { s: AnyObj; nav: Nav }) {
   };
   if (err) return <main className="stack"><div className="banner error"><span className="grow">{err}</span></div></main>;
   if (!a) return <main className="stack"><p className="muted">Loading…</p></main>;
-  const managing = a.accounts.some((x: AnyObj) => x.bots.length || x.pending);
+  // An account with bots, swaps or coins other than its budget's still to settle stays on the page (and keeps new budgets out)
+  const holding = a.accounts.some((x: AnyObj) => x.holds);
+  const showAccounts = a.on || holding || a.accounts.some((x: AnyObj) => x.halted || x.killed);
 
   return (
     <main className="stack smart">
@@ -63,11 +65,9 @@ export function SmartTrader({ s, nav }: { s: AnyObj; nav: Nav }) {
         {a.lastError && <div className="banner"><span className="grow">Last check: {a.lastError}</span></div>}
       </section>
 
-      {!a.on && !managing && <Setup s={s} a={a} busy={busy} run={run} />}
-      {(a.on || managing) && <>
-        {a.accounts.map((x: AnyObj) => <AccountCard key={x.chainId} s={s} x={x} nav={nav} busy={busy} onCarryOn={() => void run(() => http('/api/autopilot/carry-on', 'POST', { chainId: x.chainId }))} />)}
-        <OnControls a={a} busy={busy} run={run} />
-      </>}
+      {showAccounts && a.accounts.map((x: AnyObj) => <AccountCard key={x.chainId} s={s} x={x} nav={nav} busy={busy} run={run} />)}
+      {(a.on || holding) && <OnControls a={a} busy={busy} run={run} />}
+      {!a.on && !holding && <Setup s={s} a={a} busy={busy} run={run} />}
       <Decisions log={a.log} s={s} />
       <TokenTraderPanel s={s} />
     </main>
@@ -90,11 +90,14 @@ function Setup({ s, a, busy, run }: { s: AnyObj; a: AnyObj; busy: boolean; run: 
   const free = chains.filter((c) => !rows.some((r) => r.chainId === c.id));
   const liveBlocked = rows.some((r) => !chainOf(s, r.chainId)?.hasSigner);
   const set = (i: number, r: Partial<BudgetRow>) => setRows(rows.map((x, j) => (j === i ? { ...x, ...r } : x)));
-  const start = () => run(async () => {
-    await http('/api/autopilot', 'PUT', { mode, options: opts, budgets: rows.map((r) => ({ chainId: r.chainId, coin: r.coin, amount: Number(r.amount) })) });
+  // Asked before anything is saved: cancelling leaves the settings as they were
+  const start = () => {
     if (mode === 'live' && !confirm(`Turn the smart trader on with real money? It opens, closes and swaps on its own, up to the budgets you set (${rows.map((r) => `${r.amount} ${r.coin}`).join(', ')}).`)) return;
-    return http('/api/autopilot/on', 'POST');
-  });
+    return run(async () => {
+      await http('/api/autopilot', 'PUT', { mode, options: opts, budgets: rows.map((r) => ({ chainId: r.chainId, coin: r.coin, amount: Number(r.amount) })) });
+      return http('/api/autopilot/on', 'POST');
+    });
+  };
 
   return (
     <section className="card">
@@ -116,7 +119,7 @@ function Setup({ s, a, busy, run }: { s: AnyObj; a: AnyObj; busy: boolean; run: 
             <b>{chainOf(s, r.chainId)?.name}</b>
             <input value={r.amount} inputMode="decimal" aria-label="Amount" placeholder="Amount" onChange={(e) => set(i, { amount: e.target.value.replace(/[^\d.]/g, '') })} />
             <select value={r.coin} aria-label="Coin" onChange={(e) => set(i, { coin: e.target.value })}>
-              {coins(r.chainId).map((c) => <option key={c} value={c}>{c}</option>)}
+              {[...new Set([...coins(r.chainId), r.coin].filter(Boolean))].map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
             <span className="small muted">{pools(r.chainId)} pools to pick from</span>
             <button type="button" className="btn ghost small-btn" onClick={() => setRows(rows.filter((_, j) => j !== i))}>Remove</button>
@@ -173,8 +176,18 @@ function OptionsForm({ opts, setOpts }: { opts: Opts; setOpts: (o: Opts) => void
   );
 }
 
-function AccountCard({ s, x, nav, busy, onCarryOn }: { s: AnyObj; x: AnyObj; nav: Nav; busy: boolean; onCarryOn: () => void }) {
-  const v: number | null = x.value, r = v == null ? null : v / x.amount - 1;
+/** A bot's state as the trader sees it: running, or why it is waiting */
+function botState(b: AnyObj): { tag: string; cls: string; tip: string } | null {
+  if (b.cashedOut) return { tag: 'closed, coming back', cls: 'risk-mid', tip: 'Closed: what it held returns to the budget on the next check, and coins other than the budget\'s are swapped back.' };
+  if (b.retiring && b.status !== 'running' && b.status !== 'closed') return { tag: `closing paused: ${b.retiring.why}`, cls: 'risk-high', tip: 'It was stopped (by hand, KILL ALL or a safety pause) before its close finished. Resume it on its page to finish.' };
+  if (b.retiring) return { tag: `closing: ${b.retiring.why}`, cls: 'risk-mid', tip: 'Being closed; its money comes back to the budget.' };
+  if (b.status !== 'running') return { tag: b.status ?? 'missing', cls: 'risk-high', tip: 'Not running: it keeps its slot, and the smart trader leaves it alone until you resume it on its page.' };
+  return null;
+}
+
+function AccountCard({ s, x, nav, busy, run }: { s: AnyObj; x: AnyObj; nav: Nav; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<void> }) {
+  const base = x.amount - x.withdrawn;
+  const v: number | null = x.value, r = v == null || !(base > 0) ? null : v / base - 1;
   const others = Object.entries(x.coins as Record<string, number>).filter(([c, n]) => c !== x.coin && n > 0);
   return (
     <section className="card">
@@ -189,19 +202,23 @@ function AccountCard({ s, x, nav, busy, onCarryOn }: { s: AnyObj; x: AnyObj; nav
       {x.halted && <div className="banner error"><span className="grow">Stopped by the loss limit: {x.halted}.</span></div>}
       {x.killed && (
         <div className="banner error" role="status">
-          <span className="grow">Stopped by {x.killed}{x.killHalt ? ` (${haltText(x.killHalt)})` : ''}: it opens nothing, sends no swap and closes nothing on this chain until you carry on.</span>
-          <button type="button" className="btn small-btn" disabled={busy} onClick={onCarryOn}>Carry on</button>
+          <span className="grow">Stopped by {x.killed}{x.killHalt ? ` (${haltText(x.killHalt)})` : ''}: nothing is sent for this budget (no swap, close or new bot). Its bots stay stopped until you resume them on their pages.</span>
+          <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/autopilot/carry-on', 'POST', { chainId: x.chainId }))}>Carry on</button>
         </div>
       )}
-      <p className="small muted">Not in a bot: {big(x.coins[x.coin] ?? 0)} {x.coin}{others.map(([c, n]) => ` + ${big(n)} ${c}`).join('')}{x.pending ? ` · ${x.pending} swap${x.pending === 1 ? '' : 's'} confirming` : ''}</p>
+      <p className="small muted">
+        Not in a bot: {big(x.coins[x.coin] ?? 0)} {x.coin}{others.map(([c, n]) => ` + ${big(n)} ${c}`).join('')}{x.pending ? ` · ${x.pending} swap${x.pending === 1 ? '' : 's'} confirming` : ''}
+        {x.gasNative > 0 ? ` · its swaps' gas ${big(x.gasNative)} ${x.nativeSym}` : ''}
+        {x.withdrawn > 0 ? ` · ${big(x.withdrawn)} ${x.coin} taken out by hand (removed bots)` : ''}
+      </p>
       {!x.bots.length && <p className="small muted">No bots yet.</p>}
       <div className="smart-bots">
         {x.bots.map((b: AnyObj) => {
-          const gain = b.valueBudget == null ? null : b.valueBudget / b.cost - 1;
+          const gain = b.valueBudget == null ? null : b.valueBudget / b.cost - 1, st = botState(b);
           return (
             <button key={b.id} type="button" className="smart-bot" onClick={() => nav(botView(b.kind, b.id))}>
               <span className="smart-bot-name"><b>{b.label}</b><span className={`tag ${b.kind === 'lp' ? 'way-lp' : 'way-grid'}`}>{b.kind === 'lp' ? 'Liquidity' : 'Grid'}</span>
-                {b.retiring ? <span className="tag risk-mid">closing: {b.retiring.why}</span> : null}</span>
+                {st && <span className={`tag ${st.cls}`} title={st.tip}>{st.tag}</span>}</span>
               <span className="small muted">{big(b.capital)} {b.spend}{b.spend !== x.coin ? ` (${big(b.cost)} ${x.coin})` : ''} · expected {pct(b.expected, 1, true)} a week · {Date.now() < b.holdUntil ? `kept until ${new Date(b.holdUntil).toLocaleDateString()}` : 'reviewed daily'}</span>
               <span className="smart-bot-v">{b.valueBudget == null ? '—' : <><b className={gain! >= 0 ? 'pos' : 'neg'}>{pct(gain, 2, true)}</b><span className="small muted">{big(b.valueBudget)} {x.coin}</span></>}</span>
             </button>
@@ -228,9 +245,13 @@ function OnControls({ a, busy, run }: { a: AnyObj; busy: boolean; run: (fn: () =
           <button type="button" className="btn danger" disabled={busy}
             onClick={() => { if (confirm('Turn off and close every bot it runs back to its coin?')) void run(() => http('/api/autopilot/off', 'POST', { sell: true })); }}>Turn off, close its bots</button>
         </> : <>
-          <button type="button" className="btn primary" disabled={busy} onClick={() => void run(() => http('/api/autopilot/on', 'POST'))}>Turn on again</button>
-          <button type="button" className="btn danger" disabled={busy}
-            onClick={() => { if (confirm('Close every bot it ran back to its coin?')) void run(() => http('/api/autopilot/off', 'POST', { sell: true })); }}>Close its bots</button>
+          {a.closeAll && a.accounts.some((x: AnyObj) => x.bots.length || x.pending)
+            ? <span className="small muted">Closing its bots back to their coins; it can be turned on again once they are back.</span>
+            : <>
+              <button type="button" className="btn primary" disabled={busy} onClick={() => void run(() => http('/api/autopilot/on', 'POST'))}>Turn on again</button>
+              <button type="button" className="btn danger" disabled={busy}
+                onClick={() => { if (confirm('Close every bot it ran back to its coin?')) void run(() => http('/api/autopilot/off', 'POST', { sell: true })); }}>Close its bots</button>
+            </>}
         </>}
       </div>
     </section>
