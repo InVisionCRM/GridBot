@@ -416,7 +416,7 @@ describe('Auto-recenter: follows the price up only', () => {
 
   it(`moves the range up after ${RECENTER_AFTER_MS / 3600_000}h above it, same width/levels/amount, keeps the trades`, async () => {
     const { chain, bot, at } = make();
-    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30, recenter: true });
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30, recenter: true });
     chain.setPrice(P0 * 0.97); await bot.tickAll(); // buys
     chain.setPrice(P0 * 1.15); await bot.tickAll(); // sells everything on the way up, now above the range
     const before = grid(bot, id);
@@ -432,7 +432,7 @@ describe('Auto-recenter: follows the price up only', () => {
     const px = g.price;
     expect(g.config.lowerPrice).toBeCloseTo(px * 0.9, 9);
     expect(g.config.upperPrice).toBeCloseTo(px * 1.1, 9);
-    expect(g.config).toMatchObject({ gridCount: 10, totalCapitalUsd: 30 });
+    expect(g.config).toMatchObject({ gridCount: 10, totalCapitalQuote: 30 });
     // the trades carry over; the new levels above the price got their coins from one start-up buy
     expect(g.trades.length).toBe(trades + 1);
     expect(g.trades[0]).toMatchObject({ side: 'buy', seed: [5, 6, 7, 8, 9] });
@@ -442,7 +442,7 @@ describe('Auto-recenter: follows the price up only', () => {
 
   it(`at most once per ${RECENTER_COOLDOWN_MS / 3600_000}h`, async () => {
     const { chain, bot, at } = make();
-    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30, recenter: true });
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30, recenter: true });
     chain.setPrice(P0 * 1.15); await bot.tickAll();
     at(RECENTER_AFTER_MS + 1); await bot.tickAll();
     expect(grid(bot, id).recenter.count).toBe(1);
@@ -456,8 +456,8 @@ describe('Auto-recenter: follows the price up only', () => {
 
   it('never moves down, and is off unless turned on', async () => {
     const { chain, bot, at } = make();
-    const on = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30, recenter: true });
-    const off = await bot.add({ mode: 'paper', stable: 'USDC', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 });
+    const on = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30, recenter: true });
+    const off = await bot.add({ mode: 'paper', stable: 'USDC', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 });
     chain.setPrice(P0 * 0.8); await bot.tickAll();
     at(RECENTER_AFTER_MS * 5); await bot.tickAll();
     expect(grid(bot, on).config.lowerPrice).toBeCloseTo(P0 * 0.9, 12);
@@ -470,11 +470,11 @@ describe('Auto-recenter: follows the price up only', () => {
 
   it('setRecenter turns it on or off for a running grid and survives a restart', async () => {
     const { bot } = make();
-    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 });
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 });
     bot.setRecenter(id, true);
     expect(grid(bot, id).recenter.enabled).toBe(true);
     bot.stop(id);
-    await bot.start(id, { mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.8, upperPrice: P0 * 1.2, gridCount: 10, totalCapitalUsd: 30 });
+    await bot.start(id, { mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.8, upperPrice: P0 * 1.2, gridCount: 10, totalCapitalQuote: 30 });
     expect(grid(bot, id).recenter.enabled).toBe(true);
     bot.setRecenter(id, false);
     expect(grid(bot, id).recenter.enabled).toBe(false);

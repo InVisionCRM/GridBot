@@ -200,14 +200,9 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <span className="sub">{pnl ? <>waiting in the position: {num(b.owed?.base, 6)} {base} + {num(b.owed?.quote, 6)} {q}<Usd v={pnl.fees} k={k} /></> : 'measuring…'}</span>
         </div>
         <div className="kpi">
-          <span><L tip={`Gas for every open, range move, close and fee collect, plus what the swaps to the range's mix lost to the pool fee and price impact. Counted in ${q}.`}>Costs</L></span>
-          <div className="kpi-v">{pnl ? qty(-(pnl.gas + pnl.swapCost), q, 4) : '—'}</div>
-          <span className="sub">{pnl ? <>gas {qty(pnl.gas, q, 3, false)} · swaps {qty(pnl.swapCost, q, 3, false)}<Usd v={-(pnl.gas + pnl.swapCost)} k={k} /></> : ''}</span>
-        </div>
-        <div className="kpi">
-          <span><L tip={`While the price is inside the range, the position sells ${base} as it rises and buys it as it falls, so it ends up with more of whichever coin fell. Taking it out (to move the range, or to close) makes that final. This is how much less those coins were worth than the ones put in, at the same price.`}>Lost to range moves</L></span>
-          <div className={`kpi-v ${pnl?.moveLoss ? 'neg' : ''}`}>{pnl ? qty(-pnl.moveLoss, q, 4) : '—'}</div>
-          <span className="sub">{b.reranges} range move{b.reranges === 1 ? '' : 's'}<Usd v={pnl ? -pnl.moveLoss : null} k={k} /></span>
+          <span><L tip={`Everything that came off the fees, in ${q}: gas for every open, range move, close and fee collect; what the swaps to the range's mix lost to the pool fee and price impact; and what each range move locked in. While the price is inside the range the position sells ${base} as it rises and buys it as it falls, so it ends up with more of whichever coin fell; taking it out (to move the range, or to close) makes that final, and the shortfall against the coins put in, at the same price, is the range-move loss.`}>Costs</L></span>
+          <div className={`kpi-v ${pnl && pnl.gas + pnl.swapCost + pnl.moveLoss > 0 ? 'neg' : ''}`}>{pnl ? qty(-(pnl.gas + pnl.swapCost + pnl.moveLoss), q, 4) : '—'}</div>
+          <span className="sub">{pnl ? <>gas {qty(pnl.gas, q, 3, false)} · swaps {qty(pnl.swapCost, q, 3, false)} · range moves {qty(pnl.moveLoss, q, 3, false)} ({b.reranges} move{b.reranges === 1 ? '' : 's'})<Usd v={-(pnl.gas + pnl.swapCost + pnl.moveLoss)} k={k} /></> : ''}</span>
         </div>
         <div className="kpi">
           <span><L tip={`Fees earned minus gas, swap fees and range-move losses, each in dollars at the time it happened. Generated is the same thing counted in coins and valued at today's price. From the server's metrics.`}>Dollars made</L></span>

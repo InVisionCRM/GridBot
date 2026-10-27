@@ -58,8 +58,8 @@ const lpPaper: B = {
 const PLS = 0.0000051;
 const grid: B = {
   kind: 'grid', id: 'grid-hex', mode: 'live', status: 'running', stable: 'HEX', quoteSym: 'PLS', base: 'HEX', chainId: 369, usdPerQuote: PLS,
-  startedAt: now - 10 * DAY_MS, price: 220, config: { totalCapitalUsd: 14_000_000, lowerPrice: 200, upperPrice: 240, gridCount: 10 },
-  pnl: { realized: 140_000, unrealized: -35_000, plsHeld: 1, costUsd: 1 }, payout: { sent: 50_000 },
+  startedAt: now - 10 * DAY_MS, price: 220, config: { totalCapitalQuote: 14_000_000, lowerPrice: 200, upperPrice: 240, gridCount: 10 },
+  pnl: { realized: 140_000, unrealized: -35_000, plsHeld: 1, costQuote: 1 }, payout: { sent: 50_000 },
   stats: { roundTrips: 3, wins: 2, totalFees: 9_000, totalGas: 1_000 }, moveCount: 7, recenter: { count: 1 },
   trades: [
     { timestamp: now - 60_000, feeQuote: 1_000_000, roundTripNet: 150_000, stableAmount: 2_000_000, taxPct: 0.01 },
@@ -235,7 +235,7 @@ describe('status payload', async () => {
     const P0 = 0.00001;
     const chain = new MockChain(P0);
     const bot = new MultiBot({ net: NET, reader: chain, signer: chain, store: new MemoryStore(), log: new Logger(true), maxRetries: 1, retryDelayMs: 0 });
-    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 });
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 });
     const st = bot.status();
     const g = st.grids.find((x) => x.id === id)!;
     expect(g.metrics).toMatchObject({ botId: id, kind: 'grid', mode: 'paper', headline: 'generated' });

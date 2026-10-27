@@ -137,7 +137,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
               <tr key={x.id} className={x.failed ? 'failed-row' : ''}>
                 <td>{time(x.timestamp)}</td><td className={`side ${x.side}`}>{x.side}</td><td className="txt">{x.reason}</td>
                 <td>{num(x.plsAmount, x.plsAmount < 10 ? 6 : 0)}</td><td>{px(x.execPrice ?? x.price)}</td>
-                <td className={cls(x.side === 'sell' ? x.realizedPnlUsd : null)}>{x.side === 'sell' ? <Amt v={x.realizedPnlUsd} sym={q} k={k} sig={4} /> : ''}</td>
+                <td className={cls(x.side === 'sell' ? x.realizedPnlQuote : null)}>{x.side === 'sell' ? <Amt v={x.realizedPnlQuote} sym={q} k={k} sig={4} /> : ''}</td>
                 <td>{x.holdMs ? dur(x.holdMs) : ''}</td><td className="txt nowrap">{dexName(s, t.chainId, x.dex)}</td>
               </tr>
             ))}{!t.trades.length && <tr><td colSpan={8} className="txt muted">No trades yet.</td></tr>}</tbody>

@@ -454,7 +454,7 @@ export class Autopilot {
         const price = (await bot.prices([market]))[market];
         if (!(price > 0)) throw new Error('no price');
         const band = c.o.grid!.bandPct;
-        id = await bot.add({ mode, stable: market, lowerPrice: price * (1 - band), upperPrice: price * (1 + band), gridCount: c.o.grid!.gridCount, totalCapitalUsd: amount, recenter: true });
+        id = await bot.add({ mode, stable: market, lowerPrice: price * (1 - band), upperPrice: price * (1 + band), gridCount: c.o.grid!.gridCount, totalCapitalQuote: amount, recenter: true });
       } else {
         id = await bot.addLp({ mode, market, bandPct: c.o.lp!.bandPct, capital: amount, rerange: true });
       }

@@ -51,7 +51,7 @@ describe('private key handling', () => {
     const store = new MemoryStore<BotState>();
     const signer = { getAddress: () => wallet.getAddress(), sendTransaction: chain.sendTransaction.bind(chain) };
     const engine = new GridEngine({ net: NET, reader: chain, signer, store, log });
-    await engine.start({ mode: 'paper', lowerPrice: 0.000009, upperPrice: 0.000011, gridCount: 10, totalCapitalUsd: 10 });
+    await engine.start({ mode: 'paper', lowerPrice: 0.000009, upperPrice: 0.000011, gridCount: 10, totalCapitalQuote: 10 });
     await engine.tick();
     const blob = JSON.stringify(engine.status()) + JSON.stringify(store.data) + JSON.stringify(log.entries);
     expect(blob).not.toContain(key.slice(2).toLowerCase());

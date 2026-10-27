@@ -264,7 +264,7 @@ export function Chart(p: ChartProps) {
       for (const tr of t.trades ?? []) {
         if (tr.failed || snap(tr.timestamp) < s0) continue;
         const buy = tr.side === 'buy';
-        mk.push({ time: ts(snap(tr.timestamp)), position: buy ? 'belowBar' : 'aboveBar', color: buy ? C.entry : tr.realizedPnlUsd >= 0 ? C.up : C.down, shape: buy ? 'arrowUp' : 'arrowDown', size: 1.3, text: buy ? 'buy' : `${tr.reason} ${tr.realizedPnlUsd >= 0 ? '+' : ''}${num(tr.realizedPnlUsd, 3)}` });
+        mk.push({ time: ts(snap(tr.timestamp)), position: buy ? 'belowBar' : 'aboveBar', color: buy ? C.entry : tr.realizedPnlQuote >= 0 ? C.up : C.down, shape: buy ? 'arrowUp' : 'arrowDown', size: 1.3, text: buy ? 'buy' : `${tr.reason} ${tr.realizedPnlQuote >= 0 ? '+' : ''}${num(tr.realizedPnlQuote, 3)}` });
       }
       if (t.position) {
         const r = t.position.risk;

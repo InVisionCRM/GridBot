@@ -67,7 +67,7 @@ for (const net of Object.values(NETWORKS)) {
     // Flipped "Stack … with PLS" presets are checked on the deepest pool in flipChecks().
     for (const preset of STRATEGY_PRESETS.filter((x) => !x.legs.some((l) => l.flip))) {
       for (const leg of resolvePreset(preset, spots, net.defaultQuote, SAMPLE_AMOUNTS)) {
-        const e = econFromMarket(markets[leg.quote], { ...leg, totalCapitalUsd: leg.capital! }, 'exact');
+        const e = econFromMarket(markets[leg.quote], { ...leg, totalCapitalQuote: leg.capital! }, 'exact');
         ok(e.ok, `${preset.id} PLS/${leg.quote} ±${leg.bandPct * 100}%×${leg.gridCount} with ${leg.capital!.toLocaleString('en-US')} ${leg.quote}: size ${e.levelSize.toPrecision(5)} ${leg.quote}, step ${(e.spacingPct * 100).toFixed(3)}%, impact ${(e.impactPct * 100).toFixed(3)}%, gas ${e.gasQuote.toPrecision(3)} ${leg.quote}, net ${(e.netPct * 100).toFixed(3)}% = ${e.netPerRoundTrip.toPrecision(4)} ${leg.quote}/RT${e.ok ? '' : ' ' + e.reasons.join(' ')}`);
       }
     }

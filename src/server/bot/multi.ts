@@ -12,7 +12,7 @@ import { Hub } from '../chains/hub';
 import { isFlipKey, unflipKey, type MarketDef } from '../../live/markets';
 import { checkGasReserve, reserveCfg } from '../../live/gasReserve';
 import { humanAmount } from '../../live/amount';
-import { totals, type LiveTrade } from '../../live/ledger';
+import { totals, upgradeQuoteNames, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
 import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
@@ -109,8 +109,9 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
       version: 4,
       defaults: { ...DEFAULT_LIMITS, ...((o.defaults as SafetyLimits) ?? {}) },
       // `opening` (the coins after setup, for "vs holding") is no longer kept
-      grids: (o.grids as (BotState & { opening?: unknown })[]).map(({ opening: _, ...g }) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
-      trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
+      // *Usd → *Quote names (always quote-coin amounts); the state file keeps the old names until the next save
+      grids: (o.grids as (BotState & { opening?: unknown })[]).map(upgradeQuoteNames).map(({ opening: _, ...g }) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
+      trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map(upgradeQuoteNames).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
       // config.baseAmount arrived with funding from wallet coins: earlier bots put in none
       lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => upgradeLp({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],
       alerts: Array.isArray(o.alerts) ? (o.alerts as Alert[]) : [],
@@ -118,13 +119,39 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
       portfolio: o.version === 4 ? (o.portfolio as MultiState['portfolio']) : { live: [], paper: [] },
     };
   }
-  const g = o as unknown as BotState; // v1 single grid
+  const g = upgradeQuoteNames(o) as unknown as BotState; // v1 single grid
   if (g && (g.config != null || g.status || g.trades)) {
     const id = g.id || 'g1';
     return { ...empty(), defaults: { ...DEFAULT_LIMITS, ...(g.limits ?? {}) }, grids: [{ ...freshState(net, id), ...g, id, version: 1 }] };
   }
   return empty();
 }
+
+/**
+ * Live bots only (paper is simulated), every kind including LPs, in dollars. Feeds the "Total profit moved" push alert:
+ * realized + unrealized = each live bot's Total P&L (LP: net after costs and range moves + its price side). Everything
+ * comes from the bot's BotMetrics, so it matches the bot pages. A bot with no dollar rate is counted in `unpriced`.
+ */
+export function liveAggregate(grids: AnyBot[], trends: AnyBot[], lps: AnyBot[]) {
+  const a = { mode: 'live' as const, bots: 0, realized: 0, unrealized: 0, generatedUsd: 0, lpFeesEarnedUsd: 0, gasUsd: 0, feesUsd: 0, roundTrips: 0, plsHeld: 0, unpriced: 0 };
+  const add = (b: AnyBot, held: number, trips: number) => {
+    if (b.mode !== 'live') return;
+    a.bots++;
+    a.plsHeld += held;
+    a.roundTrips += trips;
+    const m = b.metrics;
+    if (!m || m.realizedUsd == null) { a.unpriced++; return; }
+    a.realized += m.realizedUsd; a.unrealized += m.unrealizedUsd ?? 0; a.generatedUsd += m.generatedUsd ?? 0;
+    a.gasUsd += m.gasUsd ?? 0; a.feesUsd += m.swapCostUsd ?? 0;
+    if (m.kind === 'lp') a.lpFeesEarnedUsd += m.feesEarnedUsd ?? 0;
+  };
+  for (const g of grids) add(g, g.pnl?.plsHeld ?? 0, g.stats?.roundTrips ?? 0);
+  for (const t of trends) add(t, t.position?.pls ?? 0, t.stats?.count ?? 0);
+  for (const l of lps) add(l, 0, 0);
+  return a;
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyBot = Record<string, any> & { mode?: string; metrics?: BotMetrics | null };
 
 /** Store that reads/writes one bot slice inside MultiState. */
 class SliceStore<T extends { id: string }> implements Store<T> {
@@ -318,7 +345,7 @@ export class MultiBot {
 
   // ── Grids ──────────────────────────────────────────────────────────────
   async add(p: StartParams): Promise<string> {
-    if (p.mode === 'live') await this.assertCovers(p.stable ?? this.d.net.defaultQuote, p.totalCapitalUsd, p.limits);
+    if (p.mode === 'live') await this.assertCovers(p.stable ?? this.d.net.defaultQuote, p.totalCapitalQuote, p.limits);
     const slot = freshState(this.d.net);
     slot.limits = { ...this.multi.defaults, ...(p.limits ?? {}) };
     this.multi.grids.push(slot);
@@ -330,7 +357,7 @@ export class MultiBot {
   async start(id: string, p: StartParams) {
     const eng = this.engine(id);
     // A running grid is refused by eng.start; checking coverage first would report a misleading shortfall.
-    if (p.mode === 'live' && eng.state.status !== 'running') await this.assertCovers(p.stable ?? eng.state.stable, p.totalCapitalUsd, p.limits);
+    if (p.mode === 'live' && eng.state.status !== 'running') await this.assertCovers(p.stable ?? eng.state.stable, p.totalCapitalQuote, p.limits);
     await eng.start(p);
   }
   resume(id: string) { this.engine(id).resume(); }
@@ -505,7 +532,7 @@ export class MultiBot {
       const e = this.engine(id), c = e.state.config;
       if (!c || e.state.lastPrice == null) return null;
       const t = totals(e.modeTrades(), e.state.lastPrice);
-      return c.totalCapitalUsd + t.realized + t.unrealized;
+      return c.totalCapitalQuote + t.realized + t.unrealized;
     }
     return this.lp(id).pnl()?.equity ?? null;
   }
@@ -568,7 +595,7 @@ export class MultiBot {
       const s = e.state, d = e.def;
       if (!d || s.mode !== 'live' || !s.config || (s.status !== 'running' && !s.inFlight)) continue;
       const t = totals(e.modeTrades(), s.lastPrice);
-      add(d, 'quote', s.id, 'grid', Math.max(0, s.config.totalCapitalUsd + t.realized - t.pos.costUsd));
+      add(d, 'quote', s.id, 'grid', Math.max(0, s.config.totalCapitalQuote + t.realized - t.pos.costQuote));
       add(d, 'base', s.id, 'grid', t.pos.plsHeld);
     }
     for (const e of this.trendEngines.values()) {
@@ -879,13 +906,13 @@ export class MultiBot {
       if (!s.config || s.mode !== mode) continue;
       const tr = e.modeTrades();
       const t = totals(tr, s.lastPrice);
-      const capital = s.config.totalCapitalUsd;
+      const capital = s.config.totalCapitalQuote;
       const eqHist = s.equity ?? [];
       rows.push({
         id: s.id, kind: 'grid', name: `Grid ${e.label}`, pair: s.stable, chainId: e.chainId, mode: s.mode, status: s.archivedAt ? 'closed' : s.status, usdPerQuote: this.usdPerQuote(s.stable),
         capital, equity: capital + t.realized + t.unrealized, realized: t.realized, unrealized: t.unrealized,
-        fees: tr.reduce((a, x) => a + (x.feeQuote ?? 0), 0), gas: t.gasUsd,
-        plsHeld: t.pos.plsHeld, quoteFree: Math.max(0, capital + t.realized - t.pos.costUsd), startedAt: s.startedAt ?? tr[0]?.timestamp ?? null,
+        fees: tr.reduce((a, x) => a + (x.feeQuote ?? 0), 0), gas: t.gasQuote,
+        plsHeld: t.pos.plsHeld, quoteFree: Math.max(0, capital + t.realized - t.pos.costQuote), startedAt: s.startedAt ?? tr[0]?.timestamp ?? null,
         equityHist: eqHist,
         closed: tr.filter((x) => x.side === 'sell' && !x.failed && x.roundTripNet != null).map((x) => ({ pnl: x.roundTripNet!, t: x.timestamp })),
         trades: tr,
@@ -899,7 +926,7 @@ export class MultiBot {
         id: st.id, kind: 'trend', name: st.name, pair: st.quote, chainId: e.chainId, mode: st.mode, status: e.state.archivedAt ? 'closed' : st.status, usdPerQuote: this.usdPerQuote(st.quote),
         capital: st.capital, equity: st.pnl.equity, realized: st.pnl.realized, unrealized: st.pnl.unrealized, fees: st.pnl.fees, gas: st.pnl.gas,
         plsHeld: st.position?.pls ?? 0, quoteFree: st.cash, startedAt: st.startedAt, equityHist: e.state.equity,
-        closed: e.modeTrades().filter((x) => x.side === 'sell' && !x.failed).map((x) => ({ pnl: x.realizedPnlUsd, t: x.timestamp, holdMs: (x as TrendTrade).holdMs })),
+        closed: e.modeTrades().filter((x) => x.side === 'sell' && !x.failed).map((x) => ({ pnl: x.realizedPnlQuote, t: x.timestamp, holdMs: (x as TrendTrade).holdMs })),
         trades: e.modeTrades(), inMarket: st.stats.timeInMarket,
       });
     }
@@ -940,7 +967,7 @@ export class MultiBot {
     const day = new Date(now); day.setHours(0, 0, 0, 0);
     const periods = { today: day.getTime(), d7: now - 7 * 86_400_000, all: 0 };
     const usd = (r: (typeof rows)[number], v: number) => (r.usdPerQuote ? v * r.usdPerQuote : 0);
-    const realizedSince = (from: number) => rows.reduce((a, r) => a + usd(r, r.trades.filter((t) => t.timestamp >= from).reduce((s, t) => s + t.realizedPnlUsd, 0)), 0);
+    const realizedSince = (from: number) => rows.reduce((a, r) => a + usd(r, r.trades.filter((t) => t.timestamp >= from).reduce((s, t) => s + t.realizedPnlQuote, 0)), 0);
     // Only snapshots that carry the allocated capital can be compared: PnL = equity − capital, so starting,
     // adding or removing a bot is not counted as a gain or loss.
     const ph = this.multi.portfolio[mode];
@@ -1022,11 +1049,11 @@ export class MultiBot {
     const rows: JournalRow[] = [];
     const push = (botId: string, kind: 'grid' | 'trend', bot: string, t: LiveTrade & { reason?: string }) => {
       const k = this.usdPerQuote(t.stable);
-      const pnl = t.side === 'sell' || t.failed ? (t.roundTripNet ?? t.realizedPnlUsd) : null;
+      const pnl = t.side === 'sell' || t.failed ? (t.roundTripNet ?? t.realizedPnlQuote) : null;
       rows.push({
         t: t.timestamp, botId, kind, bot, pair: t.stable, mode: t.paper ? 'paper' : 'live', side: t.side,
         reason: t.reason ?? (t.manual ? 'manual' : t.levelPrice != null ? `level ${t.levelPrice.toPrecision(5)}` : t.failed ? 'failed' : 'grid'),
-        pls: t.plsAmount, quote: t.stableAmount, price: t.price, fee: t.feeQuote ?? 0, gas: t.gasUsd, pnl, pnlUsd: pnl != null && k ? pnl * k : null,
+        pls: t.plsAmount, quote: t.stableAmount, price: t.price, fee: t.feeQuote ?? 0, gas: t.gasQuote, pnl, pnlUsd: pnl != null && k ? pnl * k : null,
         slippagePct: t.slippagePct ?? null, tx: t.txHash, failed: !!t.failed,
       });
     };
@@ -1177,7 +1204,7 @@ export class MultiBot {
     const { summary } = await gridEconomics(this.hub.quoter(quote), cfg, this.d.approval ?? 'exact');
     this.hub.setSpot(quote, summary.spot);
     try { await this.hub.nativeUsdAsync(def.chainId); } catch { /* optional */ }
-    const entry = capGridEntry({ capital: cfg.totalCapitalUsd, quoteReserve: summary.poolQuote, feeBps: def.pool.feeBps, maxImpact: 0.03, gridCount: cfg.gridCount });
+    const entry = capGridEntry({ capital: cfg.totalCapitalQuote, quoteReserve: summary.poolQuote, feeBps: def.pool.feeBps, maxImpact: 0.03, gridCount: cfg.gridCount });
     return { ...summary, entry: { amount: entry.amount, why: entry.why }, usdPerQuote: this.hub.usdPerQuote(quote), feeBps: def.pool.feeBps, chainId: def.chainId, label: this.hub.label(quote) };
   }
 
@@ -1215,7 +1242,7 @@ export class MultiBot {
     for (const leg of resolved) {
       const b = best[leg.quote];
       const econ = leg.capital == null ? null
-        : (await gridEconomics(b?.quoter ?? this.hub.quoter(leg.quote), { ...leg, totalCapitalUsd: leg.capital }, this.d.approval ?? 'exact')).summary;
+        : (await gridEconomics(b?.quoter ?? this.hub.quoter(leg.quote), { ...leg, totalCapitalQuote: leg.capital }, this.d.approval ?? 'exact')).summary;
       legs.push({ ...leg, econ, label: this.hub.label(leg.quote), ...(b ? { pool: b.pool } : {}) });
     }
     return { preset: { id: preset.id, name: preset.name, blurb: preset.blurb }, spots, legs };
@@ -1234,7 +1261,7 @@ export class MultiBot {
       for (const leg of legs) {
         ids.push(await this.add({
           mode: opts.mode, stable: leg.quote, lowerPrice: leg.lowerPrice, upperPrice: leg.upperPrice, gridCount: leg.gridCount,
-          totalCapitalUsd: leg.capital!, limits: opts.limits, recenter: opts.recenter, profits: opts.profits,
+          totalCapitalQuote: leg.capital!, limits: opts.limits, recenter: opts.recenter, profits: opts.profits,
         }));
       }
     } catch (e) {
@@ -1394,18 +1421,7 @@ export class MultiBot {
       const st = (this.lpEngines.get(t.id) ?? this.attachLp(t.id)).status();
       return { ...st, metrics: lpMetrics(st, at) };
     });
-    const z = { realized: 0, unrealized: 0, gasUsd: 0, feesUsd: 0, roundTrips: 0, plsHeld: 0, unpriced: 0 };
-    const aggregate = grids.reduce((a, g) => {
-      const k = g.usdPerQuote;
-      if (k == null) return { ...a, unpriced: a.unpriced + 1, plsHeld: a.plsHeld + g.pnl.plsHeld };
-      return { ...a, realized: a.realized + g.pnl.realized * k, unrealized: a.unrealized + g.pnl.unrealized * k, gasUsd: a.gasUsd + g.pnl.gasUsd * k, feesUsd: a.feesUsd + g.stats.totalFees * k, roundTrips: a.roundTrips + g.stats.roundTrips, plsHeld: a.plsHeld + g.pnl.plsHeld };
-    }, z);
-    for (const t of trends) {
-      const k = t.usdPerQuote;
-      aggregate.plsHeld += t.position?.pls ?? 0;
-      if (k == null) { aggregate.unpriced++; continue; }
-      aggregate.realized += t.pnl.realized * k; aggregate.unrealized += t.pnl.unrealized * k; aggregate.gasUsd += t.pnl.gas * k; aggregate.feesUsd += t.pnl.fees * k; aggregate.roundTrips += t.stats.count;
-    }
+    const aggregate = liveAggregate(grids, trends, lps);
     return {
       network: this.d.net.key, chainId: this.d.net.chainId, explorer: this.d.net.explorer,
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol),

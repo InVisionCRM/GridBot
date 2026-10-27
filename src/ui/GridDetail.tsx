@@ -39,7 +39,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
   const [lower, setLower] = useState(String(g.config.lowerPrice));
   const [upper, setUpper] = useState(String(g.config.upperPrice));
   const [count, setCount] = useState(String(g.config.gridCount));
-  const [amount, setAmount] = useState(String(g.config.totalCapitalUsd));
+  const [amount, setAmount] = useState(String(g.config.totalCapitalQuote));
   const [econ, setEcon] = useState<AnyObj | null>(null);
   const [econErr, setEconErr] = useState<string | null>(null);
   useEffect(() => {
@@ -57,7 +57,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
   const problem = fundsProblem(funds, +amount || 0, g.mode);
   const restart = () => act(async () => {
     if (g.mode === 'live' && !confirm(`Restart this LIVE grid with the new range? It signs real swaps.`)) return;
-    await botApi(`grids/${g.id}/start`, 'POST', { mode: g.mode, stable: g.stable, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: +amount });
+    await botApi(`grids/${g.id}/start`, 'POST', { mode: g.mode, stable: g.stable, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalQuote: +amount });
   });
   const coin = (x: number, sign = false) => `${sign && x > 0 ? '+' : ''}${humanAmount(x)} ${q}`;
   return (
@@ -143,7 +143,7 @@ function Limits({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean 
 function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
   const [all, setAll] = useState(false);
   const q = quoteSym(g), base = g.base ?? 'PLS', k: number | null = g.usdPerQuote ?? null;
-  const net = (t: AnyObj) => t.roundTripNet ?? t.realizedPnlUsd;
+  const net = (t: AnyObj) => t.roundTripNet ?? t.realizedPnlQuote;
   const tx = (h: string) => (h && !h.startsWith('paper')
     ? <a href={explorerTx(s, g.chainId, h)} target="_blank" rel="noreferrer">{h.slice(0, 10)}…</a>
     : <span className="muted">{h ? 'paper' : ''}</span>);
@@ -169,7 +169,7 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
                 <td>{t.triggerPrice ? formatPrice(t.triggerPrice) : '—'}</td><td>{t.quotedPrice ? formatPrice(t.quotedPrice) : '—'}</td>
                 <td title={t.fromReceipt === false && !t.paper ? 'receipt log missing: minimum-out used' : ''}>{t.execPrice ?? t.price ? formatPrice(t.execPrice ?? t.price) : '—'}{t.fromReceipt === false && !t.paper ? '*' : ''}</td>
                 <td className={(t.slippagePct ?? 0) > 0.001 ? 'neg' : ''}>{t.slippagePct != null ? pct(t.slippagePct, 3) : '—'}</td>
-                <td>{t.taxPct != null && t.taxPct > 0.0005 ? pct(t.taxPct, 2) : '—'}</td><td>{num(t.gasUsd, 8)}</td>
+                <td>{t.taxPct != null && t.taxPct > 0.0005 ? pct(t.taxPct, 2) : '—'}</td><td>{num(t.gasQuote, 8)}</td>
                 <td className={cls(profit)}>{profitTxt}</td><td className="txt nowrap">{dexName(s, g.chainId, t.dex)}</td><td>{tx(t.txHash)}</td>
               </tr>
             ) : (
@@ -261,7 +261,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={`The ${g.base} the grid bought and hasn't sold yet, compared with what it cost. It moves with the price until those coins sell one level up, so it is not in Generated.`}>Unrealized</L></span>
           <div className={`kpi-v ${cls(open)}`}>{held > 0 && open != null ? qty(open, q, 5) : '—'}</div>
-          <span className="sub">{held > 0 ? <>{num(held, held < 10 ? 6 : 2)} {g.base} bought for {qty(g.pnl.costUsd, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now<Usd v={open} k={k} /></> : 'nothing waiting to sell'}</span>
+          <span className="sub">{held > 0 ? <>{num(held, held < 10 ? 6 : 2)} {g.base} bought for {qty(g.pnl.costQuote, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now<Usd v={open} k={k} /></> : 'nothing waiting to sell'}</span>
         </div>
         <div className="kpi">
           <span><L tip={m?.calc ?? 'Total P&L'}>Total P&amp;L, in {q}</L></span>

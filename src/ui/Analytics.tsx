@@ -79,7 +79,7 @@ function ModeAnalytics({ s, mode }: { s: AnyObj; mode: 'live' | 'paper' }) {
     for (const [k, v] of Object.entries(f)) if (v) p.set(k, k === 'from' ? String(new Date(v).getTime()) : v);
     return p.toString();
   }, [f, mode]);
-  const sig = `${s.aggregate?.roundTrips}:${(s.trends ?? []).map((t: AnyObj) => t.trades.length).join(',')}:${s.grids?.length}:${s.trends?.length}`;
+  const sig = `${(s.grids ?? []).map((g: AnyObj) => g.moveCount ?? 0).join(',')}:${(s.trends ?? []).map((t: AnyObj) => t.trades.length).join(',')}:${s.grids?.length}:${s.trends?.length}`;
   useEffect(() => {
     let dead = false;
     const load = () => http(`/api/analytics/overview?mode=${mode}`).then((o) => !dead && setOv(o)).catch(() => undefined);

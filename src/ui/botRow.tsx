@@ -84,7 +84,7 @@ export function todaySeries(bots: AnyObj[], includePaper: boolean): number[] {
     if (!(typeof k === 'number' && k > 0)) continue;
     for (const tr of (b.trades ?? []) as AnyObj[]) {
       if (tr.failed || tr.side === 'buy' || !(tr.timestamp >= from)) continue;
-      const pnl = tr.roundTripNet ?? tr.realizedPnlUsd;
+      const pnl = tr.roundTripNet ?? tr.realizedPnlQuote;
       if (typeof pnl === 'number' && Number.isFinite(pnl)) ev.push({ t: tr.timestamp, usd: pnl * k });
     }
   }

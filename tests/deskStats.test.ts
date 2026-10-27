@@ -56,7 +56,7 @@ describe('desk stat math', () => {
   it('puts the estimate on the facts and dashes fees the bot does not earn', () => {
     const grid = {
       kind: 'grid', id: 'g', startedAt: now - 2 * DAY_MS, usdPerQuote: 1,
-      config: { totalCapitalUsd: 100, lowerPrice: 10, upperPrice: 20, gridCount: 10 },
+      config: { totalCapitalQuote: 100, lowerPrice: 10, upperPrice: 20, gridCount: 10 },
       pnl: { realized: 4, unrealized: 6 },
       stats: { roundTrips: 2, wins: 1, totalFees: 0.2, totalGas: 0.3 },
       moveCount: 5, recenter: { count: 0 },
@@ -81,8 +81,8 @@ describe('desk stat math', () => {
 
 describe('desk table', () => {
   const bots = [
-    { id: 'g', kind: 'grid', mode: 'paper', status: 'running', label: 'ETH/USDC', chainId: 1, config: { totalCapitalUsd: 10 }, pnl: { realized: 1, unrealized: 0 }, usdPerQuote: 1, startedAt: now - DAY_MS },
-    { id: 'g2', kind: 'grid', mode: 'paper', status: 'running', label: 'PLS/HEX', chainId: 369, config: { totalCapitalUsd: 4 }, pnl: { realized: 3, unrealized: 0 }, usdPerQuote: 1, startedAt: now - DAY_MS },
+    { id: 'g', kind: 'grid', mode: 'paper', status: 'running', label: 'ETH/USDC', chainId: 1, config: { totalCapitalQuote: 10 }, pnl: { realized: 1, unrealized: 0 }, usdPerQuote: 1, startedAt: now - DAY_MS },
+    { id: 'g2', kind: 'grid', mode: 'paper', status: 'running', label: 'PLS/HEX', chainId: 369, config: { totalCapitalQuote: 4 }, pnl: { realized: 3, unrealized: 0 }, usdPerQuote: 1, startedAt: now - DAY_MS },
     { id: 't', kind: 'trend', mode: 'paper', status: 'stopped', name: 'HEX trend', chainId: 369, capital: 5, pnl: { realized: -1, unrealized: 0, returnPct: -0.2 }, usdPerQuote: 1, startedAt: now - DAY_MS },
     { id: 'l', kind: 'lp', mode: 'live', status: 'running', label: 'ETH/USDC LP', chainId: 1, inRange: false, config: { capital: 20 }, pnl: { net: 2, price: 0, fees: 1 }, usdPerQuote: 1, startValue: 20, startedAt: now - DAY_MS },
   ];
@@ -128,7 +128,7 @@ describe('grid capital is in the quote coin', () => {
   const k = 0.0000051;
   const grid = {
     kind: 'grid', id: 'hexpls', startedAt: now - 10 * DAY_MS, usdPerQuote: k,
-    config: { totalCapitalUsd: 14_000_000, lowerPrice: 200, upperPrice: 240, gridCount: 10 },
+    config: { totalCapitalQuote: 14_000_000, lowerPrice: 200, upperPrice: 240, gridCount: 10 },
     pnl: { realized: 140_000, unrealized: 0 },
   };
   it('converts invested capital to dollars with the quote rate', () => {

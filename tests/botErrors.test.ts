@@ -9,7 +9,7 @@ describe('A bot error clears once the next tick gets through', () => {
     const P0 = 0.00001;
     const chain = new MockChain(P0);
     const bot = new MultiBot({ net: NET, reader: chain, signer: chain, store: new MemoryStore<MultiState>(), log: new Logger(true), maxRetries: 1, retryDelayMs: 0 });
-    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 });
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 });
     const grid = () => bot.status().grids.find((g) => g.id === id)!;
 
     const call = chain.call.bind(chain);
@@ -37,10 +37,10 @@ describe('A token balance that fails to read is an error, never 0', () => {
     await bot.refreshWallet(true);
     const coins = bot.status().wallets.find((w) => w.chainId === NET.chainId)!.coins;
     expect(coins.find((c) => c.symbol === 'DAI')).toMatchObject({ amount: null, error: expect.stringMatching(/request timeout/) });
-    await expect(bot.add({ mode: 'live', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 }))
+    await expect(bot.add({ mode: 'live', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 }))
       .rejects.toThrow(/Couldn't read your DAI balance \(request timeout.*nothing was started/);
     // once it reads again, the start goes through
     chain.call = call;
-    await expect(bot.add({ mode: 'live', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 })).resolves.toBeTruthy();
+    await expect(bot.add({ mode: 'live', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 })).resolves.toBeTruthy();
   });
 });

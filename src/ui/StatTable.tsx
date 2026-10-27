@@ -52,7 +52,7 @@ export function StatTable({ b, s }: { b: AnyObj; s: AnyObj }) {
     ['Est. 365d', est(f.est.d365, f.estHint.d365), calc],
     ['Moves', f.moves.text ?? '—'],
     ['Win rate', f.winRate == null ? '—' : pct(f.winRate, 0)],
-    ['Fees paid', f.feesPaidUsd == null ? '—' : usd(f.feesPaidUsd)],
+    ['Fees paid', f.feesPaidUsd == null ? '—' : usd(f.feesPaidUsd), 'Gas + swap fees paid; for an LP also what range moves locked in (fees earned − fees paid = Generated, in dollars at each event).'],
     ['Fees earned', f.feesEarnedUsd == null ? '—' : usd(f.feesEarnedUsd)],
     ['Time in range', f.timeInRange == null ? '—' : pct(f.timeInRange, 0)],
     ['Range', range],

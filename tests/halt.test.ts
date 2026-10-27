@@ -14,7 +14,7 @@ import { haltText, showHalt } from '../src/ui/haltText';
 import { MockChain, NET } from './helpers/mockChain';
 
 const P0 = 0.00001;
-const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 };
+const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 };
 
 function make(store = new MemoryStore<MultiState>(), signer: MockChain | null = null) {
   const chain = new MockChain(P0);

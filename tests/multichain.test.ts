@@ -225,8 +225,8 @@ describe('Multi-chain operation', () => {
     const px = await hub.quoter(ETH_DEF.key).getPrice();
     expect(px).toBeGreaterThan(2900);
     expect(px).toBeLessThan(3000);
-    const pg = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.000009, upperPrice: 0.000011, gridCount: 10, totalCapitalUsd: 30 });
-    const bg = await bot.add({ mode: 'paper', stable: ETH_DEF.key, lowerPrice: px * 0.95, upperPrice: px * 1.05, gridCount: 8, totalCapitalUsd: 400 });
+    const pg = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.000009, upperPrice: 0.000011, gridCount: 10, totalCapitalQuote: 30 });
+    const bg = await bot.add({ mode: 'paper', stable: ETH_DEF.key, lowerPrice: px * 0.95, upperPrice: px * 1.05, gridCount: 8, totalCapitalQuote: 400 });
     const st = bot.status();
     expect(st.grids.find((g) => g.id === bg)).toMatchObject({ chainId: 1, dex: 'uniswap-v3', dexName: 'Uniswap V3', feeTier: 500 });
     expect(bot.stopChain(1)).toBe(1);
@@ -264,7 +264,7 @@ describe('Multi-chain operation', () => {
     const bot = new MultiBot({ net: NET, reader: pls, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub });
     expect(bot.marketList().find((m) => m.key === tknDef.key)).toMatchObject({ risk: 'low', liveAllowed: true, custom: false });
     const spot = await hub.quoter(tknDef.key).getPrice();
-    await expect(bot.add({ mode: 'live', stable: tknDef.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.001 })).rejects.toThrow(/LIVE blocked/);
+    await expect(bot.add({ mode: 'live', stable: tknDef.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalQuote: 0.001 })).rejects.toThrow(/LIVE blocked/);
     expect(hub.def(tknDef.key).safety!.risk).toBe('unknown'); // the fresh check replaced the shipped report
     expect(bot.marketList().find((m) => m.key === tknDef.key)!.liveAllowed).toBe(false);
   });
@@ -281,7 +281,7 @@ describe('Multi-chain operation', () => {
     expect(d.safety!.liveAllowed).toBe(false);
     expect(d.quote).toMatchObject({ address: WETH.address, symbol: 'ETH', native: true }); // spends native ETH
     const spot = await bot.hub.quoter(d.key).getPrice();
-    const p = { stable: d.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.01 };
+    const p = { stable: d.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalQuote: 0.01 };
     await expect(bot.add({ mode: 'live', ...p })).rejects.toThrow(/safety|paper only|blocked|simulation/i);
     const gid = await bot.add({ mode: 'paper', ...p });
     // Native spend coin → the gas set-aside applies, like HEX/PLS.

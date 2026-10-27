@@ -215,7 +215,7 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
   const startCustom = () => act(async () => {
     if (!confirmLive(`grid on ${m.label}`)) return;
     const r = await botApi('grids', 'POST', {
-      mode, stable: pair, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: +amount,
+      mode, stable: pair, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalQuote: +amount,
       limits: limitsBody(limits, !!m.quoteNative), recenter: follow, profits: profitsBody(profits),
     });
     nav({ v: 'grid', id: r.id });

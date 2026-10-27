@@ -113,6 +113,8 @@ export interface LpState {
     fees: number; gas: number; sent: number; feeCoins: Coins; swapCost: number; moveLoss: number;
     /** The same costs in the coin they were paid in, at each event's price ("generated" units). Absent on older state. */
     gasCoins?: Coins; swapCoins?: Coins; moveCoins?: Coins;
+    /** Range-move loss rebuilt at load from the coins put in and taken out (backfillMoveLoss); absent if never needed. */
+    moveLossBackfill?: { loss: number; price: number; at: number };
   };
   startedAt: number | null;
   /** Price when the bot started */
@@ -167,7 +169,7 @@ const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
   return {
-    kind: 'lp', version: 6, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
+    kind: 'lp', version: 7, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
     outSince: null, lastRerangeAt: null, reranges: 0, seen: null, totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 },     startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
     closing: false, archivedAt: null, halt: null,
@@ -193,6 +195,10 @@ const RESTART_PAPER = { g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0'
  * 5: fees per coin, swap costs and what moves locked in. Earlier fees stay counted in the quote coin at their worth when
  *    collected; swap costs and move losses count from the upgrade; an open position's coins are taken at its next reading.
  *    The range moves as soon as the price leaves it: the missed-fees tally and the moves-per-day list are dropped.
+ *    That upgrade set lost-to-moves to 0 and cleared the open position's coins put in, so a bot that moved its range
+ *    before (or with that position open across) the upgrade never counted those losses: version 7 rebuilds them.
+ * 7: backfillMoveLoss on a closed bot whose moves were never counted. Runs on every load (idempotent), not only at
+ *    the version step, because it needs the bot to be closed; the state file is only rewritten on the bot's next save.
  */
 export function upgradeLp(s: LpState): LpState {
   let t = s;
@@ -217,7 +223,36 @@ export function upgradeLp(s: LpState): LpState {
     // (they stay in the position until it is taken out); with Send, fees it sent before the upgrade aren't counted as its.
     t = { ...t, version: 6, position: t.position ? { ...t.position, feesBefore: { ...t.totals.feeCoins } } : null };
   }
-  return t;
+  if (t.version < 7) t = { ...t, version: 7 };
+  return backfillMoveLoss(t);
+}
+
+/**
+ * A closed LP that moved its range but shows no loss from it (the v5 upgrade zeroed the tally): rebuild the loss from
+ * what it recorded. It put in config.capital (quote) + config.baseAmount (base) and holds `idle` at the end, which is
+ * the principal plus every fee collected (fees are reinvested, so they all come back at the close). At the exit
+ * price, the shortfall of principal against the coins put in is what the moves locked in, the same measure exited()
+ * books per move. Swap costs before the upgrade weren't tallied either, so they are inside this figure.
+ * Counted in the quote coin at the exit price (the only price the record has for it).
+ * Skipped when it can't be exact: still open, fees sent out, coins set aside, no exit price, or a loss already counted.
+ * Idempotent: once applied, totals.moveLoss is non-zero and moveLossBackfill is set.
+ */
+export function backfillMoveLoss(s: LpState): LpState {
+  const t = s.totals, c = s.config, idle = s.idle, price = s.lastPrice;
+  if (t.moveLossBackfill || t.moveLoss !== 0 || t.swapCost !== 0 || !(s.reranges > 0)) return s;
+  if (s.status !== 'closed' || s.position || s.step || !c || !idle || !(price != null && price > 0)) return s;
+  if (t.sent > 0 || (s.aside && (s.aside.base > 0 || s.aside.quote > 0))) return s;
+  const principal = { base: idle.base - t.feeCoins.base, quote: idle.quote - t.feeCoins.quote };
+  const loss = ((c.baseAmount ?? 0) - principal.base) * price + (c.capital - principal.quote);
+  if (!Number.isFinite(loss) || loss <= 0) return s;
+  return {
+    ...s,
+    totals: {
+      ...t, moveLoss: loss,
+      moveCoins: { base: (t.moveCoins?.base ?? 0), quote: (t.moveCoins?.quote ?? 0) + loss },
+      moveLossBackfill: { loss, price, at: s.lastPriceAt ?? 0 },
+    },
+  };
 }
 
 /** Logs of `name` from the position manager in a receipt. */
