@@ -86,6 +86,8 @@ export interface MultiDeps {
   hub?: Hub;
   /** Set in a friend's copy (env.ts readCopy): the app shows whose copy it is and where the key is added */
   copy?: { friend: string; host: string } | null;
+  /** A chain whose RPCs keep failing this long raises a banner + Activity entry (RPC_ALERT_MINUTES; default 3 min). */
+  rpcAlertAfterMs?: number;
 }
 
 export interface ChainWallet {
@@ -716,6 +718,7 @@ export class MultiBot {
       await Promise.all([...byChain.values()].map(async (jobs) => { for (const j of jobs) await j(); }));
       this.checkRanges();
       this.evaluateAlerts();
+      this.checkRpcHealth();
       try { await this.taxWatch.tick(); } catch { /* never abort the poll loop */ }
       this.snapshotPortfolio();
       this.activity.emit('status');
@@ -1325,6 +1328,29 @@ export class MultiBot {
     });
   }
 
+  /**
+   * Per-chain RPC health: one Activity entry (with a notification) when a chain's RPCs have kept failing for
+   * rpcAlertAfterMs, and one when it recovers. The banner reads rpcHealth.alerted from the status.
+   */
+  checkRpcHealth() {
+    for (const rt of this.hub.runtimes()) {
+      const ch = rt.reader.checkHealth?.(this.d.rpcAlertAfterMs);
+      if (!ch) continue;
+      const c = rt.cfg;
+      if (ch.kind === 'alert') {
+        this.activity.emitEvent({
+          type: 'alert', kind: 'system', level: 'error', notify: true, chainId: c.id,
+          msg: `${c.name}: RPC failing for ${ch.minutes} min (${ch.failures} failed reads on every endpoint)${ch.lastError ? `: ${ch.lastError}` : ''}. Bots on this chain can't read prices or send. Add another RPC with RPC_URL_${c.envSlug} in .env.`,
+        });
+      } else {
+        this.activity.emitEvent({
+          type: 'info', kind: 'system', level: 'success', notify: true, chainId: c.id,
+          msg: `${c.name}: RPC recovered after ${ch.minutes} min of failures (${ch.failures} failed reads)`,
+        });
+      }
+    }
+  }
+
   /** Every configured chain: trading status, signer, gas wallet, RPC health, tx queue, bots. */
   chainsStatus() {
     return this.hub.runtimes().map((rt) => {
@@ -1337,7 +1363,8 @@ export class MultiBot {
         dexes: c.dexes.map((x) => ({ id: x.id, name: x.name, kind: x.kind })),
         hasSigner: !!rt.signer, address: w?.address ?? rt.gas.address, gasNative: w?.native ?? rt.gas.native, lowGas: rt.gas.low,
         lowGasNative: c.lowGasNative, nativeUsd: this.hub.nativeUsd(c.id), walletError: w?.error ?? rt.gas.error ?? null,
-        txBusy: rt.gate.busy, rpc: rt.reader.currentUrl ?? null, rpcStatus: rt.reader.status ?? null, bots,
+        txBusy: rt.gate.busy, rpc: rt.reader.currentUrl ?? null, rpcStatus: rt.reader.status ?? null,
+        rpcHealth: rt.reader.health?.() ?? null, bots,
       };
     });
   }

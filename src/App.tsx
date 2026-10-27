@@ -6,7 +6,7 @@ import { Activity } from './ui/Activity';
 import { loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs } from './ui/Alerts';
 import { botApi, http } from './ui/api';
 import { usd } from './ui/fmt';
-import { ChainFilterCtx, chainOf, RefreshCtx, type ChainFilter } from './ui/chains';
+import { ChainFilterCtx, chainOf, RefreshCtx, rpcAlerts, type ChainFilter } from './ui/chains';
 import { Home } from './ui/Home';
 import { Bots } from './ui/Bots';
 import { More } from './ui/More';
@@ -135,6 +135,14 @@ export default function App() {
           connected={connected} ver={ver.v} holdings={holdings.data} onActivity={() => setDrawer(true)} onGuide={() => setGuide(true)}
         />
 
+        {rpcAlerts(s).map((c) => (
+          <div key={`rpc-${c.id}`} className="banner error" role="alert">
+            <span className="grow">
+              {c.name}: RPC failing{c.rpcHealth?.failingSince ? ` since ${new Date(c.rpcHealth.failingSince).toLocaleTimeString()}` : ''}
+              {' '}({c.rpcHealth?.failures ?? 0} failed reads on every endpoint{c.rpcHealth?.lastError ? `: ${c.rpcHealth.lastError}` : ''}). Bots on this chain can't read prices or trade until it recovers.
+            </span>
+          </div>
+        ))}
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}
 
         <ViewError key={`${view.v}:${'id' in view ? view.id : ''}:${'tab' in view ? view.tab : ''}:${view.v === 'holdings' ? view.focus ?? '' : ''}`} onHome={() => nav({ v: 'home' })}>
