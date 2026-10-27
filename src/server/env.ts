@@ -60,6 +60,34 @@ export function takeHostAuth(): OwnerConfig | null {
   return { login: ownerLoginFrom(loginRaw), pass, session: Number.isInteger(n) && n > 0 ? n : 1 };
 }
 
+export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boolean }
+
+/**
+ * Quote keys for the capital router. Like PRIVATE_KEY they are removed from process.env at once and registered
+ * for redaction. The strings stay in this module; callers only get whether each one was set.
+ * A friend's copy never sees them (they are not on the copy's environment allow-list).
+ */
+let bridgeKeys: { across: string | null; relay: string | null; lifi: string | null } = { across: null, relay: null, lifi: null };
+
+function takeOne(name: 'ACROSS_API_KEY' | 'RELAY_API_KEY' | 'LIFI_API_KEY'): string | null {
+  const raw = process.env[name];
+  delete process.env[name];
+  if (!raw || !raw.trim()) return null;
+  const v = raw.trim();
+  registerSecret(v);
+  return v;
+}
+
+export function takeBridgeKeys(): BridgeConfigured {
+  bridgeKeys = { across: takeOne('ACROSS_API_KEY'), relay: takeOne('RELAY_API_KEY'), lifi: takeOne('LIFI_API_KEY') };
+  return bridgeConfigured();
+}
+
+/** Whether a quote key was set. The key itself never leaves this file. */
+export function bridgeConfigured(): BridgeConfigured {
+  return { across: bridgeKeys.across != null, relay: bridgeKeys.relay != null, lifi: bridgeKeys.lifi != null };
+}
+
 /** What a friend's copy knows about itself: set by the host app that starts it (friends/copies.ts). */
 export interface CopyInfo { friend: string; host: string; hostUrl: string }
 

@@ -5,7 +5,8 @@ import { MultiBot, type MultiState } from './bot/multi';
 import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
 import { ActivityBus } from './bot/activity';
-import { createSigners, loadEnv, readCopy, readSettings, takeFriendsSecret, takeHostAuth } from './env';
+import { createSigners, loadEnv, readCopy, readSettings, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
+import { Router, type RouterFile } from './router/router';
 import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
@@ -28,6 +29,8 @@ import { createTokenTrader, tokenTraderStore } from './market/tokenFeed';
 loadEnv();
 const friendsSecret = takeFriendsSecret();
 const hostAuth = takeHostAuth();
+// Before anything copies process.env (a friend's copy must not inherit quote keys).
+const bridgeKeyStatus = takeBridgeKeys();
 const cfg = readSettings();
 const isProd = process.env.NODE_ENV === 'production';
 const log = new Logger();
@@ -117,11 +120,20 @@ const tokenTrader = copy ? undefined : createTokenTrader({
 });
 // Stop all / STOP chain: the token trader and sniper make no new buys there; exits of positions it holds keep running.
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));
+// ROUTER HOOK: host only (a friend's copy has readCopy() set). Stop all calls router.halt.
+const router = new Router({
+  store: new JsonStore<RouterFile>(path.join(dataDir, 'router.json')),
+  host: copy == null,
+  configured: bridgeKeyStatus,
+  chainIds: hub.runtimes().map((r) => r.cfg.id),
+  emit: activity.emitEvent,
+});
+bot.routerHalt = (halt) => router.halt(halt);
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
   lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader, copy: !!copy,
+  friends, autopilot, tokenTrader, router, copy: !!copy,
 });
 if (isProd) {
   app.use(express.static(clientDir));

@@ -23,6 +23,15 @@ describe('private key handling', () => {
       expect(/process\.env\.PRIVATE_KEY|new\s+Wallet\s*\(/.test(code), f).toBe(false);
     }
   });
+  it('only src/server/env.ts reads bridge quote keys', () => {
+    for (const [f, code] of src) {
+      if (f === join('src', 'server', 'env.ts')) continue;
+      expect(/ACROSS_API_KEY|RELAY_API_KEY|LIFI_API_KEY/.test(code), f).toBe(false);
+    }
+    const env = src.find(([f]) => f.endsWith(join('server', 'env.ts')))![1];
+    expect(env).toMatch(/ACROSS_API_KEY/);
+    expect(env).toMatch(/delete process\.env\[name\]/);
+  });
   it('frontend code never touches keys or signing', () => {
     for (const [f, code] of src) {
       if (f.startsWith(join('src', 'server'))) continue;
