@@ -245,20 +245,26 @@ export class MultiBot {
   }
 
   /**
-   * Live bots restored as running (state.json) on a market with a safety report: held (not ticked, so they send
-   * nothing new) until a fresh check of their market answers, like a Resume:
-   * - passes → released;
-   * - completes and fails → stopped (safety pause) with the reasons, never resumed;
+   * Live bots restored as running (state.json) on a market with a safety report are held until a fresh check of their
+   * market answers, like a Resume. Held grid and trend bots keep ticking for exits only: stop-loss, take-profit, exit
+   * signals and grid sells of what is held still fire and execute; no entry, grid buy, follow-the-price reseed or payout.
+   * A held liquidity bot (no stop / take-profit exits) only settles a tx already sent; no open, re-range or send.
+   * - passes → released to normal ticking;
+   * - completes and fails → an exit already queued or in flight settles, nothing new fires, then the bot is stopped
+   *   (safety pause) with the reasons; never resumed. Liquidity bots stop at once (a sent tx still settles);
    * - can't complete (3 tries, at most bootCheckMs in all) → released on the last passing report, which is marked stale,
    *   with a warning and an audit record on the bot (kind 'boot'); no passing report → stopped.
-   * Closing bots and a tx already in flight are not held: those only settle or unwind.
+   * Closing bots are not held (they only unwind). A tx already sent before the restart always settles.
    */
   readonly bootSafety: Promise<void>;
   private readonly held = new Set<string>();
   private isHeld(id: string) { return this.held.has(id); }
 
   private async checkAtBoot(): Promise<void> {
-    type Bot = { id: string; state: { mode: string; status: string; closing?: boolean; archivedAt?: number | null }; stop: (why: Halt) => void; setStartOverride: (o: StartOverride) => void };
+    type Bot = {
+      id: string; state: { mode: string; status: string; closing?: boolean; archivedAt?: number | null };
+      hold: () => void; release: () => void; failStop: (why: Halt) => void; setStartOverride: (o: StartOverride) => void;
+    };
     const byKey = new Map<string, { bot: Bot; persist: () => void; label: string }[]>();
     const add = (key: string, bot: Bot, persist: () => void, label: string) => {
       const s = bot.state;
@@ -267,10 +273,16 @@ export class MultiBot {
       const k = unflipKey(key);
       byKey.set(k, [...(byKey.get(k) ?? []), { bot, persist, label }]);
       this.held.add(bot.id);
+      bot.hold();
     };
-    for (const e of this.engines.values()) add(e.state.stable, { id: e.state.id, state: e.state, stop: (h) => e.stop(h), setStartOverride: (o) => e.setStartOverride(o) }, () => this.persist(), `Grid ${this.hub.label(e.state.stable)}`);
-    for (const e of this.trendEngines.values()) add(e.state.quote, { id: e.state.id, state: e.state, stop: (h) => e.stop(h), setStartOverride: (o) => e.setStartOverride(o) }, () => this.persist(), e.state.name || this.hub.label(e.state.quote));
-    for (const e of this.lpEngines.values()) add(e.state.market, { id: e.state.id, state: e.state, stop: (h) => e.stop(h), setStartOverride: (o) => e.setStartOverride(o) }, () => this.persist(), `Liquidity ${this.hub.label(e.state.market)}`);
+    const exitsOnly = (e: GridEngine | TrendEngine) => ({
+      id: e.state.id, state: e.state, hold: () => e.holdForSafety(), release: () => e.releaseSafetyHold(),
+      failStop: (h: Halt) => e.settleThenStop(h), setStartOverride: (o: StartOverride) => e.setStartOverride(o),
+    });
+    for (const e of this.engines.values()) add(e.state.stable, exitsOnly(e), () => this.persist(), `Grid ${this.hub.label(e.state.stable)}`);
+    for (const e of this.trendEngines.values()) add(e.state.quote, exitsOnly(e), () => this.persist(), e.state.name || this.hub.label(e.state.quote));
+    // Liquidity: no stop / take-profit exits; held = not ticked except to settle a tx already sent (tickAll).
+    for (const e of this.lpEngines.values()) add(e.state.market, { id: e.state.id, state: e.state, hold: () => undefined, release: () => undefined, failStop: (h) => e.stop(h), setStartOverride: (o) => e.setStartOverride(o) }, () => this.persist(), `Liquidity ${this.hub.label(e.state.market)}`);
     if (!byKey.size) return;
     await Promise.all([...byKey].map(async ([key, bots]) => {
       const label = this.hub.label(key), chainId = this.hub.def(key).chainId;
@@ -284,10 +296,11 @@ export class MultiBot {
           // Completed and failed, or couldn't complete with no passing report to fall back on: never resumed.
           const why = e instanceof SafetyBlocked || e instanceof SafetyIncomplete ? e.message : `safety check error: ${(e as Error).message}`;
           const halt = systemHalt('safety-pause', `safety check after restart: ${why}`.slice(0, 300), this.now());
-          for (const b of bots) b.bot.stop(halt);
-          say('error', `${label}: safety check after restart — ${why}. ${bots.length} live bot(s) stay stopped; review, then resume.`, true);
+          for (const b of bots) b.bot.failStop(halt);
+          say('error', `${label}: safety check after restart — ${why}. ${bots.length} live bot(s) stopped (an exit already triggered settles first); review, then resume.`, true);
           return;
         }
+        for (const b of bots) b.bot.release();
         if (!info) { say('info', `${label}: safety re-checked after restart — passes; ${bots.length} live bot(s) carry on`, false); return; }
         for (const b of bots) {
           const audit = startOverride(info, this.now(), 'boot');
@@ -943,7 +956,6 @@ export class MultiBot {
       for (const e of this.engines.values()) {
         // A stopped grid has nothing to do. Ticking it used to re-read price and balances for every one, ahead of a close.
         if (e.state.archivedAt) continue;
-        if (this.isHeld(e.state.id) && !e.state.inFlight && !e.state.payoutInFlight) continue; // boot safety check pending
         if (e.state.status === 'running' || e.state.closing || e.state.inFlight || e.state.payoutInFlight) {
           push(e.chainId, async () => {
             const before = last(e.state);
@@ -954,7 +966,6 @@ export class MultiBot {
       }
       for (const e of this.trendEngines.values()) {
         if (e.state.archivedAt) continue;
-        if (this.isHeld(e.state.id) && !e.state.inFlight) continue; // boot safety check pending
         if (e.state.status === 'running' || e.state.closing || e.state.inFlight) push(e.chainId, () => e.tick(this.spots[e.state.quote]));
       }
       // A stopped liquidity bot doesn't tick, except to settle a tx already sent. Its position keeps earning, so its
@@ -962,7 +973,7 @@ export class MultiBot {
       for (const e of this.lpEngines.values()) {
         if (e.state.archivedAt || e.state.status === 'idle' || e.state.status === 'closed') continue;
         const sent = !!(e.state.step?.hash || e.state.step?.swap);
-        if (this.isHeld(e.state.id) && !sent) continue; // boot safety check pending
+        if (this.isHeld(e.state.id) && !sent) continue; // boot safety check pending (grid / trend tick exits-only instead)
         if (e.state.status === 'running' || e.state.closing || sent || (e.state.status === 'stopped' && n % STOPPED_LP_EVERY === 0)) push(e.chainId, () => e.tick());
       }
       await Promise.all([...byChain.values()].map(async (jobs) => { for (const j of jobs) await j(); }));

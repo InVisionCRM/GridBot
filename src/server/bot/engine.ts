@@ -24,7 +24,7 @@ import { pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, type RecenterState } from '../../live/recenter';
 import { noKey } from '../words';
-import { requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
+import { isHalt, requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
 
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
@@ -183,6 +183,18 @@ export function freshState(net: LiveNetwork, id?: string): BotState {
     profits: { mode: 'reinvest' }, payoutPending: 0, payoutInFlight: null, payouts: [],
     closing: false, archivedAt: null, halt: null,
   };
+}
+
+/**
+ * Boot safety hold: buys that triggered go back to waiting, armed, so they trigger again once the hold ends (not
+ * skipped: a skip needs the price to move back first). A start-up seed buy is dropped like a skip.
+ */
+function untrigger(intervals: LiveInterval[], buys: QueuedTrade[]): LiveInterval[] {
+  let out = intervals;
+  for (const q of buys) {
+    out = q.seed ? onTradeSkipped(out, q) : out.map((iv) => (iv.index === q.intervalIndex && iv.status === 'pendingBuy' ? { ...iv, status: 'waitingBuy' as const } : iv));
+  }
+  return out;
 }
 
 export class GridEngine {
@@ -408,6 +420,7 @@ export class GridEngine {
   }
 
   stop(why?: string | Halt) {
+    this.safetyHold = null;
     const halt = resolveHalt(why, this.now());
     const dropped = this.state.queue;
     this.state.intervals = dropped.reduce((iv, q) => onTradeSkipped(iv, q), this.state.intervals);
@@ -665,6 +678,40 @@ export class GridEngine {
   }
   stopLoop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
+  /**
+   * MultiBot's boot safety hold (a restart, until the market's fresh check answers):
+   * - 'exits': exits only. Stops, take-profits and sells of what is held still fire and execute; no new entry or buy.
+   * - a Halt: the check failed. The exits already queued or in flight settle, nothing new is triggered, then the bot
+   *   stops with this Halt.
+   * Not persisted: a restart holds again.
+   */
+  safetyHold: null | 'exits' | Halt = null;
+
+  /** Boot hold (exits only): queued buys are dropped (their levels go back to waiting), sells stay. */
+  holdForSafety() {
+    this.safetyHold = 'exits';
+    const buys = this.state.queue.filter((q) => q.side === 'buy');
+    if (!buys.length) return;
+    this.state.intervals = untrigger(this.state.intervals, buys);
+    this.state.queue = this.state.queue.filter((q) => q.side !== 'buy');
+    this.save();
+  }
+  /** Boot check passed: back to normal. */
+  releaseSafetyHold() { this.safetyHold = null; }
+  /** Boot check failed: stop now, or once the exits already queued / in flight have settled. */
+  settleThenStop(halt: Halt) {
+    if (this.state.status !== 'running') { this.safetyHold = null; return; } // stopped meanwhile (by hand): leave it
+    if (!this.state.inFlight && !this.state.queue.some((q) => q.side === 'sell')) { this.safetyHold = null; this.stop(halt); return; }
+    this.safetyHold = halt;
+    this.tag('warn', `safety check failed: settling the exit already triggered, then stopping (${halt.detail})`);
+  }
+  private finishSettle() {
+    const h = this.safetyHold;
+    if (!isHalt(h) || this.state.inFlight || this.state.queue.some((q) => q.side === 'sell')) return;
+    this.safetyHold = null;
+    this.stop(h);
+  }
+
   async tick(ctx: TickCtx = {}): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
@@ -702,15 +749,25 @@ export class GridEngine {
       }
       if (this.state.closing && !this.state.inFlight && !(this.state.closeFails && this.state.closeFails.retryAt > this.now())) this.queueUnwindSells();
       // A close only sells what is already held. New buys and follow-the-price wait until it isn't closing.
-      if (this.state.status === 'running' && !this.state.inFlight && !this.state.closing) {
-        const { intervals, queued } = evaluateTick(this.state.intervals, price, this.now());
-        this.state.intervals = intervals;
+      if (this.state.status === 'running' && !this.state.inFlight && !this.state.closing && !isHalt(this.safetyHold)) {
+        const ev = evaluateTick(this.state.intervals, price, this.now());
+        this.state.intervals = ev.intervals;
+        let queued = ev.queued;
+        // Boot hold: sells (exits of what is held) go ahead; buys wait (their levels go back to waiting) until it passes.
+        if (this.safetyHold) {
+          const buys = queued.filter((q) => q.side === 'buy');
+          if (buys.length) {
+            this.state.intervals = untrigger(this.state.intervals, buys);
+            this.tag('info', `Price ${price}: ${buys.length} buy(s) not placed — held until the safety check after the restart passes`);
+          }
+          queued = queued.filter((q) => q.side !== 'buy');
+        }
         if (queued.length) {
           this.state.queue.push(...queued);
           this.tag('info', `Price ${price}: triggered ${queued.map((q) => `${q.side}@${q.levelPrice}`).join(', ')}`);
           this.ev('queued', `Grid ${this.label}: queued ${queued.map((q) => `${q.side} @ ${q.levelPrice.toPrecision(5)}`).join(', ')}`);
         }
-        await this.followUp(price);
+        if (!this.safetyHold) await this.followUp(price); // follow-the-price buys / reseeds wait for the check
       }
       if (this.state.config && this.state.status === 'running') {
         const eq = this.state.equity ??= [];
@@ -721,8 +778,9 @@ export class GridEngine {
       }
       this.save();
       await this.drain();
+      this.finishSettle();
       if (this.state.closing && this.flat()) this.finishClose();
-      await this.payOut(price);
+      if (!this.safetyHold) await this.payOut(price); // a payout isn't an exit: it waits for the check
       // A tick that got through means the last error (often one RPC timeout) is over; the Activity log keeps it.
       // A close that could not sell (price-impact cap, quote failed) keeps that reason on the row.
       this.lastError = this.state.closing ? this.closeNote : null;
@@ -740,7 +798,9 @@ export class GridEngine {
     this.draining = true;
     try {
       while (this.state.status === 'running' && !this.state.inFlight && this.state.queue.length) {
-        const job = this.state.queue[0];
+        // Boot hold: only sells (exits) run; a buy isn't sent until the check passes.
+        const job = this.safetyHold ? this.state.queue.find((q) => q.side === 'sell') : this.state.queue[0];
+        if (!job) break;
         const run = () => this.runJob(job);
         const gate = this.gate;
         if (gate) await gate.run(run);

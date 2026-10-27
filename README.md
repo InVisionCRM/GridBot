@@ -181,10 +181,12 @@ What doesn't change:
 
 **After an app restart** (bots restored from `state.json` as running), the same rule applies, per market, with one check shared by the market's bots:
 
-- Live bots on a market with a safety report are **held** (the poll doesn't tick them, so they send nothing new) until the check answers. `status.safetyChecking` lists them; their pages show *Checking safety after the restart…*.
-- Bots that are closing, or that have a tx in flight, aren't held: they only settle or unwind.
-- **Passes:** released.
-- **Completed and failing:** all of them stay **stopped** (a safety pause with the reasons, and a notifying alert). A bot whose check fails is never resumed.
+- Live bots on a market with a safety report are **held** until the check answers. `status.safetyChecking` lists them; their pages show *Checking safety after the restart…*.
+  - **Grid and trend bots keep watching their exits and may execute them:** stop-loss, take-profit, trailing stop, exit signals, max-hold, and grid sells of levels they hold. They make **no new entries**: no trend entry (the signal is logged as filtered), no grid buy (a crossed buy level goes back to waiting and triggers again after a pass), no follow-the-price reseed, no profit payout. A buy that was queued when the app stopped is dropped.
+  - **Liquidity bots** have no stop-loss / take-profit exits: held, they only settle a tx already sent (no open, re-range or send).
+- Bots that are closing aren't held: they only unwind.
+- **Passes:** released to normal ticking.
+- **Completed and failing:** an exit already queued or in flight still **settles**; nothing new fires (no new exit or entry), then the bot is **stopped** (a safety pause with the reasons, and a notifying alert). With nothing pending it stops at once; a liquidity bot stops at once (a sent tx still settles). A bot whose check fails is never resumed. A bot stopped by hand meanwhile stays as it was stopped.
 - **Not completed:** released on the last passing report (stale), with `startOverride.kind: 'boot'` (the app, `origin: system`) and a notifying warning per bot. With no passing report they stay stopped.
 - **Never stuck:** all tries for one market stop after 45 s (`bootCheckMs`); each try is cut off at 20 s. Out of time counts as not completed.
 

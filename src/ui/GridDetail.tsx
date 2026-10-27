@@ -229,7 +229,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
       {showHalt(g, closing) && <p className="bot-why">{showHalt(g, closing)}</p>}
       {overrideText(g) && <p className="bot-why">{overrideText(g)}</p>}
-      {(chk.on || heldForSafety(s, g.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… this bot waits until it answers.'} />}
+      {(chk.on || heldForSafety(s, g.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… exits (stop-loss, take-profit, sells) still run; no new buys until it passes.'} />}
 
       <div className="notices">
         {g.available === false && <div className="banner error"><span className="grow">This market isn't available on the running server (its chain may be turned off {s.copy ? `by ${s.copy.host}` : 'in .env'}).</span></div>}

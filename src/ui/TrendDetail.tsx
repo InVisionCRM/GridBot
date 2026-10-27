@@ -80,7 +80,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
       {showHalt(t, closing) && <p className="bot-why">{showHalt(t, closing)}</p>}
       {overrideText(t) && <p className="bot-why">{overrideText(t)}</p>}
-      {(chk.on || heldForSafety(s, t.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… this bot waits until it answers.'} />}
+      {(chk.on || heldForSafety(s, t.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… exits (stop-loss, take-profit, sells) still run; no new buys until it passes.'} />}
 
       <div className="notices">
         {t.lastError && <div className="banner error"><span className="grow">{t.lastError}</span></div>}

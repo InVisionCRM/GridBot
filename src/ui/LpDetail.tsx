@@ -183,7 +183,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
       {showHalt(b, closing) && <p className="bot-why">{showHalt(b, closing)}</p>}
       {overrideText(b) && <p className="bot-why">{overrideText(b)}</p>}
-      {(chk.on || heldForSafety(s, b.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… this bot waits until it answers.'} />}
+      {(chk.on || heldForSafety(s, b.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… no open, re-range or send until it passes.'} />}
 
       <div className="notices">
         {b.lastError && <div className="banner error"><span className="grow">{b.lastError}</span></div>}

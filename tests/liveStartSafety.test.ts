@@ -446,21 +446,22 @@ describe('4. App restart: live bots restored as running follow the resume rule, 
     for (const b of all(w.bot)) expect(b.status).toBe('stopped');
   });
 
-  it('boot never gets stuck: a hung RPC is cut off by the boot deadline; bots are held (not ticked) until then', async () => {
+  it('boot never gets stuck: a hung RPC is cut off by the boot deadline; bots are held (exits only / LP not ticked) until then', async () => {
     const store = await savedRunning();
     const w = world(PASS, { store, steps: ['hang'], bootCheckMs: 150, tryMs: 10_000 });
     const ids = all(w.bot).map((b) => b.id);
     expect(w.bot.status().safetyChecking.sort()).toEqual([...ids].sort());
-    // While held, the poll doesn't tick them (they send nothing new).
-    const engines = [
-      ...(w.bot as unknown as { engines: Map<string, { tick: () => Promise<void> }> }).engines.values(),
-      ...(w.bot as unknown as { trendEngines: Map<string, { tick: () => Promise<void> }> }).trendEngines.values(),
-      ...(w.bot as unknown as { lpEngines: Map<string, { tick: () => Promise<void> }> }).lpEngines.values(),
-    ];
-    let ticked = 0;
-    for (const e of engines) e.tick = async () => { ticked++; };
+    // While held, grid and trend bots tick for exits only (tests/bootHoldExits.test.ts); the liquidity bot (no
+    // stop / take-profit exits) isn't ticked unless it has a tx to settle.
+    const grids = [...(w.bot as unknown as { engines: Map<string, { tick: () => Promise<void>; safetyHold: unknown }> }).engines.values()];
+    const trends = [...(w.bot as unknown as { trendEngines: Map<string, { tick: () => Promise<void>; safetyHold: unknown }> }).trendEngines.values()];
+    const lps = [...(w.bot as unknown as { lpEngines: Map<string, { tick: () => Promise<void> }> }).lpEngines.values()];
+    expect([...grids, ...trends].map((e) => e.safetyHold)).toEqual(['exits', 'exits']);
+    let ticked = 0, lpTicked = 0;
+    for (const e of [...grids, ...trends]) e.tick = async () => { ticked++; };
+    for (const e of lps) e.tick = async () => { lpTicked++; };
     await w.bot.tickAll();
-    expect(ticked).toBe(0);
+    expect([ticked, lpTicked]).toEqual([2, 0]);
     const t0 = Date.now();
     await w.bot.bootSafety;
     expect(Date.now() - t0).toBeLessThan(2_000);
@@ -469,8 +470,9 @@ describe('4. App restart: live bots restored as running follow the resume rule, 
       expect(b.status).toBe('running');
       expect(b.startOverride).toMatchObject({ kind: 'boot', blockedBy: expect.stringMatching(/timed out|out of time/) });
     }
+    expect([...grids, ...trends].map((e) => e.safetyHold)).toEqual([null, null]); // released
     await w.bot.tickAll();
-    expect(ticked).toBe(3);
+    expect([ticked, lpTicked]).toEqual([4, 1]);
   });
 
   it('paper bots and stopped live bots are not checked at boot', async () => {
