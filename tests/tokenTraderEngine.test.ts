@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
@@ -28,6 +29,7 @@ const pool = (o: Partial<FreshPool> = {}): FreshPool => ({
 function trader(o: {
   now?: () => number; discover?: () => Promise<FreshPool[]>;
   assess?: (p: FreshPool) => Promise<GateInput>;
+  holders?: (p: FreshPool) => Promise<{ largest: number | null; top10: number | null; unverified: boolean }>;
   hits?: SnipeHit[]; resolve?: (h: SnipeHit) => Promise<FreshPool | null>;
   store?: MemoryStore<TraderState>;
 } = {}) {
@@ -36,6 +38,7 @@ function trader(o: {
   const t = new TokenTrader({
     store, now: o.now ?? (() => 1_700_000_000_000), sniper,
     discover: o.discover, assess: async (p) => (o.assess ? o.assess(p) : clean()),
+    holders: o.holders,
     resolve: o.resolve ?? (async () => null),
   });
   return { t, store };
@@ -130,6 +133,10 @@ describe('token trader engine', () => {
       expect(saved.body.options.perTradeUsd).toBe(40);
       expect(saved.body.options.sniper.on).toBe(true);
       expect(saved.body.options.sniper.chains[1]).toBe(false);
+      expect(saved.body.options.enforceHolderCheck).toBe(false);
+      const ui = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
+      expect(ui).toMatch(/Holder concentration/);
+      expect(ui).toMatch(/enforceHolderCheck/);
       expect((await call('POST', '/api/token-trader/on')).body.on).toBe(true);
       expect((await call('POST', '/api/token-trader/off')).body.on).toBe(false);
       expect(store.load()!.options.perTradeUsd).toBe(40);
@@ -144,5 +151,105 @@ describe('token trader engine', () => {
     expect(() => t.turnOn()).toThrow(/not wired/);
     expect(() => t.configure({ sniper: { on: false, minLiquidityUsd: 1, delayBlocks: 0, delaySec: 0, maxPerHour: 1, chains: {}, mevRpc: 'http://rpc.example' } })).toThrow(/https/);
     expect(() => t.configure({ maxImpact: 0.2 })).toThrow(/5%/);
+  });
+
+  it('leaves concentration unread when the check is off, and blocks from it when the check is on', async () => {
+    const p = pool({ tokenSymbol: 'HELD' });
+    let calls = 0;
+    const off = trader({
+      discover: async () => [p],
+      holders: async () => { calls++; throw new Error('explorer down'); },
+    });
+    off.t.configure({ minPoolAgeSec: 0, risk: 'safe' });
+    off.t.turnOn();
+    await off.t.tick();
+    expect(calls).toBe(0);
+    expect(off.t.status().positions).toHaveLength(1);
+    expect(off.t.status().options.enforceHolderCheck).toBe(false);
+
+    const on = trader({
+      discover: async () => [pool({ tokenSymbol: 'WHALE' })],
+      holders: async () => ({ largest: 0.6, top10: 0.7, unverified: false }),
+    });
+    on.t.configure({ minPoolAgeSec: 0, risk: 'safe', enforceHolderCheck: true });
+    on.t.turnOn();
+    await on.t.tick();
+    expect(on.t.status().positions).toHaveLength(0);
+    expect(on.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/one holder has 60%/);
+
+    const top = trader({
+      discover: async () => [pool({ tokenSymbol: 'TEN' })],
+      holders: async () => ({ largest: 0.2, top10: 0.91, unverified: false }),
+    });
+    top.t.configure({ minPoolAgeSec: 0, risk: 'medium', enforceHolderCheck: true });
+    top.t.turnOn();
+    await top.t.tick();
+    expect(top.t.status().positions).toHaveLength(0);
+    expect(top.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/top 10/);
+  });
+
+  it('fails closed for safe and medium when the holder read throws, and still buys on risk any', async () => {
+    const boom = async () => { throw new Error('rpc down'); };
+    for (const risk of ['safe', 'medium'] as const) {
+      const { t } = trader({ discover: async () => [pool()], holders: boom });
+      t.configure({ minPoolAgeSec: 0, risk, enforceHolderCheck: true });
+      t.turnOn();
+      await t.tick();
+      expect(t.status().positions).toHaveLength(0);
+      expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+    }
+    const any = trader({ discover: async () => [pool()], holders: boom });
+    any.t.configure({ minPoolAgeSec: 0, risk: 'any', enforceHolderCheck: true });
+    any.t.turnOn();
+    await any.t.tick();
+    expect(any.t.status().positions).toHaveLength(1);
+  });
+
+  it('keeps the holder check off for a saved file that predates it, and the API can turn it on', async () => {
+    const store = new MemoryStore<TraderState>();
+    const old = {
+      version: 1 as const, on: false,
+      options: {
+        mode: 'paper' as const, perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 0, chains: [] as number[],
+        risk: 'safe' as const, maxImpact: 0.03, maxPoolShare: 0.02,
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+      },
+      positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
+    };
+    store.save(old as TraderState);
+    let calls = 0;
+    const { t } = trader({
+      store, discover: async () => [pool()],
+      holders: async () => { calls++; throw new Error('should not be called'); },
+    });
+    expect(t.status().options.enforceHolderCheck).toBe(false);
+    t.turnOn();
+    await t.tick();
+    expect(calls).toBe(0);
+    expect(t.status().positions).toHaveLength(1);
+
+    const bot = new MultiBot({ net: NET, reader: new MockChain(), signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), now: () => 1_800_000_000_000 });
+    const server = createApp({ bot, net: NET, tokenTrader: t }).listen(0, '127.0.0.1');
+    await new Promise((r) => server.once('listening', r));
+    const port = (server.address() as AddressInfo).port;
+    const call = (method: string, path: string, body?: unknown) => new Promise<{ status: number; body: TraderState & { on: boolean } }>((resolve, reject) => {
+      const data = JSON.stringify(body ?? {});
+      const req = http.request({ host: '127.0.0.1', port, path, method, headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, (res) => {
+        let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(b) }));
+      });
+      req.on('error', reject); req.end(data);
+    });
+    try {
+      const saved = await call('PUT', '/api/token-trader', { enforceHolderCheck: true });
+      expect(saved.status).toBe(200);
+      expect(saved.body.options.enforceHolderCheck).toBe(true);
+      expect(saved.body.options.maxImpact).toBe(0.03);
+      await t.tick();
+      expect(calls).toBe(1);
+      expect(t.status().positions).toHaveLength(1);
+      expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
   });
 });

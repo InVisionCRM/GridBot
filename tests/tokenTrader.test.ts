@@ -68,6 +68,20 @@ describe('safety gate', () => {
     expect(gateToken(clean({ lpUnlocked: null, canPause: null })).ok).toBe(true);
   });
 
+  it('ignores holder-check fields unless the check is on, then fails closed for safe and medium only', () => {
+    const unknown = clean({ holderConcentration: null });
+    const off = gateToken(unknown);
+    expect(gateToken({ ...unknown, holdersUnverified: true, top10Concentration: 0.99, enforceHolderCheck: false })).toEqual(off);
+    expect(gateToken({ ...unknown, enforceHolderCheck: true, holdersUnverified: true }).reason).toMatch(/could not be verified/);
+    expect(gateToken({ ...unknown, risk: 'medium', enforceHolderCheck: true, holdersUnverified: true }).ok).toBe(false);
+    expect(gateToken({ ...unknown, risk: 'any', enforceHolderCheck: true, holdersUnverified: true }).ok).toBe(true);
+    // Medium still does not use the safe-only 50% rule. Top 10 above 80% does block safe and medium.
+    expect(gateToken({ ...unknown, risk: 'medium', enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.6, top10Concentration: 0.7 }).ok).toBe(true);
+    expect(gateToken({ ...unknown, risk: 'medium', enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.2, top10Concentration: 0.85 }).reason).toMatch(/top 10/);
+    expect(gateToken({ ...unknown, risk: 'any', enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.9, top10Concentration: 0.95 }).ok).toBe(true);
+    expect(gateToken(clean({ holderConcentration: 0.6, enforceHolderCheck: true, holdersUnverified: false, top10Concentration: 0.6 })).reason).toMatch(/one holder has 60%/);
+  });
+
   it('medium allows a proxy and a small tax under the cap, and still blocks a pause function and unlocked liquidity', () => {
     expect(gateToken(clean({ risk: 'medium', proxy: true, sellTax: 0.05 })).ok).toBe(true);
     expect(gateToken(clean({ risk: 'medium', canPause: true })).reason).toMatch(/pause/);

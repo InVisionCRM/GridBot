@@ -7,7 +7,10 @@ import { JsonRpcProvider } from 'ethers';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
-import { ROUTER } from '../dex/abis';
+import { ERC20, ROUTER } from '../dex/abis';
+import { readCall } from '../dex/types';
+import { fetchJson } from '../fetchJson';
+import { holderApiBase, readHolderConcentration } from './holderRead';
 import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
 import type { SafetyLimits } from '../../live/limits';
 import type { SharedNonce, TxGate } from '../bot/txGate';
@@ -91,6 +94,17 @@ export function createTokenTrader(o: {
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk),
+    // Called only when the holder check is on. Flag off never reaches this, so a scan makes no explorer calls.
+    holders: (pool) => readHolderConcentration({
+      chainId: pool.chainId, token: pool.token, exclude: [pool.pool],
+      api: holderApiBase(o.hub.rt(pool.chainId).cfg),
+    }, {
+      fetchJson,
+      totalSupply: async (chainId, token) => {
+        const [supply] = await readCall<[bigint]>(o.hub.rt(chainId).reader, token, ERC20, 'totalSupply');
+        return supply;
+      },
+    }),
     resolve: (hit) => resolveHit(o.hub, hit),
     live: {
       buy: async (pool, spend, limits) => {
@@ -201,6 +215,8 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
     buyTax: s?.buyTaxPct ?? null, sellTax: s?.sellTaxPct ?? null,
     liquidityUsd: pool.liquidityUsd, minLiquidityUsd: pool.source === 'snipe' ? 0 : 0,
     canMint, canPause: s?.paused != null ? true : null, canBlacklist: s?.blacklist != null ? true : null,
+    // Unknown until the trader's holder check is on. That check fills this in; leaving it null here keeps the gate
+    // identical when the check is off, and keeps this function from calling an explorer on every assess.
     proxy: s?.proxy != null ? true : null, lpUnlocked: null, holderConcentration: null, recentLiqPull: false,
     liveAllowed: s?.liveAllowed ?? false,
   };

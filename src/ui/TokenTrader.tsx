@@ -73,6 +73,10 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       </div>
 
       <div className="tt-row" style={{ marginTop: 10 }}>
+        <label className="check"><input type="checkbox" checked={o.enforceHolderCheck === true} onChange={(e) => void save({ enforceHolderCheck: e.target.checked })} /><span>Holder concentration</span></label>
+        <span className="muted small">Off unless checked, and off changes nothing. When on, a buy reads the largest holder and the top 10, skipping the pool, burn addresses and known lockers. If that list can't be read, safe and medium skip the token.</span>
+      </div>
+      <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.sniper.on} onChange={(e) => void save({ sniper: { ...o.sniper, on: e.target.checked } })} /><span>Sniper</span></label>
         <label className="smart-field"><span className="k">Min liquidity</span><input value={o.sniper.minLiquidityUsd} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, minLiquidityUsd: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>
         <label className="smart-field"><span className="k">Delay blocks</span><input value={o.sniper.delayBlocks} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, delayBlocks: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>

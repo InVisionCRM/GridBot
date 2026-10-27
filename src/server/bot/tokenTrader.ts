@@ -41,6 +41,11 @@ export interface TraderOptions {
   risk: 'safe' | 'medium' | 'any';
   maxImpact: number;
   maxPoolShare: number;
+  /**
+   * Read holder concentration and let the gate use it. Default off: assess still passes unknown concentration,
+   * and the gate output matches a build that does not know about this flag.
+   */
+  enforceHolderCheck: boolean;
   sniper: SniperOptions;
 }
 
@@ -111,6 +116,7 @@ const TRADE_MAX = 200;
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
+  enforceHolderCheck: false,
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
 
@@ -129,6 +135,11 @@ export class TokenTrader {
     discover?: () => Promise<FreshPool[]>;
     /** Safety inputs for a pool. Required before any buy. */
     assess?: (pool: FreshPool, mode: 'paper' | 'live', risk: TraderOptions['risk']) => Promise<GateInput>;
+    /**
+     * Largest holder and top 10, excluding the pool, burn addresses and lockers.
+     * Called only when `enforceHolderCheck` is on. A throw is "could not verify".
+     */
+    holders?: (pool: FreshPool) => Promise<{ largest: number | null; top10: number | null; unverified: boolean }>;
     /** Latest price, depth, volume, tax, sell simulation. Paper tests can omit this and call mark(). */
     mark?: (p: Position) => Promise<Partial<Position> | null>;
     live?: {
@@ -289,7 +300,22 @@ export class TokenTrader {
   private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number }> {
     if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0 };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
-    const r = gateToken({ ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) });
+    let input: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
+    if (this.state.options.enforceHolderCheck) {
+      let h = { largest: null as number | null, top10: null as number | null, unverified: true };
+      if (this.d.holders) {
+        try { h = await this.d.holders(pool); } catch { h = { largest: null, top10: null, unverified: true }; }
+      }
+      const unverified = h.unverified || h.largest == null || h.top10 == null;
+      input = {
+        ...input,
+        enforceHolderCheck: true,
+        holdersUnverified: unverified,
+        holderConcentration: unverified ? null : h.largest,
+        top10Concentration: unverified ? null : h.top10,
+      };
+    }
+    const r = gateToken(input);
     return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0 };
   }
 

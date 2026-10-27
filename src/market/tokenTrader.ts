@@ -12,6 +12,7 @@
 import { HARD_CAPS } from '../live/limits';
 import { MAX_TAX, TAX_TOLERANCE } from '../live/tax';
 import { simBuy, simSell, type CostModel } from './costs';
+import { TOP10_MAX_SHARE } from './holders';
 import { capSwap, TOKEN_MAX_POOL_SHARE } from './poolSize';
 
 export const DEFAULT_MIN_POOL_AGE_SEC = 24 * 3600;
@@ -96,8 +97,20 @@ export interface GateInput {
   proxy: boolean | null;
   /** LP can be pulled by the owner (not burned / not locked). null = not detectable. */
   lpUnlocked: boolean | null;
-  /** Largest holder as a share of supply. null = unknown, and unknown is not a block. */
+  /**
+   * Largest holder as a share of circulating supply. null = unknown.
+   * Unknown is not a block unless `enforceHolderCheck` is on (safe and medium then fail closed).
+   */
   holderConcentration: number | null;
+  /**
+   * Holder-concentration check. Absent or false: `top10Concentration` and `holdersUnverified` are ignored,
+   * and a null `holderConcentration` stays "not a block", which is today's gate.
+   */
+  enforceHolderCheck?: boolean;
+  /** Top 10 holders as a share of circulating supply. Ignored unless `enforceHolderCheck`. */
+  top10Concentration?: number | null;
+  /** The holder list could not be read. Fails closed for safe and medium only when `enforceHolderCheck`. */
+  holdersUnverified?: boolean;
   recentLiqPull: boolean;
   /** The existing safety classifier. Live still requires this. */
   liveAllowed: boolean;
@@ -122,6 +135,9 @@ export function gateToken(g: GateInput): GateResult {
   const tax = Math.max(g.buyTax ?? 0, g.sellTax ?? 0);
   if (g.mode === 'live' && tax > maxTax) return hard(`tax ${(tax * 100).toFixed(1)}% is over the ${(maxTax * 100).toFixed(0)}% live cap`);
   if (g.mode === 'live' && !g.liveAllowed) return hard('safety check does not allow live trading');
+  if (g.enforceHolderCheck && g.holdersUnverified && (g.risk === 'safe' || g.risk === 'medium')) {
+    return hard('holder concentration could not be verified');
+  }
   if (g.risk === 'safe' || g.risk === 'medium') {
     if (g.canPause === true) return hard('owner can pause');
     if (g.lpUnlocked === true) return hard('liquidity is unlocked');
@@ -132,6 +148,9 @@ export function gateToken(g: GateInput): GateResult {
     if (g.canBlacklist === true) return hard('owner can blacklist');
     if (tax > TAX_TOLERANCE) return hard(`tax ${(tax * 100).toFixed(2)}% (safe allows none)`);
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
+  }
+  if (g.enforceHolderCheck && (g.risk === 'safe' || g.risk === 'medium') && g.top10Concentration != null && g.top10Concentration > TOP10_MAX_SHARE) {
+    return hard(`top 10 holders have ${(g.top10Concentration * 100).toFixed(0)}%`);
   }
   // Honeypot and a failed sell already returned above, so live only still needs the classifier and the tax cap.
   return { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null };
