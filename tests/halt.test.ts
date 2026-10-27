@@ -112,19 +112,37 @@ describe('stop reasons', () => {
     });
   });
 
-  it('the stop alias is the same stop-all, and a gateway via header is the phone', async () => {
+  it('the stop alias stops everything only with { all: true }, and a gateway via header is the phone', async () => {
     const { bot } = make();
     await bot.add({ mode: 'paper', stable: 'DAI', ...base });
     const port = await listen(createApp({ bot, net: NET, heartbeatMs: 60_000, statusThrottleMs: 60_000 }));
-    const stopped = await req(port, '/api/bot/stop', 'POST', {
-      'content-type': 'application/json',
-      'x-gridbot-via': 'owner',
-      'user-agent': 'iPhone',
-    }, '{}');
+    const h = { 'content-type': 'application/json', 'x-gridbot-via': 'owner', 'user-agent': 'iPhone' };
+    for (const body of ['{}', '{"all":"true"}', '{"all":1}']) {
+      const refused = await req(port, '/api/bot/stop', 'POST', h, body);
+      expect(refused.status).toBe(400);
+      expect(bot.status().grids[0].status).toBe('running');
+    }
+    const stopped = await req(port, '/api/bot/stop', 'POST', h, '{"all":true}');
     expect(stopped.status).toBe(200);
     expect(bot.status().grids[0].halt).toMatchObject({
       what: 'stop-all', detail: 'POST /api/bot/stop-all', origin: 'gateway-owner', endpoint: 'POST /api/bot/stop', ua: 'iPhone',
     });
+  });
+
+  it('the stop alias with { id } stops just that bot, with an audit record', async () => {
+    const { bot } = make();
+    const a = await bot.add({ mode: 'paper', stable: 'DAI', ...base });
+    const b2 = await bot.add({ mode: 'paper', stable: 'DAI', ...base });
+    const port = await listen(createApp({ bot, net: NET, heartbeatMs: 60_000, statusThrottleMs: 60_000 }));
+    const h = { 'content-type': 'application/json', 'user-agent': 'Laptop' };
+    const got = await req(port, '/api/bot/stop', 'POST', h, JSON.stringify({ id: a }));
+    expect(got.status).toBe(200);
+    const g = (id: string) => bot.status().grids.find((x) => x.id === id)!;
+    expect(g(a).status).toBe('stopped');
+    expect(g(b2).status).toBe('running');
+    expect(g(a).halt).toMatchObject({ what: 'bot-stop', origin: 'localhost', endpoint: 'POST /api/bot/stop', ua: 'Laptop' });
+    expect((await req(port, '/api/bot/stop', 'POST', h, '{"id":"nope"}')).status).toBe(400);
+    expect(g(b2).status).toBe('running');
   });
 
   it('a friend copy stays a friend copy even if the via header says owner', async () => {

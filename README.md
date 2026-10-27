@@ -44,7 +44,7 @@ Dev: `npm run dev` (UI :5173, API :3847).
 - **Chains.** PulseChain, Robinhood Chain and Ethereum are on by default. `CHAINS=ethereum` (for example) limits the set; PulseChain is always on. Bots, alerts and custom tokens saved for a chain that isn't loaded stay stopped and show as unavailable until you remove them.
 - **RPCs.** `RPC_URL_<SLUG>` (comma-separated list allowed) comes first, then the built-in public fallbacks. On PulseChain the legacy `RPC_URL` also works. The reader rotates endpoints on transport errors and 429s, uses a 12 s timeout, and limits concurrency per chain. A chain with one RPC (Robinhood) has nothing to rotate to: a 429 there is retried after 1 s, 2 s and 4 s, other errors after 0.4 s and 0.8 s. Robinhood's RPC rate-limits `eth_getLogs` and, while those run, refuses ordinary reads too, for seconds at a time (measured 2026-10-22: `eth_call` alone, 0 of 400 refused at up to 30 a second; with log reads at 4 a second, 2 of 75; at 8, 9 of 75). The only log reads in normal running are the liquidity replay's swap history; during it, a live liquidity bot's tick failed with *exceeded maximum retry limit … 429 Too Many Requests*. In six paired 3–4-minute runs under that load, the old 0.4 s + 0.8 s let 47 of ~3,100 bot reads fail, these waits 3. In the app, a full 7-day ETH/USDG history read alongside a ±1% paper liquidity bot then gave the bot no errors. A failed read only skips that tick: a liquidity bot's tries count mined reverts, not refused reads. Simulations with state overrides try every endpoint, because support varies by RPC.
 - **Keys.** One `PRIVATE_KEY` signs on every chain (same EVM address). The optional `PRIVATE_KEY_<SLUG>` (e.g. `PRIVATE_KEY_ETHEREUM`) overrides it for that chain. Keys are read only in `src/server/env.ts`, removed from `process.env` immediately, redacted from logs, and never sent to the UI (`tests/noSecrets.test.ts`).
-- **Queues.** Each chain has its own `TxGate` + nonce queue, so chains trade in parallel while one chain never has two txs in flight. **Stop all** stops everything; with a chain selected it stops only that chain.
+- **Queues.** Each chain has its own `TxGate` + nonce queue, so chains trade in parallel while one chain never has two txs in flight. **Stop all** stops everything; with a chain selected it stops only that chain. It also stops the Smart trader there (it opens, swaps and closes nothing until **Carry on**) and the token trader's new buys and snipes (until **Resume new buys**); the token trader keeps managing the exits of positions it already holds. A start that is still in progress when Stop all is pressed is refused. `POST /api/bot/stop` takes `{ "id": "<bot id>" }` for one bot, or `{ "all": true }` for every bot.
 - **Gas.** The gas balance is polled per chain, with a warning in the feed when it drops below the chain's threshold (50k PLS; 0.01 ETH on Ethereum; 0.0005 ETH on Robinhood). Gas is converted to the market's base and quote units through the chain's native/USD market. On Robinhood (an Arbitrum Orbit L2) the cost and start gates add the L1 component from `NodeInterface.gasEstimateL1Component`.
 - **Markets.** The key `chain:BASE/QUOTE` (e.g. `ethereum:ETH/USDC`) is used by every feature: grids, trend bots, backtests, charts, market panels, alerts, analytics and the journal. The existing PulseChain keys (`DAI`, `HEX`, …) and `data/state.json` load unchanged as chain 369.
 - **UI.** The chain filter in the top bar applies to every screen. Chain badges and explorer links per chain. Tools → Analytics shows aggregated ≈USD with a per-chain breakdown. DEX/version + fee tags appear on each grid, trend bot, pool and fill.
@@ -199,7 +199,7 @@ Give it an amount on a chain and turn it on; it runs that money as grid and liqu
 - **API:**
   - `GET /api/autopilot`
   - `PUT /api/autopilot {mode, options, budgets}` · `PUT /api/autopilot/options`
-  - `POST /api/autopilot/on` · `POST /api/autopilot/off {sell}` · `POST /api/autopilot/review`
+  - `POST /api/autopilot/on` · `POST /api/autopilot/off {sell}` · `POST /api/autopilot/review` · `POST /api/autopilot/carry-on {chainId}` (after Stop all / STOP chain)
 - **Checked:**
   - `tests/autopilot.test.ts` (the planner) and `tests/autopilotEngine.test.ts`: on the mock chain with the real MultiBot. Covered: opening, the week's hold, retiring to cash, a pool in another coin (swapped in, valued, swapped back), the loss limit, and turning off.
   - In a sandbox, in paper, on a copy of a real scan (179 pools), budgets of 1,000 USDG on Robinhood and 500 DAI on PulseChain:
@@ -225,7 +225,7 @@ Your own dashboard stays on this computer. To open it from your iPhone, reach th
    ```
    tailscale serve --bg 3850
    ```
-   That serves the gateway at `https://<mac>.<tailnet>.ts.net` to your tailnet only. `tailscale serve status` prints the address. Leave Funnel off unless a friend who is not on your tailnet needs a link.
+   That serves the gateway at `https://<mac>.<tailnet>.ts.net` to your tailnet only. `tailscale serve status` prints the address. Leave Funnel off: friends get in by device sharing (below), and the owner log-in is refused through Funnel anyway.
 
 **On your iPhone**
 
@@ -233,7 +233,16 @@ Install the Tailscale app and log in to the same tailnet. Open `https://<mac>.<t
 
 `tailscale serve` forwards with `Host: <mac>.<tailnet>.ts.net` and `X-Forwarded-*` headers. The gateway allows that hostname (from `GATEWAY_HOST` or the address saved under Tools → Friends) and refuses any other public host. It does not trust `X-Forwarded-Host`. It then calls your app on `127.0.0.1:3847` with a localhost Host, and sets a localhost Origin only after its own same-origin check. The app still refuses any other Host or Origin on a direct connection, so opening port 3847 does not skip the gateway.
 
-The owner log-in is not a friend. Invite links cannot create it. A friend's cookie is never sent to your app. Five wrong passwords lock that name for 15 minutes, and 30 failures in a minute pause every log-in. The cookie is signed, HttpOnly, Secure, SameSite=Lax, and lasts 30 days. Tailscale is the second factor: only devices on your tailnet can open `tailscale serve`. Use `tailscale funnel` only when a friend needs the public internet. Funnel publishes the gateway; your owner password is then what stands in front of your bots.
+The owner log-in is not a friend. Invite links cannot create it. A friend's cookie is never sent to your app. Five wrong passwords lock that name for 15 minutes, and 30 failures in a minute pause every log-in. The cookie is signed, HttpOnly, Secure, SameSite=Lax, and lasts 30 days. Tailscale is the second factor: only devices on your tailnet (and people you shared this computer with) can open `tailscale serve`. **The owner log-in is refused through Tailscale Funnel**, and an owner cookie is not honored there: only this computer and the tailnet reach your bots. How the gateway tells them apart (from Tailscale's `ipn/ipnlocal/serve.go`):
+
+| Header set by Tailscale | `tailscale serve` (tailnet, shared users) | `tailscale funnel` (internet) |
+|---|---|---|
+| `Tailscale-Funnel-Request` | not set | `?1` |
+| `Tailscale-User-Login` / `-Name` / `-Profile-Pic` | the user (not for tagged devices) | not set |
+| `X-Forwarded-For` | the device's tailnet address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) | the visitor's public IP |
+| `X-Forwarded-Host`, `X-Forwarded-Proto` | the ts.net name, `https` | same |
+
+Tailscale deletes client-sent `Tailscale-*` headers and replaces `X-Forwarded-For`, so a visitor can't hide either sign. The gateway treats a request with the Funnel header **or** a forwarded address that is not loopback/tailnet as Funnel. (Funnel in raw TCP mode, `tailscale funnel --tcp`, sets no headers at all; don't use it for the gateway.)
 
 ## Friends' copies (Tools → Friends)
 
@@ -242,7 +251,7 @@ Friends get their own copy of the app on your computer and open it on their phon
 **Set up (once, on your computer)**
 1. `npm run friends:setup` adds `FRIENDS_SECRET` to `.env`. It locks friends' keys and signs their log-ins. Keep it: a new one makes the saved keys unreadable.
 2. `npm run build`, then `npm start`. Friends' copies run from the built app; `npm run dev` leaves them off.
-3. Install [Tailscale](https://tailscale.com/download) and log in. For your own phone, follow Phone access (`tailscale serve --bg 3850`), which stays on your tailnet. For a friend who is not on your tailnet, run `tailscale funnel --bg 3850` once. It prints `https://<computer>.<tailnet>.ts.net`. Funnel publishes the gateway to the internet and needs the Funnel attribute turned on for your tailnet (the admin console asks the first time). See the [Funnel guide](https://tailscale.com/kb/1223/funnel).
+3. Install [Tailscale](https://tailscale.com/download) and log in. Run `tailscale serve --bg 3850` (Phone access); it prints `https://<computer>.<tailnet>.ts.net`. For a friend, **share this computer** with them instead of using Funnel: in the [admin console](https://login.tailscale.com/admin/machines), this computer → Share, send them the link; they accept it with their own (free) Tailscale account and open the same address with the Tailscale app on. They see only this computer, not the rest of your tailnet. See [Sharing](https://tailscale.com/kb/1084/sharing). Tailscale Funnel would publish the log-in page to the whole internet; friends' log-ins still work through it, but the owner log-in does not.
 4. Tools → Friends: your name and that address, then **Make invite link** and text it to the friend.
 
 **A friend, on their phone**: opens the link, chooses a password, and pastes their key if they want to trade live (it can be added later under **Account**). Then they log in with their name and password; the page can be added to the home screen like an app. A forgotten password gets a **New password link** from you; their bots and key stay.
@@ -498,7 +507,7 @@ Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the
 - **Cost gate.** The expected move (TP distance, or k×ATR) must clear the 0.579% round-trip fee + impact both ways from live reserves + gas + slippage allowance + min edge. Blocked signals are logged with the numbers.
 - **Safety checks.** The same units guard, impact cap, slippage, deadline and decimals handling as the grids. A broadcast tx is reconciled by hash.
 - **Inventory.** Separate from the grids: a bot only spends its own cash and only sells PLS it bought. A live start checks that the address balance covers every live allocation (grids + trend bots).
-- **State.** Persisted in `data/state.json` (v3; migrates v1/v2) and resumed on boot. Stop is per bot; Stop all stops grids and trend bots.
+- **State.** Persisted in `data/state.json` (v3; migrates v1/v2) and resumed on boot. Stop is per bot; Stop all stops grids, trend and liquidity bots, the Smart trader's opens, and the token trader's new buys (its exits keep running).
 
 ## Candles
 
