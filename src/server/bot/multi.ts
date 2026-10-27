@@ -226,6 +226,15 @@ export class MultiBot {
       label: (k) => this.hub.label(k),
     });
     this.hub.onSuspect = (k, why) => { void this.taxWatch.suspect(k, why); };
+    this.hub.onSafetyStale = (k, r) => {
+      this.activity.emitEvent({ type: 'alert', kind: 'system', level: 'warn', notify: false, pair: k, chainId: this.hub.def(k).chainId,
+        msg: `${this.hub.label(k)}: safety report is STALE (${r.stale!.why}). Showing the last known report from ${new Date(r.at).toISOString()}; bots keep running, live starts use it until a re-check measures again.` });
+      this.activity.emit('status');
+    };
+    this.hub.onSafetyFresh = (k, r) => {
+      this.activity.emitEvent({ type: 'info', kind: 'system', level: 'info', pair: k, chainId: this.hub.def(k).chainId, msg: `${this.hub.label(k)}: safety re-checked again — ${r.risk}${r.liveAllowed ? '' : ', live trading blocked'}` });
+      this.activity.emit('status');
+    };
     this.resumeClosing();
   }
 
@@ -1525,6 +1534,7 @@ export class MultiBot {
       pool: d.pool.address || (d.legacy ? d.candlePool ?? null : null),
       poolMode: d.poolMode ?? (d.custom ? 'manual' : 'default'), poolChoices: this.hub.rt(d.chainId).adapters.size,
       legacy: !!d.legacy, custom: !!d.custom, risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null, liveAllowed: d.safety ? d.safety.liveAllowed : true,
+      safetyAt: d.safety?.at ?? null, safetyStale: d.safety?.stale ?? null,
       buyTaxPct: d.safety?.buyTaxPct ?? null, sellTaxPct: d.safety?.sellTaxPct ?? null, transferTaxPct: d.safety?.transferTaxPct ?? null,
       taxMode: d.safety?.taxMode ?? null, maxTxTokens: d.safety?.maxTxTokens ?? null, maxWalletTokens: d.safety?.maxWalletTokens ?? null,
       tradable: this.hub.rt(d.chainId).tradable,
@@ -1566,6 +1576,7 @@ export class MultiBot {
       legacyChainId: this.hub.legacyChainId,
       chains: this.chainsStatus(),
       marketList: this.marketList(),
+      safetyStale: this.hub.list().filter((d) => d.safety?.stale).map((d) => ({ key: d.key, label: this.hub.label(d.key), at: d.safety!.at, ...d.safety!.stale! })),
       grids, trends, lps, aggregate, allocations: this.allocations(), alerts: this.multi.alerts,
       candleSync: this.candleSyncStatus?.() ?? null,
       log: this.d.log.entries.slice(-80).reverse(),

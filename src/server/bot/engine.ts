@@ -364,7 +364,9 @@ export class GridEngine {
   /** Markets with a safety report (custom tokens, verified built-ins): re-run the eth_call buy/sell simulation before going live; honeypot / tax / unknown → refuse. */
   private async requireLiveSafety(key: string) {
     let s = this.hub.def(key).safety ?? null;
-    try { s = await this.hub.recheck(key); } catch (e) { this.tag('warn', `safety re-check failed: ${(e as Error).message}`); }
+    try { s = await this.hub.recheck(key); } catch (e) { s = this.hub.def(key).safety ?? null; this.tag('warn', `safety re-check failed: ${(e as Error).message}`); }
+    // Couldn't re-check: decided on the last known report (as before), and said so.
+    if (s?.stale && s.liveAllowed) this.tag('warn', `starting on the last known safety report from ${new Date(s.at).toISOString()} (stale: ${s.stale.why})`);
     if (!s?.liveAllowed) {
       throw new Error(`LIVE blocked — ${this.hub.label(key)} safety ${s?.risk ?? 'unknown'}: ${(s?.reasons ?? ['no safety check']).join(' ')}`);
     }
