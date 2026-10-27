@@ -138,7 +138,9 @@ export function botFacts(b: AnyObj, now = Date.now(), extra?: { chain?: string |
     : b.kind === 'trend' ? num(b.capital)
     : b.kind === 'lp' ? (num(b.startValue) ?? num(b.config?.capital))
     : null;
-  const investedUsd = trader ? num(b.spentUsd) : b.kind === 'grid' ? investedQuote : usdOf(investedQuote, k);
+  // Grid capital (config.totalCapitalUsd) is in quote units despite its name: equity = capital + realized + unrealized
+  // in the quote coin (engine.ts), and the server's USD rollups multiply it by usdPerQuote (multi.ts). Convert it here too.
+  const investedUsd = trader ? num(b.spentUsd) : usdOf(investedQuote, k);
   const valueUsd = bookUsd(b);
   let realizedQuote: number | null = null;
   let unrealizedQuote: number | null = null;

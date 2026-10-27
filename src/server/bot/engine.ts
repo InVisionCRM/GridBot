@@ -197,7 +197,12 @@ export class GridEngine {
       if (this.state.status === 'running') this.state.halt = systemHalt('startup', 'No signing key — stopped.', this.now());
       this.state.status = 'stopped';
     }
-    this.executor = this.makeExecutor(this.state.mode, this.state.stable);
+    // A saved live grid with no key for its chain (key removed, .env not found from this folder) must not take the whole
+    // app down: makeExecutor throws for live without a signer. It loads stopped and sends nothing until a key is back.
+    if (this.state.mode === 'live' && !this.signer) {
+      this.lastError = noKey();
+      this.executor = new UnavailableExecutor('live', this.lastError);
+    } else this.executor = this.makeExecutor(this.state.mode, this.state.stable);
     if (this.executor instanceof UnavailableExecutor && this.state.status === 'running') {
       this.tag('warn', `${this.state.stable}: ${this.lastError} — stopped.`);
       this.state.halt = systemHalt('startup', `${this.state.stable}: ${this.lastError ?? 'market unavailable'} — stopped.`, this.now());

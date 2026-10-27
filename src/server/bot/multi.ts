@@ -189,7 +189,7 @@ export class MultiBot {
       now: () => this.now(),
       markets: () => this.watchedSafetyKeys(),
       current: (k) => this.hub.def(k).safety,
-      recheck: (k) => this.hub.recheck(k),
+      recheck: (k, why) => this.hub.recheck(k, { keepMeasured: why === 'scheduled' }),
       pause: (k, why) => this.pauseMarket(k, why),
       alert: (k, level, msg, notify) => this.activity.emitEvent({ type: 'alert', kind: 'system', level, notify, pair: k, chainId: this.hub.def(k).chainId, msg }),
       label: (k) => this.hub.label(k),
