@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { diskCache, decodeV3Snapshot, invertCandles, parseDexscreenerOhlcv, parseGeckoOhlcv } from '../src/backtest/adapters';
+import { diskCache, decodeV3Snapshot, geckoOhlcvUrl, invertCandles, parseDexscreenerOhlcv, parseGeckoOhlcv } from '../src/backtest/adapters';
 import { candleLpFees, lpShareForFeeTier } from '../src/backtest/feeModel';
 import { GAS_UNITS, gasQuote } from '../src/backtest/gasModel';
 import { renderMarkdown, unlabeledNumberLines, type BotSummary } from '../src/backtest/report';
@@ -74,6 +74,14 @@ describe('fee and gas models', () => {
 });
 
 describe('adapters', () => {
+  it('asks GeckoTerminal for a whole-second timestamp', () => {
+    const url = geckoOhlcvUrl('eth', '0x' + 'ab'.repeat(20), '0x' + 'cd'.repeat(20), 1793135234.008, { unit: 'minute', n: 15 });
+    expect(url).toContain('/ohlcv/minute?');
+    expect(url).toContain('aggregate=15');
+    expect(url).toContain('before_timestamp=1793135234');
+    expect(url).not.toContain('1793135234.008');
+  });
+
   it('inverts a flipped pair so the quote and the volume swap sides', () => {
     const [c] = invertCandles([{ t: 1, o: 2, h: 4, l: 1, c: 2, v: 10 }]);
     expect(c.o).toBeCloseTo(0.5);

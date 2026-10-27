@@ -156,11 +156,11 @@ function addr(v: unknown): string {
   return /^0x[0-9a-fA-F]{40}$/.test(s) ? s : '';
 }
 
-/** Seconds. The app stores milliseconds. */
+/** Whole seconds. The app stores milliseconds. A fractional timestamp is rejected by the candle API. */
 function sec(v: unknown): number | null {
   const n = num(v);
   if (n == null || n <= 0) return null;
-  return n > 1e12 ? n / 1000 : n;
+  return Math.floor(n > 1e12 ? n / 1000 : n);
 }
 
 function chainById(id: number): BacktestChain | null {

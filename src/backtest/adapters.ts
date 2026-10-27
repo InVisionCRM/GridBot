@@ -78,7 +78,7 @@ export function geckoOhlcvUrl(
   bar: { unit: 'hour' | 'minute'; n: number } = { unit: 'hour', n: 1 },
 ): string {
   const q = new URLSearchParams({ aggregate: String(bar.n), limit: '1000', currency: 'token', token: baseToken });
-  if (beforeSec) q.set('before_timestamp', String(beforeSec));
+  if (beforeSec) q.set('before_timestamp', String(Math.floor(beforeSec)));
   return `https://api.geckoterminal.com/api/v2/networks/${network}/pools/${pool}/ohlcv/${bar.unit}?${q}`;
 }
 
@@ -103,15 +103,24 @@ export async function diskCache<T>(dir: string, key: string, load: () => Promise
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+let nextGeckoAt = 0;
+
+async function paceGecko(): Promise<void> {
+  const wait = nextGeckoAt - Date.now();
+  if (wait > 0) await sleep(wait);
+  nextGeckoAt = Date.now() + 4_000;
+}
 
 async function getJson(url: string, fetchFn: FetchLike, cacheDir: string): Promise<unknown> {
   const host = new URL(url).host;
   const { value } = await diskCache(cacheDir, url, async () => {
     // GeckoTerminal answers 429 and asks for about a minute. A cached miss waits and tries again; other errors do not.
+    const gecko = host.includes('geckoterminal');
     let wait = 65_000;
     for (let attempt = 0; attempt < 4; attempt++) {
+      if (gecko) await paceGecko();
       const r = await fetchFn(url, { headers: { accept: 'application/json' } });
-      if (r.status === 429 && attempt < 3 && host.includes('geckoterminal')) {
+      if (r.status === 429 && attempt < 3 && gecko) {
         await sleep(wait);
         wait = Math.min(wait * 2, 180_000);
         continue;
@@ -151,9 +160,14 @@ export async function loadCandles(o: {
   }
   const slug = chain.screener ?? chain.key;
   const url = dexscreenerOhlcvUrl(slug, o.pool, o.from, o.to);
-  const candles = parseDexscreenerOhlcv(await getJson(url, fetchFn, o.cacheDir)).filter((c) => c.t >= o.from && c.t < o.to);
-  if (!candles.length) throw new Error(`no candles (${errors.join('; ') || 'DexScreener empty'})`);
-  return { candles, source: 'dexscreener' };
+  try {
+    const candles = parseDexscreenerOhlcv(await getJson(url, fetchFn, o.cacheDir)).filter((c) => c.t >= o.from && c.t < o.to);
+    if (!candles.length) throw new Error(errors.join('; ') || 'DexScreener empty');
+    return { candles, source: 'dexscreener' as const };
+  } catch (e) {
+    const why = errors.length ? `${errors.join('; ')}; ` : '';
+    throw new Error(`no candles (${why}${(e as Error).message})`);
+  }
 }
 
 async function geckoRange(network: string, pool: string, base: string, from: number, to: number, fetchFn: FetchLike, cacheDir: string, barMinutes: number): Promise<Candle[]> {
