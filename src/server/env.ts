@@ -71,6 +71,28 @@ export function readCopy(): CopyInfo | null {
   return { friend, host, hostUrl };
 }
 
+/**
+ * A friend's copy: ask the host for the friend's key over the IPC channel (friends/copies.ts answers once). null = the
+ * friend gave no key (paper only). The key is registered for log redaction and never put in process.env.
+ */
+export function receiveFriendKey(timeoutMs = 15_000): Promise<string | null> {
+  const send = process.send?.bind(process);
+  if (!send) return Promise.reject(new Error('A friend\'s copy is started by the host app.'));
+  return new Promise((resolve, reject) => {
+    const done = (f: () => void) => { clearTimeout(timer); process.off('message', on); f(); };
+    const on = (m: unknown) => {
+      const msg = m as { type?: unknown; key?: unknown } | null;
+      if (msg?.type !== 'friend-key') return;
+      const key = typeof msg.key === 'string' && msg.key ? msg.key : null;
+      if (key) registerSecret(key.trim().startsWith('0x') ? key.trim() : `0x${key.trim()}`);
+      done(() => resolve(key));
+    };
+    const timer = setTimeout(() => done(() => reject(new Error("The host app didn't hand over the friend's key."))), timeoutMs);
+    process.on('message', on);
+    send({ type: 'friend-key?' });
+  });
+}
+
 /** JSON-RPC provider with a 30 s request timeout (ethers' default is 5 min, which can stall a poll or backfill). */
 export function makeProvider(rpcUrl: string, chainId: number, timeoutMs = 30_000): JsonRpcProvider {
   const req = new FetchRequest(rpcUrl);
@@ -107,7 +129,7 @@ function parseKey(raw: string | undefined, name: string): string | null {
  * PRIVATE_KEY_<envSlug> (e.g. PRIVATE_KEY_ETHEREUM). Every PRIVATE_KEY* variable is removed from process.env
  * immediately and registered for log redaction; keys never leave this module except inside Wallet objects.
  */
-export function createSigners(chains: { id: number; envSlug: string; provider: JsonRpcProvider }[]): Map<number, Wallet> {
+export function createSigners(chains: { id: number; envSlug: string; provider: JsonRpcProvider }[], o: { friendKey?: string | null } = {}): Map<number, Wallet> {
   const shared = process.env.PRIVATE_KEY;
   delete process.env.PRIVATE_KEY;
   const per = new Map<string, string | undefined>();
@@ -116,7 +138,9 @@ export function createSigners(chains: { id: number; envSlug: string; provider: J
     per.set(name.slice('PRIVATE_KEY_'.length), process.env[name]);
     delete process.env[name];
   }
-  const sharedKey = parseKey(shared, 'PRIVATE_KEY');
+  // A friend's copy: only the key the host handed over (receiveFriendKey), on every chain; nothing from its environment.
+  if ('friendKey' in o) per.clear();
+  const sharedKey = 'friendKey' in o ? parseKey(o.friendKey ?? undefined, "The friend's key") : parseKey(shared, 'PRIVATE_KEY');
   const out = new Map<number, Wallet>();
   for (const c of chains) {
     const k = parseKey(per.get(c.envSlug), `PRIVATE_KEY_${c.envSlug}`) ?? sharedKey;
