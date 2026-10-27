@@ -22,12 +22,12 @@ export class V3Adapter implements DexAdapter {
   get spender() { return this.cfg.router; }
 
   async findPools(a: string, b: string): Promise<PoolRef[]> {
-    // TODO(pool-fee): when PR #54 lands, set feeBps from poolFee.ts (the pool's fee()).
-    // Never copy that value onto feeTier — getPool, QuoterV2 and the router all key on the factory tier.
     const found = await Promise.all(this.cfg.feeTiers!.map(async (tier) => {
       try {
         const [p] = await readCall<[string]>(this.reader, this.cfg.factory, V3_FACTORY, 'getPool', [a, b, tier]);
-        return isZero(p) ? null : { dex: this.cfg.id, kind: 'v3' as const, address: p, feeBps: tier / 100, feeTier: tier };
+        if (isZero(p)) return null;
+        // feeBps is the pool's fee() (dynamic-fee DEXes re-read it in feeBpsNow). feeTier stays this factory key.
+        return { dex: this.cfg.id, kind: 'v3' as const, address: p, feeBps: await readV3FeeBps(this.reader, p), feeTier: tier };
       } catch { return null; }
     }));
     return found.filter((x): x is NonNullable<typeof x> => !!x);
