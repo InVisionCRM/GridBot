@@ -9,7 +9,7 @@ import { ARB_NODE_INTERFACE, ARB_NODE_INTERFACE_ADDR, ERC20 } from '../dex/abis'
 import type { DexAdapter } from '../dex/types';
 import { V2Adapter } from '../dex/v2';
 import { V3Adapter } from '../dex/v3';
-import type { RpcStatus } from './fallback';
+import type { ChainRpcHealth, HealthChange, RpcStatus } from './fallback';
 
 /** Reader surface the runtime may use (FallbackReader implements all; test mocks may omit the optional ones). */
 export type RuntimeReader = ChainReader & {
@@ -19,6 +19,8 @@ export type RuntimeReader = ChainReader & {
   sendEach?(method: string, params: unknown[]): Promise<unknown>;
   status?: RpcStatus;
   currentUrl?: string;
+  health?(): ChainRpcHealth;
+  checkHealth?(alertAfterMs?: number, recoverMs?: number): HealthChange | null;
 };
 
 export interface GasState { address: string | null; native: number | null; low: boolean; at: number | null; error: string | null }
