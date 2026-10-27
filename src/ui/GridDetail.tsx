@@ -6,7 +6,8 @@ import { AnimatedNumber, StatusDot } from './motion';
 import { RangeBar } from './charts';
 import { Chart, EquityChart } from './Chart';
 import { StatTable } from './StatTable';
-import { ago, cls, num, pct, px, qty, time } from './fmt';
+import { metricsOf } from './deskStats';
+import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { T } from './theme';
@@ -190,10 +191,13 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const g: AnyObj | undefined = s.grids.find((x: AnyObj) => x.id === id);
   if (!g) return null;
 
-  const k: number | null = g.usdPerQuote ?? null;
+  const m = metricsOf(g);
+  const k: number | null = m?.quote.usdPerQuote ?? g.usdPerQuote ?? null;
   const q = quoteSym(g);
   const rs = rangeState(g);
-  const earned: number = g.pnl.realized, open: number = g.pnl.unrealized, held: number = g.pnl.plsHeld;
+  // Money figures come from the server's metrics (src/metrics/botMetrics.ts); nothing is added up here.
+  const earned: number | null = m?.generated?.[q] ?? m?.quote.realized ?? null, open: number | null = m?.quote.unrealized ?? null, held: number = g.pnl.plsHeld;
+  const total: number | null = m?.quote.totalPnl ?? null;
   const running = g.status === 'running';
   const closing = !!g.closing;
   const remove = () => act(async () => { if (confirm(`Remove the ${gridName(g)} grid and its history? ${g.base} it still holds stays in your wallet.`)) { await botApi(`grids/${g.id}`, 'DELETE'); nav({ v: 'home' }); } });
@@ -250,19 +254,19 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <div className="kpi-row detail-stats">
         <div className="kpi">
-          <span><L tip="Every completed buy then sell: what the sell brought in minus what that buy cost, after pool fees and gas. This is money the grid has made; the coin's price no longer changes it.">Earned by trading</L></span>
-          <div className={`kpi-v ${cls(earned)}`}><AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} /></div>
-          <span className="sub">from {g.stats.roundTrips} completed buy → sell trade{g.stats.roundTrips === 1 ? '' : 's'}, after fees and gas<Usd v={earned} k={k} /></span>
+          <span><L tip={m?.calc ?? 'Generated'}>Generated, in {q}</L></span>
+          <div className={`kpi-v ${cls(earned)}`}>{earned == null ? '—' : <AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} />}</div>
+          <span className="sub">from {g.stats.roundTrips} completed buy → sell trade{g.stats.roundTrips === 1 ? '' : 's'}, after fees and gas{m?.generatedUsd != null && <span className="usd"> ≈ {usd(m.generatedUsd, true)}</span>}</span>
         </div>
         <div className="kpi">
-          <span><L tip="Coins the grid bought that haven't sold yet, compared with what they cost. This goes up and down with the price until they sell one level up; it isn't a loss unless they're sold below cost.">Bought, not sold yet</L></span>
-          <div className={`kpi-v ${cls(open)}`}>{held > 0 ? qty(open, q, 5) : '—'}</div>
+          <span><L tip={`The ${g.base} the grid bought and hasn't sold yet, compared with what it cost. It moves with the price until those coins sell one level up, so it is not in Generated.`}>Unrealized</L></span>
+          <div className={`kpi-v ${cls(open)}`}>{held > 0 && open != null ? qty(open, q, 5) : '—'}</div>
           <span className="sub">{held > 0 ? <>{num(held, held < 10 ? 6 : 2)} {g.base} bought for {qty(g.pnl.costUsd, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now<Usd v={open} k={k} /></> : 'nothing waiting to sell'}</span>
         </div>
         <div className="kpi">
-          <span><L tip={`Earned by trading plus the change on the coins not sold yet, in ${q}.`}>Overall, in {q}</L></span>
-          <div className={`kpi-v ${cls(earned + open)}`}>{qty(earned + open, q, 5)}</div>
-          <span className="sub">earned + not sold yet<Usd v={earned + open} k={k} /></span>
+          <span><L tip={m?.calc ?? 'Total P&L'}>Total P&amp;L, in {q}</L></span>
+          <div className={`kpi-v ${cls(total)}`}>{total == null ? '—' : qty(total, q, 5)}</div>
+          <span className="sub">{m?.totalPnlPct == null ? 'generated + unrealized' : `${pct(m.totalPnlPct, 2, true)} of capital in`}{total != null && <Usd v={total} k={k} />}</span>
         </div>
         <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg <Amt v={g.stats.avgNet} sym={q} k={k} sig={4} /> each · {g.stats.wins} profitable</span></div>
         <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>

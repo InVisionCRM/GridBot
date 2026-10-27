@@ -1047,6 +1047,7 @@ label.wide input { min-width: 180px; }
 .join b { grid-column: 1; grid-row: 2; font-family: var(--mono); font-size: 26px; line-height: 1.15; font-weight: 500; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .join .sparkline, .join .segs { grid-column: 2; grid-row: 1 / span 2; justify-self: end; align-self: center; }
 .join .sparkline { width: 88px; height: 36px; max-width: none; }
+.join .fees-sub { grid-column: 1; grid-row: 3; font-size: 11px; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .segs { display: flex; flex-wrap: wrap; gap: 3px; width: 72px; height: auto; margin: 0; justify-content: flex-end; }
 .segs i { flex: 1; background: var(--raised); border-radius: 1px; max-width: 18px; }
 .segs i.on { background: var(--profit); }
@@ -1236,7 +1237,7 @@ label.wide input { min-width: 180px; }
 .bot-menu-empty { margin: 8px; color: var(--muted); font-size: 13px; }
 .desk.desk-book { min-width: 0; }
 .desk.desk-book .desk-head, .desk.desk-book .desk-row {
-  grid-template-columns: minmax(0, 1.5fr) 80px minmax(0, 0.8fr) 84px 92px 64px 56px 72px 48px 64px 36px;
+  grid-template-columns: minmax(0, 1.4fr) 80px minmax(0, 0.7fr) 84px minmax(0, 1.1fr) 92px 64px 84px 56px 72px 48px 36px;
 }
 .desk.desk-book .desk-head > *, .desk.desk-book .desk-row > * { min-width: 0; }
 .desk.desk-book .desk-spark .sparkline { width: 72px; height: 28px; }
@@ -1267,6 +1268,10 @@ label.wide input { min-width: 180px; }
 .desk-group b { font-weight: 500; }
 .desk-group .mono, .desk-group .pos, .desk-group .neg { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .desk-chev { color: var(--muted); width: 12px; }
+/* Generated (the headline): units per token, dollars under it */
+.desk-gen { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 0; }
+.desk-gen b { display: block; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-gen small { font-size: 11px; color: var(--muted); }
 .desk-pct, .desk-age, .desk-apr, .desk-moves, .desk-fees { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
 .desk-expand { padding: 4px 0 12px; }
 .stat-table { margin-top: 8px; }
@@ -1291,6 +1296,8 @@ label.wide input { min-width: 180px; }
   .desk.desk-book .desk-row .desk-age,
   .desk.desk-book .desk-row .desk-apr,
   .desk.desk-book .desk-row .desk-moves,
-  .desk.desk-book .desk-row .desk-fees { display: none; }
+  .desk.desk-book .desk-row .desk-fees,
+  .desk.desk-book .desk-row .desk-pnl { display: none; }
+  .desk.desk-book .desk-row .desk-gen { grid-area: pnl; }
   .desk-group { width: calc(100% + 24px); margin-inline: -12px; padding-inline: 12px; }
 }

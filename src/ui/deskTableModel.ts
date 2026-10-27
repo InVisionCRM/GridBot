@@ -5,7 +5,7 @@ import { botFacts, type DeskFacts } from './deskStats';
 export const GROUPS = ['Grid', 'Trend', 'Liquidity', 'Token trader', 'Paper'] as const;
 export type DeskGroup = typeof GROUPS[number];
 
-export type DeskSort = 'name' | 'value' | 'pnl' | 'pnlPct' | 'age' | 'apr' | 'moves' | 'fees';
+export type DeskSort = 'name' | 'value' | 'generated' | 'pnl' | 'pnlPct' | 'age' | 'apr' | 'moves' | 'fees';
 export type SortDir = 'asc' | 'desc';
 
 export interface DeskQuery {
@@ -87,6 +87,7 @@ function sortValue(it: DeskItem, key: DeskSort): number | string | null {
   const f = it.facts;
   if (key === 'name') return it.name.toLowerCase();
   if (key === 'value') return f.valueUsd;
+  if (key === 'generated') return f.generatedUsd;
   if (key === 'pnl') return f.pnlUsd;
   if (key === 'pnlPct') return f.pnlPct;
   if (key === 'age') return f.ageMs;

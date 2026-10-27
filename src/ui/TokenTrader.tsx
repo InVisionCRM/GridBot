@@ -77,6 +77,12 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         <input placeholder="https://rpc.flashbots.net" value={o.sniper.mevRpc ?? ''} onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, mevRpc: e.target.value || null } } })} onBlur={() => void save({ sniper: o.sniper })} />
       </label>
 
+      {t.metrics && (
+        <p className="small" title={t.metrics.calc}>
+          Generated <b className={(t.metrics.generatedUsd ?? 0) >= 0 ? 'pos' : 'neg'}>{t.metrics.generatedUsd == null ? '—' : `${t.metrics.generatedUsd < 0 ? '−' : '+'}${usd(t.metrics.generatedUsd)}`}</b>
+          <span className="muted"> from closed sells · unrealized {t.metrics.unrealizedUsd == null ? '—' : `${t.metrics.unrealizedUsd < 0 ? '−' : '+'}${usd(t.metrics.unrealizedUsd)}`} · {t.metrics.fillCount ?? 0} trades</span>
+        </p>
+      )}
       <h3 className="small" style={{ marginTop: 14 }}>Open</h3>
       {!t.positions.length && <p className="muted small">No open positions.</p>}
       <div className="smart-bots">
@@ -84,7 +90,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
           <div key={p.id} className="smart-bot" style={{ cursor: 'default' }}>
             <span className="smart-bot-name"><b>{p.label}</b> <ChainBadge c={chainOf(s, p.chainId)} testnet={false} /> <span className="tag">{p.source}</span></span>
             <span className="small muted">in {num(p.entryPrice, 6)} · now {num(p.price, 6)} · {p.exitPlan}</span>
-            <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.spentUsd ? p.pnlUsd / p.spentUsd : 0, 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
+            <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.pnlPct ?? null, 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
           </div>
         ))}
       </div>

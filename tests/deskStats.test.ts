@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ageMs, botFacts, DAY_MS, extrapolate, moveParts, winRateOf } from '../src/ui/deskStats';
+import { botMetrics } from '../src/metrics/botMetrics';
+import { ageMs, botFacts as rawFacts, DAY_MS, estHint, estNeedMs, extrapolate, moveParts, unitsText, winRateOf } from '../src/ui/deskStats';
 import { bucketItems, deskItems, emptyQuery, nextSort } from '../src/ui/deskTableModel';
 import { allOn, toggleEvery, toggleId } from '../src/ui/botPick';
+
+/** The UI only reshapes the server's metrics, so give each test bot the metrics the server would attach. */
+const withMetrics = <T extends Record<string, unknown>>(b: T, at: number) => ({ ...b, metrics: botMetrics(b, at) });
+const botFacts = (b: Record<string, unknown>, at: number) => rawFacts(withMetrics(b, at), at);
 
 const now = 1_700_000_000_000;
 
@@ -61,7 +66,8 @@ describe('desk stat math', () => {
     expect(f.investedUsd).toBe(100);
     expect(f.realizedUsd).toBe(4);
     expect(f.unrealizedUsd).toBe(6);
-    expect(f.est.h24).toEqual({ amount: 5, pct: 0.05 });
+    expect(f.est.h24).toEqual({ amount: 2, pct: null }); // Generated (realized 4 over 2 days), not total P&L
+    expect(f.generated).toEqual({ quote: 4 });
     expect(f.est.d365).toBeNull(); // two days of history is too short for a year
     expect(f.feesPaidUsd).toBeCloseTo(0.5);
     expect(f.feesEarnedUsd).toBeNull();
@@ -80,13 +86,13 @@ describe('desk table', () => {
     { id: 't', kind: 'trend', mode: 'paper', status: 'stopped', name: 'HEX trend', chainId: 369, capital: 5, pnl: { realized: -1, unrealized: 0, returnPct: -0.2 }, usdPerQuote: 1, startedAt: now - DAY_MS },
     { id: 'l', kind: 'lp', mode: 'live', status: 'running', label: 'ETH/USDC LP', chainId: 1, inRange: false, config: { capital: 20 }, pnl: { net: 2, price: 0, fees: 1 }, usdPerQuote: 1, startValue: 20, startedAt: now - DAY_MS },
   ];
-  const items = deskItems(bots, (b) => (b.chainId === 1 ? 'ETH' : 'PLS'), now);
+  const items = deskItems(bots.map((b) => withMetrics(b, now)), (b) => (b.chainId === 1 ? 'ETH' : 'PLS'), now);
 
   it('groups by strategy, with paper grids still under Grid', () => {
     const buckets = bucketItems(items, emptyQuery());
     expect(buckets.map((g) => g.name)).toEqual(['Grid', 'Trend', 'Liquidity']);
     expect(buckets[0].rows.map((r) => r.b.id)).toEqual(['g', 'g2']);
-    expect(buckets[0].value).toBe(14);
+    expect(buckets[0].value).toBe(18); // server current value: capital + realized + unrealized (10+1, 4+3)
   });
 
   it('filters by type, status, and search, and sorts P&L with blanks last', () => {
@@ -130,7 +136,6 @@ describe('grid capital is in the quote coin', () => {
     expect(f.investedUsd).toBeCloseTo(14_000_000 * k, 6);
     expect(f.pnlUsd).toBeCloseTo(140_000 * k, 6);
     expect(f.pnlPct).toBeCloseTo(0.01, 9);
-    expect(f.realizedPct).toBeCloseTo(0.01, 9);
     expect(f.est.d365?.pct).toBeCloseTo(0.01 * 36.5, 9);
   });
   it('shows no dollar capital when the quote has no dollar rate', () => {
@@ -141,5 +146,38 @@ describe('grid capital is in the quote coin', () => {
   });
   it('values a grid with no equity history at capital × rate', () => {
     expect(botFacts({ ...grid, pnl: undefined }, now).valueUsd).toBeCloseTo(14_000_000 * k, 6);
+  });
+});
+
+describe('estimate hint for a dash', () => {
+  it('says how much history each window needs', () => {
+    expect(estNeedMs(365 * DAY_MS)).toBe(7 * DAY_MS);
+    expect(estHint(2 * DAY_MS, 365 * DAY_MS)).toBe('needs 7d of history');
+    expect(estHint(60_000, 7 * DAY_MS)).toBe('needs 3.2h of history');
+    expect(estHint(60_000, DAY_MS)).toBe('needs 28 min of history');
+    expect(estHint(null, DAY_MS)).toBe('needs 28 min of history');
+    expect(estHint(8 * DAY_MS, 365 * DAY_MS)).toBeNull();
+  });
+  it('puts the hint on the facts exactly where the estimate is a dash', () => {
+    const lp = {
+      kind: 'lp', id: 'lp', startedAt: now - 2 * DAY_MS, usdPerQuote: 1, price: 2000, base: 'ETH', quote: 'USDC',
+      startValue: 8000, config: { capital: 8000 }, value: 8100,
+      pnl: { net: 120, price: -20, fees: 129.7, feeCoins: { base: 0.01, quote: 109.7 } },
+    };
+    const f = botFacts(lp, now);
+    expect(f.est.d365).toBeNull();
+    expect(f.aprPct).toBeNull();
+    expect(f.estHint.d365).toBe('needs 7d of history');
+    expect(f.est.d7).not.toBeNull();
+    expect(f.estHint.d7).toBeNull();
+    expect(f.estHint.h24).toBeNull();
+    expect(f.generatedRate?.d365).toBeNull();
+    expect(f.generatedRate?.d1).toEqual({ ETH: 0.005, USDC: 54.85 });
+  });
+  it('writes units per token', () => {
+    expect(unitsText({ ETH: 0.0062605, USDC: 41.455 })).toBe('+0.00626 ETH · +41.46 USDC');
+    expect(unitsText({ PLS: -1_234_567.8 })).toBe('−1,234,568 PLS');
+    expect(unitsText({ ETH: 0, USDC: 0 })).toBe('0');
+    expect(unitsText(null)).toBe('—');
   });
 });

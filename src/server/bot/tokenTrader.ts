@@ -6,6 +6,7 @@
  * (impact, fee, tax). Live is opt-in: it needs a signing key and the existing safety classifier, and sends
  * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
  */
+import { tokenMetrics } from '../../metrics/botMetrics';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
 import {
@@ -144,12 +145,13 @@ export class TokenTrader {
 
   status() {
     const openUsd = this.openUsd();
-    return {
-      ...this.state,
-      openUsd,
-      lastError: this.lastError,
-      positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p) })),
-    };
+    const positions = this.state.positions.map((p) => {
+      const pnlUsd = this.pnl(p);
+      const cost = p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0);
+      return { ...p, pnlUsd, pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p) };
+    });
+    const out = { ...this.state, id: 'token-trader', kind: 'token' as const, openUsd, lastError: this.lastError, positions };
+    return { ...out, metrics: tokenMetrics(out, Date.now()) };
   }
 
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {

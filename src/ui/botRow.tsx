@@ -3,7 +3,8 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { botApi } from './api';
 import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
-import { botFacts } from './deskStats';
+import { botFacts, metricsOf, unitsText } from './deskStats';
+import type { FeesToday } from '../metrics/feesToday';
 import { cls, dur, pct, px, qty, usd } from './fmt';
 import { ChainMark, TokenMark } from './icons';
 import { useShowUsd } from './money';
@@ -55,26 +56,17 @@ function statusWord(b: AnyObj) {
   return 'Idle';
 }
 
-/** Realized plus what is still unsold, in quote units, and as a fraction of the money put in. */
+/** Total P&L in the quote coin, in dollars and as a fraction of capital in: the server's metrics, nothing recomputed. */
 export function pnlParts(b: AnyObj): { quote: number | null; usd: number | null; pct: number | null } {
-  const k = typeof b.usdPerQuote === 'number' && b.usdPerQuote > 0 ? b.usdPerQuote : null;
-  if (b.kind === 'trader' || b.kind === 'sniper') {
-    const u = typeof b.pnlUsd === 'number' ? b.pnlUsd : typeof b.pnl?.unrealized === 'number' ? b.pnl.unrealized : null;
-    const cap = typeof b.spentUsd === 'number' ? b.spentUsd : null;
-    return { quote: u, usd: u, pct: u != null && cap ? u / cap : null };
-  }
-  if (b.kind === 'lp') {
-    const net = typeof b.pnl?.net === 'number' ? b.pnl.net : null;
-    const cap = b.config?.capital;
-    return { quote: net, usd: net != null && k != null ? net * k : null, pct: net != null && cap ? net / cap : null };
-  }
-  if (b.kind === 'trend') {
-    const q = (b.pnl?.realized ?? 0) + (b.pnl?.unrealized ?? 0);
-    return { quote: q, usd: k != null ? q * k : null, pct: typeof b.pnl?.returnPct === 'number' ? b.pnl.returnPct : null };
-  }
-  const q = (b.pnl?.realized ?? 0) + (b.pnl?.unrealized ?? 0);
-  const cap = b.config?.totalCapitalUsd;
-  return { quote: q, usd: k != null ? q * k : null, pct: cap ? q / cap : null };
+  const m = metricsOf(b);
+  if (!m) return { quote: null, usd: null, pct: null };
+  return { quote: m.quote.totalPnl, usd: m.totalPnlUsd, pct: m.totalPnlPct };
+}
+
+/** The headline per bot: units generated and their dollar value now (server metrics). */
+export function generatedParts(b: AnyObj): { units: Record<string, number> | null; usd: number | null; text: string } {
+  const m = metricsOf(b);
+  return { units: m?.generated ?? null, usd: m?.generatedUsd ?? null, text: unitsText(m?.generated) };
 }
 
 export function fillsToday(b: AnyObj, from = startOfDay()): number | null {
@@ -103,18 +95,30 @@ export function todaySeries(bots: AnyObj[], includePaper: boolean): number[] {
   return pts;
 }
 
-export function feesTodayUsd(bots: AnyObj[]): number {
-  const from = startOfDay();
-  let sum = 0;
-  for (const b of bots) {
-    const k = b.usdPerQuote as number | null;
-    if (!(typeof k === 'number' && k > 0)) continue;
-    for (const tr of (b.trades ?? []) as AnyObj[]) {
-      if (tr.failed || !(tr.timestamp >= from) || typeof tr.feeQuote !== 'number') continue;
-      sum += tr.feeQuote * k;
-    }
+/** Home's "Fees earned today", from the server's `feesToday` (status payload), limited to the bots on screen. */
+export function feesTodayOf(s: AnyObj, bots: AnyObj[]): { liveEarnedUsd: number; paperEarnedUsd: number; livePaidUsd: number; liveSeries: number[] } {
+  const ft = s?.feesToday as FeesToday | undefined;
+  if (!ft) return { liveEarnedUsd: 0, paperEarnedUsd: 0, livePaidUsd: 0, liveSeries: [0] };
+  const ids = new Set(bots.map((b) => String(b.id)));
+  const all = Object.keys(ft.byBot ?? {}).every((id) => ids.has(id));
+  let liveEarnedUsd = 0, paperEarnedUsd = 0, livePaidUsd = 0;
+  for (const [id, r] of Object.entries(ft.byBot ?? {})) {
+    if (!ids.has(id)) continue;
+    if (r.mode === 'live') { liveEarnedUsd += r.earnedUsd; livePaidUsd += r.paidUsd; } else paperEarnedUsd += r.earnedUsd;
   }
-  return sum;
+  return { liveEarnedUsd, paperEarnedUsd, livePaidUsd, liveSeries: all ? ft.liveSeries : [0, liveEarnedUsd] };
+}
+
+/** Σ generatedUsd over the bots on screen (Home headline). Null when none has a dollar value. */
+export function totalGeneratedUsd(bots: AnyObj[]): number | null {
+  let sum = 0, any = false;
+  for (const b of bots) {
+    const v = metricsOf(b)?.generatedUsd;
+    if (v == null) continue;
+    sum += v;
+    any = true;
+  }
+  return any ? sum : null;
 }
 
 export function totalPnlUsd(bots: AnyObj[]): number | null {
@@ -193,7 +197,7 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
     return (
       <div className="bot-more">
         <p>{b.inRange === false ? 'Out of range' : b.inRange ? 'In range' : 'No position'}{pos ? ` · ${px(pos.lower)} – ${px(pos.upper)}` : ''}</p>
-        <p>Fees {qty(fees, sym, 4, false)}</p>
+        <p>Fees earned {qty(fees, sym, 4, false)}</p>
         <button type="button" className="text-link" onClick={() => nav(botView(b.kind, b.id))}>Open</button>
       </div>
     );
@@ -252,8 +256,10 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   const on = b.status === 'running' && !bad;
   const money = showUsd && pnl.usd != null ? usd(pnl.usd, true) : pnl.quote != null ? qty(pnl.quote, pair.quote, 4) : '—';
   const pos = b.position;
-  const value = bookUsd(b);
+  const m = metricsOf(b);
+  const value = m ? m.currentValueUsd : bookUsd(b);
   const facts = metrics ? botFacts(b) : null;
+  const gen = generatedParts(b);
   const go = () => (isTrader(b) ? nav({ v: 'auto' }) : expandable ? onToggle?.() : nav(botView(b.kind, b.id)));
   if (columns) {
     return (
@@ -276,17 +282,25 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
           <span className="desk-range"><BotRange b={b} fills={fills} /></span>
           <span className="desk-val">{value == null ? '—' : usd(value)}</span>
-          <span className="desk-pnl">
-            <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
-            {!metrics && <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>}
-          </span>
-          {metrics && facts && <>
+          {metrics && facts ? <>
+            <span className="desk-gen" title={m?.calc ?? undefined}>
+              <b className={cls(gen.usd)}>{gen.text}</b>
+              {gen.usd != null && <small>{usd(gen.usd, true)}</small>}
+            </span>
+            <span className="desk-pnl" title={m?.calc ?? undefined}>
+              <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
+            </span>
             <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
-            <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
-            <span className="desk-apr">{facts.est.d365?.pct == null ? '—' : pct(facts.est.d365.pct, 1, true)}</span>
-            <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
             <span className="desk-fees">{facts.feesEarnedUsd == null ? '—' : usd(facts.feesEarnedUsd)}</span>
-          </>}
+            <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
+            <span className="desk-apr" title={facts.aprPct == null ? facts.estHint.d365 ?? undefined : m?.calc ?? undefined}>{facts.aprPct == null ? '—' : pct(facts.aprPct, 1, true)}</span>
+            <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
+          </> : (
+            <span className="desk-pnl" title={m?.calc ?? undefined}>
+              <b className={cls(gen.usd)}>{gen.text}</b>
+              <small className="muted">{gen.usd == null ? '' : `${usd(gen.usd, true)} generated`}</small>
+            </span>
+          )}
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
         </div>
         {bad && <p className="line-note">{b.lastError}</p>}
@@ -312,9 +326,9 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
             </span>
             {b.kind === 'lp' && pos && <RangeBar lower={pos.lower} upper={pos.upper} price={b.price} inRange={b.inRange} />}
           </span>
-          <span className="bot-pnl">
-            <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
-            <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>
+          <span className="bot-pnl" title={m?.calc ?? undefined}>
+            <b className={cls(gen.usd)}>{gen.text}</b>
+            <small className="muted">{gen.usd == null ? '' : `${usd(gen.usd, true)} generated`}</small>
           </span>
         </button>
         <RowMenu b={b} nav={nav} pause={pause} close={close} />

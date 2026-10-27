@@ -15,6 +15,7 @@ import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { Usd } from './money';
 import { showHalt } from './haltText';
+import { metricsOf } from './deskStats';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -144,14 +145,13 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   useEffect(() => { const i = setInterval(() => tick((x) => x + 1), 30_000); return () => clearInterval(i); }, []);
   if (!b) return null;
 
-  const q = b.quote, base = b.base, k: number | null = b.usdPerQuote ?? null;
+  const m = metricsOf(b);
+  const q = b.quote, base = b.base, k: number | null = m?.quote.usdPerQuote ?? b.usdPerQuote ?? null;
   const prices = usdPrices(b, k);
   const pnl: AnyObj | null = b.pnl;
   const pos = b.position, step = b.step;
   const running = b.status === 'running', closed = b.status === 'closed';
   const closing = !!b.closing || step?.action === 'close';
-  // a daily rate only once it has run a full day: the first minutes' costs scaled to a day say nothing
-  const days = b.startedAt ? (Date.now() - b.startedAt) / 86_400_000 : null;
   const close = () => {
     if (b.mode === 'live' && !confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
     act(() => botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close'));
@@ -190,6 +190,11 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <div className="kpi-row detail-stats">
         <div className="kpi">
+          <span><L tip={m?.calc ?? 'Generated'}>Generated</L></span>
+          <div className="kpi-v coins2">{m?.generated ? <>{Object.entries(m.generated).map(([sym, u]) => <b key={sym} className={cls(u)}>{qty(u, sym, 5)}</b>)}</> : '—'}</div>
+          <span className="sub">fees − gas − swap fees − range-move losses, per coin{m?.generatedUsd != null && <span className="usd"> ≈ {usd(m.generatedUsd, true)} at today's price</span>}</span>
+        </div>
+        <div className="kpi">
           <span><L tip={`Your share of the pool's trading fees, in the coins they were paid in: collected so far plus what's waiting in the position. A trade selling ${base} pays its fee in ${base}; one buying it pays in ${q}. The coins' price doesn't change these amounts.`}>Fees earned</L></span>
           <div className="kpi-v coins2">{pnl ? <><b className={cls(pnl.feeCoins.base)}>{qty(pnl.feeCoins.base, base, 5)}</b><b className={cls(pnl.feeCoins.quote)}>{qty(pnl.feeCoins.quote, q, 5)}</b></> : '—'}</div>
           <span className="sub">{pnl ? <>waiting in the position: {num(b.owed?.base, 6)} {base} + {num(b.owed?.quote, 6)} {q}<Usd v={pnl.fees} k={k} /></> : 'measuring…'}</span>
@@ -205,9 +210,14 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <span className="sub">{b.reranges} range move{b.reranges === 1 ? '' : 's'}<Usd v={pnl ? -pnl.moveLoss : null} k={k} /></span>
         </div>
         <div className="kpi">
-          <span><L tip={`Fees earned minus costs and what range moves lost, in ${q}. The coins' own price move isn't in it: that happens whether or not the bot runs.`}>Earned after costs</L></span>
-          <div className={`kpi-v ${cls(pnl?.net)}`}>{pnl ? <AnimatedNumber value={pnl.net} format={(x) => qty(x, q, 5)} /> : '—'}</div>
-          <span className="sub">{pnl && b.startValue ? <>{pct(pnl.net / b.startValue, 2, true)} of what you put in{days != null && days >= 1 ? ` · ${qty(pnl.net / days, q, 3)} a day` : ''}<Usd v={pnl.net} k={k} /></> : ''}</span>
+          <span><L tip={`Fees earned minus gas, swap fees and range-move losses, each in dollars at the time it happened. Generated is the same thing counted in coins and valued at today's price. From the server's metrics.`}>Dollars made</L></span>
+          <div className={`kpi-v ${cls(m?.dollarsMadeUsd)}`}>{m?.dollarsMadeUsd == null ? '—' : <AnimatedNumber value={m.dollarsMadeUsd} format={(x) => usd(x, true)} />}</div>
+          <span className="sub">at the price of each fee, swap and move</span>
+        </div>
+        <div className="kpi">
+          <span><L tip={m?.calc ?? 'Total P&L'}>Total P&amp;L</L></span>
+          <div className={`kpi-v ${cls(m?.quote.totalPnl)}`}>{m?.quote.totalPnl == null ? '—' : qty(m.quote.totalPnl, q, 5)}</div>
+          <span className="sub">{m?.totalPnlPct != null ? <>{pct(m.totalPnlPct, 2, true)} of capital in · price change {usd(m.priceChangeUsd, true)}</> : 'measuring…'}{m?.quote.totalPnl != null && <Usd v={m.quote.totalPnl} k={k} />}</span>
         </div>
         <div className="kpi">
           <span><L tip="The coins in the position right now (they change as the price moves inside the range), and its share of the liquidity trading at today's price, which is its share of every trade's fee. Out of range the share is 0.">Liquidity provided</L></span>

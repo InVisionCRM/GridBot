@@ -4,7 +4,7 @@ import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
 import { StatTable } from './StatTable';
-import { ago, cls, dur, num, pct, px, qty, time } from './fmt';
+import { ago, cls, dur, num, pct, px, qty, time, usd } from './fmt';
 import { ChainBadge, DexTag, chainOf, dexName } from './chains';
 import { STRATEGIES } from '../market/strategy';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -15,6 +15,8 @@ import { LinesEditor } from './LinesEditor';
 import { T } from './theme';
 import { quoteSym, type AnyObj, type Nav } from './model';
 import { Amt, Usd } from './money';
+import { metricsOf } from './deskStats';
+import { L } from './Tip';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -40,9 +42,12 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   useEffect(() => { const i = setInterval(() => tick((x) => x + 1), 30_000); return () => clearInterval(i); }, []);
   if (!t) return null;
 
-  const k: number | null = t.usdPerQuote ?? null;
+  const m = metricsOf(t);
+  const k: number | null = m?.quote.usdPerQuote ?? t.usdPerQuote ?? null;
   const q = quoteSym(t), base = t.base ?? 'PLS';
-  const profit: number = t.pnl.equity - t.capital;
+  // From the server's metrics (src/metrics/botMetrics.ts), not recomputed here.
+  const gen: number | null = m?.quote.realized ?? null;
+  const profit: number | null = m?.quote.totalPnl ?? null;
   const running = t.status === 'running';
   const closing = !!t.closing;
   const pos = t.position;
@@ -84,7 +89,8 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="kpi-row detail-stats">
-        <div className="kpi"><span>Profit</span><div className={`kpi-v ${cls(profit)}`}><AnimatedNumber value={profit} format={(x) => qty(x, q, 5)} /></div><span className="sub">{pct(t.pnl.returnPct, 2, true)}<Usd v={profit} k={k} /> · <Amt v={t.pnl.realized} sym={q} k={null} sig={4} /> banked</span></div>
+        <div className="kpi"><span><L tip={m?.calc ?? 'Generated'}>Generated</L></span><div className={`kpi-v ${cls(gen)}`}>{gen == null ? '—' : <AnimatedNumber value={gen} format={(x) => qty(x, q, 5)} />}</div><span className="sub">closed trades, after fees and gas{m?.generatedUsd != null && <span className="usd"> ≈ {usd(m.generatedUsd, true)}</span>}</span></div>
+        <div className="kpi"><span><L tip={m?.calc ?? 'Total P&L'}>Total P&amp;L</L></span><div className={`kpi-v ${cls(profit)}`}>{profit == null ? '—' : qty(profit, q, 5)}</div><span className="sub">{pct(m?.totalPnlPct ?? null, 2, true)}{profit != null && <Usd v={profit} k={k} />} · unrealized <Amt v={m?.quote.unrealized ?? null} sym={q} k={null} sig={4} /></span></div>
         <div className="kpi"><span>Trades</span><div className="kpi-v">{t.stats.count}</div><span className="sub">{t.stats.count ? `${pct(t.stats.winRate, 0)} profitable` : 'none closed yet'} · {t.blocked} skipped by the cost check</span></div>
         <div className="kpi"><span>Worst drop</span><div className="kpi-v">{pct(t.stats.maxDrawdown, 1)}</div><span className="sub">from the bot's peak value</span></div>
         <div className="kpi"><span>Fees + gas</span><div className="kpi-v"><Amt v={-(t.pnl.fees + t.pnl.gas)} sym={q} k={k} sig={4} /></div><span className="sub">paid so far</span></div>

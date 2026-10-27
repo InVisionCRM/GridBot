@@ -4,6 +4,8 @@
  * state file (v3; legacy PulseChain state loads unchanged as chain 369). Also owns the candle store feed, market panels, alerts, analytics and
  * the activity bus.
  */
+import { gridMetrics, lpMetrics, trendMetrics, type BotMetrics } from '../../metrics/botMetrics';
+import { feesToday } from '../../metrics/feesToday';
 import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { LiveNetwork } from '../../live/networks';
 import { Hub } from '../chains/hub';
@@ -955,14 +957,19 @@ export class MultiBot {
     }));
     // Portfolio curve at today's capital: capNow + PnL(t) (flows removed), so drawdown reflects trading only.
     const curve = ph.map(([t, v, , c]) => [t, capNow + (v - c)] as [number, number]);
+    // Per-bot return comes from the same metrics as /api/bot/status (src/metrics/botMetrics.ts).
+    const stNow = this.status();
+    const mOf = new Map([...stNow.grids, ...stNow.trends, ...stNow.lps].map((b) => [b.id, b.metrics] as const));
     const bots = rows.map((r) => {
       const st = tradeStats(r.closed);
+      const m = mOf.get(r.id) ?? null;
       return {
         id: r.id, kind: r.kind, name: r.name, pair: r.pair, chainId: r.chainId, mode: r.mode, status: r.status, usdPerQuote: r.usdPerQuote,
         capital: r.capital, equity: r.equity, equityUsd: usd(r, r.equity), capitalUsd: usd(r, r.capital),
         realized: r.realized, unrealized: r.unrealized, realizedUsd: usd(r, r.realized), unrealizedUsd: usd(r, r.unrealized),
         feesUsd: usd(r, r.fees), gasUsd: usd(r, r.gas),
-        returnPct: r.capital ? r.equity / r.capital - 1 : 0,
+        returnPct: m?.totalPnlPct ?? (r.capital ? r.equity / r.capital - 1 : 0),
+        metrics: m,
         plsHeld: r.plsHeld, quoteFree: r.quoteFree, startedAt: r.startedAt,
         stats: { ...st, profitFactor: st.profitFactor === Infinity ? null : st.profitFactor, maxDrawdown: drawdown(r.equityHist).max, timeInMarket: r.inMarket },
         equity_hist: r.equityHist.map(([t, v]) => [t, usd(r, v)] as [number, number]),
@@ -1364,16 +1371,29 @@ export class MultiBot {
     }));
   }
 
+  /** One bot's money figures (the same object /api/bot/status carries as `metrics`). Null for an unknown id. */
+  metricsFor(id: string): BotMetrics | null {
+    const st = this.status();
+    const b = [...st.grids, ...st.trends, ...st.lps].find((x) => x.id === id);
+    return b ? b.metrics : null;
+  }
+
   status() {
+    const at = Date.now();
     const grids = this.multi.grids.map((g) => {
       const st = (this.engines.get(g.id) ?? this.attach(g.id)).status();
-      return { ...st, kind: 'grid' as const, usdPerQuote: this.usdPerQuote(st.stable) };
+      const out = { ...st, kind: 'grid' as const, usdPerQuote: this.usdPerQuote(st.stable) };
+      return { ...out, metrics: gridMetrics(out, at) };
     });
     const trends = this.multi.trends.map((t) => {
       const st = (this.trendEngines.get(t.id) ?? this.attachTrend(t.id)).status();
-      return { ...st, usdPerQuote: this.usdPerQuote(st.quote) };
+      const out = { ...st, usdPerQuote: this.usdPerQuote(st.quote) };
+      return { ...out, metrics: trendMetrics(out, at) };
     });
-    const lps = this.multi.lps.map((t) => (this.lpEngines.get(t.id) ?? this.attachLp(t.id)).status());
+    const lps = this.multi.lps.map((t) => {
+      const st = (this.lpEngines.get(t.id) ?? this.attachLp(t.id)).status();
+      return { ...st, metrics: lpMetrics(st, at) };
+    });
     const z = { realized: 0, unrealized: 0, gasUsd: 0, feesUsd: 0, roundTrips: 0, plsHeld: 0, unpriced: 0 };
     const aggregate = grids.reduce((a, g) => {
       const k = g.usdPerQuote;
@@ -1396,6 +1416,7 @@ export class MultiBot {
       chains: this.chainsStatus(),
       marketList: this.marketList(),
       grids, trends, lps, aggregate, allocations: this.allocations(), alerts: this.multi.alerts,
+      feesToday: feesToday([...grids, ...trends, ...lps], at),
       candleSync: this.candleSyncStatus?.() ?? null,
       log: this.d.log.entries.slice(-80).reverse(),
     };

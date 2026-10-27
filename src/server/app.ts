@@ -157,6 +157,13 @@ export function createApp(o: AppOpts) {
     return bot.economics(String(req.query.quote ?? net.defaultQuote), { lowerPrice: lower, upperPrice: upper, gridCount: n, totalCapitalUsd: cap });
   }));
   app.get('/api/bot/status', wrap(async () => bot.status()));
+  // One bot's money figures (BotMetrics, src/metrics/botMetrics.ts); "token-trader" is the token trader.
+  app.get('/api/bot/:id/metrics', wrap(async (req, res) => {
+    const id = String(req.params.id);
+    const m = id === 'token-trader' && o.tokenTrader ? o.tokenTrader.status().metrics : bot.metricsFor(id);
+    if (!m) { res.status(404).json({ error: `No bot ${id}` }); return; }
+    return m;
+  }));
   app.get('/api/bot/prices', wrap(async () => ({ prices: await bot.prices() })));
   app.get('/api/bot/presets', (_req, res) => res.json({ presets: listPresets() }));
   app.get('/api/bot/presets/:id/preview', wrap(async (req) => bot.previewPreset(req.params.id, {

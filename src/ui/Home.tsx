@@ -1,7 +1,7 @@
 /** Home: net worth, the book chart, a joined strip, the bots, then the two cards that used to live only under More. */
 import { useEffect, useMemo, useState } from 'react';
 import { http } from './api';
-import { BotRow, feesTodayUsd, listBots, pnlParts, todaySeries, totalPnlUsd, useRowActions } from './botRow';
+import { BotRow, feesTodayOf, generatedParts, listBots, todaySeries, totalGeneratedUsd, totalPnlUsd, useRowActions } from './botRow';
 import { AreaChart, Donut, Meter, Sparkline } from './charts';
 import { chainOf, chains, useChainFilter } from './chains';
 import { cls, pct, usd } from './fmt';
@@ -9,8 +9,11 @@ import { formatUsdAmount, type HoldingsSnapshot } from '../live/holdingsMath';
 import { AnimatedNumber, useCount } from './motion';
 import type { Opportunity } from '../market/scan';
 import { isSafe, tryIt, useOpportunities, wayOf } from './Opportunities';
-import { bookUsd, equitySpan, feeSeries, portfolioSeries, seriesChange, type DeskRange } from './series';
+import { bookUsd, equitySpan, portfolioSeries, seriesChange, type DeskRange } from './series';
 import type { AnyObj, Nav } from './model';
+
+const GEN_CALC = 'Generated: what the bots made, net of costs, in the coins they made it in (liquidity fees after gas, swap fees and range-move losses; grid and trend round-trip profit after fees and gas), valued at today\'s prices. Price moves on coins held are not in it; they are in P&L.';
+const FEES_TODAY_CALC = 'Fees your live liquidity bots earned since local midnight (collected + still in the position), worked out on the server. Paper bots and pool fees grid/trend trades paid are shown under it, never added in.';
 
 const RANGES: DeskRange[] = ['1H', '1D', '1W', '1M', 'ALL'];
 
@@ -65,10 +68,12 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
   const pnlAll = totalPnlUsd(bots);
   const pnl30 = span >= 20 * 86_400_000 ? monthChg.delta : pnlAll;
   const pnlLabel = span >= 20 * 86_400_000 ? '30d P&L' : 'P&L';
-  const fees = feesTodayUsd(bots);
-  const feesLine = useMemo(() => feeSeries(bots), [bots]);
-  const best = bots.slice().sort((a, b) => (pnlParts(b).usd ?? pnlParts(b).pct ?? -Infinity) - (pnlParts(a).usd ?? pnlParts(a).pct ?? -Infinity))[0];
-  const bestPnl = best ? pnlParts(best) : null;
+  const genAll = totalGeneratedUsd(bots);
+  const today = useMemo(() => feesTodayOf(s, bots), [s, bots]);
+  const fees = today.liveEarnedUsd;
+  const feesLine = today.liveSeries;
+  const best = bots.slice().sort((a, b) => (generatedParts(b).usd ?? -Infinity) - (generatedParts(a).usd ?? -Infinity))[0];
+  const bestGen = best ? generatedParts(best) : null;
   const slices = useMemo(() => {
     if (holdings?.hasSigner) {
       return holdings.chains
@@ -132,14 +137,20 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
 
       <section className="join" aria-label="Summary">
         <div>
-          <span>{pnlLabel}</span>
-          <b className={cls(pnl30)}>{pnl30 == null ? '—' : <AnimatedNumber value={pnl30} format={(x) => usd(x, true)} />}</b>
+          <span title={GEN_CALC}>Generated</span>
+          <b className={cls(genAll)}>{genAll == null ? '—' : <AnimatedNumber value={genAll} format={(x) => usd(x, true)} />}</b>
+          <small className="muted fees-sub" title={pnlLabel === 'P&L' ? 'Total P&L: current value + paid out − capital in, price change included.' : 'Change in the bots\' combined book value over the last 30 days.'}>{pnlLabel} {pnl30 == null ? '—' : usd(pnl30, true)}</small>
           <Sparkline points={span >= 20 * 86_400_000 ? month : series} width={120} height={32} />
         </div>
         <div>
-          <span>Fees today</span>
+          <span title={FEES_TODAY_CALC}>Fees earned today</span>
           <b><AnimatedNumber value={fees} format={(x) => usd(x, true)} /></b>
-          <Sparkline points={feesLine} width={120} height={32} />
+          {(today.paperEarnedUsd !== 0 || today.livePaidUsd !== 0) && (
+            <small className="muted fees-sub">
+              {[today.paperEarnedUsd !== 0 ? `paper ${usd(today.paperEarnedUsd, true)}` : '', today.livePaidUsd !== 0 ? `trade fees paid ${usd(today.livePaidUsd)}` : ''].filter(Boolean).join(' · ')}
+            </small>
+          )}
+          <Sparkline points={feesLine.length > 1 ? feesLine : [0, 0]} width={120} height={32} />
         </div>
         <div>
           <span>Bots</span>
@@ -148,8 +159,9 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
         </div>
         <div>
           <span>Best bot</span>
-          <b className={cls(bestPnl?.usd ?? bestPnl?.pct)}>{best ? (best.label || best.name || best.base) : '—'}</b>
-          {best && <Sparkline points={portfolioSeries([best], 'ALL').length > 2 ? portfolioSeries([best], 'ALL') : [0, bestPnl?.usd ?? 0]} width={120} height={32} />}
+          <b className={cls(bestGen?.usd)}>{best ? (best.label || best.name || best.base) : '—'}</b>
+          {best && bestGen && <small className="muted fees-sub">{bestGen.text}</small>}
+          {best && <Sparkline points={portfolioSeries([best], 'ALL').length > 2 ? portfolioSeries([best], 'ALL') : [0, bestGen?.usd ?? 0]} width={120} height={32} />}
         </div>
       </section>
 
@@ -157,7 +169,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
       <section className="desk" aria-label="Bots">
         {!!bots.length && (
           <div className="desk-head" aria-hidden="true">
-            <span>Pair</span><span /><span>Range</span><span>Value</span><span>P&amp;L</span><span />
+            <span>Pair</span><span /><span>Range</span><span>Value</span><span>Generated</span><span />
           </div>
         )}
         {bots.map((b) => <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} columns />)}
