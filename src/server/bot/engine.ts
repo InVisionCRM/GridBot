@@ -121,6 +121,14 @@ export interface EngineDeps {
   hub?: Hub;
 }
 
+/** What MultiBot.tickAll already read this poll, so each grid doesn't read it again. */
+export interface TickCtx {
+  /** This market's price from the poll's price batch */
+  price?: number;
+  /** One wallet read per key per poll (cleared after a trade on the chain) */
+  wallet?: <T>(key: string, read: () => Promise<T>) => Promise<T>;
+}
+
 export interface StartParams extends GridConfig {
   mode: Mode;
   stable?: string;
@@ -624,28 +632,38 @@ export class GridEngine {
   }
   stopLoop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  async tick(): Promise<void> {
+  async tick(ctx: TickCtx = {}): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
       if (this.state.inFlight && !this.draining) await this.reconcile();
-      const price = await this.executor.getPrice();
+      // The poll's price batch already read this market's price (MultiBot.tickAll); reading it again per grid doubled
+      // the RPC calls. A grid ticked on its own (or after a trade on its chain this poll) reads its own.
+      const price = ctx.price != null && ctx.price > 0 && !this.state.inFlight ? ctx.price : await this.executor.getPrice();
       this.state.lastPrice = price;
       this.state.lastPriceAt = this.now();
       this.hub.setSpot(this.state.stable, price);
-      try { this.balances = await this.executor.balances(); } catch { /* keep last */ }
+      try {
+        // Live balances are the wallet's: grids on the same market share one read per poll (paper balances are each grid's own).
+        this.balances = this.executor.mode === 'live' && ctx.wallet
+          ? { ...(await ctx.wallet(`bal:${this.state.stable}`, () => this.executor.balances())) }
+          : await this.executor.balances();
+      } catch { /* keep last */ }
       const signer = this.signer;
       if (signer) {
         try {
           if (this.executor.mode === 'live') this.walletBalances = this.balances;
           else {
-            const q = this.hub.quoter(this.state.stable);
-            const a = await signer.getAddress();
-            const [b, st] = await Promise.all([
-              q.base.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.base.address),
-              q.stable.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.stable.address),
-            ]);
-            this.walletBalances = { pls: Number(b) / 10 ** q.base.decimals, stable: Number(st) / 10 ** q.stable.decimals };
+            const read = async () => {
+              const q = this.hub.quoter(this.state.stable);
+              const a = await signer.getAddress();
+              const [b, st] = await Promise.all([
+                q.base.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.base.address),
+                q.stable.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.stable.address),
+              ]);
+              return { pls: Number(b) / 10 ** q.base.decimals, stable: Number(st) / 10 ** q.stable.decimals };
+            };
+            this.walletBalances = { ...(ctx.wallet ? await ctx.wallet(`wallet:${this.state.stable}`, read) : await read()) };
           }
         } catch { /* keep last */ }
       }

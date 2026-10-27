@@ -67,6 +67,19 @@ export interface MultiState {
 }
 type PortfolioSnap = [number, number, number, number];
 
+/**
+ * What must be on disk before the app acts on it (DurableJsonStore writes synchronously when this changes): every
+ * bot's lifecycle (status, mode, closing, archived, config, limits, halt) and anything about a transaction (in flight,
+ * its hashes, a payout in flight, a liquidity step). Prices, equity points and grid intervals are not in it: they are
+ * written by the debounced write.
+ */
+export function multiUrgentKey(s: MultiState): string {
+  const g = s.grids.map((b) => [b.id, b.status, b.mode, b.closing, b.archivedAt, b.inFlight, b.payoutInFlight, b.config, b.limits, b.halt, b.trades?.[b.trades.length - 1] ?? null]);
+  const t = s.trends.map((b) => [b.id, b.status, b.mode, b.closing, b.archivedAt, b.inFlight, b.limits, b.halt, b.trades?.[b.trades.length - 1] ?? null]);
+  const l = s.lps.map((b) => [b.id, b.status, b.mode, b.closing, b.archivedAt, b.step, b.position?.id ?? null, b.position?.liquidity ?? null, b.halt]);
+  return JSON.stringify([g, t, l, s.alerts.length, s.defaults]);
+}
+
 export interface MultiDeps {
   net: LiveNetwork;
   reader: ChainReader;
@@ -86,6 +99,8 @@ export interface MultiDeps {
   hub?: Hub;
   /** Set in a friend's copy (env.ts readCopy): the app shows whose copy it is and where the key is added */
   copy?: { friend: string; host: string } | null;
+  /** A chain whose RPCs keep failing this long raises a banner + Activity entry (RPC_ALERT_MINUTES; default 3 min). */
+  rpcAlertAfterMs?: number;
 }
 
 export interface ChainWallet {
@@ -145,6 +160,9 @@ export interface JournalRow {
 
 const usdFmt = (x: number) => Math.round(x * 100) / 100;
 const spikeNote = (n: number) => (n ? `${n} candle${n === 1 ? '' : 's'} had a one-off price spike clipped: a single trade in a thin pool printed a price far outside this pair's usual moves and the pool was put straight back, so no bot could have traded there.` : '');
+
+/** A stopped liquidity bot's value refresh: every this many polls */
+export const STOPPED_LP_EVERY = 12;
 
 export class MultiBot {
   readonly hub: Hub;
@@ -267,6 +285,8 @@ export class MultiBot {
   get hasSigner() { return this.hub.runtimes().some((r) => !!r.signer); }
   private now() { return (this.d.now ?? Date.now)(); }
   private persist() { this.d.store.save(this.multi); }
+  /** Write state.json now if a debounced write is pending (shutdown). */
+  flush() { this.d.store.flush?.(); }
 
   private attach(id: string): GridEngine {
     let eng = this.engines.get(id);
@@ -728,8 +748,10 @@ export class MultiBot {
       const now = this.now();
       // One price batch per poll feeds candles, trend bots, alerts and the ticker. Markets nothing uses are
       // polled every 3rd tick to spare public RPCs.
+      const n = this.tickN++;
+      let raw: Record<string, number> = {};
       try {
-        const raw = await this.prices(this.watchedKeys(this.tickN++ % 3 === 0));
+        raw = await this.prices(this.watchedKeys(n % 3 === 0));
         const px: Record<string, number> = {};
         for (const [pair, p] of Object.entries(raw)) {
           if (this.candles.tick(pair, p, Math.floor(now / 1000))) { px[pair] = p; this.hub.setSpot(pair, p); }
@@ -741,23 +763,47 @@ export class MultiBot {
       // Chains in parallel; bots on one chain run sequentially (their TxGate serializes sends anyway).
       const byChain = new Map<number, (() => Promise<void>)[]>();
       const push = (cid: number, f: () => Promise<void>) => { const a = byChain.get(cid) ?? []; a.push(f); byChain.set(cid, a); };
+      // Per chain: the poll's prices and one wallet read per market, until a bot on that chain trades (the pool and
+      // the wallet then moved, so the next bot reads its own).
+      const traded = new Set<number>();
+      const memo = new Map<number, Map<string, Promise<unknown>>>();
+      const ctxFor = (cid: number, key: string) => ({
+        price: traded.has(cid) ? undefined : raw[key],
+        wallet: <T>(k: string, read: () => Promise<T>): Promise<T> => {
+          const m = memo.get(cid) ?? new Map<string, Promise<unknown>>();
+          memo.set(cid, m);
+          let p = m.get(k) as Promise<T> | undefined;
+          if (!p) { p = read(); m.set(k, p); p.catch(() => m.delete(k)); }
+          return p;
+        },
+      });
+      const last = (t: { trades?: unknown[] }) => t.trades?.[t.trades.length - 1];
       for (const e of this.engines.values()) {
         // A stopped grid has nothing to do. Ticking it used to re-read price and balances for every one, ahead of a close.
         if (e.state.archivedAt) continue;
-        if (e.state.status === 'running' || e.state.closing || e.state.inFlight || e.state.payoutInFlight) push(e.chainId, () => e.tick());
+        if (e.state.status === 'running' || e.state.closing || e.state.inFlight || e.state.payoutInFlight) {
+          push(e.chainId, async () => {
+            const before = last(e.state);
+            await e.tick(ctxFor(e.chainId, e.state.stable));
+            if (last(e.state) !== before || e.state.inFlight) { traded.add(e.chainId); memo.delete(e.chainId); }
+          });
+        }
       }
       for (const e of this.trendEngines.values()) {
         if (e.state.archivedAt) continue;
         if (e.state.status === 'running' || e.state.closing || e.state.inFlight) push(e.chainId, () => e.tick(this.spots[e.state.quote]));
       }
-      // A stopped liquidity bot still reads its position (value, fees) and settles a tx already sent.
+      // A stopped liquidity bot doesn't tick, except to settle a tx already sent. Its position keeps earning, so its
+      // value and fees are refreshed every STOPPED_LP_EVERY polls (≈2 min at the default 10 s poll).
       for (const e of this.lpEngines.values()) {
         if (e.state.archivedAt || e.state.status === 'idle' || e.state.status === 'closed') continue;
-        if (e.state.status === 'running' || e.state.status === 'stopped' || e.state.closing) push(e.chainId, () => e.tick());
+        const sent = !!(e.state.step?.hash || e.state.step?.swap);
+        if (e.state.status === 'running' || e.state.closing || sent || (e.state.status === 'stopped' && n % STOPPED_LP_EVERY === 0)) push(e.chainId, () => e.tick());
       }
       await Promise.all([...byChain.values()].map(async (jobs) => { for (const j of jobs) await j(); }));
       this.checkRanges();
       this.evaluateAlerts();
+      this.checkRpcHealth();
       try { await this.taxWatch.tick(); } catch { /* never abort the poll loop */ }
       this.snapshotPortfolio();
       this.activity.emit('status');
@@ -1367,6 +1413,29 @@ export class MultiBot {
     });
   }
 
+  /**
+   * Per-chain RPC health: one Activity entry (with a notification) when a chain's RPCs have kept failing for
+   * rpcAlertAfterMs, and one when it recovers. The banner reads rpcHealth.alerted from the status.
+   */
+  checkRpcHealth() {
+    for (const rt of this.hub.runtimes()) {
+      const ch = rt.reader.checkHealth?.(this.d.rpcAlertAfterMs);
+      if (!ch) continue;
+      const c = rt.cfg;
+      if (ch.kind === 'alert') {
+        this.activity.emitEvent({
+          type: 'alert', kind: 'system', level: 'error', notify: true, chainId: c.id,
+          msg: `${c.name}: RPC failing for ${ch.minutes} min (${ch.failures} failed reads on every endpoint)${ch.lastError ? `: ${ch.lastError}` : ''}. Bots on this chain can't read prices or send. Add another RPC with RPC_URL_${c.envSlug} in .env.`,
+        });
+      } else {
+        this.activity.emitEvent({
+          type: 'info', kind: 'system', level: 'success', notify: true, chainId: c.id,
+          msg: `${c.name}: RPC recovered after ${ch.minutes} min of failures (${ch.failures} failed reads)`,
+        });
+      }
+    }
+  }
+
   /** Every configured chain: trading status, signer, gas wallet, RPC health, tx queue, bots. */
   chainsStatus() {
     return this.hub.runtimes().map((rt) => {
@@ -1379,7 +1448,8 @@ export class MultiBot {
         dexes: c.dexes.map((x) => ({ id: x.id, name: x.name, kind: x.kind })),
         hasSigner: !!rt.signer, address: w?.address ?? rt.gas.address, gasNative: w?.native ?? rt.gas.native, lowGas: rt.gas.low,
         lowGasNative: c.lowGasNative, nativeUsd: this.hub.nativeUsd(c.id), walletError: w?.error ?? rt.gas.error ?? null,
-        txBusy: rt.gate.busy, rpc: rt.reader.currentUrl ?? null, rpcStatus: rt.reader.status ?? null, bots,
+        txBusy: rt.gate.busy, rpc: rt.reader.currentUrl ?? null, rpcStatus: rt.reader.status ?? null,
+        rpcHealth: rt.reader.health?.() ?? null, bots,
       };
     });
   }
