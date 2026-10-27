@@ -46,6 +46,11 @@ export interface TraderOptions {
    * Off unless set: the gate then behaves exactly as it does without the field.
    */
   v3LpLockCheck: boolean;
+  /**
+   * Fill lpUnlocked from the V2 LP token (lpRemovable) or the V3 position-NFT check.
+   * Off unless set: assess leaves lpUnlocked null and the gate output is unchanged.
+   */
+  lpUnlockCheck: boolean;
   sniper: SniperOptions;
 }
 
@@ -117,6 +122,7 @@ export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
   v3LpLockCheck: false,
+  lpUnlockCheck: false,
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
 
@@ -173,6 +179,7 @@ export class TokenTrader {
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
     const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
     if ('v3LpLockCheck' in o) n.v3LpLockCheck = o.v3LpLockCheck === true;
+    if ('lpUnlockCheck' in o) n.lpUnlockCheck = o.lpUnlockCheck === true;
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');

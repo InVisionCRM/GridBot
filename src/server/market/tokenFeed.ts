@@ -7,7 +7,9 @@ import { JsonRpcProvider } from 'ethers';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
-import { unverifiedV3Lp } from '../../market/v3LpLock';
+import { applyLpUnlock, unverifiedLpUnlock } from '../../market/lpUnlock';
+import { unverifiedV3Lp, type V3LpReport } from '../../market/v3LpLock';
+import { readLiveLpUnlock } from './lpUnlockRead';
 import { readV3LpLock, type V3LockReader } from './v3LpLockRead';
 import { ROUTER } from '../dex/abis';
 import { LiveExecutor, type ChainReader } from '../bot/chain';
@@ -86,12 +88,12 @@ export function createTokenTrader(o: {
   approval: 'exact' | 'max'; receiptTimeoutMs: number;
 }): TokenTrader {
   const sniper = new PoolSniper({ chains: sniperChains(o.hub), source: logSource(o.hub) });
-  const flag = { on: () => false };
+  const flags = { v3LpLockCheck: () => false, lpUnlockCheck: () => false };
   const trader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
-    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flag.on()),
+    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flags.v3LpLockCheck(), flags.lpUnlockCheck()),
     resolve: (hit) => resolveHit(o.hub, hit),
     live: {
       buy: async (pool, spend, limits) => {
@@ -119,7 +121,8 @@ export function createTokenTrader(o: {
       },
     },
   });
-  flag.on = () => trader.status().options.v3LpLockCheck === true;
+  flags.v3LpLockCheck = () => trader.status().options.v3LpLockCheck === true;
+  flags.lpUnlockCheck = () => trader.status().options.lpUnlockCheck === true;
   return trader;
 }
 
@@ -172,7 +175,7 @@ async function discover(hub: Hub, gecko: GeckoSource): Promise<FreshPool[]> {
   return out.slice(0, 40);
 }
 
-async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', v3LpLockCheck = false): Promise<GateInput> {
+async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', v3LpLockCheck = false, lpUnlockCheck = false): Promise<GateInput> {
   const r = await hub.inspect({ chainId: pool.chainId, address: pool.token, quote: pool.spend, pool: pool.pool });
   const s = r.safety;
   let canMint: boolean | null = null;
@@ -186,15 +189,34 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
     proxy: s?.proxy != null ? true : null, lpUnlocked: null, holderConcentration: null, recentLiqPull: false,
     liveAllowed: s?.liveAllowed ?? false,
   };
-  // Flag off: do not attach v3Lp, so gateToken sees the same input it always has.
-  if (!v3LpLockCheck || pool.kind !== 'v3') return gate;
-  try {
+  // Both flags off: do not attach v3Lp or lpUnlock, so gateToken sees the same input it always has.
+  if (!lpUnlockCheck && (!v3LpLockCheck || pool.kind !== 'v3')) return gate;
+  const timing = () => {
     const rt = hub.rt(pool.chainId);
-    gate.v3Lp = await readV3LpLock(rt.reader as V3LockReader, pool, rt.cfg.dexes, {
-      nowSec: Math.floor(Date.now() / 1000), blockTimeSec: rt.cfg.blockTimeSec, logChunk: rt.cfg.logChunk,
-    });
+    return {
+      rt,
+      nowSec: Math.floor(Date.now() / 1000),
+      blockTimeSec: rt.cfg.blockTimeSec,
+      logChunk: rt.cfg.logChunk,
+    };
+  };
+  let v3: V3LpReport | undefined;
+  if (v3LpLockCheck && pool.kind === 'v3') {
+    try {
+      const t = timing();
+      v3 = await readV3LpLock(t.rt.reader as V3LockReader, pool, t.rt.cfg.dexes, t);
+    } catch (e) {
+      v3 = unverifiedV3Lp(pool.pool, '', `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
+    }
+    gate.v3Lp = v3;
+  }
+  if (!lpUnlockCheck) return gate;
+  try {
+    const t = timing();
+    applyLpUnlock(gate, true, await readLiveLpUnlock(t.rt.reader as V3LockReader, pool, t.rt.cfg.dexes, t, v3));
   } catch (e) {
-    gate.v3Lp = unverifiedV3Lp(pool.pool, '', `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
+    const kind = pool.kind === 'v3' ? 'v3' : pool.kind === 'v2' ? 'v2' : 'other';
+    applyLpUnlock(gate, true, unverifiedLpUnlock(kind, `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`));
   }
   return gate;
 }

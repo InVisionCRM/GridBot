@@ -3,11 +3,10 @@
  * Holder lists that report "0% locked / 0% burned" for a V3 pool are describing that missing ERC-20, so they
  * cannot see a lock. This module reads the pool's in-range positions and classifies each NFT owner.
  *
- * The token-trader gate only blocks when `lpUnlocked === true` (see gateToken). The live assess path currently
- * leaves that field null, and nothing in this repo calls a GoPlus-style LP-holder API. `lpRemovable` in
- * tokenChecks.ts is the V2 burn/owner helper and is not consulted by the gate. This check does not replace
- * that signal. It is extra evidence, and it runs only when the trader option `v3LpLockCheck` is on
- * (default off). With the option off the gate input never carries a report, and gateToken is unchanged.
+ * The token-trader gate blocks safe/medium when `lpUnlocked === true` (see gateToken). Nothing in this repo
+ * calls a GoPlus-style LP-holder API. `lpRemovable` is the V2 helper. Assess leaves `lpUnlocked` null unless
+ * the separate option `lpUnlockCheck` is on. This report is extra evidence, and it is attached only when
+ * `v3LpLockCheck` is on (default off). With that option off the gate input never carries a report.
  *
  * Reads are eth_call, eth_getCode, eth_getLogs and eth_getTransactionReceipt. No transaction is signed or sent.
  * A transport failure, a rate limit that does not clear, or in-range liquidity we could not attribute becomes
