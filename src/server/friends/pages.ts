@@ -1,22 +1,21 @@
 /**
  * The gateway's own pages (log in, invite, new password, account, copy starting), as plain HTML forms: they work on
- * any phone browser, need no script, and keep the key field out of the app's bundle. Night Desk look, mobile first.
+ * any phone browser, need no script, and keep the key field out of the app's bundle. Pro Desk look, mobile first.
  */
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
 const CSS = `
-:root{--bg:#0b0f0e;--surface:#121917;--surface-2:#18211e;--line:#1f2a27;--line-2:#2c3a36;--text:#e6efec;--muted:#7f918b;--profit:#3dffa2;--on-profit:#04150d;--loss:#ff6b6b;--warn:#f2c14e;
-color-scheme:dark;font-family:'Jost','Avenir Next','Segoe UI',sans-serif;font-size:16px;line-height:1.5;color:var(--text);background:var(--bg)}
+:root{--bg:#0B0E11;--surface:#181A20;--surface-2:#1E2329;--line:#2B3139;--line-2:#3C434D;--text:#EAECEF;--muted:#848E9C;--profit:#F0B90B;--on-profit:#0B0E11;--loss:#F6465D;--warn:#F0B90B;
+color-scheme:dark;font-family:'IBM Plex Sans','Segoe UI',sans-serif;font-size:16px;line-height:1.5;color:var(--text);background:var(--bg)}
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:flex;justify-content:center;padding:max(28px,env(safe-area-inset-top)) 16px 48px;
-background:radial-gradient(640px 340px at 85% -90px,rgba(61,255,162,.07),transparent 70%),radial-gradient(520px 300px at -10% 110%,rgba(61,255,162,.035),transparent 70%),var(--bg)}
+body{margin:0;min-height:100vh;display:flex;justify-content:center;padding:max(28px,env(safe-area-inset-top)) 16px 48px;background:var(--bg)}
 main{width:100%;max-width:420px;display:flex;flex-direction:column;gap:16px;animation:rise .35s ease-out both}
 @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){main{animation:none}}
 .logo{font-weight:600;font-size:1.15rem;letter-spacing:-.01em;display:flex;align-items:center;gap:8px;margin-bottom:4px}
-.logo i{width:10px;height:10px;border-radius:2px;background:var(--profit);box-shadow:0 0 14px rgba(61,255,162,.5)}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:14px}
+.logo i{width:10px;height:10px;border-radius:2px;background:var(--profit)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:20px;display:flex;flex-direction:column;gap:14px}
 h1{font-size:1.5rem;font-weight:600;margin:0;letter-spacing:-.015em;line-height:1.2}
 h2{font-size:1.05rem;font-weight:600;margin:0}
 p{margin:0}
@@ -26,12 +25,12 @@ label{display:flex;flex-direction:column;gap:6px;font-size:.92rem;font-weight:50
 label small{font-weight:400;color:var(--muted);font-size:.82rem}
 input{font:inherit;font-size:16px;color:var(--text);background:var(--bg);border:1px solid var(--line-2);border-radius:9px;padding:12px;width:100%}
 input:focus{outline:2px solid var(--profit);outline-offset:1px;border-color:transparent}
-button,.btn{font:inherit;font-size:1rem;font-weight:600;border-radius:10px;padding:13px 16px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);cursor:pointer;text-align:center;text-decoration:none;display:block;width:100%}
+button,.btn{font:inherit;font-size:1rem;font-weight:600;border-radius:4px;padding:13px 16px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);cursor:pointer;text-align:center;text-decoration:none;display:block;width:100%}
 button.primary{background:var(--profit);color:var(--on-profit);border-color:transparent}
-button.danger{background:transparent;color:var(--loss);border-color:rgba(255,107,107,.4)}
-.msg{border-radius:9px;padding:10px 12px;font-size:.92rem;border:1px solid}
-.msg.err{border-color:rgba(255,107,107,.4);background:rgba(255,107,107,.08)}
-.msg.ok{border-color:rgba(61,255,162,.35);background:rgba(61,255,162,.06)}
+button.danger{background:transparent;color:var(--loss);border-color:rgba(246,70,93,.55)}
+.msg{border-radius:6px;padding:10px 12px;font-size:.92rem;border:1px solid}
+.msg.err{border-color:rgba(246,70,93,.55);background:rgba(246,70,93,.12)}
+.msg.ok{border-color:rgba(14,203,129,.4);background:rgba(14,203,129,.12)}
 .note{border-left:2px solid var(--warn);padding:2px 0 2px 12px;font-size:.88rem;color:var(--muted)}
 .keybox{border-top:1px solid var(--line);padding-top:14px;display:flex;flex-direction:column;gap:10px}
 .addr{font-family:'IBM Plex Mono',monospace;font-size:.95rem;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;word-break:break-all}
@@ -43,12 +42,12 @@ button.danger{background:transparent;color:var(--loss);border-color:rgba(255,107
 function page(title: string, body: string, o: { refreshSec?: number } = {}): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0b0f0e"><meta name="robots" content="noindex">
+<meta name="theme-color" content="#0B0E11"><meta name="robots" content="noindex">
 ${o.refreshSec ? `<meta http-equiv="refresh" content="${o.refreshSec}">` : ''}
 <title>${esc(title)} · GridBot</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap" rel="stylesheet">
 <style>${CSS}</style></head><body><main><div class="logo"><i></i>GridBot</div>${body}</main></body></html>`;
 }
 

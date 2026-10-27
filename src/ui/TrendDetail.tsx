@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
+import { StatTable } from './StatTable';
 import { ago, cls, dur, num, pct, px, qty, time } from './fmt';
 import { ChainBadge, DexTag, chainOf, dexName } from './chains';
 import { STRATEGIES } from '../market/strategy';
@@ -57,29 +58,32 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
     <main className="stack">
       <button type="button" className="back" onClick={() => nav({ v: 'home' })}>← Home</button>
       <div className="detail-head">
-        <StatusDot beat={t.priceAt} state={closing ? 'closing' : t.lastError ? 'error' : t.status} />
-        <ChainBadge c={chainOf(s, t.chainId ?? s.legacyChainId)} testnet={false} />
-        <h2>{t.name}</h2>
-        <span className="tag">Trend</span>
-        {t.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
-        <DexTag name={t.dexName} feeBps={t.feeBps} feeTier={t.feeTier} />
-        <span className={`st ${closing ? 'closing' : t.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{t.inFlight ? ' · swap in flight' : ''}</span>
-        {showHalt(t, closing) && <span className="bot-why">{showHalt(t, closing)}</span>}
-        <span className="grow" />
-        {running
-          ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
-          : <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/resume`, 'POST'))}>Resume</button>}
-        <button type="button" className="btn" disabled={busy || !pos || !running || closing} onClick={closePos}>Sell now</button>
-        <button type="button" className="btn" disabled={busy || closing} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
-        <button type="button" className="btn danger" disabled={busy || running || !!t.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
+        <div className="detail-id">
+          <StatusDot beat={t.priceAt} state={closing ? 'closing' : t.lastError ? 'error' : t.status} />
+          <h2>{t.name}</h2>
+          <ChainBadge c={chainOf(s, t.chainId ?? s.legacyChainId)} testnet={false} />
+          <span className="tag">Trend</span>
+          {t.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
+          <DexTag name={t.dexName} feeBps={t.feeBps} feeTier={t.feeTier} />
+          <span className={`st ${closing ? 'closing' : t.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{t.inFlight ? ' · swap in flight' : ''}</span>
+        </div>
+        <div className="detail-actions">
+          {running
+            ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
+            : <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/resume`, 'POST'))}>Resume</button>}
+          <button type="button" className="btn" disabled={busy || !pos || !running || closing} onClick={closePos}>Sell now</button>
+          <button type="button" className="btn danger" disabled={busy || closing} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
+          <button type="button" className="btn danger" disabled={busy || running || !!t.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
+        </div>
       </div>
+      {showHalt(t, closing) && <p className="bot-why">{showHalt(t, closing)}</p>}
 
       <div className="notices">
         {t.lastError && <div className="banner error"><span className="grow">{t.lastError}</span></div>}
         {!running && pos && <div className="banner"><span className="grow"><b>Stopped while holding {base}.</b> The stop-loss and take-profit are not watched until you resume.</span></div>}
       </div>
 
-      <div className="kpi-row">
+      <div className="kpi-row detail-stats">
         <div className="kpi"><span>Profit</span><div className={`kpi-v ${cls(profit)}`}><AnimatedNumber value={profit} format={(x) => qty(x, q, 5)} /></div><span className="sub">{pct(t.pnl.returnPct, 2, true)}<Usd v={profit} k={k} /> · <Amt v={t.pnl.realized} sym={q} k={null} sig={4} /> banked</span></div>
         <div className="kpi"><span>Trades</span><div className="kpi-v">{t.stats.count}</div><span className="sub">{t.stats.count ? `${pct(t.stats.winRate, 0)} profitable` : 'none closed yet'} · {t.blocked} skipped by the cost check</span></div>
         <div className="kpi"><span>Worst drop</span><div className="kpi-v">{pct(t.stats.maxDrawdown, 1)}</div><span className="sub">from the bot's peak value</span></div>
@@ -89,11 +93,12 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="split wide-left">
         <div className="card">
           {t.cfg.strategy === 'lines'
-            ? <LinesEditor s={s} ticks={ticks} pair={t.quote} tf={t.tf} lines={t.cfg.lines} busy={busy} height={400}
+            ? <LinesEditor s={s} ticks={ticks} pair={t.quote} tf={t.tf} lines={t.cfg.lines} busy={busy} height={480}
                 onChange={(lines) => act(() => botApi(`trends/${t.id}/lines`, 'PUT', { lines }))} />
-            : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact height={400}
+            : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact desk height={480}
                 emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
           <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
+          <StatTable b={t} s={s} />
         </div>
         <div className="stack">
           <div className="card">

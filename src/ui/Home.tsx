@@ -1,15 +1,18 @@
-/** Home: net worth, a short summary, the bots, then the two cards that used to live only under More. */
-import { useEffect, useState } from 'react';
+/** Home: net worth, the book chart, a joined strip, the bots, then the two cards that used to live only under More. */
+import { useEffect, useMemo, useState } from 'react';
 import { http } from './api';
-import { BotRow, feesTodayUsd, listBots, todaySeries, totalPnlUsd, useRowActions } from './botRow';
-import { Meter, Sparkline } from './charts';
-import { chainOf, useChainFilter } from './chains';
+import { BotRow, feesTodayUsd, listBots, pnlParts, todaySeries, totalPnlUsd, useRowActions } from './botRow';
+import { AreaChart, Donut, Meter, Sparkline } from './charts';
+import { chainOf, chains, useChainFilter } from './chains';
 import { cls, pct, usd } from './fmt';
 import { formatUsdAmount, type HoldingsSnapshot } from '../live/holdingsMath';
-import { AnimatedNumber } from './motion';
+import { AnimatedNumber, useCount } from './motion';
 import type { Opportunity } from '../market/scan';
 import { isSafe, tryIt, useOpportunities, wayOf } from './Opportunities';
+import { bookUsd, equitySpan, feeSeries, portfolioSeries, seriesChange, type DeskRange } from './series';
 import type { AnyObj, Nav } from './model';
+
+const RANGES: DeskRange[] = ['1H', '1D', '1W', '1M', 'ALL'];
 
 function useJson(path: string) {
   const [data, setData] = useState<AnyObj | null>(null);
@@ -23,21 +26,67 @@ function useJson(path: string) {
   return data;
 }
 
+function HeroWorth({ value }: { value: number | null }) {
+  const shown = useCount(value);
+  if (value == null || shown == null) return <p className="home-num">—</p>;
+  const text = formatUsdAmount(shown);
+  const dot = text.lastIndexOf('.');
+  return (
+    <p className="home-num">
+      {dot < 0 ? text : <>{text.slice(0, dot)}<span className="cents">{text.slice(dot)}</span></>}
+    </p>
+  );
+}
+
 export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings: HoldingsSnapshot | null; act: (fn: () => Promise<unknown>) => void }) {
   const { chain } = useChainFilter();
   const { err, pause, close } = useRowActions();
+  const [range, setRange] = useState<DeskRange>('1D');
   const bots = listBots(s, chain).sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
   const running = bots.filter((b) => b.status === 'running').length;
-  const paused = bots.filter((b) => b.status === 'stopped').length;
-  const live = bots.filter((b) => b.mode === 'live').length;
-  const paper = bots.length - live;
   const worth = !holdings || !holdings.hasSigner ? null
     : chain === 'all' ? (holdings.netWorthExDustUsd ?? holdings.netWorthUsd)
     : (holdings.chains.find((c) => c.chainId === chain)?.usd ?? null);
-  const series = todaySeries(bots, holdings?.hasSigner === false);
-  const today = series[series.length - 1] ?? 0;
-  const pnl = totalPnlUsd(bots);
+  const book = useMemo(() => bots.reduce((a, b) => a + (bookUsd(b) ?? 0), 0), [bots]);
+  const shownWorth = worth ?? (holdings?.hasSigner === false ? book : null);
+  const series = useMemo(() => {
+    const hist = portfolioSeries(bots, range);
+    if (hist.length > 2 && hist.some((p) => p !== hist[0])) return hist;
+    if (range === '1H' || range === '1D') {
+      const day = todaySeries(bots, holdings?.hasSigner === false);
+      if (day.length > 1 && day.some((p) => p !== 0)) return day;
+    }
+    return hist;
+  }, [bots, range, holdings?.hasSigner]);
+  const chg = seriesChange(series);
+  const span = equitySpan(bots);
+  const month = useMemo(() => portfolioSeries(bots, '1M'), [bots]);
+  const monthChg = seriesChange(month);
+  const pnlAll = totalPnlUsd(bots);
+  const pnl30 = span >= 20 * 86_400_000 ? monthChg.delta : pnlAll;
+  const pnlLabel = span >= 20 * 86_400_000 ? '30d P&L' : 'P&L';
   const fees = feesTodayUsd(bots);
+  const feesLine = useMemo(() => feeSeries(bots), [bots]);
+  const best = bots.slice().sort((a, b) => (pnlParts(b).usd ?? pnlParts(b).pct ?? -Infinity) - (pnlParts(a).usd ?? pnlParts(a).pct ?? -Infinity))[0];
+  const bestPnl = best ? pnlParts(best) : null;
+  const slices = useMemo(() => {
+    if (holdings?.hasSigner) {
+      return holdings.chains
+        .filter((c) => (chain === 'all' || c.chainId === chain) && c.usd > 0)
+        .map((c) => ({ key: String(c.chainId), label: c.short, usd: c.usd, color: c.color }));
+    }
+    const map = new Map<number, number>();
+    for (const b of bots) {
+      const v = bookUsd(b);
+      if (v == null) continue;
+      const id = (b.chainId ?? s.legacyChainId) as number;
+      map.set(id, (map.get(id) ?? 0) + v);
+    }
+    return [...map.entries()].filter(([, v]) => v > 0).map(([id, v]) => {
+      const c = chainOf(s, id) ?? chains(s).find((x) => x.id === id);
+      return { key: String(id), label: c?.short ?? String(id), usd: v, color: c?.color ?? '#F0B90B' };
+    });
+  }, [holdings, chain, bots, s]);
   const { p } = useOpportunities();
   const picks = ((p?.chains ?? []) as AnyObj[])
     .filter((c) => chain === 'all' || c.chainId === chain)
@@ -48,33 +97,70 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
     .slice(0, 3);
   const auto = useJson('/api/autopilot');
   const trader = useJson('/api/token-trader');
-  const best = picks[0]?.w.expected ?? 0;
+  const top = picks[0]?.w.expected ?? 0;
+  const paper = holdings?.hasSigner === false;
 
   return (
     <main className="home">
-      <section className="home-fig" aria-label="Net worth">
-        <div>
-          <p className="home-k">Net worth</p>
-          <p className="home-num">{worth == null ? '—' : <AnimatedNumber value={worth} format={formatUsdAmount} />}</p>
-          <p className={`home-day ${holdings?.hasSigner === false || !holdings ? 'muted' : cls(today)}`}>
-            {holdings == null && 'Reading…'}
-            {holdings?.hasSigner === false && 'Paper · '}
-            {holdings && <>Today {usd(today, true)}</>}
-          </p>
-        </div>
-        {holdings && <Sparkline points={series} />}
-      </section>
+      <div className="hero-grid">
+        <section className="card hero-card" aria-label="Net worth">
+          <div className="home-hero">
+            <div>
+              <p className="home-k">Net worth</p>
+              <HeroWorth value={shownWorth} />
+              <p className="home-sub">
+                {holdings == null && 'Reading…'}
+                {paper && 'Paper'}
+                {holdings && (
+                  <span className={`chip ${cls(chg.delta)}`}>{usd(chg.delta, true)} {chg.pct == null ? '' : pct(chg.pct, 2, true)}</span>
+                )}
+              </p>
+            </div>
+            <div className="seg" role="tablist" aria-label="Range">
+              {RANGES.map((r) => (
+                <button key={r} type="button" className={range === r ? 'on' : ''} aria-pressed={range === r} onClick={() => setRange(r)}>{r}</button>
+              ))}
+            </div>
+          </div>
+          <AreaChart points={series} />
+        </section>
+        <section className="card alloc-card" aria-label="Allocation">
+          <p className="home-k">Allocation</p>
+          <Donut slices={slices} />
+        </section>
+      </div>
 
-      <section className="strip" aria-label="Summary">
-        <div><span>P&amp;L</span><b className={cls(pnl)}>{pnl == null ? '—' : <AnimatedNumber value={pnl} format={(x) => usd(x, true)} />}</b></div>
-        <div><span>Fees today</span><b>{<AnimatedNumber value={fees} format={(x) => usd(x, true)} />}</b></div>
-        <div><span>Bots</span><b>{running} running · {paused} paused</b></div>
-        <div><span>Live / paper</span><b>{live} live · {paper} paper</b></div>
+      <section className="join" aria-label="Summary">
+        <div>
+          <span>{pnlLabel}</span>
+          <b className={cls(pnl30)}>{pnl30 == null ? '—' : <AnimatedNumber value={pnl30} format={(x) => usd(x, true)} />}</b>
+          <Sparkline points={span >= 20 * 86_400_000 ? month : series} width={120} height={32} />
+        </div>
+        <div>
+          <span>Fees today</span>
+          <b><AnimatedNumber value={fees} format={(x) => usd(x, true)} /></b>
+          <Sparkline points={feesLine} width={120} height={32} />
+        </div>
+        <div>
+          <span>Bots</span>
+          <b>{running}/{bots.length || 0}</b>
+          <span className="segs" aria-hidden="true">{(bots.length ? bots : [{ id: '0', status: '' }]).slice(0, 12).map((b) => <i key={b.id} className={b.status === 'running' ? 'on' : ''} />)}</span>
+        </div>
+        <div>
+          <span>Best bot</span>
+          <b className={cls(bestPnl?.usd ?? bestPnl?.pct)}>{best ? (best.label || best.name || best.base) : '—'}</b>
+          {best && <Sparkline points={portfolioSeries([best], 'ALL').length > 2 ? portfolioSeries([best], 'ALL') : [0, bestPnl?.usd ?? 0]} width={120} height={32} />}
+        </div>
       </section>
 
       {err && <p className="note bad">{err}</p>}
-      <section aria-label="Bots">
-        {bots.map((b) => <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} />)}
+      <section className="desk" aria-label="Bots">
+        {!!bots.length && (
+          <div className="desk-head" aria-hidden="true">
+            <span>Pair</span><span /><span>Range</span><span>Value</span><span>P&amp;L</span><span />
+          </div>
+        )}
+        {bots.map((b) => <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} columns />)}
         {!bots.length && <p className="muted home-empty">No bots{chain !== 'all' ? ' on this chain' : ''}. <button type="button" className="text-link" onClick={() => nav({ v: 'bots' })}>Start one</button></p>}
       </section>
 
@@ -83,7 +169,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
         {picks.map(({ o, w }) => (
           <button key={`${o.chainId}-${o.key ?? o.add?.pool}`} type="button" className="pick" onClick={() => tryIt(o, w.how, nav, act)}>
             <span className="pick-name">{o.label}<small>{chainOf(s, o.chainId)?.short} · {w.how === 'lp' ? 'Liquidity' : 'Grid'}</small></span>
-            <Meter value={best > 0 ? w.expected / best : 0} />
+            <Meter value={top > 0 ? w.expected / top : 0} />
             <b className="pos">{pct(w.expected, 1, true)}</b>
           </button>
         ))}

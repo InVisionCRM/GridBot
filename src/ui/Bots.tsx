@@ -1,8 +1,9 @@
 /** Every bot. A row opens its range, fees, and levels; the full page is one tap further. */
-import { useContext, useState } from 'react';
-import { botApi } from './api';
+import { useContext, useEffect, useState } from 'react';
+import { botApi, http } from './api';
 import { humanAmount } from '../live/amount';
-import { BotRow, listBots, useRowActions } from './botRow';
+import { listBots, useRowActions } from './botRow';
+import { DeskTable } from './DeskTable';
 import { RefreshCtx, chains, useChainFilter } from './chains';
 import type { AnyObj, Nav } from './model';
 
@@ -11,8 +12,15 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
   const refresh = useContext(RefreshCtx);
   const { err, pause, close } = useRowActions();
   const [rowErr, setRowErr] = useState<string | null>(null);
-  const [open, setOpen] = useState<string | null>(null);
   const [hide, setHide] = useState<Set<string>>(new Set());
+  const [trader, setTrader] = useState<AnyObj | null>(null);
+  useEffect(() => {
+    let dead = false;
+    const load = () => http<AnyObj>('/api/token-trader').then((d) => { if (!dead) setTrader(d); }).catch(() => undefined);
+    void load();
+    const t = setInterval(load, 15_000);
+    return () => { dead = true; clearInterval(t); };
+  }, []);
   const [pend, setPend] = useState<Set<string>>(new Set());
   const here = (b: AnyObj) => chain === 'all' || (b.chainId ?? s.legacyChainId) === chain;
   const all: AnyObj[] = [
@@ -21,7 +29,17 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
     ...(s.lps ?? []).map((t: AnyObj) => ({ ...t, kind: 'lp' })),
   ].filter(here);
   const kept = all.filter((b) => b.archivedAt).length;
-  const bots = listBots(s, chain).filter((b) => !hide.has(b.id)).sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
+  const bots = listBots(s, chain).filter((b) => !hide.has(b.id));
+  const traders = ((trader?.positions ?? []) as AnyObj[])
+    .filter((p) => chain === 'all' || p.chainId === chain)
+    .map((p) => {
+      const trades = ((trader?.trades ?? []) as AnyObj[]).filter((t) => t.pool === p.pool && t.chainId === p.chainId);
+      return {
+        ...p, kind: p.source === 'snipe' ? 'sniper' : 'trader', name: p.label, label: p.label, base: p.token, quote: p.spend,
+        status: 'running', startedAt: p.openedAt, usdPerQuote: typeof p.usdPerSpend === 'number' && p.usdPerSpend > 0 ? p.usdPerSpend : 1,
+        moveCount: trades.length, lastMoveAt: trades.reduce((m: number, t: AnyObj) => Math.max(m, t.t || 0), 0) || null,
+      };
+    });
   const running = bots.filter((b) => b.status === 'running').length;
   const isClosing = (b: AnyObj) => !!b.closing || pend.has(b.id) || b.step?.action === 'close';
   const closable = bots.filter((b) => !isClosing(b));
@@ -59,10 +77,9 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
       {short && <p className="note bad">{short}. Stop a bot or add funds.</p>}
       {low.map((c) => <p key={c.id} className="note">Low gas on {c.name}.</p>)}
       {(err || rowErr) && <p className="note bad">{err || rowErr}</p>}
-      {bots.map((b) => (
-        <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} expandable open={open === b.id} onToggle={() => setOpen((id) => id === b.id ? null : b.id)} />
-      ))}
-      {!bots.length && <p className="muted home-empty">No bots{chain !== 'all' ? ' on this chain' : ''}. Start a grid above, in paper, to watch it with live prices.</p>}
+      {(bots.length > 0 || traders.length > 0)
+        ? <DeskTable s={s} bots={[...bots, ...traders]} nav={nav} pause={pause} close={close} />
+        : <p className="muted home-empty">No bots{chain !== 'all' ? ' on this chain' : ''}. Start a grid above, in paper, to watch it with live prices.</p>}
       <p className="foot-links">
         <button type="button" className="text-stop" disabled={busy || running === 0} onClick={onStopAll}>Stop all</button>
         {closable.length > 0 && <button type="button" onClick={closeAll}>Close all</button>}

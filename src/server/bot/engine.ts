@@ -920,6 +920,8 @@ export class GridEngine {
         };
       })(),
       stats: roundTripStats(trades),
+      moveCount: trades.filter((t) => !t.failed && !t.manual).length,
+      lastMoveAt: trades.reduce((m, t) => (!t.failed && !t.manual ? Math.max(m, t.timestamp || 0) : m), 0) || null,
       econ: this.state.econ ?? null,
       lastError: this.lastError,
       spacing,

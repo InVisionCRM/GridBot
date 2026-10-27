@@ -721,6 +721,8 @@ export class TrendEngine {
       trades: trades.slice(-100).reverse(),
       pnl: { realized, unrealized, equity, returnPct: s.capital ? equity / s.capital - 1 : 0, gas: trades.reduce((a, t) => a + t.gasUsd, 0), fees: trades.reduce((a, t) => a + (t.feeQuote ?? 0), 0) },
       stats: { ...tradeStats(closed), maxDrawdown: drawdown(s.equity).max, timeInMarket: s.startedAt ? inMarketMs / Math.max(1, this.now() - s.startedAt) : 0 },
+      moveCount: trades.filter((t) => !t.failed).length,
+      lastMoveAt: trades.reduce((m, t) => (!t.failed ? Math.max(m, t.timestamp || 0) : m), 0) || null,
       equityHist: s.equity.slice(-600),
       blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, lastError: this.lastError,
     };

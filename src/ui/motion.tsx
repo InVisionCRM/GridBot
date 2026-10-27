@@ -13,16 +13,15 @@ export function useReducedMotion() {
   return r;
 }
 
-/** Number that eases to its new value (no colour flash). */
-export function AnimatedNumber({ value, format, className = '', duration = 450 }: { value: number | null | undefined; format: (x: number) => string; className?: string; duration?: number }) {
+/** Eases from the previous figure (0 on first paint) to `value`. */
+export function useCount(value: number | null | undefined, duration = 450): number | null {
   const reduced = useReducedMotion();
-  const [shown, setShown] = useState(value ?? 0);
-  const from = useRef(value ?? 0);
+  const [shown, setShown] = useState(0);
+  const from = useRef(0);
   useEffect(() => {
     if (value == null) return;
     const start = from.current;
-    if (start === value) return;
-    if (reduced) { setShown(value); from.current = value; return; }
+    if (reduced || start === value) { setShown(value); from.current = value; return; }
     let raf = 0;
     const t0 = performance.now();
     const step = (t: number) => {
@@ -35,7 +34,13 @@ export function AnimatedNumber({ value, format, className = '', duration = 450 }
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
   }, [value, reduced, duration]);
-  if (value == null) return <span className={className}>—</span>;
+  return value == null ? null : shown;
+}
+
+/** Number that eases to its new value (no colour flash). */
+export function AnimatedNumber({ value, format, className = '', duration = 450 }: { value: number | null | undefined; format: (x: number) => string; className?: string; duration?: number }) {
+  const shown = useCount(value, duration);
+  if (value == null || shown == null) return <span className={className}>—</span>;
   return <span className={`num ${className}`}>{format(shown)}</span>;
 }
 
