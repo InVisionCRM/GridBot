@@ -48,9 +48,12 @@ export function effectiveEntry(spent: number, tokens: number): number {
   return spent > 0 && tokens > 0 ? spent / tokens : 0;
 }
 
-/** Move needed in the pool mid to break even after a buy and a sell, each paying `feeBps` (1%/1% → +2.03%). */
-export function breakEvenMove(entryFeeBps: number, exitFeeBps: number): number {
-  return 1 / ((1 - entryFeeBps / 10_000) * (1 - exitFeeBps / 10_000)) - 1;
+/**
+ * Move needed in the pool mid to break even after a buy and a sell: the entry fee, the exit fee, and the sell tax taken
+ * from the tokens sold (1%/1% → +2.03%; 1%/1% + 5% sell tax → +7.40%). A buy tax is in the entry already (fewer tokens).
+ */
+export function breakEvenMove(entryFeeBps: number, exitFeeBps: number, sellTax = 0): number {
+  return 1 / ((1 - entryFeeBps / 10_000) * (1 - exitFeeBps / 10_000) * (1 - sellTax)) - 1;
 }
 
 export interface FreshPool {
@@ -215,13 +218,19 @@ export interface ExitPos {
    * fees: with 1% in and 1% out, break-even is +2.03% in the mid. Default 0 (gross, the old behaviour).
    */
   exitFee?: number;
+  /**
+   * Sell tax the exit pays (fraction), taken from the tokens before the pool: gains are net of it too, so TP / SL are
+   * net of every cost. The bot passes the entry-time sell tax; a tax that rises later is the separate "sell tax rose"
+   * exit. Default 0.
+   */
+  exitTax?: number;
 }
 
 export type ExitDecision = { action: 'hold' } | { action: 'sell'; frac: number; why: string };
 
 /** What to do with an open position. `frac` is a share of the original size (the remainder on a full exit). */
 export function decideExit(p: ExitPos): ExitDecision {
-  const keep = 1 - Math.max(0, Math.min(p.exitFee ?? 0, 0.99));
+  const keep = (1 - Math.max(0, Math.min(p.exitFee ?? 0, 0.99))) * (1 - Math.max(0, Math.min(p.exitTax ?? 0, 0.99)));
   const gain = p.entryPrice > 0 ? (p.price * keep) / p.entryPrice - 1 : 0;
   const left = Math.max(0, Math.min(1, p.remainingFrac));
   if (!(left > 0)) return { action: 'hold' };

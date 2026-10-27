@@ -164,6 +164,8 @@ export class TokenTrader {
   private migrateEntries() {
     let n = 0;
     for (const p of this.state.positions) {
+      // exits are net of the entry-time sell tax: a file without one uses the last measured sell tax (else 0)
+      if (!Number.isFinite(p.entrySellTax)) { p.entrySellTax = Number.isFinite(p.sellTax) ? p.sellTax : 0; n++; }
       if (p.entryBasis === 'effective') continue;
       const eff = effectiveEntry(p.spent, p.entryTokens);
       p.entryMid = p.mode === 'paper' ? p.entryPrice : null;
@@ -172,7 +174,7 @@ export class TokenTrader {
     }
     if (n) {
       this.save();
-      this.say(`Token trader: ${n} open position(s) now use the effective entry (spend per token received, after fees, impact and tax)`);
+      this.say(`Token trader: ${n} open position(s) now use the effective entry (spend per token received, after fees, impact and tax; exits net of the exit fee and sell tax)`);
     }
   }
 
@@ -416,7 +418,7 @@ export class TokenTrader {
       entryVolume: p.entryVolume, volume: p.volume, entryLiq: p.entryLiq, liq: p.liq,
       sellTax: p.sellTax, entrySellTax: p.entrySellTax, sellSimOk: p.sellSimOk,
       tp1Done: p.tp1Done, tp2Done: p.tp2Done, remainingFrac: p.entryTokens > 0 ? p.tokens / p.entryTokens : 0,
-      exitFee: p.feeBps / 10_000,
+      exitFee: p.feeBps / 10_000, exitTax: p.entrySellTax,
     };
   }
 

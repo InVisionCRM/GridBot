@@ -37,7 +37,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
           ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/token-trader/off', 'POST'))}>Off</button>
           : <button type="button" className="btn small-btn primary" disabled={busy} onClick={() => void start(o, run)}>On</button>}
       </div>
-      <p className="small">New and trending pools, sized from the pool's depth, under your per-trade and total limits. Exits: a third at +50%, a third at +100%, a 20% trail after +30%, a hard stop at −25% (all measured from the effective entry, spend per token received after the pool fee, impact and tax, to what a token fetches after the exit fee: with 1% each way, break-even is +2.03%), plus liquidity pulled, a tax that appears, a failed sell, a 6h time stop and volume dying. The sniper buys a pool when liquidity is added and ignores the minimum age. Paper fills the same way, with the pool's fee, impact and tax.</p>
+      <p className="small">New and trending pools, sized from the pool's depth, under your per-trade and total limits. Exits: a third at +50%, a third at +100%, a 20% trail after +30%, a hard stop at −25% (all measured from the effective entry, spend per token received after the pool fee, impact and tax, to what a token fetches after the exit fee and sell tax: with 1% each way, break-even is +2.03%, +7.40% with a 5% sell tax), plus liquidity pulled, a tax that appears, a failed sell, a 6h time stop and volume dying. The sniper buys a pool when liquidity is added and ignores the minimum age. Paper fills the same way, with the pool's fee, impact and tax.</p>
       {err && <div className="banner error" role="alert"><span className="grow">{err}</span></div>}
       {t.lastError && <div className="banner"><span className="grow">{t.lastError}</span></div>}
       {t.entriesHalt && (
@@ -94,7 +94,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         {t.positions.map((p: AnyObj) => (
           <div key={p.id} className="smart-bot" style={{ cursor: 'default' }}>
             <span className="smart-bot-name"><b>{p.label}</b> <ChainBadge c={chainOf(s, p.chainId)} testnet={false} /> <span className="tag">{p.source}</span></span>
-            <span className="small muted" title="Entry = spend per token received, after the pool fee, price impact and buy tax (paper and live alike). Exits also count the exit fee.">entry {num(p.entryPrice, 6)} after fees · now {num(p.price, 6)} · {p.exitPlan}</span>
+            <span className="small muted" title="Entry = spend per token received, after the pool fee, price impact and buy tax (paper and live alike). Take profit and stops are also net of the exit fee and the sell tax measured at entry.">entry {num(p.entryPrice, 6)} after fees &amp; tax · now {num(p.price, 6)} · {p.exitPlan}</span>
             <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.spentUsd ? p.pnlUsd / p.spentUsd : 0, 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
           </div>
         ))}

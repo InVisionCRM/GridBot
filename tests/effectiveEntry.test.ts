@@ -174,3 +174,61 @@ describe('migration of open positions', () => {
     expect(again.map((p) => p.entryPrice)).toEqual([pp.entryPrice, lp.entryPrice]);
   });
 });
+
+describe('net of the sell tax too (profit net of fees and taxes)', () => {
+  const T = 0.05;
+  it('break-even with 1% fees each way + 5% sell tax is +7.40%', () => {
+    expect(breakEvenMove(100, 100, T)).toBeCloseTo(1 / (0.99 * 0.99 * 0.95) - 1, 12);
+    expect(+(breakEvenMove(100, 100, T) * 100).toFixed(2)).toBe(7.4);
+    expect(breakEvenMove(100, 100, 0)).toBeCloseTo(breakEvenMove(100, 100), 12);
+  });
+
+  it('paper round trip with a 5% sell tax: P&L ≈ 0 at +7.40%, and decideExit gain is 0 there', async () => {
+    const { t, p } = await open();
+    const st = t['state' as never] as TraderState;
+    st.positions[0].entrySellTax = T; st.positions[0].sellTax = T; // the tax the safety check measured at entry
+    const be = breakEvenMove(100, 100, T);
+    t.mark(p.id, { price: MID * (1 + be) });
+    expect(Math.abs(t.status().positions[0].pnlUsd)).toBeLessThan(1e-4);
+    t.mark(p.id, { price: MID * (1 + be - 0.001) });
+    expect(t.status().positions[0].pnlUsd).toBeLessThan(0);
+    const d = decideExit(at(MID / 0.99, MID * (1 + be), { exitTax: T, now: NOW + EXIT.timeStopMs }));
+    expect(d).toMatchObject({ action: 'sell', why: expect.stringMatching(/only (-)?0\.0% up/) });
+  });
+
+  it('TP and hard stop trigger levels include the exit fee and the sell tax', () => {
+    const entry = 100, keep = 0.99 * (1 - T);
+    const tp1 = (entry * (1 + EXIT.tp1)) / keep, stop = (entry * (1 - EXIT.hardStop)) / keep;
+    expect(decideExit(at(entry, tp1 * 0.999, { exitTax: T, entrySellTax: T, sellTax: T }))).toEqual({ action: 'hold' });
+    expect(decideExit(at(entry, tp1 * 1.001, { exitTax: T, entrySellTax: T, sellTax: T }))).toMatchObject({ why: expect.stringMatching(/take profit/) });
+    expect(decideExit(at(entry, (entry * 1.5) / 0.99 * 1.001, { exitTax: T, entrySellTax: T, sellTax: T }))).toEqual({ action: 'hold' }); // fee-only level: not yet
+    expect(decideExit(at(entry, stop * 1.001, { exitTax: T, entrySellTax: T, sellTax: T }))).toEqual({ action: 'hold' });
+    expect(decideExit(at(entry, stop * 0.999, { exitTax: T, entrySellTax: T, sellTax: T }))).toMatchObject({ why: expect.stringMatching(/hard stop/) });
+  });
+
+  it('the "sell tax rose" exit is kept', () => {
+    expect(decideExit(at(100, 100, { exitTax: T, entrySellTax: T, sellTax: T + 0.02 }))).toMatchObject({ action: 'sell', why: expect.stringMatching(/sell tax rose to 7\.0%/) });
+  });
+
+  it('the bot passes the entry-time sell tax as the exit tax', async () => {
+    const { t, p } = await open();
+    (t['state' as never] as TraderState).positions[0].entrySellTax = T;
+    (t['state' as never] as TraderState).positions[0].sellTax = T;
+    t.mark(p.id, { price: (p.entryPrice * 1.5) / 0.99 * 1.001 }); // enough net of the fee alone…
+    expect(t.status().positions[0].exitPlan).toBe('hold');        // …but not net of the 5% tax
+    t.mark(p.id, { price: (p.entryPrice * 1.5) / (0.99 * 0.95) * 1.001 });
+    expect(t.status().positions[0].exitPlan).toMatch(/take profit/);
+  });
+
+  it('migration: a position without an entry-time sell tax gets the last measured one', async () => {
+    const paper = await open();
+    const raw = structuredClone(paper.t['state' as never]) as TraderState;
+    const pp = raw.positions[0] as unknown as Record<string, unknown>;
+    delete pp.entryMid; delete pp.entryBasis; delete pp.entrySellTax; pp.sellTax = T;
+    const store = new MemoryStore<TraderState>();
+    store.save(raw);
+    const migrated = trader({ store }).t.status().positions[0];
+    expect(migrated.entrySellTax).toBe(T);
+    expect(store.load()!.positions[0].entrySellTax).toBe(T);
+  });
+});
