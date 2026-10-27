@@ -49,6 +49,7 @@ const bot = new MultiBot({
   net: cfg.net, reader: legacyReader, signer: hub.rt(cfg.net.chainId).signer, store: new DurableJsonStore<MultiState>(cfg.stateFile, { urgentKey: multiUrgentKey, onError: (e) => log.warn(`state.json: ${e.message}`) }), log,
   approval: cfg.approval, maxRetries: cfg.maxRetries, retryDelayMs: cfg.retryDelayMs, candles, activity, hub,
   copy: copy && { friend: copy.friend, host: copy.host },
+  rpcAlertAfterMs: Number(process.env.RPC_ALERT_MINUTES) > 0 ? Number(process.env.RPC_ALERT_MINUTES) * 60_000 : undefined,
 });
 const gecko = new GeckoSource(copy ? relayFetch(copy.hostUrl) : undefined);
 const sync: CandleSync = new CandleSync(gecko, () => hub.candleSources(), candles, {
