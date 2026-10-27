@@ -129,6 +129,7 @@ const router = new Router({
   configured: bridgeKeyStatus,
   chainIds: hub.runtimes().map((r) => r.cfg.id),
   emit: activity.emitEvent,
+  log,
 });
 bot.routerHalt = (halt) => router.halt(halt);
 const app = createApp({

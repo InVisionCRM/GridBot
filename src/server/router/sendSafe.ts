@@ -1,20 +1,32 @@
 /**
  * One broadcast of an exact {from, to, data, value} transaction.
  * eth_call at 'pending', then estimateGas against the kind's cap, then an explicit gasLimit,
- * then a fee check, then one send through the chain's TxGate and shared nonce.
- * A timeout is pending / source_sent with the hash. Nothing here sends a second time.
- * Not used by bots. chain.ts is unchanged.
+ * then a fee check, all of that again after the chain's TxGate is acquired (a bot tx may have
+ * been ahead of us). The router halt is read immediately before the shared nonce is taken.
+ * Fees: EIP-1559 uses a clamped priority fee and maxFee = 2×base + priority. A legacy chain
+ * puts the price in gasPrice. The hash is keccak256 of the signed bytes, so a send timeout or
+ * "already known" still has a hash. Nothing here sends a second time. Not used by bots.
  */
-import { Interface, toQuantity } from 'ethers';
-import type { ReceiptLike, SentTx } from '../bot/chain';
+import { Interface, keccak256, toQuantity } from 'ethers';
+import { isRealRevert, isTransportError } from '../chains/fallback';
+import { redact } from '../bot/logger';
 import type { SharedNonce, TxGate } from '../bot/txGate';
 import type { TxKind } from './settings';
 
 const REVERT = new Interface(['error Error(string)', 'error Panic(uint256)']);
 const ADDR = /^0x[0-9a-fA-F]{40}$/;
 const DATA = /^0x(?:[0-9a-fA-F]{2})*$/;
+const GWEI = 1_000_000_000n;
+/**
+ * A node that answers eth_maxPriorityFeePerGas with the whole gas price must not have that
+ * copied into the tip. 5 gwei covers a normal Ethereum tip; the per-chain unit cap is the abort.
+ */
+export const PRIORITY_FEE_CLAMP_WEI = 5n * GWEI;
+const BLOCK_SCAN = 8;
 
-export type SendSafeCode = 'revert' | 'gas_cap' | 'fee' | 'sim';
+export type SendSafeCode =
+  | 'revert' | 'gas_cap' | 'fee' | 'sim' | 'halt' | 'rpc'
+  | 'underpriced' | 'stale_nonce' | 'broadcast';
 
 export class SendSafeAbort extends Error {
   constructor(message: string, readonly code: SendSafeCode) {
@@ -28,43 +40,71 @@ export interface ExactTx { from: string; to: string; data: string; value: bigint
 export interface SafeReader {
   send(method: string, params: unknown[]): Promise<unknown>;
   getFeeData(): Promise<{ gasPrice: bigint | null; maxFeePerGas: bigint | null }>;
-  getTransactionCount(address: string, blockTag: 'pending'): Promise<number>;
+  getTransactionCount(address: string, blockTag: 'pending' | 'latest'): Promise<number>;
 }
 
-/** Signer that accepts the gas fields chain.ts's TxSender type does not list. The hub forwards unknown fields to ethers. */
+/** Signs one tx. The hub's wallet does this; sendSafe broadcasts the raw bytes itself. */
 export interface GasSender {
   getAddress(): Promise<string>;
-  sendTransaction(tx: {
-    to: string; data: string; value: bigint; nonce: number; gasLimit: bigint;
+  signTransaction(tx: {
+    to: string; data: string; value: bigint; nonce: number; gasLimit: bigint; chainId: number;
+    type: 0 | 2;
+    gasPrice?: bigint;
     maxFeePerGas?: bigint; maxPriorityFeePerGas?: bigint;
-  }): Promise<SentTx>;
+  }): Promise<string>;
 }
 
 export interface SendSafeOpts {
   tx: ExactTx;
   kind: TxKind;
+  chainId: number;
   reader: SafeReader;
   signer: GasSender;
   gate: TxGate;
   nonce: SharedNonce;
   /** Gas units. estimateGas above this aborts before a send. */
   gasCap: bigint;
-  /** Wei. Abort when maxFeePerGas × gasLimit (+ optional L1 fee) is above this. */
+  /** Wei. Abort when the per-gas price × gasLimit (+ optional L1 fee) is above this. */
   gasBudgetWei: bigint;
+  /** Wei per gas. Abort when the price itself is above this (router maxGasPriceWei). */
+  maxGasPriceWei: bigint;
   /** Extra wei (Orbit L1 component) added to the fee check. Omit on an L1. */
   l1FeeWei?: bigint;
   receiptTimeoutMs?: number;
-  /** Called with the decoded reason. Must not receive the raw RPC error (that can carry an endpoint). */
+  /**
+   * Read inside the gate, immediately before the nonce is taken.
+   * Stop all sets the router halt while this send may still be queued behind a bot tx.
+   */
+  halted?: () => boolean;
+  /** Called with a safe reason. Must not receive a raw RPC error (that can carry an endpoint). */
   warn?: (msg: string) => void;
 }
 
+export type SendSafeStatus = 'confirmed' | 'pending' | 'reverted' | 'replaced' | 'cancelled';
+
 export interface SendSafeResult {
-  status: 'confirmed' | 'pending' | 'reverted';
-  /** pending → source_sent (broadcast, outcome unknown). A mined receipt → source_confirmed. */
-  state: 'source_sent' | 'source_confirmed';
+  status: SendSafeStatus;
+  /** pending → source_sent. A receipt for this hash → source_confirmed. A different hash at this nonce → source_replaced. */
+  state: 'source_sent' | 'source_confirmed' | 'source_replaced';
   hash: string;
   gasLimit: bigint;
   nonce: number;
+  replacementHash?: string;
+}
+
+interface Plan {
+  gasLimit: bigint;
+  unit: bigint;
+  gasPrice?: bigint;
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
+}
+
+interface Outcome {
+  status: SendSafeStatus;
+  state: SendSafeResult['state'];
+  hash: string;
+  replacementHash?: string;
 }
 
 /** gasLimit = min(estimate × 1.2, cap). estimate above the cap throws. */
@@ -76,6 +116,21 @@ export function explicitGasLimit(estimate: bigint, cap: bigint, kind: string): b
   return padded > cap ? cap : padded;
 }
 
+/** Strip endpoints and registered secrets from a provider error before it leaves this module. */
+export function sanitizeBroadcastError(e: unknown): string {
+  const err = e as { message?: string; shortMessage?: string } | null;
+  const raw = typeof err?.message === 'string' && err.message
+    ? err.message
+    : typeof err?.shortMessage === 'string' ? err.shortMessage : String(e ?? '');
+  const stripped = raw
+    .replace(/https?:\/\/[^\s)\]"'<>]+/gi, '[rpc]')
+    .replace(/(?:api[_-]?key|apikey|key|token)=([^&\s]+)/gi, 'key=[REDACTED]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const red = redact(stripped);
+  return (red.slice(0, 180) || 'broadcast failed');
+}
+
 function fail(o: SendSafeOpts, code: SendSafeCode, message: string): never {
   o.warn?.(`router send aborted (${o.kind}): ${message}`);
   throw new SendSafeAbort(message, code);
@@ -83,6 +138,24 @@ function fail(o: SendSafeOpts, code: SendSafeCode, message: string): never {
 
 function rpcTx(tx: ExactTx) {
   return { from: tx.from, to: tx.to, data: tx.data, value: toQuantity(tx.value) };
+}
+
+function failureCode(e: unknown): 'revert' | 'rpc' {
+  if (isRealRevert(e)) return 'revert';
+  const msg = e instanceof Error ? e.message : String(e ?? '');
+  // ethers wraps a dead RPC as CALL_EXCEPTION "missing revert data". That is not a revert.
+  if (/missing revert data/i.test(msg)) return 'rpc';
+  if (isTransportError(e)) return 'rpc';
+  if (revertData(e)) return 'revert';
+  if (/execution reverted/i.test(msg) || typeof (e as { reason?: unknown })?.reason === 'string') return 'revert';
+  return 'rpc';
+}
+
+function abortFromRpc(o: SendSafeOpts, e: unknown): never {
+  if (e instanceof SendSafeAbort) fail(o, e.code, e.message);
+  if (failureCode(e) === 'revert') fail(o, 'revert', decodeRevertReason(e));
+  const detail = sanitizeBroadcastError(e);
+  fail(o, 'rpc', detail && detail !== 'broadcast failed' ? `RPC request failed: ${detail}` : 'RPC request failed');
 }
 
 /** Decoded revert string only. The raw provider error is not returned: its text can include the RPC URL. */
@@ -96,7 +169,7 @@ export function decodeRevertReason(e: unknown): string {
   if (typeof reason === 'string' && reason.trim() && !/https?:\/\//i.test(reason)) return clip(clean(reason));
   const msg = e instanceof Error ? e.message : '';
   const m = /execution reverted(?::\s*|\s+)([^(\n]+)/i.exec(msg);
-  if (m?.[1] && !/https?:\/\//i.test(m[1])) return clip(clean(m[1]));
+  if (m?.[1] && !/missing revert data/i.test(m[1]) && !/https?:\/\//i.test(m[1])) return clip(clean(m[1]));
   return 'execution reverted';
 }
 
@@ -132,14 +205,238 @@ function asQuantity(v: unknown): bigint {
   throw new SendSafeAbort('estimateGas did not return a gas quantity', 'sim');
 }
 
-async function waitFor(tx: SentTx, timeoutMs: number): Promise<ReceiptLike | null> {
+function qtyOrNull(v: unknown): bigint | null {
+  if (typeof v === 'string' && /^0x[0-9a-fA-F]+$/.test(v)) return BigInt(v);
+  if (typeof v === 'bigint' && v >= 0n) return v;
+  return null;
+}
+
+async function tryQty(o: SendSafeOpts, method: string, params: unknown[]): Promise<bigint | null> {
+  try { return qtyOrNull(await o.reader.send(method, params)); }
+  catch { return null; }
+}
+
+function clampPriority(tip: bigint, unitCap: bigint): bigint {
+  if (tip < 0n) return 0n;
+  const ceiling = unitCap < PRIORITY_FEE_CLAMP_WEI ? unitCap : PRIORITY_FEE_CLAMP_WEI;
+  return tip > ceiling ? ceiling : tip;
+}
+
+/** eth_maxPriorityFeePerGas, else the median tip from eth_feeHistory, else 1 gwei. Always clamped. */
+async function priorityFee(o: SendSafeOpts): Promise<bigint> {
+  const direct = await tryQty(o, 'eth_maxPriorityFeePerGas', []);
+  if (direct != null) return clampPriority(direct, o.maxGasPriceWei);
   try {
-    return (await tx.wait(1, timeoutMs)) ?? null;
-  } catch (e) {
-    const rec = (e as { receipt?: ReceiptLike }).receipt;
-    if (rec) return rec;
-    return null;
+    const hist = await o.reader.send('eth_feeHistory', ['0xa', 'latest', [50]]) as { reward?: unknown };
+    const tips: bigint[] = [];
+    if (Array.isArray(hist?.reward)) {
+      for (const row of hist.reward) {
+        const cell = Array.isArray(row) ? row[0] : null;
+        const n = qtyOrNull(cell);
+        if (n != null && n > 0n) tips.push(n);
+      }
+    }
+    tips.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    if (tips.length) return clampPriority(tips[Math.floor(tips.length / 2)]!, o.maxGasPriceWei);
+  } catch { /* fee history is optional; the default tip is below */ }
+  return clampPriority(GWEI, o.maxGasPriceWei);
+}
+
+async function resolveFee(o: SendSafeOpts): Promise<Pick<Plan, 'unit' | 'gasPrice' | 'maxFeePerGas' | 'maxPriorityFeePerGas'>> {
+  let block: unknown;
+  try { block = await o.reader.send('eth_getBlockByNumber', ['latest', false]); }
+  catch (e) { abortFromRpc(o, e); }
+  if (!block || typeof block !== 'object') fail(o, 'rpc', 'RPC request failed: no latest block');
+  const baseRaw = (block as { baseFeePerGas?: unknown }).baseFeePerGas;
+  const base = qtyOrNull(baseRaw);
+  if (base == null) {
+    let gasPrice = await tryQty(o, 'eth_gasPrice', []);
+    if (gasPrice == null) {
+      try {
+        const fee = await o.reader.getFeeData();
+        gasPrice = fee.gasPrice ?? fee.maxFeePerGas;
+      } catch (e) { abortFromRpc(o, e); }
+    }
+    if (gasPrice == null || gasPrice <= 0n) fail(o, 'fee', 'no gas price from the chain');
+    return { gasPrice, unit: gasPrice };
   }
+  const priority = await priorityFee(o);
+  const maxFee = base * 2n + priority;
+  return { maxFeePerGas: maxFee, maxPriorityFeePerGas: priority, unit: maxFee };
+}
+
+async function assess(o: SendSafeOpts): Promise<Plan> {
+  const tx = o.tx;
+  try {
+    const out = await o.reader.send('eth_call', [rpcTx(tx), 'pending']);
+    if (typeof out !== 'string') fail(o, 'sim', 'eth_call returned no result');
+  } catch (e) {
+    if (e instanceof SendSafeAbort) throw e;
+    abortFromRpc(o, e);
+  }
+
+  let estimate: bigint;
+  try { estimate = asQuantity(await o.reader.send('eth_estimateGas', [rpcTx(tx), 'pending'])); }
+  catch (e) {
+    if (e instanceof SendSafeAbort) fail(o, e.code, e.message);
+    abortFromRpc(o, e);
+  }
+
+  let gasLimit: bigint;
+  try { gasLimit = explicitGasLimit(estimate, o.gasCap, o.kind); }
+  catch (e) { if (e instanceof SendSafeAbort) fail(o, e.code, e.message); throw e; }
+
+  const fee = await resolveFee(o);
+  if (fee.unit > o.maxGasPriceWei) fail(o, 'fee', `gas price ${fee.unit} wei exceeds the ${o.maxGasPriceWei} wei cap`);
+  const l1 = o.l1FeeWei ?? 0n;
+  if (l1 < 0n) fail(o, 'fee', 'L1 fee is negative');
+  const cost = fee.unit * gasLimit + l1;
+  if (cost > o.gasBudgetWei) fail(o, 'fee', `gas cost ${cost} wei exceeds budget ${o.gasBudgetWei} wei`);
+  return { gasLimit, ...fee };
+}
+
+function assertNotHalted(o: SendSafeOpts) {
+  if (o.halted?.()) fail(o, 'halt', 'router halted before the nonce was taken');
+}
+
+type BroadcastKind = 'already_known' | 'timeout' | 'underpriced' | 'stale_nonce' | 'other';
+
+function broadcastKind(e: unknown): BroadcastKind {
+  const err = e as { code?: string; message?: string; shortMessage?: string };
+  const code = String(err?.code ?? '');
+  const msg = `${err?.shortMessage ?? ''} ${err?.message ?? e ?? ''}`.toLowerCase();
+  if (code === 'REPLACEMENT_UNDERPRICED' || /replacement transaction underpriced|replacement fee too low|underpriced/.test(msg)) return 'underpriced';
+  if (code === 'NONCE_EXPIRED' || /nonce too low|nonce has already been used|nonce expired|old nonce|stale nonce/.test(msg)) return 'stale_nonce';
+  if (/already known|alreadyknown|known transaction/.test(msg)) return 'already_known';
+  if (code === 'TIMEOUT' || code === 'ETIMEDOUT' || /timeout|timed out|etimedout/.test(msg)) return 'timeout';
+  return 'other';
+}
+
+function localHash(raw: string): string {
+  if (typeof raw !== 'string' || !/^0x[0-9a-fA-F]+$/.test(raw) || (raw.length % 2) !== 0) {
+    throw new SendSafeAbort('signer returned no signed transaction', 'broadcast');
+  }
+  return keccak256(raw);
+}
+
+function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
+
+function parseReceipt(v: unknown, expectHash: string): { status: number; hash: string } | null {
+  if (!v || typeof v !== 'object') return null;
+  const r = v as { status?: string | number | null; transactionHash?: string };
+  let status: number | null = null;
+  if (r.status === 1 || r.status === '0x1' || r.status === '0x01') status = 1;
+  else if (r.status === 0 || r.status === '0x0' || r.status === '0x00') status = 0;
+  if (status == null) return null;
+  const hash = typeof r.transactionHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(r.transactionHash) ? r.transactionHash : expectHash;
+  return { status, hash };
+}
+
+interface MinedTx { hash?: string; from?: string; to?: string | null; nonce?: string | number; value?: string; input?: string; data?: string }
+
+function nonceOf(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isInteger(v) && v >= 0) return v;
+  if (typeof v === 'string' && /^0x[0-9a-fA-F]+$/.test(v)) return Number(BigInt(v));
+  return null;
+}
+
+function sameAddr(a: string | null | undefined, b: string) {
+  return typeof a === 'string' && a.toLowerCase() === b.toLowerCase();
+}
+
+function isCancel(tx: MinedTx, from: string): boolean {
+  if (!sameAddr(tx.to, from)) return false;
+  const value = qtyOrNull(tx.value) ?? 0n;
+  const input = String(tx.input ?? tx.data ?? '0x').toLowerCase();
+  return value === 0n && (input === '0x' || input === '0x0' || input === '');
+}
+
+function txsOf(block: unknown): MinedTx[] {
+  const txs = (block as { transactions?: unknown } | null)?.transactions;
+  if (!Array.isArray(txs)) return [];
+  return txs.filter((t): t is MinedTx => !!t && typeof t === 'object');
+}
+
+function blockNum(block: unknown): bigint | null {
+  return qtyOrNull((block as { number?: unknown } | null)?.number);
+}
+
+/** The nonce was mined under a different hash: cancelled (0-value self-send) or replaced. Never our confirmation. */
+async function detectReplacement(o: SendSafeOpts, from: string, nonce: number, ourHash: string): Promise<Outcome | null> {
+  const mined = await o.reader.getTransactionCount(from, 'latest');
+  if (mined <= nonce) return null;
+  let block = await o.reader.send('eth_getBlockByNumber', ['latest', true]);
+  for (let i = 0; i < BLOCK_SCAN && block; i++) {
+    for (const tx of txsOf(block)) {
+      if (!sameAddr(tx.from, from) || nonceOf(tx.nonce) !== nonce) continue;
+      const hash = typeof tx.hash === 'string' ? tx.hash : '';
+      if (hash.toLowerCase() === ourHash.toLowerCase()) return null;
+      const kind = isCancel(tx, from) ? 'cancelled' : 'replaced';
+      return { status: kind, state: 'source_replaced', hash: ourHash, ...(hash ? { replacementHash: hash } : {}) };
+    }
+    const n = blockNum(block);
+    if (n == null || n <= 0n) break;
+    block = await o.reader.send('eth_getBlockByNumber', [toQuantity(n - 1n), true]);
+  }
+  return { status: 'replaced', state: 'source_replaced', hash: ourHash };
+}
+
+async function waitOutcome(o: SendSafeOpts, from: string, hash: string, nonce: number): Promise<Outcome> {
+  const deadline = Date.now() + (o.receiptTimeoutMs ?? 120_000);
+  for (;;) {
+    let receipt: { status: number; hash: string } | null = null;
+    try { receipt = parseReceipt(await o.reader.send('eth_getTransactionReceipt', [hash]), hash); }
+    catch { receipt = null; }
+    if (receipt) {
+      if (receipt.hash.toLowerCase() !== hash.toLowerCase()) {
+        return { status: 'replaced', state: 'source_replaced', hash, replacementHash: receipt.hash };
+      }
+      if (receipt.status !== 1) return { status: 'reverted', state: 'source_confirmed', hash };
+      return { status: 'confirmed', state: 'source_confirmed', hash };
+    }
+    try {
+      const replaced = await detectReplacement(o, from, nonce, hash);
+      if (replaced) return replaced;
+    } catch { /* a read failed; keep waiting. Do not report this hash confirmed. */ }
+    if (Date.now() >= deadline) return { status: 'pending', state: 'source_sent', hash };
+    await sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+  }
+}
+
+async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number): Promise<SendSafeResult> {
+  const tx = o.tx;
+  const common = { to: tx.to, data: tx.data, value: tx.value, nonce, gasLimit: plan.gasLimit, chainId: o.chainId };
+  const unsigned = plan.gasPrice != null
+    ? { ...common, type: 0 as const, gasPrice: plan.gasPrice }
+    : { ...common, type: 2 as const, maxFeePerGas: plan.maxFeePerGas, maxPriorityFeePerGas: plan.maxPriorityFeePerGas };
+  let raw: string;
+  try { raw = await o.signer.signTransaction(unsigned); }
+  catch (e) {
+    o.nonce.invalidate();
+    if (e instanceof SendSafeAbort) fail(o, e.code, e.message);
+    fail(o, 'broadcast', `could not sign: ${sanitizeBroadcastError(e)}`);
+  }
+  let hash: string;
+  try { hash = localHash(raw); }
+  catch (e) {
+    o.nonce.invalidate();
+    if (e instanceof SendSafeAbort) fail(o, e.code, e.message);
+    throw e;
+  }
+  try {
+    await o.reader.send('eth_sendRawTransaction', [raw]);
+  } catch (e) {
+    const kind = broadcastKind(e);
+    if (kind !== 'already_known' && kind !== 'timeout') {
+      o.nonce.invalidate();
+      if (kind === 'underpriced') fail(o, 'underpriced', 'replacement underpriced; not resent');
+      if (kind === 'stale_nonce') fail(o, 'stale_nonce', 'nonce already used; not resent');
+      fail(o, 'broadcast', sanitizeBroadcastError(e));
+    }
+    // already known / the send itself timed out: the bytes may be in the mempool. Track the local hash. Do not send again.
+  }
+  const outcome = await waitOutcome(o, tx.from, hash, nonce);
+  return { ...outcome, gasLimit: plan.gasLimit, nonce };
 }
 
 export async function sendSafe(o: SendSafeOpts): Promise<SendSafeResult> {
@@ -147,53 +444,20 @@ export async function sendSafe(o: SendSafeOpts): Promise<SendSafeResult> {
   if (!ADDR.test(tx.from) || !ADDR.test(tx.to)) fail(o, 'sim', 'from and to must be 0x addresses');
   if (!DATA.test(tx.data)) fail(o, 'sim', 'data must be hex');
   if (typeof tx.value !== 'bigint' || tx.value < 0n) fail(o, 'sim', 'value must be a non-negative amount');
+  if (!Number.isInteger(o.chainId) || o.chainId <= 0) fail(o, 'sim', 'chain id is missing');
+  if (typeof o.maxGasPriceWei !== 'bigint' || o.maxGasPriceWei <= 0n) fail(o, 'fee', 'gas price cap is missing');
 
-  try {
-    const out = await o.reader.send('eth_call', [rpcTx(tx), 'pending']);
-    if (typeof out !== 'string') fail(o, 'sim', 'eth_call returned no result');
-  } catch (e) {
-    if (e instanceof SendSafeAbort) throw e;
-    fail(o, 'revert', decodeRevertReason(e));
-  }
-
-  let estimate: bigint;
-  try {
-    estimate = asQuantity(await o.reader.send('eth_estimateGas', [rpcTx(tx), 'pending']));
-  } catch (e) {
-    if (e instanceof SendSafeAbort) fail(o, e.code, e.message);
-    fail(o, 'revert', decodeRevertReason(e));
-  }
-
-  let gasLimit: bigint;
-  try { gasLimit = explicitGasLimit(estimate, o.gasCap, o.kind); }
-  catch (e) { if (e instanceof SendSafeAbort) fail(o, e.code, e.message); throw e; }
-
-  const fee = await o.reader.getFeeData();
-  const maxFee = fee.maxFeePerGas ?? fee.gasPrice;
-  if (maxFee == null || maxFee <= 0n) fail(o, 'fee', 'no maxFeePerGas from the chain');
-  const l1 = o.l1FeeWei ?? 0n;
-  if (l1 < 0n) fail(o, 'fee', 'L1 fee is negative');
-  const cost = maxFee * gasLimit + l1;
-  if (cost > o.gasBudgetWei) fail(o, 'fee', `gas cost ${cost} wei exceeds budget ${o.gasBudgetWei} wei`);
+  // Refuse before any read when Stop all already landed. A send that is only queued later is checked inside the gate.
+  assertNotHalted(o);
+  await assess(o);
 
   // One send, inside the chain gate, with the shared nonce. The wait stays in the gate (same as a bot fill).
   return o.gate.run(async () => {
+    assertNotHalted(o);
+    const plan = await assess(o);
+    // Same place a bot send reads canSend: after the gate is held, before the nonce is taken.
+    assertNotHalted(o);
     const nonce = await o.nonce.next(() => o.reader.getTransactionCount(tx.from, 'pending'));
-    let sent: SentTx;
-    try {
-      sent = await o.signer.sendTransaction({
-        to: tx.to, data: tx.data, value: tx.value, nonce, gasLimit,
-        maxFeePerGas: maxFee, maxPriorityFeePerGas: maxFee,
-      });
-    } catch (e) {
-      o.nonce.invalidate();
-      o.warn?.(`router send aborted (${o.kind}): broadcast failed`);
-      throw e;
-    }
-    // Timeout or any other unknown outcome: return the hash. Do not invalidate, do not send again.
-    const receipt = await waitFor(sent, o.receiptTimeoutMs ?? 120_000);
-    if (!receipt) return { status: 'pending' as const, state: 'source_sent' as const, hash: sent.hash, gasLimit, nonce };
-    if (receipt.status !== 1) return { status: 'reverted' as const, state: 'source_confirmed' as const, hash: sent.hash, gasLimit, nonce };
-    return { status: 'confirmed' as const, state: 'source_confirmed' as const, hash: sent.hash, gasLimit, nonce };
+    return broadcast(o, plan, nonce);
   });
 }

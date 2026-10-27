@@ -23,6 +23,21 @@ export const DEFAULT_GAS_CAPS: Record<TxKind, number> = {
   claim: 500_000,
 };
 
+const GWEI = 1_000_000_000n;
+/**
+ * Wei per gas. A send aborts above this. Ethereum 500 gwei is past a severe spike.
+ * Robinhood (Orbit) is an L2, so 30 gwei is already far above a normal price.
+ * PulseChain prices run high in wei because PLS is cheap; 2,000,000 gwei still stops a runaway.
+ */
+export const DEFAULT_MAX_GAS_PRICE_WEI: Readonly<Record<number, bigint>> = {
+  1: 500n * GWEI,
+  369: 2_000_000n * GWEI,
+  4663: 30n * GWEI,
+};
+export const FALLBACK_MAX_GAS_PRICE_WEI = 200n * GWEI;
+/** 1 native coin per gas unit. A stored cap cannot be set above this. */
+export const MAX_GAS_PRICE_WEI_CAP = 10n ** 18n;
+
 export const ROUTER_HARD_CAPS = {
   maxPerMoveUsd: 50_000,
   maxPerDayUsd: 100_000,
@@ -80,6 +95,8 @@ export interface RouterSettings {
   minConfidence: number;
   /** chain id → tx kind → gas units. */
   gasCaps: Record<string, Partial<Record<TxKind, number>>>;
+  /** chain id → max wei per gas, decimal string. A send aborts when the price is above this. */
+  maxGasPriceWei: Record<string, string>;
   autoClaim: boolean;
   halt: RouterHalt | null;
 }
@@ -111,6 +128,7 @@ export function defaultSettings(chainIds: readonly number[]): RouterSettings {
     maxMovesPerDay: 2,
     minConfidence: 0.5,
     gasCaps: gasDefaults(chainIds),
+    maxGasPriceWei: gasPriceDefaults(chainIds),
     autoClaim: false,
     halt: null,
   };
@@ -120,6 +138,35 @@ function gasDefaults(chainIds: readonly number[]): RouterSettings['gasCaps'] {
   const out: RouterSettings['gasCaps'] = {};
   for (const id of chainIds) out[String(id)] = { ...DEFAULT_GAS_CAPS };
   return out;
+}
+
+function defaultGasPrice(id: number): bigint {
+  return DEFAULT_MAX_GAS_PRICE_WEI[id] ?? FALLBACK_MAX_GAS_PRICE_WEI;
+}
+
+function gasPriceDefaults(chainIds: readonly number[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const id of chainIds) if (Number.isInteger(id) && id > 0) out[String(id)] = defaultGasPrice(id).toString();
+  return out;
+}
+
+function clampWei(n: bigint): bigint {
+  if (n < 1n) return 1n;
+  if (n > MAX_GAS_PRICE_WEI_CAP) return MAX_GAS_PRICE_WEI_CAP;
+  return n;
+}
+
+function parseWei(v: unknown, fallback: bigint): bigint {
+  if (typeof v === 'bigint') return clampWei(v < 0n ? fallback : v);
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0) return clampWei(BigInt(v));
+  if (typeof v === 'string' && /^\d+$/.test(v.trim())) return clampWei(BigInt(v.trim()));
+  return fallback;
+}
+
+function strictWei(v: unknown, name: string): bigint {
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v >= 1) return clampWei(BigInt(v));
+  if (typeof v === 'string' && /^\d+$/.test(v.trim()) && v.trim() !== '0') return clampWei(BigInt(v.trim()));
+  throw new Error(`${name} must be a positive whole number of wei.`);
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -240,6 +287,26 @@ function fillGas(caps: RouterSettings['gasCaps'], known: ReadonlySet<number>): R
   return out;
 }
 
+function fillGasPrice(map: Record<string, string>, known: ReadonlySet<number>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const id of known) out[String(id)] = parseWei(map[String(id)], defaultGasPrice(id)).toString();
+  return out;
+}
+
+function priceMap(v: unknown, known: ReadonlySet<number>, base: Record<string, string>, strict: boolean): Record<string, string> {
+  const out = { ...base };
+  if (v == null) return out;
+  if (!isObj(v)) { if (strict) throw new Error('maxGasPriceWei must be an object of chain id → wei per gas.'); return out; }
+  for (const [k, raw] of entries(v)) {
+    const key = chainKey(Number(k), known);
+    if (!key) { if (strict && k.trim()) throw new Error(`Unknown chain ${k}.`); continue; }
+    if (raw == null) continue;
+    const fallback = parseWei(out[key], defaultGasPrice(Number(key)));
+    out[key] = (strict ? strictWei(raw, `maxGasPriceWei ${key}`) : parseWei(raw, fallback)).toString();
+  }
+  return out;
+}
+
 function capMap(map: Record<string, number>, ceiling: number): Record<string, number> {
   const out: Record<string, number> = {};
   for (const [k, n] of Object.entries(map)) out[k] = clamp(n, 0, ceiling);
@@ -274,6 +341,7 @@ function finish(s: RouterSettings, chainIds: readonly number[]): RouterSettings 
     maxMovesPerDay: clamp(Math.round(s.maxMovesPerDay), 0, ROUTER_HARD_CAPS.maxMovesPerDay),
     minConfidence: clamp(s.minConfidence, 0, ROUTER_HARD_CAPS.minConfidence),
     gasCaps: fillGas(s.gasCaps, known),
+    maxGasPriceWei: fillGasPrice(s.maxGasPriceWei, known),
     autoClaim: s.autoClaim === true,
   };
 }
@@ -292,6 +360,7 @@ export function settingsFromFile(raw: unknown, chainIds: readonly number[]): Rou
       gasCaps[key] = { ...gasCaps[key], ...kindsOf(v, false) };
     }
   }
+  const maxGasPriceWei = priceMap(raw.maxGasPriceWei, known, base.maxGasPriceWei, false);
   return finish({
     on: raw.on === true,
     mode,
@@ -309,6 +378,7 @@ export function settingsFromFile(raw: unknown, chainIds: readonly number[]): Rou
     maxMovesPerDay: num(raw.maxMovesPerDay, base.maxMovesPerDay, 0, ROUTER_HARD_CAPS.maxMovesPerDay, true),
     minConfidence: num(raw.minConfidence, base.minConfidence, 0, ROUTER_HARD_CAPS.minConfidence),
     gasCaps,
+    maxGasPriceWei,
     autoClaim: raw.autoClaim === true,
     halt: readHalt(raw.halt),
   }, chainIds);
@@ -328,6 +398,7 @@ export function patchSettings(current: RouterSettings, body: unknown, chainIds: 
     allowedBridges: [...current.allowedBridges],
     minNetGainTok: { ...current.minNetGainTok },
     gasCaps: Object.fromEntries(Object.entries(current.gasCaps).map(([id, row]) => [id, { ...row }])),
+    maxGasPriceWei: { ...current.maxGasPriceWei },
     halt: current.halt,
   };
   for (const key of Object.keys(body)) {
@@ -388,6 +459,9 @@ export function patchSettings(current: RouterSettings, body: unknown, chainIds: 
           if (v == null) { delete next.gasCaps[id]; continue; }
           next.gasCaps[id] = { ...next.gasCaps[id], ...kindsOf(v, true) };
         }
+        break;
+      case 'maxGasPriceWei':
+        next.maxGasPriceWei = priceMap(body.maxGasPriceWei, known, next.maxGasPriceWei, true);
         break;
       case 'autoClaim':
         if (typeof body.autoClaim !== 'boolean') throw new Error('autoClaim must be true or false.');

@@ -11,7 +11,7 @@ import { MultiBot, type MultiState } from '../src/server/bot/multi';
 import { MemoryStore } from '../src/server/bot/store';
 import { bridgeConfigured, takeBridgeKeys } from '../src/server/env';
 import { Router, type RouterFile } from '../src/server/router/router';
-import { etaP90Within, ROUTER_HARD_CAPS } from '../src/server/router/settings';
+import { DEFAULT_MAX_GAS_PRICE_WEI, etaP90Within, MAX_GAS_PRICE_WEI_CAP, ROUTER_HARD_CAPS } from '../src/server/router/settings';
 import { MockChain, NET } from './helpers/mockChain';
 
 const CHAINS = [369, 1, 4663];
@@ -69,6 +69,12 @@ describe('router settings', () => {
     expect(router.gasCap(369, 'bridge')).toBe(300_000n);
     expect(router.gasCap(1, 'claim')).toBe(500_000n);
     expect(router.gasCap(999, 'swap')).toBeNull();
+    expect(s.maxGasPriceWei['1']).toBe(DEFAULT_MAX_GAS_PRICE_WEI[1].toString());
+    expect(s.maxGasPriceWei['369']).toBe(DEFAULT_MAX_GAS_PRICE_WEI[369].toString());
+    expect(s.maxGasPriceWei['4663']).toBe(DEFAULT_MAX_GAS_PRICE_WEI[4663].toString());
+    expect(router.maxGasPriceWei(1)).toBe(DEFAULT_MAX_GAS_PRICE_WEI[1]);
+    expect(router.maxGasPriceWei(999)).toBeNull();
+    expect(router.isHalted()).toBe(false);
     expect(etaP90Within(60 * 60, 60)).toBe(true);
     expect(etaP90Within(60 * 60 + 1, 60)).toBe(false);
     expect(router.update(s)).toEqual(s);
@@ -113,6 +119,10 @@ describe('router settings', () => {
     expect(s.allowedChains).toEqual([369, 1]);
     expect(s.gasCaps['369'].claim).toBe(ROUTER_HARD_CAPS.gasUnits);
     expect(s.gasCaps['369'].bridge).toBe(300_000);
+    expect(router.update({ maxGasPriceWei: { '1': MAX_GAS_PRICE_WEI_CAP.toString() + '0' } }).maxGasPriceWei['1']).toBe(MAX_GAS_PRICE_WEI_CAP.toString());
+    expect(router.update({ maxGasPriceWei: { '369': '1000000000' } }).maxGasPriceWei['369']).toBe('1000000000');
+    expect(() => router.update({ maxGasPriceWei: { '999': '1' } })).toThrow(/Unknown chain/);
+    expect(router.maxGasPriceWei(369)).toBe(1_000_000_000n);
     expect(s.autoClaim).toBe(true);
     expect(router.update({ maxPerMoveUsd: 100, maxSlippageBps: 0, maxPerMoveUsdByChain: { '369': 1_000 } }).maxPerMoveUsdByChain).toEqual({ '369': 100 });
     expect(router.status().maxSlippageBps).toBe(1);
@@ -128,7 +138,7 @@ describe('router settings', () => {
       version: 1, on: true, mode: 'live', maxPerMoveUsd: 0, maxPerDayUsd: 0,
       maxPerMoveUsdByChain: {}, maxPerDayUsdByChain: {}, allowedChains: [], allowedBridges: ['canonical-slow' as 'across'],
       minNetGainTok: {}, minNetGainPct: 0.005, maxSlippageBps: 99_999, maxEtaMin: 60, cooldownMin: 360,
-      maxMovesPerDay: 2, minConfidence: 0.5, gasCaps: {}, autoClaim: false, halt: null,
+      maxMovesPerDay: 2, minConfidence: 0.5, gasCaps: {}, maxGasPriceWei: {}, autoClaim: false, halt: null,
     });
     const host = new Router({ store, host: true, chainIds: CHAINS });
     expect(host.status().on).toBe(false);
@@ -202,6 +212,33 @@ describe('router settings', () => {
     expect(refused.status).toBe(400);
     expect(refused.text).toMatch(/Zero blocks live/);
     expect(router.status().on).toBe(false);
+  });
+
+  it('a save error while recording the halt does not fail Stop all', () => {
+    const chain = new MockChain();
+    const log = new Logger(true);
+    const bot = new MultiBot({ net: NET, reader: chain, signer: null, store: new MemoryStore<MultiState>(), log });
+    const store = new MemoryStore<RouterFile>();
+    const inner = store.save.bind(store);
+    let boom = false;
+    store.save = (s) => {
+      if (boom) throw new Error('disk full https://rpc.example/SECRETKEYVALUE123');
+      inner(s);
+    };
+    const router = new Router({ store, host: true, chainIds: [NET.chainId], log, emit: bot.activity.emitEvent });
+    router.turnOn();
+    expect(router.isHalted()).toBe(false);
+    bot.routerHalt = (h) => router.halt(h);
+    boom = true;
+    expect(() => bot.stopAll()).not.toThrow();
+    expect(router.status().on).toBe(false);
+    expect(router.isHalted()).toBe(true);
+    expect(router.status().halt?.subject).toBe('router');
+    const logged = log.entries.map((e) => e.msg).join('\n');
+    expect(logged).toMatch(/halt was not saved/);
+    expect(logged).not.toContain('SECRETKEYVALUE123');
+    expect(logged).not.toMatch(/https?:\/\//);
+    expect(bot.activity.recent().some((e) => e.msg === 'capital router off — no new moves')).toBe(true);
   });
 });
 

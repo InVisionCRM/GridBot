@@ -74,7 +74,7 @@ function takeOne(name: 'ACROSS_API_KEY' | 'RELAY_API_KEY' | 'LIFI_API_KEY'): str
   delete process.env[name];
   if (!raw || !raw.trim()) return null;
   const v = raw.trim();
-  registerSecret(v);
+  registerSecret(v, 1);
   return v;
 }
 

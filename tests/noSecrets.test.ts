@@ -4,6 +4,7 @@ import { Wallet } from 'ethers';
 import { describe, expect, it } from 'vitest';
 import { GridEngine, type BotState } from '../src/server/bot/engine';
 import { Logger, redact } from '../src/server/bot/logger';
+import { takeBridgeKeys } from '../src/server/env';
 import { MemoryStore } from '../src/server/bot/store';
 import { NET, MockChain } from './helpers/mockChain';
 
@@ -76,5 +77,38 @@ describe('private key handling', () => {
   it('.env is gitignored and .env.example holds only a placeholder', () => {
     expect(readFileSync(join(root, '.gitignore'), 'utf8')).toMatch(/^\.env$/m);
     expect(readFileSync(join(root, '.env.example'), 'utf8')).not.toMatch(/0x[0-9a-fA-F]{64}/);
+  });
+  it('vite define does not inject quote keys or private keys into the client bundle', () => {
+    const vite = readFileSync(join(root, 'vite.config.ts'), 'utf8');
+    expect(vite).not.toMatch(/ACROSS_API_KEY|RELAY_API_KEY|LIFI_API_KEY|PRIVATE_KEY/);
+    const defineAt = vite.search(/\bdefine\s*:/);
+    if (defineAt >= 0) expect(vite.slice(defineAt)).not.toMatch(/process\.env/);
+  });
+  it('quote keys are taken before the friend-copy environment is snapshotted', () => {
+    const index = readFileSync(join(root, 'src', 'server', 'index.ts'), 'utf8');
+    const take = index.lastIndexOf('takeBridgeKeys(');
+    const snap = index.indexOf('...process.env');
+    expect(take).toBeGreaterThanOrEqual(0);
+    expect(snap).toBeGreaterThan(take);
+  });
+  it('redacts a configured quote key shorter than 16 characters', () => {
+    const key = 'rk_short_1';
+    expect(key.length).toBeLessThan(16);
+    delete process.env.ACROSS_API_KEY;
+    delete process.env.RELAY_API_KEY;
+    delete process.env.LIFI_API_KEY;
+    process.env.RELAY_API_KEY = key;
+    try {
+      expect(takeBridgeKeys()).toMatchObject({ relay: true });
+      expect(redact(`leak ${key}`)).toBe('leak [REDACTED]');
+      const log = new Logger(true);
+      log.error(`leak ${key}`);
+      expect(log.entries[0].msg).toContain('[REDACTED]');
+      expect(log.entries[0].msg).not.toContain(key);
+    } finally {
+      delete process.env.ACROSS_API_KEY;
+      delete process.env.RELAY_API_KEY;
+      delete process.env.LIFI_API_KEY;
+    }
   });
 });

@@ -4,6 +4,7 @@
  * Host only: `host` must be passed true (the process is not a friend's copy). Otherwise the router stays off.
  */
 import { requestHalt, type Halt } from '../bot/audit';
+import { redact } from '../bot/logger';
 import type { Store } from '../bot/store';
 import {
   guardOn, HOST_ONLY, liveEnableError, MAX_ETA_BASIS, patchSettings, settingsFromFile,
@@ -37,6 +38,7 @@ export class Router {
     chainIds?: readonly number[];
     now?: () => number;
     emit?: (e: { type: 'stopped'; kind: 'system'; level: 'warn'; notify?: boolean; msg: string; data?: Record<string, unknown> }) => void;
+    log?: { error(msg: string): void };
   }) {
     this.host = d.host === true;
     this.configured = {
@@ -72,6 +74,7 @@ export class Router {
       maxMovesPerDay: s.maxMovesPerDay,
       minConfidence: s.minConfidence,
       gasCaps: copyCaps(s.gasCaps),
+      maxGasPriceWei: { ...s.maxGasPriceWei },
       autoClaim: s.autoClaim,
       halt: s.halt ? { subject: 'router', halt: { ...s.halt.halt } } : null,
       configured: { ...this.configured },
@@ -83,6 +86,15 @@ export class Router {
     const n = this.state.gasCaps[String(chainId)]?.[kind];
     return typeof n === 'number' ? BigInt(n) : null;
   }
+
+  /** Wei per gas for one chain, or null when that chain is not loaded. */
+  maxGasPriceWei(chainId: number): bigint | null {
+    const s = this.state.maxGasPriceWei[String(chainId)];
+    return typeof s === 'string' && /^\d+$/.test(s) ? BigInt(s) : null;
+  }
+
+  /** Stop all / turn off. A queued send reads this inside the gate, before it takes a nonce. */
+  isHalted(): boolean { return this.state.halt != null; }
 
   update(body: unknown): RouterStatus {
     if (!this.host) throw new Error(HOST_ONLY);
@@ -121,7 +133,8 @@ export class Router {
       halt: { at: h.at, what: h.what, detail: h.detail, origin: h.origin, endpoint: h.endpoint ?? null, ua: h.ua ?? null },
     };
     this.state = { ...this.state, on: false, halt };
-    this.save();
+    try { this.save(); }
+    catch (e) { this.note(`capital router halt was not saved: ${publicError(e)}`); }
     try {
       this.d.emit?.({
         type: 'stopped', kind: 'system', level: 'warn', notify: true,
@@ -129,6 +142,11 @@ export class Router {
         data: { subject: 'router', halt },
       });
     } catch { /* a listener must not break Stop all */ }
+  }
+
+  /** A logger must not fail Stop all either. */
+  private note(msg: string) {
+    try { this.d.log?.error(redact(msg)); } catch { /* ignore */ }
   }
 
   private save() {
@@ -151,10 +169,15 @@ export class Router {
       maxMovesPerDay: s.maxMovesPerDay,
       minConfidence: s.minConfidence,
       gasCaps: s.gasCaps,
+      maxGasPriceWei: s.maxGasPriceWei,
       autoClaim: s.autoClaim,
       halt: s.halt,
     });
   }
+}
+
+function publicError(e: unknown): string {
+  return String((e as Error)?.message ?? e).replace(/https?:\/\/\S+/gi, '[rpc]').slice(0, 180);
 }
 
 function copyCaps(g: RouterSettings['gasCaps']): RouterSettings['gasCaps'] {

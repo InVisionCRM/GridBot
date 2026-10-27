@@ -581,7 +581,12 @@ export class MultiBot {
     this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'error', notify: true, msg: `KILL ALL — ${n} bot(s) stopped`, data: { halt } });
     this.noteStop(null, halt);
     // ROUTER HOOK: Stop all turns the capital router off. STOP chain does not.
-    this.routerHalt?.(halt);
+    // A save error inside the router must not fail the stop; the bots are already stopped.
+    try { this.routerHalt?.(halt); }
+    catch (e) {
+      const msg = String((e as Error)?.message ?? e).replace(/https?:\/\/\S+/gi, '[rpc]').slice(0, 180);
+      this.d.log.error(`router halt failed: ${msg}`);
+    }
   }
 
   /** Stop one bot by id, whatever its kind (POST /api/bot/stop { id }). */

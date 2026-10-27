@@ -209,7 +209,7 @@ Give it an amount on a chain and turn it on; it runs that money as grid and liqu
 
 ## Capital router (settings only)
 
-Off, and in paper (dry-run), until you turn it on. Settings live in `data/router.json`. This does not move funds: there is no swap or bridge send on these routes. `maxEtaMin` (default 60) is compared to a route's p90 ETA. `canonical-slow` is never an allowed bridge. Live mode refuses to turn on while `maxPerMoveUsd` or `maxPerDayUsd` is 0, or while allowed chains or bridges are empty. It runs on the host app only; a friend's copy stays off (`readCopy()`). Stop all sets `on` to false and stores the halt with subject `router`.
+Off, and in paper (dry-run), until you turn it on. Settings live in `data/router.json`. This does not move funds: there is no swap or bridge send on these routes. `maxEtaMin` (default 60) is compared to a route's p90 ETA. `canonical-slow` is never an allowed bridge. Live mode refuses to turn on while `maxPerMoveUsd` or `maxPerDayUsd` is 0, or while allowed chains or bridges are empty. It runs on the host app only; a friend's copy stays off (`readCopy()`). Stop all sets `on` to false and stores the halt with subject `router`. A failure saving that halt is logged and does not fail Stop all. `maxGasPriceWei` is a per-chain wei-per-gas cap (defaults: 500 gwei on Ethereum, 30 gwei on Robinhood, 2,000,000 gwei on PulseChain). A router send aborts when the price is above it.
 
 - **API:** `GET /api/router` · `PUT /api/router` · `POST /api/router/on` · `POST /api/router/off`
 - The GET body has `configured.across` / `relay` / `lifi` booleans and never the quote keys.
