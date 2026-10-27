@@ -95,7 +95,7 @@ describe('friends: invites, logins, sessions', () => {
 });
 
 describe("friends: a copy's environment", () => {
-  it("carries the friend's key and shared settings, never the host's keys, RPCs or secret", () => {
+  it("carries the shared settings, never a key (the friend's or the host's), RPCs or secret", () => {
     const hostEnv = {
       PRIVATE_KEY: '0xhost', PRIVATE_KEY_ETHEREUM: '0xhosteth', FRIENDS_SECRET: 'f'.repeat(64), RPC_URL_ETHEREUM: 'https://eth.example/v2/apikey',
       HOST_PASSWORD_HASH: 'c2FsdA==.aGFzaA==', HOST_LOGIN: 'owner', HOST_SESSION: '1', GATEWAY_HOST: 'mac.tailnet.ts.net',
@@ -104,8 +104,8 @@ describe("friends: a copy's environment", () => {
     const env = childEnv(hostEnv, { id: 'a', name: 'Alex', port: 3851, key: '0xfriend' }, { name: 'Kyle', url: 'http://127.0.0.1:3847' });
     expect(env).toEqual({
       CHAINS: 'ethereum,robinhood', POLL_MS: '10000', NODE_ENV: 'production', PORT: '3851',
-      FRIEND_NAME: 'Alex', HOST_NAME: 'Kyle', HOST_URL: 'http://127.0.0.1:3847', PRIVATE_KEY: '0xfriend',
-    });
+      FRIEND_NAME: 'Alex', HOST_NAME: 'Kyle', HOST_URL: 'http://127.0.0.1:3847',
+    }); // the friend's key goes over IPC, never in the environment (tests/friendKeyIpc.test.ts)
     const paper = childEnv(hostEnv, { id: 'a', name: 'Alex', port: 3851, key: null }, { name: 'Kyle', url: 'x' });
     expect(paper).not.toHaveProperty('PRIVATE_KEY');
     expect(paper).not.toHaveProperty('HOST_PASSWORD_HASH');

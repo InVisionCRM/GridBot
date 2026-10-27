@@ -225,7 +225,9 @@ export const CHAINS: ChainConfig[] = [
       { symbol: 'USDT', name: 'Tether USD', address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6, kind: 'stable' },
       { symbol: 'DAI', name: 'Dai Stablecoin', address: '0x6B175474E89094C44Da98b954EedeAC495271d0F', decimals: 18, kind: 'stable' },
     ],
-    rpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org', 'https://cloudflare-eth.com'],
+    // cloudflare-eth.com was dropped 2026-10-27: it answers eth_call / eth_getBalance / eth_blockNumber with JSON-RPC
+    // errors (-32603 "Internal error", -32046 "Cannot fulfill request"); only eth_chainId still works.
+    rpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org', 'https://eth-mainnet.public.blastapi.io'],
     explorer: 'https://etherscan.io', geckoSlug: 'eth', screener: 'ethereum', status: 'live', trading: { enabled: true },
     // lists a wallet's ERC-20s; an empty list for a wallet holding none (checked 2026-10-22)
     tokenApi: 'https://eth.blockscout.com/api/v2',

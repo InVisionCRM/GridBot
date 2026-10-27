@@ -365,4 +365,66 @@ describe('GridEngine close', () => {
     expect(engine.paperBalances().pls).toBeGreaterThan(0);
     expect(engine.status().archivedAt).toBeNull();
   });
+
+  it("a live close's sales that keep failing (reverts) wait 10, 20, 40, 80 minutes, then stop the grid after 5; Close again tries again", async () => {
+    let now = 1_800_000_000_000;
+    const { chain, engine } = make(undefined, undefined, undefined, { now: () => now });
+    await engine.start({ mode: 'live', ...grid });
+    chain.setPrice(P0 * 0.935);
+    await engine.tick();
+    expect(engine.requestClose()).toBe(true);
+    chain.faults = Array(400).fill('revert');
+    const waits: number[] = [], sends: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const n = chain.sent.length;
+      await engine.tick();
+      sends.push(chain.sent.length - n);
+      await engine.tick(); // waiting: nothing is sent
+      const f = engine.state.closeFails;
+      if (f) { waits.push((f.retryAt - now) / 60_000); now = f.retryAt; }
+    }
+    // one sale per try (sent twice: the executor's own retry), the others wait with it
+    expect(sends).toEqual([2, 2, 2, 2, 2]);
+    expect(waits).toEqual([10, 20, 40, 80]);
+    expect(engine.state).toMatchObject({ status: 'stopped', closing: false, archivedAt: null, closeFails: null });
+    const n = chain.sent.length;
+    now += 3600_000;
+    await engine.tick();
+    expect(chain.sent.length).toBe(n);
+    chain.faults = [];
+    expect(engine.requestClose()).toBe(true);
+    for (let i = 0; i < 3; i++) await engine.tick();
+    expect(engine.state.archivedAt).not.toBeNull();
+    expect(engine.status().pnl.plsHeld).toBeLessThan(1e-6);
+  });
+
+  it("a live close's sales are in the position and its profit, not grid round trips", async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'live', ...grid });
+    chain.setPrice(P0 * 0.935);
+    await engine.tick();
+    engine.requestClose();
+    for (let i = 0; i < 3; i++) await engine.tick();
+    expect(engine.state.archivedAt).not.toBeNull();
+    const sales = engine.state.trades.filter((t) => t.side === 'sell' && !t.failed);
+    expect(sales.length).toBeGreaterThan(0);
+    expect(sales.every((t) => t.closeSale && t.roundTripNet === undefined)).toBe(true);
+    expect(engine.status().stats.roundTrips).toBe(0);
+  });
+
+  it('a close sale far over the impact cap (a thin pool) is refused for its impact, not as a units mismatch', async () => {
+    const { chain, engine } = make();
+    await engine.start({ mode: 'live', ...grid });
+    chain.setPrice(P0 * 0.935);
+    await engine.tick();
+    const held = engine.status().pnl.plsHeld;
+    // the pool shrinks to well under one sale's size: the quote's price, impact included, is far from the spot
+    chain.rD = BigInt(Math.round(held * P0 * 0.935 / 6)) * 10n ** 18n / 1n;
+    chain.setPrice(P0 * 0.935, 'DAI');
+    engine.setLimits({ maxPriceImpact: 0.05 });
+    engine.requestClose();
+    await engine.tick();
+    expect(engine.status().lastError).toMatch(/price impact/);
+    expect(engine.status().lastError).not.toMatch(/inconsistent/);
+  });
 });
