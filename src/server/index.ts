@@ -1,9 +1,10 @@
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MultiBot, type MultiState } from './bot/multi';
+import { MultiBot, multiUrgentKey, type MultiState } from './bot/multi';
 import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
+import { DurableJsonStore } from './bot/durableStore';
 import { ActivityBus } from './bot/activity';
 import { createSigners, loadEnv, readCopy, readSettings, takeFriendsSecret, takeHostAuth } from './env';
 import { createApp } from './app';
@@ -45,7 +46,7 @@ const legacyReader = readers.get(cfg.net.chainId)!;
 const activity = new ActivityBus(400, Date.now, path.join(dataDir, 'activity.log'));
 const candles = new CandleStore(path.join(dataDir, 'candles'), 5000);
 const bot = new MultiBot({
-  net: cfg.net, reader: legacyReader, signer: hub.rt(cfg.net.chainId).signer, store: new JsonStore<MultiState>(cfg.stateFile), log,
+  net: cfg.net, reader: legacyReader, signer: hub.rt(cfg.net.chainId).signer, store: new DurableJsonStore<MultiState>(cfg.stateFile, { urgentKey: multiUrgentKey, onError: (e) => log.warn(`state.json: ${e.message}`) }), log,
   approval: cfg.approval, maxRetries: cfg.maxRetries, retryDelayMs: cfg.retryDelayMs, candles, activity, hub,
   copy: copy && { friend: copy.friend, host: copy.host },
 });
@@ -160,6 +161,7 @@ const shutdown = () => {
   if (autopilotTimer) clearInterval(autopilotTimer);
   if (tokenTimer) clearInterval(tokenTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
+  try { bot.flush(); } catch { /* logged by the store */ }
   if (friends instanceof FriendsHost) friends.stop();
   process.exit(0);
 };
