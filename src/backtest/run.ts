@@ -151,13 +151,14 @@ function depthOf(data: HarnessData): { quoteReserve: number; plsReserve: number 
 
 function finish(cfg: BotConfig, g: {
   base: number; quote: number; days: number; moves: number; movesWord: BotSummary['movesWord'];
-  timeInRange: number; timeWord: BotSummary['timeWord']; feeUsd: number;
+  timeInRange: number; timeWord: BotSummary['timeWord'];
+  /** Fees valued in the quote coin, before converting to USD. */
+  feeQuote: number;
   priceStart: number; priceEnd: number; netVsHold: number;
 }, extra?: { onChain?: NamedNumber[]; modelNotes?: NamedNumber[]; simFills?: SimFill[] }): BotSummary {
   if (!(g.days > 0)) throw new Error('the window is empty');
   const usd = usdOf(cfg, g.priceEnd);
   const usdPerDay = (g.base * usd.base + g.quote * usd.quote) / g.days;
-  const capitalUsd = cfg.capital * (usd.quote || 1);
   const tier = cfg.feeTier ?? cfg.feeBps * 100;
   const modelNotes: NamedNumber[] = [...(extra?.modelNotes ?? [])];
   if (cfg.kind === 'lp') {
@@ -176,7 +177,7 @@ function finish(cfg: BotConfig, g: {
     usdPerDay, usdSource: 'modeled',
     moves: g.moves, movesWord: g.movesWord,
     timeInRange: g.timeInRange, timeWord: g.timeWord,
-    feeApr: capitalUsd > 0 ? (g.feeUsd / capitalUsd) * (365 / g.days) : 0,
+    feeApr: cfg.capital > 0 ? (g.feeQuote / cfg.capital) * (365 / g.days) : 0,
     priceChange: priceChanges(cfg, g.priceStart, g.priceEnd),
     netVsHold: { amount: g.netVsHold, symbol: cfg.quote.symbol },
     modelNotes, onChain: extra?.onChain ?? [], simFills: extra?.simFills ?? [],
@@ -246,8 +247,6 @@ function runLp(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
   const price = r.priceEnd > 0 ? r.priceEnd : priceGuess;
   const gasBase = cfg.gasToken === 'base' && price > 0 ? r.gas / price : 0;
   const gasQuoteAmt = cfg.gasToken === 'base' ? 0 : r.gas;
-  const usd = usdOf(cfg, price);
-  const feeUsd = r.feeCoins.base * usd.base + r.feeCoins.quote * usd.quote;
   const endValue = r.endCoins.base * price + r.endCoins.quote - r.gas;
   const holdValue = r.startCoins.base * price + r.startCoins.quote;
   return finish(cfg, {
@@ -255,7 +254,8 @@ function runLp(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     quote: r.feeCoins.quote - gasQuoteAmt - r.swapCost - r.moveLoss,
     days: r.days, moves: r.moves, movesWord: 'Moves',
     timeInRange: r.inRange, timeWord: 'Time in range',
-    feeUsd, priceStart: r.priceStart, priceEnd: price,
+    feeQuote: r.feeCoins.quote + (price > 0 ? r.feeCoins.base * price : 0),
+    priceStart: r.priceStart, priceEnd: price,
     netVsHold: endValue - holdValue,
   }, { onChain: data.onChain });
 }
@@ -343,7 +343,7 @@ function runGrid(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     days: (candles[candles.length - 1].t - candles[0].t) / day,
     moves: fills, movesWord: 'Fills',
     timeInRange: inBars / candles.length, timeWord: 'Time in range',
-    feeUsd: feeQuote * (usdOf(cfg, priceEnd).quote || 1),
+    feeQuote,
     priceStart: candles[0].o, priceEnd,
     netVsHold: endValue - cfg.capital,
   }, { onChain: data.onChain, simFills });
@@ -373,7 +373,7 @@ function runTrend(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary 
     days: (candles[candles.length - 1].t - candles[0].t) / day,
     moves: r.trades.length, movesWord: 'Fills',
     timeInRange: r.metrics.exposure, timeWord: 'Time in a position',
-    feeUsd: feeQuote * (usdOf(cfg, priceEnd).quote || 1),
+    feeQuote,
     priceStart: candles[0].o, priceEnd,
     netVsHold: endQuote + openValue - cfg.capital,
   }, { onChain: data.onChain, simFills });
@@ -440,7 +440,7 @@ function runToken(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary 
     days: (candles[candles.length - 1].t - candles[0].t) / day,
     moves: sells + 1, movesWord: 'Fills',
     timeInRange: tokens > entry * 1e-6 ? 1 : sells / candles.length, timeWord: 'Time in a position',
-    feeUsd: feeQuote * (usdOf(cfg, priceEnd).quote || 1),
+    feeQuote,
     priceStart: c0.c, priceEnd,
     netVsHold: endValue - cfg.capital,
   }, { onChain: data.onChain, simFills });
