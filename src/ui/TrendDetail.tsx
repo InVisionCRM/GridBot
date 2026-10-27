@@ -88,7 +88,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {!running && pos && <div className="banner"><span className="grow"><b>Stopped while holding {base}.</b> The stop-loss and take-profit are not watched until you resume.</span></div>}
       </div>
 
-      <div className="kpi-row detail-stats">
+      <div className="kpi-row detail-stats" data-testid="top-strip">
         <div className="kpi"><span><L tip={m?.calc ?? 'Generated'}>Generated</L></span><div className={`kpi-v ${cls(gen)}`}>{gen == null ? '—' : <AnimatedNumber value={gen} format={(x) => qty(x, q, 5)} />}</div><span className="sub">closed trades, after fees and gas{m?.generatedUsd != null && <span className="usd"> ≈ {usd(m.generatedUsd, true)}</span>}</span></div>
         <div className="kpi"><span>Trades</span><div className="kpi-v">{t.stats.count}</div><span className="sub">{t.stats.count ? `${pct(t.stats.winRate, 0)} profitable` : 'none closed yet'} · {t.blocked} skipped by the cost check</span></div>
         <div className="kpi"><span>Worst drop</span><div className="kpi-v">{pct(t.stats.maxDrawdown, 1)}</div><span className="sub">from the bot's peak value</span></div>
@@ -104,7 +104,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
             : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact desk height={480}
                 emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
           <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
-          <StatTable b={t} s={s} />
+          <StatTable b={t} s={s} hide={['Generated', "Generated, today's value"]} />
         </div>
         <div className="stack">
           <div className="card">

@@ -3,7 +3,7 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { botApi } from './api';
 import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
-import { botFacts, metricsOf, unitsText } from './deskStats';
+import { botFacts, echoes, metricsOf, unitsText } from './deskStats';
 import type { FeesToday } from '../metrics/feesToday';
 import { cls, dur, pct, px, qty, usd } from './fmt';
 import { ChainMark, TokenMark } from './icons';
@@ -189,7 +189,13 @@ function RowMenu({ b, nav, pause, close }: { b: AnyObj; nav: Nav; pause: (b: Any
   );
 }
 
-function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
+/**
+ * What a desk row's columns (Value, Generated, P&L, %, Fees, Age, APR, Moves) and its expanded summary (range) already
+ * show, left out of the expanded stat table and Details so no number appears twice.
+ */
+const DESK_SHOWN_ELSEWHERE = ['Generated', "Generated, today's value", 'Age', 'APR', 'Fees earned', 'Moves', 'Range'] as const;
+
+function Expanded({ b, nav, desk = false }: { b: AnyObj; nav: Nav; desk?: boolean }) {
   if (isTrader(b)) return null;
   const sym = String(quoteSym(b) ?? '');
   const fees = feeQuote(b);
@@ -198,7 +204,7 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
     return (
       <div className="bot-more">
         <p>{b.inRange === false ? 'Out of range' : b.inRange ? 'In range' : 'No position'}{pos ? ` · ${px(pos.lower)} – ${px(pos.upper)}` : ''}</p>
-        <p>Fees earned {qty(fees, sym, 4, false)}</p>
+        {!desk && <p>Fees earned {qty(fees, sym, 4, false)}</p>}
         <button type="button" className="text-link" onClick={() => nav(botView(b.kind, b.id))}>Open</button>
       </div>
     );
@@ -218,9 +224,9 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
     <div className="bot-more">
       <p>Range {b.config ? `${px(b.config.lowerPrice)} – ${px(b.config.upperPrice)}` : '—'}{rs ? ` · ${rs}` : ''} · {b.config?.gridCount ?? levels.length} levels</p>
       <p>Fees {qty(fees, sym, 4, false)} · {b.stats?.roundTrips ?? 0} round trips</p>
-      {levels.slice(0, 6).map((iv) => (
+      <div className="lvls" data-testid="levels" style={{ display: 'contents' }}>{levels.slice(0, 6).map((iv) => (
         <p key={iv.index} className="lvl">{px(iv.buyPrice)} → {px(iv.sellPrice)} · {iv.status === 'holding' ? 'filled' : iv.status === 'waitingBuy' ? 'waiting' : iv.status}</p>
-      ))}
+      ))}</div>
       {levels.length > 6 && <p className="lvl">{levels.length - 6} more levels</p>}
       <button type="button" className="text-link" onClick={() => nav(botView(b.kind, b.id))}>Open</button>
     </div>
@@ -286,7 +292,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           {metrics && facts ? <>
             <span className="desk-gen" title={m?.calc ?? undefined}>
               <b className={cls(gen.usd)}>{gen.text}</b>
-              {gen.usd != null && <small>{usd(gen.usd, true)}</small>}
+              {gen.usd != null && !echoes(gen.text, usd(gen.usd, true)) && <small>{usd(gen.usd, true)}</small>}
             </span>
             <span className="desk-pnl" title={m?.calc ?? undefined}>
               <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
@@ -305,7 +311,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
         </div>
         {bad && <p className="line-note">{b.lastError}</p>}
-        {open && <div className="desk-expand"><Expanded b={b} nav={nav} /><StatTable b={b} s={s} /><MoneyDetails b={b} /></div>}
+        {open && <div className="desk-expand"><Expanded b={b} nav={nav} desk /><StatTable b={b} s={s} hide={DESK_SHOWN_ELSEWHERE} /><MoneyDetails b={b} hide={['Total P&L', 'Value now']} /></div>}
       </div>
     );
   }

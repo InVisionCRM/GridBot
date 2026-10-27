@@ -170,6 +170,21 @@ export function botFacts(b: AnyObj, _now = Date.now(), extra?: { chain?: string 
 }
 
 /** "+0.00626 ETH · +41.46 USDC": units per token, signed, zero legs dropped (all zero → "0"). Null → dash. */
+/** The figures in a formatted string as numbers, without sign, "$" and separators ("−$1,234.50" → ["1234.5"]); zero is not a figure. */
+export function figuresOf(text: string | null | undefined): string[] {
+  return (String(text ?? '').match(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g) ?? []).map((t) => Number(t.replace(/,/g, ''))).filter((n) => n !== 0).map(String);
+}
+
+/**
+ * True when `extra` adds no figure that `shown` doesn't already have, e.g. "≈ $23.75" beside "−23.75 USDG" (a stablecoin's
+ * dollar value prints the same number). Used to leave such echoes out: no number twice on a screen.
+ */
+export function echoes(shown: string | null | undefined, extra: string | null | undefined): boolean {
+  const have = new Set(figuresOf(shown));
+  const add = figuresOf(extra);
+  return add.length > 0 && add.every((f) => have.has(f));
+}
+
 export function unitsText(gen: Record<string, number> | null | undefined, max = 2): string {
   if (!gen) return '—';
   const legs = Object.entries(gen).filter(([, u]) => Number.isFinite(u) && u !== 0);

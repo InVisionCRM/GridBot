@@ -16,7 +16,7 @@ const FX = JSON.parse(readFileSync(new URL('./fixtures/real-2026-10-27.json', im
 const H = 3_600_000;
 const src = (f: string) => readFileSync(new URL(`../src/ui/${f}`, import.meta.url), 'utf8');
 /** The top KPI strip of a page's source. */
-const strip = (f: string) => { const s = src(f); const i = s.indexOf('<div className="kpi-row detail-stats">'); return s.slice(i, s.indexOf('\n      </div>\n', i)); };
+const strip = (f: string) => { const s = src(f); const i = s.indexOf('<div className="kpi-row detail-stats"'); return s.slice(i, s.indexOf('\n      </div>\n', i)); };
 
 describe('one headline per bot page', () => {
   for (const page of ['LpDetail.tsx', 'GridDetail.tsx', 'TrendDetail.tsx']) {
@@ -29,7 +29,7 @@ describe('one headline per bot page', () => {
   }
   it('the token trader page and the desk row also use the Details expander', () => {
     expect(src('TokenTrader.tsx')).toMatch(/<MoneyDetails b=\{t\} \/>/);
-    expect(src('botRow.tsx')).toMatch(/<MoneyDetails b=\{b\} \/>/);
+    expect(src('botRow.tsx')).toMatch(/<MoneyDetails b=\{b\}/);
     expect(src('StatTable.tsx')).not.toMatch(/'Total P&L'|'Price change'/);
   });
   it('Details is collapsed and shows exactly the metrics', () => {

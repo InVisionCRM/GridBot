@@ -7,9 +7,9 @@ import { RangeBar } from './charts';
 import { Chart, EquityChart } from './Chart';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
-import { metricsOf } from './deskStats';
+import { echoes, metricsOf } from './deskStats';
 import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
-import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
+import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { T } from './theme';
 import { errMsg, gridName, quoteSym, rangeState, spendFunds, type AnyObj, type Nav } from './model';
@@ -19,7 +19,7 @@ import { humanAmount } from '../live/amount';
 import { recenterAt } from '../live/recenter';
 import { LiveLevels, livePrice } from './live';
 import { L, Tip } from './Tip';
-import { Amt, Usd } from './money';
+import { Amt } from './money';
 import { showHalt } from './haltText';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -84,6 +84,9 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
     </div>
   );
 }
+
+/** Figures the grid page shows elsewhere, left out of the chart's stat table: Generated (headline), the range (under the chart). */
+const GRID_SHOWN_ELSEWHERE = ['Generated', "Generated, today's value", 'Range'] as const;
 
 /** Something on the grid still has to sell (or a trade is queued / in flight): the range can't move yet. */
 const busyLevels = (g: AnyObj) => !!g.inFlight || g.queue.length > 0 || g.intervals.some((i: AnyObj) => i.status !== 'inactive' && i.status !== 'waitingBuy');
@@ -240,34 +243,32 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="card">
         <Chart status={s} ticks={ticks} pairs={[g.stable]} pair={g.stable} compact desk height={480} />
         {g.config && (
-          <div className="detail-range">
+          <div className="detail-range" data-testid="range-line">
             <span className="k">Range</span>
             <RangeBar wide lower={g.config.lowerPrice} upper={g.config.upperPrice} price={g.price} inRange={rs == null ? null : rs === 'in'} />
             <span className="mono small">{px(g.config.lowerPrice)} – {px(g.config.upperPrice)}</span>
           </div>
         )}
-        <p className="muted small"><Orientation m={{ base: g.base ?? 'PLS', quote: q, flipped: g.flipped, label: g.label }} compact /> · dashed lines are the grid levels · solid lines are the range · B and S mark fills · pool fee {feeLabel(mk(s, g.stable))} per swap</p>
-        <StatTable b={g} s={s} />
+        <p className="muted small"><Orientation m={{ base: g.base ?? 'PLS', quote: q, flipped: g.flipped, label: g.label }} compact /> · dashed lines are the grid levels · solid lines are the range · B and S mark fills</p>
+        <StatTable b={g} s={s} hide={GRID_SHOWN_ELSEWHERE} />
       </div>
 
       {running && <div className="card live-strip"><LiveLevels g={g} price={livePrice(ticks, g.stable, g.price)} /></div>}
 
-      <div className="kpi-row detail-stats">
+      <div className="kpi-row detail-stats" data-testid="top-strip">
         <div className="kpi">
           <span><L tip={m?.calc ?? 'Generated'}>Generated, in {q}</L></span>
           <div className={`kpi-v ${cls(earned)}`}>{earned == null ? '—' : <AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} />}</div>
-          <span className="sub">from {g.stats.roundTrips} completed buy → sell trade{g.stats.roundTrips === 1 ? '' : 's'}, after fees and gas{m?.generatedUsd != null && <span className="usd"> ≈ {usd(m.generatedUsd, true)}</span>}</span>
+          <span className="sub">from completed buy → sell trades, after fees and gas{m?.generatedUsd != null && !(earned != null && echoes(qty(earned, q, 5), usd(m.generatedUsd, true))) && <span className="usd"> ≈ {usd(m.generatedUsd, true)}</span>}</span>
         </div>
-        <div className="kpi">
-          <span><L tip={`The ${g.base} the grid bought and hasn't sold yet, compared with what it cost. It moves with the price until those coins sell one level up, so it is not in Generated.`}>Unrealized</L></span>
-          <div className={`kpi-v ${cls(open)}`}>{held > 0 && open != null ? qty(open, q, 5) : '—'}</div>
-          <span className="sub">{held > 0 ? <>{num(held, held < 10 ? 6 : 2)} {g.base} bought for {qty(g.pnl.costQuote, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now<Usd v={open} k={k} /></> : 'nothing waiting to sell'}</span>
-        </div>
-        <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg <Amt v={g.stats.avgNet} sym={q} k={k} sig={4} /> each · {g.stats.wins} profitable</span></div>
-        <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>
+        <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">{g.stats.roundTrips > 1 && <>avg <Amt v={g.stats.avgNet} sym={q} k={k} sig={4} /> each · </>}{g.stats.wins} profitable</span></div>
+        <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{q} per {g.base}</span></div>
         <div className="kpi"><span><L tip="Pool fees paid on this grid's fills, in the quote coin.">Fees</L></span><div className="kpi-v">{qty(((g.trades ?? []) as AnyObj[]).reduce((a, t) => a + (typeof t.feeQuote === 'number' ? t.feeQuote : 0), 0), q, 4, false)}</div><span className="sub">paid on fills</span></div>
       </div>
-      <MoneyDetails b={g} />
+      <MoneyDetails b={g} note="what it holds, unrealized, dollars made, total P&L" breakdown={held > 0 ? [
+        ['Holding', <>{num(held, held < 10 ? 6 : 2)} {g.base}, bought for {qty(g.pnl.costQuote, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now</>, `The ${g.base} the grid bought and hasn't sold yet. It sells one level up.`],
+        [`Unrealized, ${q}`, open == null ? '—' : qty(open, q, 5), `What those coins are worth now minus what they cost. It moves with the price until they sell, so it is not in Generated.`],
+      ] : [['Holding', 'nothing waiting to sell']]} />
 
       {g.config && (
         <div className="card">
