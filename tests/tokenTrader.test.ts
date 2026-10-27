@@ -71,15 +71,23 @@ describe('safety gate', () => {
   it('ignores holder-check fields unless the check is on, then fails closed for safe and medium only', () => {
     const unknown = clean({ holderConcentration: null });
     const off = gateToken(unknown);
-    expect(gateToken({ ...unknown, holdersUnverified: true, top10Concentration: 0.99, enforceHolderCheck: false })).toEqual(off);
-    expect(gateToken({ ...unknown, enforceHolderCheck: true, holdersUnverified: true }).reason).toMatch(/could not be verified/);
-    expect(gateToken({ ...unknown, risk: 'medium', enforceHolderCheck: true, holdersUnverified: true }).ok).toBe(false);
-    expect(gateToken({ ...unknown, risk: 'any', enforceHolderCheck: true, holdersUnverified: true }).ok).toBe(true);
-    // Medium still does not use the safe-only 50% rule. Top 10 above 80% does block safe and medium.
-    expect(gateToken({ ...unknown, risk: 'medium', enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.6, top10Concentration: 0.7 }).ok).toBe(true);
-    expect(gateToken({ ...unknown, risk: 'medium', enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.2, top10Concentration: 0.85 }).reason).toMatch(/top 10/);
+    expect(gateToken({ ...unknown, holdersUnverified: true, top10Concentration: 0.99, holderUnavailable: 'no-source', holderChain: 'Ethereum', enforceHolderCheck: false })).toEqual(off);
+    expect(gateToken({ ...unknown, holderConcentration: 0.2, top10Concentration: 0.9, maxHolderShare: 0.1, maxTop10Share: 0.4 }).ok).toBe(true);
+    expect(gateToken({ ...unknown, enforceHolderCheck: true, holdersUnverified: true, holderUnavailable: 'read-failed', holderChain: 'Ethereum' }).reason).toBe('holder concentration unavailable: holder read failed for Ethereum');
+    expect(gateToken({ ...unknown, enforceHolderCheck: true, holdersUnverified: true, holderUnavailable: 'no-source', holderChain: 'PulseChain' }).reason).toBe('holder concentration unavailable: no holder data source for PulseChain');
+    expect(gateToken({ ...unknown, risk: 'medium', enforceHolderCheck: true, holdersUnverified: true, holderUnavailable: 'no-source', holderChain: 'PulseChain' }).ok).toBe(false);
+    expect(gateToken({ ...unknown, risk: 'any', enforceHolderCheck: true, holdersUnverified: true, holderUnavailable: 'no-source', holderChain: 'PulseChain' }).ok).toBe(true);
+    // Defaults when the check is on: 10% for one holder, 40% for the top 10. The safe-only 50% rule still speaks first.
+    const under = { enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.09, top10Concentration: 0.39 };
+    expect(gateToken({ ...unknown, risk: 'medium', ...under }).ok).toBe(true);
+    expect(gateToken({ ...unknown, risk: 'safe', ...under }).ok).toBe(true);
+    expect(gateToken({ ...unknown, risk: 'medium', ...under, holderConcentration: 0.11 }).reason).toBe('one holder has 11% (maximum 10%)');
+    expect(gateToken({ ...unknown, risk: 'medium', ...under, top10Concentration: 0.41 }).reason).toBe('top 10 holders have 41% (maximum 40%)');
+    expect(gateToken({ ...unknown, risk: 'medium', ...under, holderConcentration: 0.2, top10Concentration: 0.5, maxHolderShare: 0.25, maxTop10Share: 0.6 }).ok).toBe(true);
+    expect(gateToken({ ...unknown, risk: 'medium', ...under, holderConcentration: 0.3, maxHolderShare: 0.25, maxTop10Share: 0.6 }).reason).toBe('one holder has 30% (maximum 25%)');
     expect(gateToken({ ...unknown, risk: 'any', enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.9, top10Concentration: 0.95 }).ok).toBe(true);
     expect(gateToken(clean({ holderConcentration: 0.6, enforceHolderCheck: true, holdersUnverified: false, top10Concentration: 0.6 })).reason).toMatch(/one holder has 60%/);
+    expect(gateToken(clean({ risk: 'medium', holderConcentration: 0.6, enforceHolderCheck: true, holdersUnverified: false, top10Concentration: 0.6, maxHolderShare: 0.8, maxTop10Share: 0.9 })).ok).toBe(true);
   });
 
   it('medium allows a proxy and a small tax under the cap, and still blocks a pause function and unlocked liquidity', () => {

@@ -6,6 +6,8 @@
  * (impact, fee, tax). Live is opt-in: it needs a signing key and the existing safety classifier, and sends
  * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
  */
+import { chainById } from '../../live/chains';
+import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, clampHolderShare } from '../../market/holders';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
 import {
@@ -46,6 +48,10 @@ export interface TraderOptions {
    * and the gate output matches a build that does not know about this flag.
    */
   enforceHolderCheck: boolean;
+  /** Largest holder, as a share of circulating supply. Used only when `enforceHolderCheck` is on. Default 10%. */
+  maxHolderShare: number;
+  /** Top 10 holders, as a share of circulating supply. Used only when `enforceHolderCheck` is on. Default 40%. */
+  maxTop10Share: number;
   sniper: SniperOptions;
 }
 
@@ -116,7 +122,7 @@ const TRADE_MAX = 200;
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
-  enforceHolderCheck: false,
+  enforceHolderCheck: false, maxHolderShare: DEFAULT_MAX_HOLDER_SHARE, maxTop10Share: DEFAULT_MAX_TOP10_SHARE,
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
 
@@ -139,7 +145,10 @@ export class TokenTrader {
      * Largest holder and top 10, excluding the pool, burn addresses and lockers.
      * Called only when `enforceHolderCheck` is on. A throw is "could not verify".
      */
-    holders?: (pool: FreshPool) => Promise<{ largest: number | null; top10: number | null; unverified: boolean }>;
+    holders?: (pool: FreshPool) => Promise<{
+      largest: number | null; top10: number | null; unverified: boolean;
+      unavailable?: 'no-source' | 'read-failed'; chainName?: string;
+    }>;
     /** Latest price, depth, volume, tax, sell simulation. Paper tests can omit this and call mark(). */
     mark?: (p: Position) => Promise<Partial<Position> | null>;
     live?: {
@@ -182,6 +191,8 @@ export class TokenTrader {
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
     if (!(n.maxImpact > 0) || n.maxImpact > HARD_CAPS.maxPriceImpact) throw new Error('Price-impact cap must be between 0% and 5%.');
     if (!(n.maxPoolShare > 0) || n.maxPoolShare > 0.5) throw new Error('Max pool share must be between 0% and 50%.');
+    n.maxHolderShare = clampHolderShare(n.maxHolderShare, DEFAULT_MAX_HOLDER_SHARE);
+    n.maxTop10Share = clampHolderShare(n.maxTop10Share, DEFAULT_MAX_TOP10_SHARE);
     if (n.sniper.mevRpc && !/^https:\/\//.test(n.sniper.mevRpc)) throw new Error('MEV URL must be an https RPC.');
     this.state.options = n;
     this.save();
@@ -302,17 +313,24 @@ export class TokenTrader {
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
     let input: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
     if (this.state.options.enforceHolderCheck) {
-      let h = { largest: null as number | null, top10: null as number | null, unverified: true };
+      const chainName = chainById(pool.chainId)?.name ?? `chain ${pool.chainId}`;
+      let h: { largest: number | null; top10: number | null; unverified: boolean; unavailable?: 'no-source' | 'read-failed'; chainName?: string } = {
+        largest: null, top10: null, unverified: true, unavailable: 'read-failed', chainName,
+      };
       if (this.d.holders) {
-        try { h = await this.d.holders(pool); } catch { h = { largest: null, top10: null, unverified: true }; }
+        try { h = await this.d.holders(pool); } catch { /* the read failed; the reason names the chain */ }
       }
       const unverified = h.unverified || h.largest == null || h.top10 == null;
       input = {
         ...input,
         enforceHolderCheck: true,
         holdersUnverified: unverified,
+        holderUnavailable: unverified ? (h.unavailable ?? 'read-failed') : undefined,
+        holderChain: h.chainName?.trim() || chainName,
         holderConcentration: unverified ? null : h.largest,
         top10Concentration: unverified ? null : h.top10,
+        maxHolderShare: this.state.options.maxHolderShare,
+        maxTop10Share: this.state.options.maxTop10Share,
       };
     }
     const r = gateToken(input);

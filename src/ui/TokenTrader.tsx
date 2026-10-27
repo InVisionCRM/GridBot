@@ -74,7 +74,9 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
 
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={o.enforceHolderCheck === true} onChange={(e) => void save({ enforceHolderCheck: e.target.checked })} /><span>Holder concentration</span></label>
-        <span className="muted small">Off unless checked, and off changes nothing. When on, a buy reads the largest holder and the top 10, skipping the pool, burn addresses and known lockers. If that list can't be read, safe and medium skip the token.</span>
+        <label className="smart-field"><span className="k">Max holder %</span><input value={Math.round((o.maxHolderShare ?? 0.1) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxHolderShare: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxHolderShare: o.maxHolderShare })} /></label>
+        <label className="smart-field"><span className="k">Max top 10 %</span><input value={Math.round((o.maxTop10Share ?? 0.4) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxTop10Share: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxTop10Share: o.maxTop10Share })} /></label>
+        <span className="muted small">Off unless checked, and off changes nothing. When on, safe and medium skip a largest holder over the max holder % (default 10) or a top 10 over the max top 10 % (default 40), after ignoring the pool, burn addresses and known lockers. No holder source, or a failed read, skips those modes and says which.</span>
       </div>
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.sniper.on} onChange={(e) => void save({ sniper: { ...o.sniper, on: e.target.checked } })} /><span>Sniper</span></label>

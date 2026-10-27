@@ -95,16 +95,19 @@ export function createTokenTrader(o: {
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk),
     // Called only when the holder check is on. Flag off never reaches this, so a scan makes no explorer calls.
-    holders: (pool) => readHolderConcentration({
-      chainId: pool.chainId, token: pool.token, exclude: [pool.pool],
-      api: holderApiBase(o.hub.rt(pool.chainId).cfg),
-    }, {
+    holders: (pool) => {
+      const cfg = o.hub.rt(pool.chainId).cfg;
+      return readHolderConcentration({
+        chainId: pool.chainId, chainName: cfg.name, token: pool.token, exclude: [pool.pool],
+        api: holderApiBase(cfg),
+      }, {
       fetchJson,
       totalSupply: async (chainId, token) => {
         const [supply] = await readCall<[bigint]>(o.hub.rt(chainId).reader, token, ERC20, 'totalSupply');
         return supply;
       },
-    }),
+    });
+    },
     resolve: (hit) => resolveHit(o.hub, hit),
     live: {
       buy: async (pool, spend, limits) => {

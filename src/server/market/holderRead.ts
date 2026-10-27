@@ -19,6 +19,8 @@ const UNVERIFIED_TTL_MS = 60_000;
 export interface HolderQuery {
   chainId: number;
   token: string;
+  /** Shown in the skip reason. Falls back to `chain <id>` when omitted. */
+  chainName?: string;
   /** Blockscout v2 base, no trailing path. null = this chain has no public holder API. */
   api: string | null;
   exclude: readonly string[];
@@ -107,7 +109,9 @@ function paced<T>(gap: number, now: () => number, fn: () => Promise<T>): Promise
   return run;
 }
 
-const UNVERIFIED: HolderMath = { unverified: true, largest: null, top10: null, included: 0 };
+function unverified(kind: 'no-source' | 'read-failed', chainName: string): HolderMath {
+  return { unverified: true, largest: null, top10: null, included: 0, unavailable: kind, chainName };
+}
 
 /**
  * Largest holder and top 10, or unverified. Never throws: a failed explorer or a failed totalSupply() is unverified.
@@ -115,6 +119,7 @@ const UNVERIFIED: HolderMath = { unverified: true, largest: null, top10: null, i
 export async function readHolderConcentration(q: HolderQuery, opts: HolderReadOpts): Promise<HolderMath> {
   const now = opts.now ?? Date.now;
   const gap = opts.paceMs ?? HOLDER_PACE_MS;
+  const chainName = q.chainName?.trim() || `chain ${q.chainId}`;
   const key = `${q.chainId}:${q.token.toLowerCase()}:${q.api ?? ''}:${[...q.exclude].map((a) => a.toLowerCase()).sort().join(',')}`;
   const hit = cache.get(key);
   if (hit && now() - hit.at < (hit.value.unverified ? UNVERIFIED_TTL_MS : VERIFIED_TTL_MS)) return hit.value;
@@ -123,7 +128,7 @@ export async function readHolderConcentration(q: HolderQuery, opts: HolderReadOp
     cache.set(key, { at: now(), value });
     return value;
   };
-  if (!q.api) return finish(UNVERIFIED);
+  if (!q.api) return finish(unverified('no-source', chainName));
 
   const api = q.api.replace(/\/$/, '');
   const tokenUrl = `${api}/tokens/${q.token}`;
@@ -156,13 +161,15 @@ export async function readHolderConcentration(q: HolderQuery, opts: HolderReadOp
       more = true;
     }
   } catch {
-    return finish(UNVERIFIED);
+    return finish(unverified('read-failed', chainName));
   }
 
-  if (!trustOrder && more) return finish(UNVERIFIED);
+  if (!trustOrder && more) return finish(unverified('read-failed', chainName));
   if (supply == null && opts.totalSupply) {
     try { supply = await paced(gap, now, () => opts.totalSupply!(q.chainId, q.token)); } catch { supply = null; }
   }
-  if (supply == null || !(supply > 0n)) return finish(UNVERIFIED);
-  return finish(holderShares({ totalSupply: supply, holders: rows, exclude: q.exclude, moreHolders: more }));
+  if (supply == null || !(supply > 0n)) return finish(unverified('read-failed', chainName));
+  const math = holderShares({ totalSupply: supply, holders: rows, exclude: q.exclude, moreHolders: more });
+  if (math.unverified) return finish({ ...math, unavailable: 'read-failed', chainName });
+  return finish({ ...math, chainName });
 }

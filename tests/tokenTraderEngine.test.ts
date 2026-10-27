@@ -179,13 +179,37 @@ describe('token trader engine', () => {
 
     const top = trader({
       discover: async () => [pool({ tokenSymbol: 'TEN' })],
-      holders: async () => ({ largest: 0.2, top10: 0.91, unverified: false }),
+      holders: async () => ({ largest: 0.05, top10: 0.41, unverified: false }),
     });
     top.t.configure({ minPoolAgeSec: 0, risk: 'medium', enforceHolderCheck: true });
     top.t.turnOn();
     await top.t.tick();
     expect(top.t.status().positions).toHaveLength(0);
-    expect(top.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/top 10/);
+    expect(top.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/top 10 holders have 41%/);
+
+    const one = trader({
+      discover: async () => [pool({ tokenSymbol: 'ONE' })],
+      holders: async () => ({ largest: 0.11, top10: 0.2, unverified: false }),
+    });
+    one.t.configure({ minPoolAgeSec: 0, risk: 'medium', enforceHolderCheck: true });
+    one.t.turnOn();
+    await one.t.tick();
+    expect(one.t.status().positions).toHaveLength(0);
+    expect(one.t.status().feed.map((f) => f.why).join(' | ')).toBe('one holder has 11% (maximum 10%)');
+    expect(one.t.status().options.maxHolderShare).toBe(0.1);
+    expect(one.t.status().options.maxTop10Share).toBe(0.4);
+
+    const custom = trader({
+      discover: async () => [pool({ tokenSymbol: 'CUSTOM' })],
+      holders: async () => ({ largest: 0.2, top10: 0.5, unverified: false }),
+    });
+    custom.t.configure({ minPoolAgeSec: 0, risk: 'safe', enforceHolderCheck: true, maxHolderShare: 2, maxTop10Share: 0 });
+    expect(custom.t.status().options.maxHolderShare).toBe(1);
+    expect(custom.t.status().options.maxTop10Share).toBe(0.01);
+    custom.t.configure({ maxHolderShare: 0.25, maxTop10Share: 0.55 });
+    custom.t.turnOn();
+    await custom.t.tick();
+    expect(custom.t.status().positions).toHaveLength(1);
   });
 
   it('fails closed for safe and medium when the holder read throws, and still buys on risk any', async () => {
@@ -196,13 +220,23 @@ describe('token trader engine', () => {
       t.turnOn();
       await t.tick();
       expect(t.status().positions).toHaveLength(0);
-      expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+      expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/holder read failed for Ethereum/);
     }
     const any = trader({ discover: async () => [pool()], holders: boom });
     any.t.configure({ minPoolAgeSec: 0, risk: 'any', enforceHolderCheck: true });
     any.t.turnOn();
     await any.t.tick();
     expect(any.t.status().positions).toHaveLength(1);
+
+    const none = trader({
+      discover: async () => [pool({ chainId: 369, tokenSymbol: 'NOSRC' })],
+      holders: async () => ({ largest: null, top10: null, unverified: true, unavailable: 'no-source', chainName: 'PulseChain' }),
+    });
+    none.t.configure({ minPoolAgeSec: 0, risk: 'safe', enforceHolderCheck: true });
+    none.t.turnOn();
+    await none.t.tick();
+    expect(none.t.status().positions).toHaveLength(0);
+    expect(none.t.status().feed.map((f) => f.why).join(' | ')).toBe('holder concentration unavailable: no holder data source for PulseChain');
   });
 
   it('keeps the holder check off for a saved file that predates it, and the API can turn it on', async () => {
@@ -247,7 +281,7 @@ describe('token trader engine', () => {
       await t.tick();
       expect(calls).toBe(1);
       expect(t.status().positions).toHaveLength(1);
-      expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+      expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/holder read failed for Ethereum/);
     } finally {
       await new Promise((r) => server.close(r));
     }

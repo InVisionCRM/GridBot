@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { chainByKey } from '../src/live/chains';
-import { TOP10_MAX_SHARE, holderShares, isExcludedHolder } from '../src/market/holders';
+import { DEFAULT_MAX_TOP10_SHARE, holderShares, isExcludedHolder } from '../src/market/holders';
 import { clearHolderCache, holderApiBase, readHolderConcentration } from '../src/server/market/holderRead';
 
 const pool = '0x' + 'ab'.repeat(20);
@@ -39,7 +39,7 @@ describe('holder shares', () => {
     expect(r.unverified).toBe(false);
     expect(r.largest).toBeCloseTo(200 / 310, 5);
     expect(r.top10).toBeCloseTo(290 / 310, 5);
-    expect(r.top10!).toBeGreaterThan(TOP10_MAX_SHARE);
+    expect(r.top10!).toBeGreaterThan(DEFAULT_MAX_TOP10_SHARE);
   });
 
   it('is unverified when another page might still hide a real holder, and verified when the list is complete', () => {
@@ -114,7 +114,7 @@ describe('holder read', () => {
       { chainId: 1, token, api: 'https://eth.blockscout.com/api/v2', exclude: [] },
       { fetchJson: async () => { throw new Error('HTTP 403'); }, paceMs: 0 },
     );
-    expect(down).toMatchObject({ unverified: true, largest: null, top10: null });
+    expect(down).toMatchObject({ unverified: true, largest: null, top10: null, unavailable: 'read-failed', chainName: 'chain 1' });
 
     let supplyCalls = 0;
     const fetched = await readHolderConcentration(
@@ -136,7 +136,7 @@ describe('holder read', () => {
       { chainId: 1, token, api: null, exclude: [] },
       { fetchJson: async () => { throw new Error('should not be called'); }, paceMs: 0 },
     );
-    expect(noApi.unverified).toBe(true);
+    expect(noApi).toMatchObject({ unverified: true, unavailable: 'no-source', chainName: 'chain 1' });
 
     const supplyDown = await readHolderConcentration(
       { chainId: 1, token: '0x' + 'ee'.repeat(20), api: 'https://eth.blockscout.com/api/v2', exclude: [] },
@@ -146,7 +146,7 @@ describe('holder read', () => {
         totalSupply: async () => { throw new Error('rpc down'); },
       },
     );
-    expect(supplyDown.unverified).toBe(true);
+    expect(supplyDown).toMatchObject({ unverified: true, unavailable: 'read-failed' });
   });
 
   it('is unverified when three pages still don’t show 10 real holders', async () => {

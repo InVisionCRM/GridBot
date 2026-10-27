@@ -4,8 +4,23 @@
  * Shares are of that circulating supply. The largest holder and the top 10 are what the token-trader gate reads.
  */
 
-/** Top 10 of circulating supply. Applied only when the holder check is turned on. */
-export const TOP10_MAX_SHARE = 0.8;
+/**
+ * Paper-vetting caps, used only when the holder check is turned on.
+ * One wallet over 10% of circulating supply, or the top 10 over 40%.
+ */
+export const DEFAULT_MAX_HOLDER_SHARE = 0.1;
+export const DEFAULT_MAX_TOP10_SHARE = 0.4;
+
+/** Settings clamp: 1% through 100% of circulating supply. */
+export const HOLDER_SHARE_MIN = 0.01;
+export const HOLDER_SHARE_MAX = 1;
+
+/** A share setting, forced into [1%, 100%]. A non-number keeps `fallback`. */
+export function clampHolderShare(v: unknown, fallback: number): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(HOLDER_SHARE_MAX, Math.max(HOLDER_SHARE_MIN, n));
+}
 
 /** How many explorer pages to read before giving up. A full top 10 from a descending page stops sooner. */
 export const HOLDER_PAGE_CAP = 3;
@@ -66,6 +81,10 @@ export interface HolderMath {
   /** Sum of the included top 10 / circulating. null when unverified. */
   top10: number | null;
   included: number;
+  /** Why a read is unverified. Absent when the shares were computed. */
+  unavailable?: 'no-source' | 'read-failed';
+  /** Chain name for the skip reason. Set by the reader, not by the share math. */
+  chainName?: string;
 }
 
 const UNVERIFIED: HolderMath = { unverified: true, largest: null, top10: null, included: 0 };
