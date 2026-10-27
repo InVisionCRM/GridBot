@@ -4,6 +4,7 @@ import { botApi } from './api';
 import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
 import { botFacts } from './deskStats';
+import { isShortRun, runSpan } from './runRate';
 import { cls, dur, pct, px, qty, usd } from './fmt';
 import { ChainMark, TokenMark } from './icons';
 import { useShowUsd } from './money';
@@ -283,7 +284,10 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           {metrics && facts && <>
             <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
-            <span className="desk-apr">{facts.est.d365?.pct == null ? '—' : pct(facts.est.d365.pct, 1, true)}</span>
+            <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'Ran under a day: the net for the run, not a yearly rate' : undefined}>{isShortRun(facts.ageMs)
+              // under a day: the run's net % with its length (two lines: the column is narrow), not a yearly rate
+              ? facts.pnlPct == null ? '—' : <>{pct(facts.pnlPct, 1, true)}<small className="desk-run">{runSpan(facts.ageMs)}</small></>
+              : facts.est.d365?.pct == null ? '—' : pct(facts.est.d365.pct, 1, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
             <span className="desk-fees">{facts.feesEarnedUsd == null ? '—' : usd(facts.feesEarnedUsd)}</span>
           </>}

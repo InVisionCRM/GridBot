@@ -15,6 +15,7 @@ import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { Usd } from './money';
 import { showHalt } from './haltText';
+import { isShortRun, rateOrRun, runLength } from './runRate';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -121,8 +122,8 @@ function PositionPace({ b, k }: { b: AnyObj; k: number | null }) {
         <span className="muted small">open {dur(ms)}</span>
       </div>
       <p className="small">So far: <b>{px(pf.coins.base, 4)} {base}</b> + <b>{px(pf.coins.quote, 4)} {q}</b> ≈ <b className="pos">{$(valQuote)}</b></p>
-      {hours < 1
-        ? <p className="small muted">Measuring: the pace shows once the position has been open an hour.</p>
+      {isShortRun(ms)
+        ? <p className="small muted">Open {runLength(Math.max(0, ms))} so far: the pace (a day, a week, a month) shows once the position has been open a day.</p>
         : <div className="pace-rows">{rows.map(([label, h]) => {
           const x = per(h);
           return (
@@ -150,8 +151,8 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const pos = b.position, step = b.step;
   const running = b.status === 'running', closed = b.status === 'closed';
   const closing = !!b.closing || step?.action === 'close';
-  // a daily rate only once it has run a full day: the first minutes' costs scaled to a day say nothing
-  const days = b.startedAt ? (Date.now() - b.startedAt) / 86_400_000 : null;
+  // a daily rate only once it has run a full day; under a day, the net over the run (runRate.ts)
+  const runMs = b.startedAt ? Date.now() - b.startedAt : null;
   const close = () => {
     if (b.mode === 'live' && !confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
     act(() => botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close'));
@@ -207,7 +208,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={`Fees earned minus costs and what range moves lost, in ${q}. The coins' own price move isn't in it: that happens whether or not the bot runs.`}>Earned after costs</L></span>
           <div className={`kpi-v ${cls(pnl?.net)}`}>{pnl ? <AnimatedNumber value={pnl.net} format={(x) => qty(x, q, 5)} /> : '—'}</div>
-          <span className="sub">{pnl && b.startValue ? <>{pct(pnl.net / b.startValue, 2, true)} of what you put in{days != null && days >= 1 ? ` · ${qty(pnl.net / days, q, 3)} a day` : ''}<Usd v={pnl.net} k={k} /></> : ''}</span>
+          <span className="sub">{pnl && b.startValue ? <>{pct(pnl.net / b.startValue, 2, true)} of what you put in · {rateOrRun(pnl.net, runMs, (x) => qty(x, q, 3), (d) => `${qty(d, q, 3)} a day`)}<Usd v={pnl.net} k={k} /></> : ''}</span>
         </div>
         <div className="kpi">
           <span><L tip="The coins in the position right now (they change as the price moves inside the range), and its share of the liquidity trading at today's price, which is its share of every trade's fee. Out of range the share is 0.">Liquidity provided</L></span>

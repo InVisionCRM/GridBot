@@ -3,6 +3,7 @@ import { chainOf, mk } from './chains';
 import { botFacts } from './deskStats';
 import { ago, dur, pct, px, usd } from './fmt';
 import type { AnyObj } from './model';
+import { isShortRun, rateOrRun } from './runRate';
 
 function money(v: number | null, p: number | null) {
   if (v == null && p == null) return '—';
@@ -38,9 +39,10 @@ export function StatTable({ b, s }: { b: AnyObj; s: AnyObj }) {
     ['Value', f.valueUsd == null ? '—' : usd(f.valueUsd)],
     ['Realized', money(f.realizedUsd, f.realizedPct)],
     ['Unrealized', money(f.unrealizedUsd, f.unrealizedPct)],
-    ['Est. 24h', est(f.est.h24)],
-    ['Est. 7d', est(f.est.d7)],
-    ['Est. 365d', est(f.est.d365)],
+    // Under a day: the net for the run with its length, not estimates scaled up from it (runRate.ts).
+    ...(isShortRun(f.ageMs)
+      ? [['Net so far', rateOrRun(f.pnlUsd, f.ageMs, (x) => money(x, f.pnlPct), () => '')] as [string, string]]
+      : [['Est. 24h', est(f.est.h24)], ['Est. 7d', est(f.est.d7)], ['Est. 365d', est(f.est.d365)]] as [string, string][]),
     ['Moves', f.moves.text ?? '—'],
     ['Win rate', f.winRate == null ? '—' : pct(f.winRate, 0)],
     ['Fees paid', f.feesPaidUsd == null ? '—' : usd(f.feesPaidUsd)],
@@ -55,7 +57,9 @@ export function StatTable({ b, s }: { b: AnyObj; s: AnyObj }) {
   ];
   return (
     <div className="stat-table">
-      <p className="stat-note">Est. 24h, 7d, and 365d extrapolate performance so far. They are not a forecast.</p>
+      <p className="stat-note">{isShortRun(f.ageMs)
+        ? 'Est. 24h, 7d, and 365d show once the bot has run a day. Until then: the net for the run.'
+        : 'Est. 24h, 7d, and 365d extrapolate performance so far. They are not a forecast.'}</p>
       <table>
         <tbody>
           {rows.map(([k, v]) => (

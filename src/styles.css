@@ -1268,6 +1268,7 @@ label.wide input { min-width: 180px; }
 .desk-group .mono, .desk-group .pos, .desk-group .neg { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .desk-chev { color: var(--muted); width: 12px; }
 .desk-pct, .desk-age, .desk-apr, .desk-moves, .desk-fees { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
+.desk-apr .desk-run { display: block; font-size: 10px; color: var(--muted); white-space: nowrap; }
 .desk-expand { padding: 4px 0 12px; }
 .stat-table { margin-top: 8px; }
 .stat-note { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
