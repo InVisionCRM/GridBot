@@ -88,8 +88,10 @@ describe('Hub.recheck({ keepMeasured }) keeps the last measured report when a re
     const r = await hub.recheck(key, { keepMeasured: true });
     expect(isInconclusive(r)).toBe(true);
     expect(r.liveAllowed).toBe(false);
-    expect(d.safety).toBe(before);
+    // Same measured values (and taxes), now labelled stale.
+    expect({ ...d.safety, stale: undefined }).toEqual({ ...before, stale: undefined });
     expect(d.safety!.liveAllowed).toBe(true);
+    expect(d.safety!.stale?.why).toMatch(/simulation didn't run/);
   });
 
   it('without keepMeasured (a live start, a manual re-check) the fresh report replaces it, as before', async () => {
