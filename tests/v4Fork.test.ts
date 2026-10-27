@@ -1,10 +1,9 @@
 /**
  * Live Robinhood Chain (4663) checks. The public RPC accepts eth_call state overrides.
- * Skipped when the RPC cannot be reached, so a unit run without network still passes the rest of the suite
- * only if this file's own `it`s are the ones that need the network — they fail closed when the chain id is wrong.
+ * Skipped when the RPC cannot be reached. A response from a different chain id still fails the assertion.
  */
 import { JsonRpcProvider } from 'ethers';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { CHAINS } from '../src/live/chains';
 import type { ChainRuntime } from '../src/server/chains/runtime';
 import { V4_QUOTER, V4_STATE_VIEW } from '../src/server/dex/abis';
@@ -32,8 +31,22 @@ function rt(): ChainRuntime {
   return { reader: { send: (method: string, params: unknown[]) => provider.send(method, params) } } as unknown as ChainRuntime;
 }
 
+/** 'down' skips. 'wrong' runs and the chain-id assertion fails. */
+let rpc: 'up' | 'down' | 'wrong' = 'down';
+
+beforeAll(async () => {
+  try {
+    const id = await Promise.race([
+      provider.send('eth_chainId', []),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 8_000)),
+    ]);
+    rpc = Number(id) === 4663 ? 'up' : 'wrong';
+  } catch { rpc = 'down'; }
+}, 12_000);
+
 describe('Robinhood V4 fork', () => {
-  it('quotes the vanilla 1% ETH pool and round-trips it through SafetyProbeV4', async () => {
+  it('quotes the vanilla 1% ETH pool and round-trips it through SafetyProbeV4', async (ctx) => {
+    if (rpc === 'down') ctx.skip();
     const chainId = Number(await provider.send('eth_chainId', []));
     expect(chainId).toBe(4663);
     expect(poolId(NATIVE_KEY)).toBe(NATIVE_POOL);
@@ -68,7 +81,8 @@ describe('Robinhood V4 fork', () => {
     expect(probe.gotSell).toBe(probe.expectedSell);
   }, 180_000);
 
-  it('buys USDG→ETH through Permit2 after a V3 WETH→USDG prep hop', async () => {
+  it('buys USDG→ETH through Permit2 after a V3 WETH→USDG prep hop', async (ctx) => {
+    if (rpc === 'down') ctx.skip();
     const cfg = CHAINS.find((c) => c.id === 4663)!.dexes.find((d) => d.id === 'uniswap-v4')!;
     const v3 = CHAINS.find((c) => c.id === 4663)!.dexes.find((d) => d.id === 'uniswap-v3')!;
     // No-hook 0.05% ETH/USDG pool (currency0 is native ETH). The buy input is USDG, so the probe
@@ -96,7 +110,8 @@ describe('Robinhood V4 fork', () => {
     expect(probe.gotSell).toBe(probe.expectedSell);
   }, 180_000);
 
-  it('sells only the ETH bought, not the funding balance, when native ETH is the sell currency', async () => {
+  it('sells only the ETH bought, not the funding balance, when native ETH is the sell currency', async (ctx) => {
+    if (rpc === 'down') ctx.skip();
     const cfg = CHAINS.find((c) => c.id === 4663)!.dexes.find((d) => d.id === 'uniswap-v4')!;
     const v3 = CHAINS.find((c) => c.id === 4663)!.dexes.find((d) => d.id === 'uniswap-v3')!;
     const key = { currency0: ZERO, currency1: USDG, fee: 500, tickSpacing: 10, hooks: ZERO };
@@ -125,7 +140,9 @@ describe('Robinhood V4 fork', () => {
       }]),
     });
     const [quoted] = V4_QUOTER.decodeFunctionResult('quoteExactInputSingle', quoteRaw);
-    expect(probe.expectedSell).toBe(quoted);
-    expect(probe.gotSell).toBe(quoted);
+    // The probe quotes and swaps sellIn. A later quoter call can move one unit as the pool trades.
+    const drift = probe.expectedSell > quoted ? probe.expectedSell - quoted : quoted - probe.expectedSell;
+    expect(drift <= 1n).toBe(true);
+    expect(probe.gotSell).toBe(probe.expectedSell);
   }, 180_000);
 });

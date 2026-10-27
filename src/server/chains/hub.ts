@@ -14,6 +14,7 @@ import { discoverPools, type DiscoveredPool } from '../dex/discovery';
 import { readTokenMeta, type TokenMeta } from '../dex/tokens';
 import { classify, depthAt, hopFor, simulateRoundTrip, type ProbeResult } from '../dex/safety';
 import { assessHook } from '../dex/v4Hooks';
+import { V4_CURRENCY_MISMATCH, v4PoolMatches } from '../dex/v4';
 import { simulateV4RoundTrip, v4Leg } from '../dex/v4Safety';
 import { isInconclusive } from '../bot/taxWatch';
 import { sameAddr } from '../dex/types';
@@ -306,6 +307,10 @@ export class Hub {
     if (req.pool && !chosen) throw new Error(`Pool ${req.pool} not found for ${token.symbol}/${q.symbol}`);
     const result: InspectResult = { chainId: rt.cfg.id, token, quoteOptions, quote, pools, chosen, draft: null, safety: null, probe: null, existing };
     if (!chosen || chosen.mid == null) return result;
+    if (chosen.kind === 'v4' && !v4PoolMatches(chosen, base, { address: quote.address })) {
+      if (req.pool) throw new Error(`Pool ${req.pool} ${V4_CURRENCY_MISMATCH}`);
+      return result;
+    }
 
     const quoteUsd = best!.usd;
     const baseUsd = quoteUsd != null ? chosen.mid * quoteUsd : null;
@@ -323,7 +328,13 @@ export class Hub {
     draft.safety = report;
     // TOKEN/WPLS (or /WETH): buys spend the native coin the wallet holds, wrapped inside the swap, like the flipped
     // HEX/PLS market. Set after the safety probe, which measures the token itself.
-    if (sameAddr(draft.quote.address, rt.cfg.wrappedNative.address)) draft.quote = { ...draft.quote, symbol: rt.cfg.nativeSymbol, native: true };
+    // A V4 pool whose currency is the wrapped token does not wrap: the market stays a WETH market.
+    // address(0) is a different pool and is not selected for a WETH quote.
+    if (sameAddr(draft.quote.address, rt.cfg.wrappedNative.address)) {
+      const v4 = draft.pool.v4;
+      const v4Wrapped = draft.pool.kind === 'v4' && !!v4 && [v4.currency0, v4.currency1].some((c) => sameAddr(c, rt.cfg.wrappedNative.address));
+      if (!v4Wrapped) draft.quote = { ...draft.quote, symbol: rt.cfg.nativeSymbol, native: true };
+    }
     return result;
   }
 
@@ -553,6 +564,7 @@ export class Hub {
     const choice = await this.poolOptions(key);
     const pick = req.auto ? choice.best : choice.pools.find((p) => req.pool && sameAddr(p.address, req.pool));
     if (!pick) throw new Error(req.auto ? `No quotable pool for ${this.label(key)}` : `Pool ${req.pool} is not a ${d.base.symbol}/${d.quote.symbol} pool on ${this.chain(d.chainId).name}`);
+    if (pick.kind === 'v4' && !v4PoolMatches(pick, d.base, d.quote)) throw new Error(`${pick.dexName} pool ${pick.address}: ${V4_CURRENCY_MISMATCH}`);
     if (pick.refOut == null || pick.mid == null) throw new Error(`${pick.dexName} pool ${pick.address} cannot be quoted${pick.error ? `: ${pick.error}` : ''}`);
     d.pool = takenPool(pick);
     d.poolMode = req.auto ? 'auto' : 'manual';

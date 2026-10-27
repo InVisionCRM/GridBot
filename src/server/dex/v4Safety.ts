@@ -8,9 +8,23 @@ import type { PoolRef } from '../../live/markets';
 import type { ChainRuntime } from '../chains/runtime';
 import { qty, type Hop, type ProbeResult } from './safety';
 import { SAFETY_PROBE_V4_RUNTIME } from './probeV4Code';
-import { resolveCurrency } from './v4';
-import { sameAddr } from './types';
+import { NATIVE } from '../../live/swapMath';
+import { isZero, sameAddr, ZERO } from './types';
 import type { V4PoolKey } from './v4PoolKey';
+
+/**
+ * The probe is called with market addresses. WETH stands in for address(0) when that is the pool currency,
+ * because the safety call passes quote.address (the wrapped coin) even on a native market. Live swaps do not
+ * use this mapping: they require the currency to equal the market token.
+ */
+function probeCurrency(token: string, key: V4PoolKey, wrapped: string): string {
+  if (token === NATIVE || sameAddr(token, wrapped)) {
+    if (isZero(key.currency0) || isZero(key.currency1)) return ZERO;
+    if (sameAddr(key.currency0, wrapped)) return key.currency0;
+    if (sameAddr(key.currency1, wrapped)) return key.currency1;
+  }
+  return [key.currency0, key.currency1].find((c) => sameAddr(c, token)) ?? token;
+}
 
 /** Throwaway address. Different from the V2/V3 probe so a shared RPC cache cannot mix the two bytecodes. */
 export const PROBE_V4_ADDRESS = '0x5afe00000000000000000000000000000000b4e4';
@@ -35,8 +49,8 @@ export function v4Leg(pool: PoolRef, tokenIn: string, tokenOut: string, cfg: Dex
   const key = pool.v4;
   if (!key) throw new Error('V4 pool is missing its PoolKey');
   if (!cfg.quoter || !cfg.permit2) throw new Error(`${cfg.id}: V4 simulation needs a quoter and Permit2`);
-  const cin = resolveCurrency(tokenIn, key, wrapped);
-  const cout = resolveCurrency(tokenOut, key, wrapped);
+  const cin = probeCurrency(tokenIn, key, wrapped);
+  const cout = probeCurrency(tokenOut, key, wrapped);
   const zeroForOne = sameAddr(cin, key.currency0);
   if (!zeroForOne && !sameAddr(cin, key.currency1)) throw new Error('tokenIn is not in this V4 pool');
   if (!sameAddr(cout, zeroForOne ? key.currency1 : key.currency0)) throw new Error('tokenOut is not in this V4 pool');

@@ -16,6 +16,14 @@ export const DYNAMIC_FEE_FLAG = 0x800000;
 export const UINT128_MAX = (1n << 128n) - 1n;
 export const UINT160_MAX = (1n << 160n) - 1n;
 export const UINT48_MAX = (1n << 48n) - 1n;
+/** 'max' Permit2 approvals expire after 30 days, not uint48 max. */
+export const PERMIT2_MAX_TTL_SEC = 30 * 24 * 60 * 60;
+
+/** Unix time (seconds) when a max-mode Permit2 allowance expires: 30 days from `nowSec`. */
+export function permit2MaxExpiration(nowSec = Math.floor(Date.now() / 1000)): bigint {
+  const exp = BigInt(nowSec) + BigInt(PERMIT2_MAX_TTL_SEC);
+  return exp > UINT48_MAX ? UINT48_MAX : exp;
+}
 
 /** V4_SWAP command byte. */
 export const V4_SWAP_COMMAND = '0x10';

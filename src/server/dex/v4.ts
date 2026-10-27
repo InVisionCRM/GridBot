@@ -4,8 +4,10 @@
  * the V4 Quoter; the live LP fee is StateView.getSlot0 (dynamic-fee pools included). Swaps are built for
  * the Universal Router and spend through Permit2 — this adapter never sends.
  *
- * address(0) is native ETH. The rest of the app thinks in the wrapped native, so state() faces address(0)
- * as WETH. The real key is kept on PoolRef.v4 and is what the quoter, the router and the safety probe use.
+ * address(0) is native ETH. state() faces address(0) as WETH so reserves line up with the wrapped address
+ * the rest of the app stores. A trade does not. A WETH market matches only a WETH currency, and a native
+ * market matches only address(0). The real key is kept on PoolRef.v4. The safety probe still accepts WETH
+ * as a stand-in for address(0), because it simulates the pool's own currency.
  */
 import { getAddress, zeroPadValue } from 'ethers';
 import type { DexConfig } from '../../live/chains';
@@ -21,6 +23,34 @@ import {
 } from './v4PoolKey';
 import { isZero, readCall, sameAddr, ZERO, type BuiltSwap, type DexAdapter, type PoolState, type QuoteOut, type SwapRequest } from './types';
 
+/** Shown when a V4 pool's currencies are not the market's tokens (native ETH is not WETH). */
+export const V4_CURRENCY_MISMATCH = 'V4 pool currency does not match this market: native ETH and WETH are different pools';
+
+/**
+ * Both pool currencies equal the market's tokens. `native` means address(0). The wrapped-native
+ * address is a different currency and does not match address(0).
+ */
+export function v4PoolMatches(
+  pool: { v4?: { currency0: string; currency1: string } },
+  base: { address: string; native?: boolean },
+  quote: { address: string; native?: boolean },
+): boolean {
+  const v = pool.v4;
+  if (!v) return false;
+  const want = [(base.native ? ZERO : base.address).toLowerCase(), (quote.native ? ZERO : quote.address).toLowerCase()].sort();
+  const have = [v.currency0.toLowerCase(), v.currency1.toLowerCase()].sort();
+  return want[0] === have[0] && want[1] === have[1];
+}
+
+/** getLogs or the head read failed. `pools` are the chunks that completed; the scan is incomplete. */
+export class V4ScanError extends Error {
+  readonly partial = true;
+  constructor(message: string, readonly pools: PoolRef[]) {
+    super(message);
+    this.name = 'V4ScanError';
+  }
+}
+
 /** Inclusive getLogs span. Robinhood rejects a range of 10_000_000 blocks or more. */
 export const V4_LOG_CHUNK = 9_000_000;
 
@@ -33,28 +63,29 @@ export type V4Reader = Pick<ChainReader, 'call'> & Partial<LogReader>;
 
 interface PairCache { to: number; pools: PoolRef[] }
 
-/** Currencies to search: the pair as given, plus address(0) in place of the wrapped native (V4 ETH pools). */
+/**
+ * The one sorted pair to search. WETH is not rewritten to address(0): a native market passes address(0)
+ * itself, and a WETH market passes the wrapped address. `wrapped` is unused and kept so callers stay put.
+ */
 export function currencyPairs(a: string, b: string, wrapped: string): [string, string][] {
-  const A = getAddress(a), B = getAddress(b);
-  const first = sortCurrencies(A, B);
-  const out: [string, string][] = [first];
-  if (sameAddr(A, wrapped) || sameAddr(B, wrapped)) {
-    const z = (t: string) => (sameAddr(t, wrapped) ? ZERO : t);
-    const second = sortCurrencies(z(A), z(B));
-    if (!sameAddr(second[0], first[0]) || !sameAddr(second[1], first[1])) out.push(second);
-  }
-  return out;
+  void wrapped;
+  return [sortCurrencies(getAddress(a), getAddress(b))];
 }
 
 /**
- * Map a market token (WETH address or 'native') onto the pool's currency.
- * A wrapped-native input settles as address(0) when that is what the pool was initialized with.
+ * Map a market token onto this pool's currency. 'native' is address(0) only. The wrapped-native
+ * address matches only the wrapped currency, never address(0).
  */
 export function resolveCurrency(token: string, key: V4PoolKey, wrapped: string): string {
-  if (token === NATIVE || sameAddr(token, wrapped)) {
-    if (isZero(key.currency0) || isZero(key.currency1)) return ZERO;
+  if (token === NATIVE) {
+    if (isZero(key.currency0)) return key.currency0;
+    if (isZero(key.currency1)) return key.currency1;
+    return token;
+  }
+  if (sameAddr(token, wrapped)) {
     if (sameAddr(key.currency0, wrapped)) return key.currency0;
     if (sameAddr(key.currency1, wrapped)) return key.currency1;
+    return token;
   }
   return [key.currency0, key.currency1].find((c) => sameAddr(c, token)) ?? token;
 }
@@ -81,12 +112,21 @@ export class V4Adapter implements DexAdapter {
     if (!logs || !headOf) return [];
     const seen = new Set<string>();
     const out: PoolRef[] = [];
+    const add = (p: PoolRef) => {
+      const id = p.address.toLowerCase();
+      if (seen.has(id)) return;
+      seen.add(id);
+      out.push(p);
+    };
     for (const [c0, c1] of currencyPairs(a, b, this.wrappedNative)) {
-      for (const p of await this.poolsFor(c0, c1, { getLogs: logs, getBlockNumber: headOf })) {
-        const id = p.address.toLowerCase();
-        if (seen.has(id)) continue;
-        seen.add(id);
-        out.push(p);
+      try {
+        for (const p of await this.poolsFor(c0, c1, { getLogs: logs, getBlockNumber: headOf })) add(p);
+      } catch (e) {
+        if (e instanceof V4ScanError) {
+          for (const p of e.pools) add(p);
+          throw new V4ScanError(e.message, out);
+        }
+        throw e;
       }
     }
     return out;
@@ -97,7 +137,8 @@ export class V4Adapter implements DexAdapter {
     const start = this.cfg.v4StartBlock ?? 0;
     const cache = this.cache.get(key) ?? { to: start - 1, pools: [] };
     let head: number;
-    try { head = await reader.getBlockNumber(); } catch { return cache.pools; }
+    try { head = await reader.getBlockNumber(); }
+    catch (e) { throw new V4ScanError(`V4 Initialize scan failed: ${(e as Error).message || 'head unavailable'}`, cache.pools); }
     let from = Math.max(start, cache.to + 1);
     while (from <= head) {
       const to = Math.min(head, from + V4_LOG_CHUNK - 1);
@@ -108,10 +149,17 @@ export class V4Adapter implements DexAdapter {
           topics: [this.initTopic, null, zeroPadValue(c0, 32), zeroPadValue(c1, 32)],
           fromBlock: from, toBlock: to,
         });
-      } catch { break; }
+      } catch (e) {
+        throw new V4ScanError(
+          `V4 Initialize scan failed for ${c0}/${c1} at blocks ${from}-${to}: ${(e as Error).message || 'getLogs failed'}`,
+          cache.pools,
+        );
+      }
       for (const log of logs) {
         const ref = this.parseInit(log);
-        if (ref) cache.pools.push(ref);
+        // Topics are indexed, but a mis-delivered log must not attach address(0) to a WETH search.
+        if (!ref?.v4 || !sameAddr(ref.v4.currency0, c0) || !sameAddr(ref.v4.currency1, c1)) continue;
+        cache.pools.push(ref);
       }
       cache.to = to;
       from = to + 1;
@@ -192,6 +240,8 @@ export class V4Adapter implements DexAdapter {
   buildSwap(r: SwapRequest): BuiltSwap {
     if (r.amountIn <= 0n) throw new Error('amountIn must be positive');
     if (r.amountIn > UINT128_MAX || r.amountOutMin > UINT128_MAX) throw new Error('V4 amounts must fit in uint128');
+    // TAKE_ALL pays msgSender(), the transaction signer. The V4 command has no recipient field, so
+    // `recipient` must be that signer (Quoter passes the account it is quoting for).
     if (!/^0x[0-9a-fA-F]{40}$/.test(r.recipient)) throw new Error('Recipient must be a wallet address');
     const key = this.keyOf(r.pool);
     const decision = assessHook(key.hooks, this.cfg.hookAllowlist);
