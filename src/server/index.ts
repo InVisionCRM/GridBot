@@ -12,7 +12,7 @@ import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
 import { CandleSync, geckoBackfill, onchainBackfill } from './market/backfill';
 import { VersionCheck } from './system/version';
-import { DailyScanner, scanDepsFromHub, type ScanFile } from './market/scanner';
+import { DailyScanner, localScan, scanDepsFromHub, type ScanFile } from './market/scanner';
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
@@ -92,7 +92,8 @@ const backfill = async (pair: string, source: 'gecko' | 'onchain', days: number)
 const dailyScan: DailyScanner | undefined = !copy && sync.enabled ? new DailyScanner(scanDepsFromHub(hub, candles, {
   gecko, store: new JsonStore<ScanFile>(path.join(dataDir, 'picks.json')), approval: cfg.approval, emit: activity.emitEvent,
 })) : undefined;
-const scanner = copy ? hostScan(copy.hostUrl, copy.host) : dailyScan;
+const scanSource = copy ? hostScan(copy.hostUrl, copy.host) : dailyScan;
+const scanner = scanSource ? localScan(hub, scanSource) : undefined;
 
 const version = copy ? null : await VersionCheck.start(process.cwd(), process.env.NODE_ENV !== 'production');
 const entry = fileURLToPath(import.meta.url);
@@ -143,6 +144,8 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   bot.startLoop(cfg.pollMs);
   sync.start();
   dailyScan?.start();
+  // A first check at once: its prices and unconfirmed swaps are read now, not a minute after a restart
+  void autopilot.tick();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
   if (friends instanceof FriendsHost) {

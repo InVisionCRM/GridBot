@@ -376,7 +376,8 @@ describe('taxes 0 / 1 / 5 / 10 %: round trip, max-tx, live V3 block, PnL from ac
   });
 
   /** Live executor against the mock: swaps pay tax to a tax wallet; the token emits a GROSS Transfer to the buyer and then a tax Transfer away, so only the balance change shows the net. */
-  function liveRig(buyTax: number) {
+  /** grossOnly: the token logs only Transfer(pair → me, gross) and takes its tax without a Transfer */
+  function liveRig(buyTax: number, o: { grossOnly?: boolean } = {}) {
     const w = taxedWorld({ buyTax });
     const m = w.m;
     m.wallet.set(`${ME.toLowerCase()}:${w.DAI.address.toLowerCase()}`, amountToUnits(1000, 18));
@@ -400,7 +401,7 @@ describe('taxes 0 / 1 / 5 / 10 %: round trip, max-tx, live V3 block, PnL from ac
           m.wallet.set(k(path[1]), (m.wallet.get(k(path[1])) ?? 0n) + net);
           const L = (from: string, to: string, v: bigint) => ({ address: path[1], topics: [topic, zeroPadValue(from, 32), zeroPadValue(to, 32)], data: zeroPadValue(toBeHex(v), 32) });
           // Reflection-style token: Transfer(pair → me, gross) then Transfer(me → taxWallet, tax)
-          logs = [L(w.pair, ME, gross), L(ME, '0x' + 'e'.repeat(40), gross - net)];
+          logs = o.grossOnly ? [L(w.pair, ME, gross)] : [L(w.pair, ME, gross), L(ME, '0x' + 'e'.repeat(40), gross - net)];
         }
         const r = { status: 1, gasUsed: 100_000n, gasPrice: 10n ** 9n, logs };
         return { hash, wait: async () => r };
@@ -409,7 +410,7 @@ describe('taxes 0 / 1 / 5 / 10 %: round trip, max-tx, live V3 block, PnL from ac
     return { w, signer };
   }
 
-  it('live buy books the ACTUAL received (balance change), not the gross Transfer log; FOT method used', async () => {
+  it('live buy books the ACTUAL received (the receipt transfers in less out), not the gross Transfer log; FOT method used', async () => {
     const { LiveExecutor } = await import('../src/server/bot/chain');
     const { w, signer } = liveRig(0.05);
     const ex = new LiveExecutor(w.q, signer, { approval: 'max', receiptTimeoutMs: 1000 });
@@ -417,11 +418,20 @@ describe('taxes 0 / 1 / 5 / 10 %: round trip, max-tx, live V3 block, PnL from ac
     expect(q.call.method).toBe('swapExactTokensForTokensSupportingFeeOnTransferTokens');
     expect(q.balanceOk).toBe(true);
     const f = await ex.execute(q, { canSend: () => true, onSent: () => undefined });
-    expect(f.outSource).toBe('balance');
+    expect(f.outSource).toBe('log');
     const gross = fromUnits(q.routerOut, q.decimalsOut);
     expect(f.amountOutHuman / gross).toBeCloseTo(0.95, 4); // net, not gross
     expect(Math.abs(f.shortfallPct!)).toBeLessThan(0.001);
     expect(f.taxPct).toBeCloseTo(0.05, 6);
+  });
+  it('a taxed token that logs only the gross amount is booked at what the wallet gained', async () => {
+    const { LiveExecutor } = await import('../src/server/bot/chain');
+    const { w, signer } = liveRig(0.05, { grossOnly: true });
+    const ex = new LiveExecutor(w.q, signer, { approval: 'max', receiptTimeoutMs: 1000 });
+    const q = await ex.quote('buy', 10, DEFAULT_LIMITS);
+    const f = await ex.execute(q, { canSend: () => true, onSent: () => undefined });
+    expect(f.outSource).toBe('balance');
+    expect(f.amountOutHuman / fromUnits(q.routerOut, q.decimalsOut)).toBeCloseTo(0.95, 4);
   });
   it('tax rises after the safety check: fill lands short of the post-tax quote → shortfall reported', async () => {
     const { LiveExecutor } = await import('../src/server/bot/chain');
