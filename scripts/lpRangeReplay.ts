@@ -1,27 +1,35 @@
 /**
- * Headline: real GeckoTerminal candles for the two LP cases.
+ * Headline: real GeckoTerminal candles and a sampled liquidity series.
  *   npx tsx scripts/lpRangeReplay.ts
  * The seeded Ornstein-Uhlenbeck path is a unit-test fixture only:
  *   npx tsx scripts/lpRangeReplay.ts --synthetic
- * No network, no wallet, no .env.
+ * No network, no wallet, no .env. The samples were read once and committed.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { formatEthReplay, runEthUsdgReplay } from '../src/market/ethUsdgReplay';
 import {
-  ethUsdcTable, fixtureRows, formatCandleTable, formatVsHold, hoodWeekTable, type Ohlcv,
+  ethUsdcTable, fixtureRows, formatCandleTable, formatVsHold, hoodWeekTable, loadSeries,
+  type LiquiditySeries, type Ohlcv,
 } from '../src/market/lpCandleReplay';
 
-function load(name: string): Ohlcv[] {
-  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-  const data = JSON.parse(readFileSync(join(root, 'tests/fixtures', name), 'utf8')) as { rows: number[][] };
+function root(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), '..');
+}
+
+function loadCandles(name: string): Ohlcv[] {
+  const data = JSON.parse(readFileSync(join(root(), 'tests/fixtures', name), 'utf8')) as { rows: number[][] };
   return fixtureRows(data);
 }
 
+function loadLiq(name: string): LiquiditySeries {
+  return loadSeries(JSON.parse(readFileSync(join(root(), 'tests/fixtures', name), 'utf8')) as LiquiditySeries);
+}
+
 function printReal(): void {
-  const eth = ethUsdcTable(load('eth-usdc-005-1h.json'));
-  const hood = hoodWeekTable(load('hood-ethusdg-5m.json'));
+  const eth = ethUsdcTable(loadCandles('eth-usdc-005-1h.json'), loadLiq('eth-usdc-005-liquidity.json'));
+  const hood = hoodWeekTable(loadCandles('hood-ethusdg-5m.json'), loadLiq('hood-ethusdg-liquidity.json'));
   for (const table of [eth, hood]) {
     console.log(formatCandleTable(table));
     console.log('');
