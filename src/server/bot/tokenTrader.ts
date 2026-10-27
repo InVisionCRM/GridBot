@@ -12,6 +12,7 @@ import {
   decideExit, filterFresh, gateToken, sizeBuy, splitSell, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SNIPER_MIN_LIQ_USD,
   type FreshPool, type GateInput,
 } from '../../market/tokenTrader';
+import { DEFAULT_MIN_LIQUIDITY_USD, effectiveMinLiquidityUsd, gateMinLiquidityUsd } from '../../market/liquidityFloor';
 import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
 import type { Emit } from './activity';
 import type { Store } from './store';
@@ -36,6 +37,13 @@ export interface TraderOptions {
   totalUsd: number;
   /** Scan discovery only. Snipes ignore it. */
   minPoolAgeSec: number;
+  /**
+   * Minimum pool liquidity (USD) for a scan buy and the safety gate. 0 matches the old hardcoded floor,
+   * so existing installs do not start skipping pools. Snipes also still have to clear `sniper.minLiquidityUsd`.
+   */
+  minLiquidityUsd: number;
+  /** When on, the floor in force is at least $50,000. Off by default. Never lowers a higher minimum. */
+  enforceLiquidityFloor: boolean;
   /** Empty = every chain the app trades */
   chains: number[];
   risk: 'safe' | 'medium' | 'any';
@@ -110,6 +118,7 @@ const TRADE_MAX = 200;
 
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
+  minLiquidityUsd: DEFAULT_MIN_LIQUIDITY_USD, enforceLiquidityFloor: false,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
@@ -155,6 +164,8 @@ export class TokenTrader {
     return {
       ...this.state,
       openUsd,
+      /** Liquidity floor scan buys and the gate actually use (the setting, raised to $50,000 when that flag is on). */
+      effectiveMinLiquidityUsd: this.floorUsd(),
       lastError: this.lastError,
       entriesHalt: this.state.entriesHalt ?? null,
       lastHalt: this.state.lastHalt ?? null,
@@ -169,6 +180,8 @@ export class TokenTrader {
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
+    if (!(n.minLiquidityUsd >= 0)) throw new Error('Minimum liquidity must be 0 or more USD.');
+    if (typeof n.enforceLiquidityFloor !== 'boolean') throw new Error('Liquidity floor flag must be on or off.');
     if (!(n.maxImpact > 0) || n.maxImpact > HARD_CAPS.maxPriceImpact) throw new Error('Price-impact cap must be between 0% and 5%.');
     if (!(n.maxPoolShare > 0) || n.maxPoolShare > 0.5) throw new Error('Max pool share must be between 0% and 50%.');
     if (n.sniper.mevRpc && !/^https:\/\//.test(n.sniper.mevRpc)) throw new Error('MEV URL must be an https RPC.');
@@ -276,6 +289,17 @@ export class TokenTrader {
     return { maxPriceImpact: Math.min(this.state.options.maxImpact, HARD_CAPS.maxPriceImpact), slippageBps: 100, deadlineMinutes: 10 };
   }
 
+  /** Configured minimum, or $50,000 when that flag is on. Does not include the sniper's own minimum. */
+  private floorUsd() { return effectiveMinLiquidityUsd(this.state.options); }
+
+  /** Gate floor for this pool: the floor in force, the sniper minimum on a snipe, and any higher floor assess reported. A reported 0 does not win. */
+  private gateFloor(pool: FreshPool, reported: number | null | undefined) {
+    const o = this.state.options;
+    return gateMinLiquidityUsd(pool, reported, {
+      minLiquidityUsd: o.minLiquidityUsd, enforceLiquidityFloor: o.enforceLiquidityFloor, sniperMinLiquidityUsd: o.sniper.minLiquidityUsd,
+    });
+  }
+
   private wantChain(id: number) {
     const c = this.state.options.chains;
     return !c.length || c.includes(id);
@@ -289,7 +313,7 @@ export class TokenTrader {
   private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number }> {
     if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0 };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
-    const r = gateToken({ ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) });
+    const r = gateToken({ ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: this.gateFloor(pool, g.minLiquidityUsd) });
     return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0 };
   }
 
@@ -340,7 +364,7 @@ export class TokenTrader {
     if (!this.d.discover) return;
     if (this.state.entriesHalt?.chains === null) return; // stopped everywhere: don't even look
     const pools = await this.d.discover();
-    const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: 0 });
+    const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: this.floorUsd() });
     for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
     for (const p of keep) await this.consider(p, 'scan');
   }
@@ -364,7 +388,8 @@ export class TokenTrader {
       if (hit.kind === 'v4') continue;
       const pool = await this.d.resolve?.(hit) ?? null;
       if (!pool) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: hit.pool.slice(0, 8), verdict: 'skipped', why: 'could not price the new pool' }); continue; }
-      if (pool.liquidityUsd < sn.minLiquidityUsd) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}` }); continue; }
+      const minLiq = Math.max(sn.minLiquidityUsd, this.floorUsd());
+      if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${minLiq.toLocaleString('en-US')}` }); continue; }
       if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); continue; }
       const before = this.state.positions.length;
       await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');

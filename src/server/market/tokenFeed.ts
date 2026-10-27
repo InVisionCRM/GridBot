@@ -6,6 +6,7 @@
 import { JsonRpcProvider } from 'ethers';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
+import { gateMinLiquidityUsd } from '../../market/liquidityFloor';
 import { mintInBytecode } from '../../market/tokenChecks';
 import { ROUTER } from '../dex/abis';
 import { LiveExecutor, type ChainReader } from '../bot/chain';
@@ -14,7 +15,7 @@ import type { Emit } from '../bot/activity';
 import type { Hub } from '../chains/hub';
 import type { GeckoSource } from './gecko';
 import { PoolSniper, type LogSource, type SniperChain } from './sniper';
-import { TokenTrader, type Position, type TraderState } from '../bot/tokenTrader';
+import { TokenTrader, type Position, type TraderOptions, type TraderState } from '../bot/tokenTrader';
 
 interface Reader extends ChainReader {
   getBlockNumber(): Promise<number>;
@@ -84,11 +85,11 @@ export function createTokenTrader(o: {
   approval: 'exact' | 'max'; receiptTimeoutMs: number;
 }): TokenTrader {
   const sniper = new PoolSniper({ chains: sniperChains(o.hub), source: logSource(o.hub) });
-  const trader = new TokenTrader({
+  const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
-    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk),
+    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, trader.status().options),
     resolve: (hit) => resolveHit(o.hub, hit),
     live: {
       buy: async (pool, spend, limits) => {
@@ -168,7 +169,7 @@ async function discover(hub: Hub, gecko: GeckoSource): Promise<FreshPool[]> {
   return out.slice(0, 40);
 }
 
-async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any'): Promise<GateInput> {
+async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', opt: TraderOptions): Promise<GateInput> {
   const r = await hub.inspect({ chainId: pool.chainId, address: pool.token, quote: pool.spend, pool: pool.pool });
   const s = r.safety;
   let canMint: boolean | null = null;
@@ -177,7 +178,8 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
     mode, risk: _risk, honeypot: s?.honeypot ?? null, sellSimOk: s ? s.simulated && s.honeypot !== true : false,
     paused: s?.paused ?? null, decimals: s?.decimals ?? r.token?.decimals ?? null,
     buyTax: s?.buyTaxPct ?? null, sellTax: s?.sellTaxPct ?? null,
-    liquidityUsd: pool.liquidityUsd, minLiquidityUsd: pool.source === 'snipe' ? 0 : 0,
+    liquidityUsd: pool.liquidityUsd,
+    minLiquidityUsd: gateMinLiquidityUsd(pool, null, { minLiquidityUsd: opt.minLiquidityUsd, enforceLiquidityFloor: opt.enforceLiquidityFloor, sniperMinLiquidityUsd: opt.sniper.minLiquidityUsd }),
     canMint, canPause: s?.paused != null ? true : null, canBlacklist: s?.blacklist != null ? true : null,
     proxy: s?.proxy != null ? true : null, lpUnlocked: null, holderConcentration: null, recentLiqPull: false,
     liveAllowed: s?.liveAllowed ?? false,
