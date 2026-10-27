@@ -110,4 +110,6 @@ export interface SwapQuoteResult {
   routes: SwapRoute[];
   /** Null in paper mode. Never broadcast by this service. */
   tx: SendableTx | null;
+  /** Set only when `tx` is set. Release it on failure, or let it expire with the swap deadline. */
+  holdId: string | null;
 }

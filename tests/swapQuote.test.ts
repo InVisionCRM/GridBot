@@ -4,7 +4,7 @@ import { chainByKey } from '../src/live/chains';
 import { clearDecimalsCache } from '../src/live/decimals';
 import { afterTax, type Taxes } from '../src/live/tax';
 import { NATIVE, applySlippage, getAmountOut } from '../src/live/swapMath';
-import { ROUTER, V3_POOL, V3_QUOTER } from '../src/server/dex/abis';
+import { ROUTER, V3_QUOTER } from '../src/server/dex/abis';
 import { ChainRuntime } from '../src/server/chains/runtime';
 import { SwapService } from '../src/server/swap/service';
 import type { SwapAggregator, SwapAllocation } from '../src/server/swap/types';
@@ -238,7 +238,7 @@ describe('swap quotes', () => {
     expect(sends()).toBe(0);
   });
 
-  it('discovers a Robinhood 1% Uniswap V3 pool and quotes with fee() via QuoterV2', async () => {
+  it('discovers a Robinhood 1% Uniswap V3 pool and quotes that tier through QuoterV2', async () => {
     const m = world({ v3: { weth: 100, usdg: 300_000, fee: 10000 } });
     const seen: { to: string; data: string }[] = [];
     const orig = m.call.bind(m);
@@ -249,13 +249,12 @@ describe('swap quotes', () => {
     });
     expect(q.route.id).toBe('uniswap-v3');
     expect(q.route.pool).toMatchObject({ kind: 'v3', feeTier: 10000, feeBps: 100 });
-    const feeSel = V3_POOL.getFunction('fee').selector;
-    const pool = q.route.pool!.address;
-    expect(seen.some((c) => c.to.toLowerCase() === pool.toLowerCase() && c.data.startsWith(feeSel))).toBe(true);
+    expect(q.holdId).toBeNull();
     const quoted = seen.find((c) => c.to.toLowerCase() === UNI.quoter!.toLowerCase() && c.data.startsWith(V3_QUOTER.getFunction('quoteExactInputSingle').selector));
     expect(quoted).toBeTruthy();
-    const params = V3_QUOTER.decodeFunctionData('quoteExactInputSingle', quoted!.data)[0] as { fee: bigint };
+    const params = V3_QUOTER.decodeFunctionData('quoteExactInputSingle', quoted!.data)[0] as { fee: bigint; amountIn: bigint };
     expect(params.fee).toBe(10000n);
+    expect(params.amountIn).toBe(10n ** 17n);
     expect(q.expectedOut).toBe(getAmountOut(10n ** 17n, raw(100, 18), raw(300_000, 6), 100));
   });
 

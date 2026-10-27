@@ -18,6 +18,7 @@ import type { VersionCheck } from './system/version';
 import { runChecks } from './system/checks';
 import type { Converter } from './convert/converter';
 import type { SwapService } from './swap/service';
+import { viaFunnel } from './friends/publicHost';
 import type { PoolSearch } from './market/poolSearch';
 import type { FriendsHost } from './friends/host';
 import type { GeckoRelay } from './friends/relay';
@@ -330,9 +331,10 @@ export function createApp(o: AppOpts) {
   app.get('/api/convert/job', wrap(() => ({ job: cv().job() })));
   app.post('/api/convert/stop', wrap(() => { cv().stop(); return { ok: true }; }));
 
-  // Quote only. Live mode returns calldata; this route never broadcasts it.
+  // Host only. A friend's copy and a request that arrived through Tailscale Funnel never quote.
+  // Live mode returns calldata; this route never broadcasts it.
   app.post('/api/swap/quote', wrap(async (req) => {
-    if (!o.swap) throw new Error('swap quoting is not available');
+    if (o.copy || !o.swap || viaFunnel(req.headers, req.socket.remoteAddress)) throw new Error('swap quoting is host-only');
     const b = req.body ?? {};
     if (typeof b.amountIn !== 'string' || !/^\d+$/.test(b.amountIn)) throw new Error('amountIn must be a decimal string of raw units');
     return plain(await o.swap.quote({

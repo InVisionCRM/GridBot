@@ -21,19 +21,12 @@ export class V3Adapter implements DexAdapter {
   get spender() { return this.cfg.router; }
 
   async findPools(a: string, b: string): Promise<PoolRef[]> {
+    // TODO(pool-fee): when PR #54 lands, set feeBps from poolFee.ts (the pool's fee()).
+    // Never copy that value onto feeTier — getPool, QuoterV2 and the router all key on the factory tier.
     const found = await Promise.all(this.cfg.feeTiers!.map(async (tier) => {
       try {
         const [p] = await readCall<[string]>(this.reader, this.cfg.factory, V3_FACTORY, 'getPool', [a, b, tier]);
-        if (isZero(p)) return null;
-        // The tier passed to getPool is only the lookup key (Robinhood lists 1% = 10000 beside 100/500/3000).
-        // The pool's own fee() is what quoting and the swap use; fall back to the lookup key if the read fails.
-        let feeTier = tier;
-        try {
-          const [fee] = await readCall<[bigint]>(this.reader, p, V3_POOL, 'fee');
-          const n = Number(fee);
-          if (Number.isInteger(n) && n > 0 && n <= 1_000_000) feeTier = n;
-        } catch { /* keep the tier asked of the factory */ }
-        return { dex: this.cfg.id, kind: 'v3' as const, address: p, feeBps: feeTier / 100, feeTier };
+        return isZero(p) ? null : { dex: this.cfg.id, kind: 'v3' as const, address: p, feeBps: tier / 100, feeTier: tier };
       } catch { return null; }
     }));
     return found.filter((x): x is NonNullable<typeof x> => !!x);

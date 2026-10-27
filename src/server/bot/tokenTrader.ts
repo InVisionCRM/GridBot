@@ -17,6 +17,8 @@ import type { Emit } from './activity';
 import type { Store } from './store';
 import type { PoolSniper, SnipeHit } from '../market/sniper';
 import { requestHalt, type Halt } from './audit';
+import type { ReservedBalance } from '../swap/holds';
+import { NATIVE } from '../../live/swapMath';
 
 export interface SniperOptions {
   on: boolean;
@@ -148,6 +150,21 @@ export class TokenTrader {
   private save() { this.d.store.save(this.state); }
   private say(msg: string, level: 'info' | 'warn' | 'success' = 'info') {
     this.d.emit?.({ type: 'info', kind: 'system', level, msg });
+  }
+
+  /**
+   * Live positions sit in the wallet: the token they hold, and the spend coin that bought it.
+   * Paper positions move no coins.
+   */
+  reservations(): ReservedBalance[] {
+    const out: ReservedBalance[] = [];
+    const native = (addr: string) => addr.toLowerCase() === NATIVE;
+    for (const p of this.state.positions) {
+      if (p.mode !== 'live') continue;
+      if (p.tokens > 0) out.push({ chainId: p.chainId, address: p.token, native: native(p.token), amount: p.tokens, source: 'token-trader' });
+      if (p.spent > 0) out.push({ chainId: p.chainId, address: p.spend, native: native(p.spend), amount: p.spent, source: 'token-trader' });
+    }
+    return out;
   }
 
   status() {
