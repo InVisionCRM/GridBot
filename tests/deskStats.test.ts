@@ -116,3 +116,30 @@ describe('chart bot pick', () => {
     expect(allOn(['a', 'b'], ['a'])).toBe(false);
   });
 });
+
+describe('grid capital is in the quote coin', () => {
+  // HEX/PLS grid: capital, P&L and equity are all in PLS. PLS ≈ $0.0000051 (PulseX V1 WPLS/DAI reserves, block 27907302).
+  const k = 0.0000051;
+  const grid = {
+    kind: 'grid', id: 'hexpls', startedAt: now - 10 * DAY_MS, usdPerQuote: k,
+    config: { totalCapitalUsd: 14_000_000, lowerPrice: 200, upperPrice: 240, gridCount: 10 },
+    pnl: { realized: 140_000, unrealized: 0 },
+  };
+  it('converts invested capital to dollars with the quote rate', () => {
+    const f = botFacts(grid, now);
+    expect(f.investedUsd).toBeCloseTo(14_000_000 * k, 6);
+    expect(f.pnlUsd).toBeCloseTo(140_000 * k, 6);
+    expect(f.pnlPct).toBeCloseTo(0.01, 9);
+    expect(f.realizedPct).toBeCloseTo(0.01, 9);
+    expect(f.est.d365?.pct).toBeCloseTo(0.01 * 36.5, 9);
+  });
+  it('shows no dollar capital when the quote has no dollar rate', () => {
+    const f = botFacts({ ...grid, usdPerQuote: null }, now);
+    expect(f.investedUsd).toBeNull();
+    expect(f.pnlPct).toBeNull();
+    expect(f.valueUsd).toBeNull();
+  });
+  it('values a grid with no equity history at capital × rate', () => {
+    expect(botFacts({ ...grid, pnl: undefined }, now).valueUsd).toBeCloseTo(14_000_000 * k, 6);
+  });
+});
