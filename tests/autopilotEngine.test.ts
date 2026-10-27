@@ -668,11 +668,12 @@ describe('MultiBot for the smart trader: what a bot is worth, and removing one',
   it("a grid removed while one of its ticks is still running doesn't come back (as a stopped ghost)", async () => {
     const { bot } = make();
     const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.8, upperPrice: P0, gridCount: 10, totalCapitalUsd: 50 });
-    const eng = (bot as unknown as { engines: Map<string, { executor: { getPrice: () => Promise<number> } }> }).engines.get(id)!;
+    const eng = (bot as unknown as { engines: Map<string, { executor: { getPrice: () => Promise<number> }; tick: () => Promise<void> }> }).engines.get(id)!;
     const price = eng.executor.getPrice.bind(eng.executor);
     let reading!: () => void;
     eng.executor.getPrice = async () => { await new Promise<void>((ok) => { reading = ok; }); return price(); };
-    const ticking = bot.tickAll();
+    // The engine's own tick (no poll price handed in, since #40 tickAll passes the batch price): it reads its price and waits there.
+    const ticking = eng.tick();
     await new Promise((ok) => setTimeout(ok, 10));
     bot.remove(id);
     reading();
