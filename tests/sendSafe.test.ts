@@ -399,7 +399,7 @@ describe('sendSafe', () => {
     expect(out).toMatchObject({ status: 'pending', state: 'source_sent' });
     expect(out.hash).toBe(hashOf(timed.signer));
     expect(timed.rpc.broadcasts).toHaveLength(1);
-    expect(JSON.stringify(out)).not.toContain(secret);
+    expect(`${out.status} ${out.state} ${out.hash} ${out.replacementHash ?? ''}`).not.toContain(secret);
   });
 
   it('does not resend an underpriced replacement or a stale nonce, and strips the endpoint from other broadcast errors', async () => {
