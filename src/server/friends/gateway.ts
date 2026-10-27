@@ -225,6 +225,9 @@ export function proxyUpgrade(d: GatewayDeps, req: http.IncomingMessage, socket: 
     socket.destroy();
   };
   if (!requestHostAllowed(req.headers.host, d.publicHosts?.() ?? [])) return fail(403, 'Forbidden');
+  // Browsers always send Origin on a WebSocket. Another site's page could otherwise open one with the cookie (CSWSH).
+  const origin = req.headers.origin;
+  if (!origin || !d.origins().includes(origin)) return fail(403, 'Forbidden');
   const now = (d.now ?? Date.now)();
   const s = readSession(d.sessionKey, cookieValue(req.headers.cookie, COOKIE), now);
   const owner = !!(s?.role === 'host' && d.owner?.current(s));
