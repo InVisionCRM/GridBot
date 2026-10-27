@@ -2,8 +2,10 @@
  * Each friend's copy of the app: the same built server (dist/server/index.js) run as a child process in its own folder
  * (data/friends/<id>/), so it has its own bots, history and settings. Its environment is built from an allow-list, never
  * copied from the host's: no PRIVATE_KEY*, RPC_URL* (they can hold API keys), FRIENDS_SECRET or HOST_PASSWORD_HASH reach it. The friend's
- * own key goes in as its PRIVATE_KEY, which the copy's env.ts removes at once, as the host's does. An IPC channel ties
- * the copy to the host: when the host stops, even when killed, the channel closes and the copy shuts down.
+ * own key is never in the copy's environment (which other processes of the same user can read, e.g. /proc/<pid>/environ,
+ * and which crash reports and `ps e` show): the copy asks for it over the IPC channel once at start (env.ts
+ * receiveFriendKey) and the host answers that one request. The same channel ties the copy to the host: when the host
+ * stops, even when killed, the channel closes and the copy shuts down.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, renameSync, rmSync, statSync } from 'node:fs';
@@ -19,9 +21,15 @@ export function childEnv(hostEnv: NodeJS.ProcessEnv, c: CopySpec, host: { name: 
   const env: Record<string, string> = {};
   for (const k of SHARED_ENV) { const v = hostEnv[k]; if (v != null && v !== '') env[k] = v; }
   Object.assign(env, { NODE_ENV: 'production', PORT: String(c.port), FRIEND_NAME: c.name, HOST_NAME: host.name, HOST_URL: host.url });
-  if (c.key) env.PRIVATE_KEY = c.key;
+  // No key here: it goes over IPC (keyMessage).
   return env;
 }
+
+/** A port on 127.0.0.1 that nothing listens on. */
+/** IPC: the copy asks once (KEY_REQUEST); the host answers with the friend's key, or null for a paper-only copy. */
+export const KEY_REQUEST = 'friend-key?';
+export const KEY_REPLY = 'friend-key';
+export function keyMessage(c: CopySpec) { return { type: KEY_REPLY, key: c.key ?? null }; }
 
 /** A port on 127.0.0.1 that nothing listens on. */
 export function portFree(port: number): Promise<boolean> {
@@ -86,6 +94,13 @@ export class Copies {
     } finally {
       closeSync(fd);
     }
+    // The key, once, to the copy that asks for it (never in its environment, never logged).
+    let handed = false;
+    child.on('message', (m: unknown) => {
+      if (handed || (m as { type?: unknown } | null)?.type !== KEY_REQUEST || !child.connected) return;
+      handed = true;
+      child.send(keyMessage(p.spec), () => { /* a copy that died meanwhile: its exit is handled below */ });
+    });
     Object.assign(p, { child, state: 'starting', since: this.now() });
     child.once('exit', (code, signal) => this.exited(p, child, `exit code ${code}`, signal));
     // A copy that can't be started emits 'error' (maybe without 'exit'); unhandled, it would take the host down.

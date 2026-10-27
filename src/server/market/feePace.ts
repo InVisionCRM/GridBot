@@ -47,7 +47,7 @@ export async function onchainFeePace(hub: Hub, store: Store<ScanFile>, def: Mark
     } catch { out = null; }
   }
   // A second reading inside the hour would wipe the window, so the first mark stays until an hour has passed.
-  if (file?.version === 3 && !(prev && now - prev.at < HOUR)) {
+  if (file?.version === 4 && !(prev && now - prev.at < HOUR)) {
     file.feeMarks = { ...file.feeMarks, [key]: { at: now, g0: g0.toString(), g1: g1.toString(), liquidity: liquidity.toString() } };
     store.save(file);
   }
