@@ -23,3 +23,16 @@ export function gasQuote(chain: BacktestChain, action: GasAction, gasPriceNative
   if (!(quotePerNative > 0)) throw new Error(`bad quote per native ${quotePerNative}`);
   return gasNative(chain, action, gasPriceNative, l1Native) * quotePerNative;
 }
+
+/**
+ * Native per gas implied by the gas a liquidity bot actually paid: one open, then one move per recorded rerange.
+ * A replay that moves the same number of times then spends the recorded gas, not today's gas price.
+ */
+export function impliedLpGasPrice(chain: BacktestChain, moves: number, gasQuoteAmount: number, quotePerNative: number): number {
+  if (!(gasQuoteAmount >= 0) || !(quotePerNative > 0)) return 0;
+  const u = GAS_UNITS[chain];
+  const open = u.v3Open + u.swap + 2 * u.approve;
+  const move = u.v3Move + u.approve;
+  const units = open + Math.max(0, moves) * move;
+  return units > 0 ? gasQuoteAmount / (units * quotePerNative) : 0;
+}

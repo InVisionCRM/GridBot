@@ -1,10 +1,11 @@
 /**
  * The summary a strategy change is judged on.
  *
- * The lead is net token units per day, after swap fees, gas, taxes and realized rebalancing losses, in each
- * coin of the pair. USD/day is a smaller line under that. There is no dollar-per-month and no percent-per-month
- * figure. One window only: the last 30 days, unless a footnote says the run used another window or an in-sample one.
- * Every number is marked modeled or on-chain actual.
+ * The lead is one number: net units per day in the bot's quote coin, after every fee coin has been converted
+ * at the price when it was collected, and after gas, taxes and realized rebalancing losses. USD/day is a smaller
+ * line under that. There is no dollar-per-month and no percent-per-month figure. One window only: the last 30
+ * days, unless a footnote says the run used another window or an in-sample one. Every number is marked modeled
+ * or on-chain actual.
  */
 export type FigureSource = 'modeled' | 'on-chain actual';
 
@@ -29,8 +30,8 @@ export interface BotSummary {
   /** Heading. Kept free of digits so it is not a measured number. */
   title: string;
   kind: 'lp' | 'grid' | 'trend' | 'token';
-  /** Quote coin first, then the base coin: USDC/day and WETH/day. */
-  rates: [TokenRate, TokenRate];
+  /** One rate: net quote units per day. Fee coins were converted at the price when they were earned. */
+  rates: TokenRate[];
   usdPerDay: number;
   usdSource: FigureSource;
   moves: number;
@@ -101,8 +102,7 @@ export function renderMarkdown(bots: BotSummary[], w: RunWindow): string {
     const lines: string[] = [
       `# ${b.title}`,
       '',
-      rateLine(b.rates[0], true),
-      rateLine(b.rates[1], true),
+      ...b.rates.map((r) => rateLine(r, true)),
       '',
       `also ${signed(b.usdPerDay)} USD/day (${b.usdSource})`,
       '',
@@ -133,8 +133,7 @@ export function summaryJson(bots: BotSummary[], w: RunWindow) {
       title: b.title,
       kind: b.kind,
       generationPerDay: {
-        [b.rates[0].symbol]: { value: b.rates[0].perDay, unit: `${b.rates[0].symbol}/day`, source: b.rates[0].source },
-        [b.rates[1].symbol]: { value: b.rates[1].perDay, unit: `${b.rates[1].symbol}/day`, source: b.rates[1].source },
+        ...Object.fromEntries(b.rates.map((r) => [r.symbol, { value: r.perDay, unit: `${r.symbol}/day`, source: r.source }])),
         usd: { value: b.usdPerDay, unit: 'USD/day', source: b.usdSource, role: 'secondary' },
       },
       moves: { value: b.moves, source: 'modeled' as const },

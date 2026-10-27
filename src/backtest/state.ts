@@ -22,8 +22,8 @@ import {
   type MarketDef,
 } from '../live/markets';
 import { NETWORKS } from '../live/networks';
-import type { BacktestChain } from './gasModel';
-import { fmt } from './report';
+import { GAS_UNITS, impliedLpGasPrice, type BacktestChain } from './gasModel';
+import { fmt, signed } from './report';
 import type { BotSummary } from './report';
 import { runBot, type BotConfig, type HarnessData, type TokenRef } from './run';
 
@@ -102,6 +102,11 @@ export interface SavedBot {
   depth?: { quoteReserve: number; baseReserve: number };
   /** Present for a liquidity bot. Calibration uses this, because those bots store no fills. */
   actual?: LpActual;
+  /**
+   * Quote units a grid or trend bot realized on its sells (`realizedPnlUsd`, which is quote coin despite the name).
+   * A liquidity bot's net is `actual` instead, so uncollected fees stay in that total.
+   */
+  recordedNet?: number;
 }
 
 export interface StateLoad {
@@ -120,12 +125,22 @@ export interface CalibrationError {
   priceMape: number | null;
   /** Grids: fee MAPE of matched fills. LPs: relative error of gas. Null when not measured. */
   feeMape: number | null;
-  /** Count miss + unmatched share + price error + fee error, or the LP fee, gas, move, swap and move-loss error. 0 is exact. */
+  /**
+   * Grids: count miss + unmatched share + price error + fee error. Liquidity bots: the net-units error, which is
+   * what the fit minimizes. 0 is exact.
+   */
   combined: number;
+  /** Relative error of quote-valued net units per day. Null when the bot recorded no window to divide by. */
+  netError: number | null;
+  /** Relative error of the fill count (grid) or the move count (liquidity). */
+  movesError: number;
   /** LP only. Relative error of the quote-valued swap cost and the locked-in move loss. */
   swapRel?: number;
   lossRel?: number;
 }
+
+/** A bot whose net-units error is above this is left out of what-if output. */
+export const NET_ERROR_LIMIT = 0.25;
 
 export interface Calibration {
   botId: string;
@@ -135,6 +150,16 @@ export interface Calibration {
   slippageBps: number;
   config: BotConfig;
   error: CalibrationError | null;
+  /** Quote units per day from the app's own totals. Null when the bot has no window. */
+  recordedPerDay: number | null;
+  /** Quote units per day from the fitted replay. Null when that replay did not run. */
+  replayedPerDay: number | null;
+  /** Same as `error.netError` when a fit exists. Null when it does not. */
+  netError: number | null;
+  /** Same as `error.movesError` when a fit exists. Null when it does not. */
+  movesError: number | null;
+  /** True when net-units error was measured and is at most {@link NET_ERROR_LIMIT}. */
+  calibrated: boolean;
   note: string;
 }
 
@@ -450,6 +475,39 @@ function configOf(kind: BotConfig['kind'], side: Side, extra: Partial<BotConfig>
   };
 }
 
+/**
+ * Native per gas from the gas each fill recorded, so a replay does not use today's gas price.
+ * A buy in the simulator pays an approval plus a swap; a sell pays the swap.
+ */
+function recordedGasPrice(trades: unknown, chain: BacktestChain): number | undefined {
+  if (!Array.isArray(trades)) return undefined;
+  const u = GAS_UNITS[chain];
+  const prices: number[] = [];
+  for (const row of trades) {
+    const t = obj(row);
+    if (!t || t.failed === true) continue;
+    const gasNative = num(t.gasPls);
+    if (!(gasNative != null && gasNative > 0)) continue;
+    const units = t.side === 'sell' ? u.swap : u.approve + u.swap;
+    prices.push(gasNative / units);
+  }
+  if (!prices.length) return undefined;
+  prices.sort((a, b) => a - b);
+  return prices[Math.floor(prices.length / 2)];
+}
+
+/** Sell-side realized pnl. The field is named in USD; the app stores quote units of the pair. */
+function gridRealized(trades: unknown): number {
+  if (!Array.isArray(trades)) return 0;
+  let sum = 0;
+  for (const row of trades) {
+    const t = obj(row);
+    if (!t || t.failed === true || t.side !== 'sell') continue;
+    sum += num(t.realizedPnlUsd) ?? num(t.roundTripNet) ?? 0;
+  }
+  return sum;
+}
+
 function gridBot(row: Record<string, unknown>, i: number): SavedBot | null {
   const cfg = obj(row.config);
   if (!cfg) return null;
@@ -465,15 +523,22 @@ function gridBot(row: Record<string, unknown>, i: number): SavedBot | null {
   const fills = fillsOf(row.trades);
   const profits = obj(row.profits);
   const recenter = obj(row.recenter);
+  const window = windowOf(row, fills);
+  const startPrice = num(row.startPrice);
+  const gasPriceNative = recordedGasPrice(row.trades, side.chain);
   return {
     id: str(row.id) || `grid-${i + 1}`,
     fills,
-    window: windowOf(row, fills),
+    window,
     depth: depthOf(row),
+    recordedNet: gridRealized(row.trades),
     config: configOf('grid', side, {
       capital, lowerPrice: lower, upperPrice: upper, gridCount,
       reinvest: profits?.mode !== 'send',
       recenter: recenter?.enabled === true,
+      ...(gasPriceNative != null ? { gasPriceNative } : {}),
+      ...(startPrice != null && startPrice > 0 ? { startPrice } : {}),
+      ...(window ? { startedAt: window.from } : {}),
       ...limitsOf(row),
     }),
   };
@@ -489,13 +554,18 @@ function trendBot(row: Record<string, unknown>, i: number): SavedBot | null {
   if (!(capital != null && capital > 0) || !rawCfg || typeof rawCfg.strategy !== 'string') return null;
   const fills = fillsOf(row.trades);
   const tf = isTF(row.tf) ? row.tf as TF : '1h';
+  const window = windowOf(row, fills);
+  const gasPriceNative = recordedGasPrice(row.trades, side.chain);
   return {
     id: str(row.id) || `trend-${i + 1}`,
     fills,
-    window: windowOf(row, fills),
+    window,
     depth: depthOf(row),
+    recordedNet: gridRealized(row.trades),
     config: configOf('trend', side, {
       capital, tf, trend: { ...DEFAULT_TREND, ...rawCfg } as TrendConfig,
+      ...(gasPriceNative != null ? { gasPriceNative } : {}),
+      ...(window ? { startedAt: window.from } : {}),
       ...limitsOf(row),
     }),
   };
@@ -504,15 +574,23 @@ function trendBot(row: Record<string, unknown>, i: number): SavedBot | null {
 function actualOf(row: Record<string, unknown>): LpActual | undefined {
   const t = obj(row.totals);
   if (!t) return undefined;
-  const fees = num(t.fees);
+  // totals.fees is what was already collected, valued in the quote coin at collection time.
+  // Fees still sitting on the open position are position.owed. The app's pnl() adds those at the current price.
+  const collected = num(t.fees);
   const gas = num(t.gas);
   const moves = num(row.reranges);
-  if (fees == null || gas == null || moves == null) return undefined;
+  if (collected == null || gas == null || moves == null) return undefined;
   const coins = obj(t.feeCoins);
+  const price = num(row.lastPrice);
+  const owed = obj(obj(row.position)?.owed) ?? obj(row.owed);
+  const owedBase = num(owed?.base) ?? 0;
+  const owedQuote = num(owed?.quote) ?? 0;
+  const owedValue = price != null && price > 0 ? owedBase * price + owedQuote : owedQuote;
   return {
-    fees, gas, moves,
-    feeBase: num(coins?.base) ?? 0,
-    feeQuote: num(coins?.quote) ?? 0,
+    fees: collected + owedValue,
+    gas, moves,
+    feeBase: (num(coins?.base) ?? 0) + owedBase,
+    feeQuote: (num(coins?.quote) ?? 0) + owedQuote,
     swapCost: num(t.swapCost) ?? 0,
     moveLoss: num(t.moveLoss) ?? 0,
   };
@@ -615,6 +693,45 @@ export function loadAppState(path: string): StateLoad {
   return { source: 'state', path, note: STATE_NOTE + skip, bots, skipped };
 }
 
+/** `chain:BASE/QUOTE` from the parsed market, so a legacy key still shows both coins. */
+export function pairLabel(cfg: Pick<BotConfig, 'chain' | 'base' | 'quote'>): string {
+  return `${cfg.chain}:${cfg.base.symbol}/${cfg.quote.symbol}`;
+}
+
+/** Quote-valued net the app recorded: LP totals (including uncollected fees), or a grid's sell pnl. */
+export function recordedQuoteNet(bot: SavedBot): number | null {
+  if (bot.config.kind === 'lp') {
+    if (!bot.actual) return null;
+    const a = bot.actual;
+    return a.fees - a.gas - a.swapCost - a.moveLoss;
+  }
+  return bot.recordedNet ?? null;
+}
+
+/** That net divided by the bot's own run, in quote units per day. */
+export function recordedPerDay(bot: SavedBot): number | null {
+  const net = recordedQuoteNet(bot);
+  if (net == null || !bot.window) return null;
+  const days = (bot.window.to - bot.window.from) / 86_400;
+  return days > 0 ? net / days : null;
+}
+
+/**
+ * Gas price implied by the gas a liquidity bot paid and the moves it recorded. Today's gas price is not used.
+ * Quote-per-native is 1 when the quote coin pays gas.
+ */
+function withRecordedGas(bot: SavedBot): BotConfig {
+  const cfg = bot.config;
+  if (cfg.kind !== 'lp' || !bot.actual || !(bot.actual.gas >= 0)) return cfg;
+  const quotePerNative = cfg.quotePerNative ?? (cfg.gasToken === 'quote' ? 1 : 0);
+  if (!(quotePerNative > 0)) return cfg;
+  return {
+    ...cfg,
+    quotePerNative,
+    gasPriceNative: impliedLpGasPrice(cfg.chain, bot.actual.moves, bot.actual.gas, quotePerNative),
+  };
+}
+
 function withFit(cfg: BotConfig, feeK: number, slippageBps: number, dwellMs?: number): BotConfig {
   return {
     ...cfg,
@@ -649,8 +766,10 @@ function compare(recorded: RecordedFill[], replayed: { t: number; side: 'buy' | 
   const feeMape = fees.length ? fees.reduce((a, b) => a + b, 0) / fees.length : null;
   const count = Math.abs(R.length - S.length) / Math.max(R.length, 1);
   const unmatched = (R.length - matched) / Math.max(R.length, 1);
+  const movesError = rel(S.length, R.length);
   return {
     recorded: R.length, replayed: S.length, priceMape, feeMape,
+    movesError, netError: null,
     combined: count + unmatched + (priceMape ?? 1) + (feeMape ?? 0),
   };
 }
@@ -665,21 +784,26 @@ function rel(sim: number, act: number): number {
   return Math.abs(sim - act) / den;
 }
 
-/** Quote-valued fees, gas, swaps, move loss and move count against the totals the app saved. */
-function compareLp(actual: LpActual, run: BotSummary): CalibrationError | null {
+/**
+ * A liquidity fit is judged on quote-valued net units per day. Move count, fees, gas, swap cost and move loss
+ * are reported beside that, and the move count breaks a tie. They are not added into the objective: matching
+ * fee volume alone used to pick a dwell that spent the profit.
+ */
+function compareLp(actual: LpActual, run: BotSummary, targetPerDay: number | null): CalibrationError | null {
   const fees = named(run, 'Fees collected');
   const gas = named(run, 'Gas');
   const swap = named(run, 'Swap cost');
   const loss = named(run, 'Move loss');
   if (fees == null || gas == null || swap == null || loss == null) return null;
-  const feeRel = rel(fees, actual.fees);
-  const gasRel = rel(gas, actual.gas);
-  const moveRel = rel(run.moves, actual.moves);
-  const swapRel = rel(swap, actual.swapCost);
-  const lossRel = rel(loss, actual.moveLoss);
+  const replayedPerDay = run.rates[0]?.perDay ?? 0;
+  const netError = targetPerDay == null ? null : rel(replayedPerDay, targetPerDay);
+  const movesError = rel(run.moves, actual.moves);
   return {
-    recorded: actual.moves, replayed: run.moves, priceMape: feeRel, feeMape: gasRel, swapRel, lossRel,
-    combined: feeRel + gasRel + moveRel + swapRel + lossRel,
+    recorded: actual.moves, replayed: run.moves,
+    priceMape: rel(fees, actual.fees), feeMape: rel(gas, actual.gas),
+    swapRel: rel(swap, actual.swapCost), lossRel: rel(loss, actual.moveLoss),
+    netError, movesError,
+    combined: netError ?? movesError,
   };
 }
 
@@ -687,67 +811,101 @@ function betterFit(
   err: CalibrationError, feeK: number, slip: number, dwellMs: number,
   best: { feeK: number; slippageBps: number; dwellMs: number; error: CalibrationError },
 ): boolean {
-  if (err.combined < best.error.combined - 1e-12) return true;
-  if (Math.abs(err.combined - best.error.combined) > 1e-12) return false;
+  const score = (e: CalibrationError) => e.netError ?? e.combined;
+  const a = score(err);
+  const b = score(best.error);
+  if (a < b - 1e-12) return true;
+  if (Math.abs(a - b) > 1e-12) return false;
+  if (err.movesError !== best.error.movesError) return err.movesError < best.error.movesError;
   if (Math.abs(feeK - 1) !== Math.abs(best.feeK - 1)) return Math.abs(feeK - 1) < Math.abs(best.feeK - 1);
   if (slip !== best.slippageBps) return slip < best.slippageBps;
   return dwellMs < best.dwellMs;
 }
 
+function unfinished(bot: SavedBot, cfg: BotConfig, feeK: number, slippageBps: number, note: string): Calibration {
+  return {
+    botId: bot.id, fitted: false, feeK, slippageBps, config: cfg, error: null,
+    recordedPerDay: recordedPerDay(bot), replayedPerDay: null, netError: null, movesError: null,
+    calibrated: false, note,
+  };
+}
+
 /**
  * Pick the fee scale (and, for a grid, the fill slippage) that makes a replay agree with what the bot recorded.
- * A liquidity bot has no fill list; it is fitted to its totals (fees, moves, gas, swap cost, move loss) instead.
- * Candle closes leave a tight band more often than a live slot0 poll, so the fit also tries a short dwell.
+ * A grid is fitted to its fills. A liquidity bot is fitted to quote-valued net units per day, using the gas it
+ * actually paid. Candle closes leave a tight band more often than a live slot0 poll, so that fit also tries a
+ * short dwell. Net-units error above {@link NET_ERROR_LIMIT} is left uncalibrated.
  */
 export function calibrateBot(bot: SavedBot, data: HarnessData): Calibration {
-  const baseK = bot.config.feeK ?? 1;
-  const baseSlip = bot.config.slippageBps ?? 0;
-  const lp = bot.config.kind === 'lp' && bot.actual;
+  const cfg = withRecordedGas(bot);
+  const baseK = cfg.feeK ?? 1;
+  const baseSlip = cfg.slippageBps ?? 0;
+  const target = recordedPerDay(bot);
+  const lp = cfg.kind === 'lp' && bot.actual;
   if (!lp && !bot.fills.length) {
-    return {
-      botId: bot.id, fitted: false, feeK: baseK, slippageBps: baseSlip, config: bot.config, error: null,
-      note: 'No recorded fills, so the fee and fill model stays at its defaults.',
-    };
+    return unfinished(bot, cfg, baseK, baseSlip, 'No recorded fills, so the fee and fill model stays at its defaults.');
   }
   const scales = FEE_SCALES;
   const slips = lp ? [baseSlip] : FILL_SLIPPAGES;
   const dwells = lp ? LP_DWELLS_MS : [0];
-  let best: { feeK: number; slippageBps: number; dwellMs: number; error: CalibrationError } | null = null;
+  let best: { feeK: number; slippageBps: number; dwellMs: number; perDay: number; error: CalibrationError } | null = null;
   for (const feeK of scales) {
     for (const slippageBps of slips) {
       for (const dwellMs of dwells) {
         let error: CalibrationError | null = null;
+        let perDay = 0;
         try {
-          const run = runBot(withFit(bot.config, feeK, slippageBps, lp ? dwellMs : undefined), data);
-          error = lp ? compareLp(bot.actual!, run) : compare(bot.fills, run.simFills);
+          const run = runBot(withFit(cfg, feeK, slippageBps, lp ? dwellMs : undefined), data);
+          perDay = run.rates[0]?.perDay ?? 0;
+          error = lp ? compareLp(bot.actual!, run, target) : compare(bot.fills, run.simFills);
         } catch {
           continue;
         }
         if (!error) continue;
-        if (!best || betterFit(error, feeK, slippageBps, dwellMs, best)) best = { feeK, slippageBps, dwellMs, error };
+        if (!best || betterFit(error, feeK, slippageBps, dwellMs, best)) {
+          best = { feeK, slippageBps, dwellMs, perDay, error };
+        }
       }
     }
   }
   if (!best) {
-    return {
-      botId: bot.id, fitted: false, feeK: baseK, slippageBps: baseSlip, config: bot.config, error: null,
-      note: 'The replay could not run, so the fee and fill model was not fitted.',
-    };
+    return unfinished(bot, cfg, baseK, baseSlip, 'The replay could not run, so the fee and fill model was not fitted.');
   }
+  const netError = target == null ? null : rel(best.perDay, target);
+  const error: CalibrationError = { ...best.error, netError };
+  const calibrated = netError != null && netError <= NET_ERROR_LIMIT;
   return {
     botId: bot.id, fitted: true, feeK: best.feeK, slippageBps: best.slippageBps,
-    config: withFit(bot.config, best.feeK, best.slippageBps, lp ? best.dwellMs : undefined), error: best.error,
+    config: withFit(cfg, best.feeK, best.slippageBps, lp ? best.dwellMs : undefined),
+    error, recordedPerDay: target, replayedPerDay: best.perDay, netError, movesError: error.movesError, calibrated,
     note: lp
-      ? 'The fee model was fitted to the recorded fees, moves, gas and rebalance cost.'
-      : 'The fee and fill model was fitted to the recorded fills.',
+      ? 'The fee model was fitted to recorded net units per day. The move count is reported separately.'
+      : 'The fee and fill model was fitted to the recorded fills. Net units per day are reported separately.',
   };
 }
 
 const pct = (n: number) => `${n < 0 ? '-' : '+'}${fmt(Math.abs(n) * 100)}%`;
 
-/** Lines for the summary. Every line that contains a digit is marked modeled. */
+function netLines(c: Calibration): string[] {
+  const unit = c.config.quote.symbol;
+  const recorded = c.recordedPerDay == null
+    ? 'Recorded net was not measured (on-chain actual).'
+    : `Recorded net ${signed(c.recordedPerDay)} ${unit}/day (on-chain actual).`;
+  const replayed = c.replayedPerDay == null
+    ? 'Replayed net was not measured (modeled).'
+    : `Replayed net ${signed(c.replayedPerDay)} ${unit}/day (modeled).`;
+  const net = c.netError == null
+    ? 'Net-units error was not measured (modeled).'
+    : `Net-units error ${pct(c.netError)} (modeled).`;
+  return [recorded, replayed, net, `Calibrated ${c.calibrated ? 'yes' : 'no'} (modeled).`];
+}
+
+/** Lines for the summary. Every line that contains a digit is marked modeled or on-chain actual. */
 export function calibrationMarkdown(c: Calibration): string {
-  if (!c.fitted || !c.error) return `${c.botId}: ${c.note} (modeled)`;
+  const who = `${pairLabel(c.config)} ${c.botId}`;
+  if (!c.fitted || !c.error) return [`${who}: ${c.note} (modeled)`, ...netLines(c)].join('\n');
+  const countWord = c.config.kind === 'lp' ? 'moves' : 'fills';
+  const countErr = ` ${countWord[0].toUpperCase()}${countWord.slice(1)} error ${pct(c.error.movesError)} (modeled).`;
   if (c.config.kind === 'lp') {
     const fee = c.error.priceMape == null ? 'Fee error was not measured (modeled).' : `Fees collected error ${pct(c.error.priceMape)} (modeled).`;
     const gas = c.error.feeMape == null ? 'Gas error was not measured (modeled).' : `Gas error ${pct(c.error.feeMape)} (modeled).`;
@@ -756,18 +914,41 @@ export function calibrationMarkdown(c: Calibration): string {
     const dwellMin = (c.config.dwellMs ?? 0) / 60_000;
     const dwell = `Outside-range dwell ${fmt(dwellMin)} minutes (modeled).`;
     return [
-      `${c.botId}: fee k ${fmt(c.feeK)} (modeled). ${dwell}`,
+      `${who}: fee k ${fmt(c.feeK)} (modeled). ${dwell}`,
       `${fee} ${gas}${swap}${loss}`,
-      `Recorded moves ${fmt(c.error.recorded)} and replayed moves ${fmt(c.error.replayed)} (modeled).`,
-      `Calibration error ${fmt(c.error.combined)} (modeled).`,
+      `Recorded moves ${fmt(c.error.recorded)} and replayed moves ${fmt(c.error.replayed)} (modeled).${countErr}`,
+      ...netLines(c),
     ].join('\n');
   }
   const fee = c.error.feeMape == null ? 'Fee error was not measured (modeled).' : `Fee error ${pct(c.error.feeMape)} (modeled).`;
   const price = c.error.priceMape == null ? 'Price error was not measured (modeled).' : `Price error ${pct(c.error.priceMape)} (modeled).`;
   return [
-    `${c.botId}: fee k ${fmt(c.feeK)} (modeled). Fill slippage ${fmt(c.slippageBps)} bps (modeled).`,
-    `Recorded fills ${fmt(c.error.recorded)} and replayed fills ${fmt(c.error.replayed)} (modeled).`,
+    `${who}: fee k ${fmt(c.feeK)} (modeled). Fill slippage ${fmt(c.slippageBps)} bps (modeled).`,
+    `Recorded fills ${fmt(c.error.recorded)} and replayed fills ${fmt(c.error.replayed)} (modeled).${countErr}`,
     `${price} ${fee}`,
-    `Calibration error ${fmt(c.error.combined)} (modeled).`,
+    ...netLines(c),
   ].join('\n');
+}
+
+export interface WhatIfRow {
+  id: string;
+  pair: string;
+  unit: string;
+  replayedPerDay: number | null;
+  calibrated: boolean;
+}
+
+/** What-if copy. Bots over the net-units limit are named as left out and are not given a rate. */
+export function whatIfMarkdown(rows: WhatIfRow[]): string {
+  const lines = [
+    '# What-if',
+    '',
+    `A what-if uses only a bot whose net-units error is at most ${fmt(NET_ERROR_LIMIT)} (modeled).`,
+  ];
+  const ok = rows.filter((r) => r.calibrated);
+  if (!ok.length) lines.push('No bot cleared that bar, so this run has no what-if (modeled).');
+  for (const r of ok) lines.push(`${r.pair} ${r.id}: ${signed(r.replayedPerDay ?? 0)} ${r.unit}/day (modeled).`);
+  const left = rows.filter((r) => !r.calibrated).length;
+  if (left) lines.push(`Uncalibrated bots left out: ${fmt(left)} (modeled).`);
+  return lines.join('\n');
 }

@@ -12,7 +12,7 @@ import { invertCandles, loadCandles, readGasPrice, readV3Pool, type FetchLike } 
 import { discoverPool } from '../src/backtest/pools';
 import { renderMarkdown, summaryJson, type RunWindow } from '../src/backtest/report';
 import { runBot, type BotConfig, type HarnessData } from '../src/backtest/run';
-import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, replayExit, ZERO_REPLAY_WARNING } from '../src/backtest/state';
+import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, pairLabel, recordedPerDay, replayExit, whatIfMarkdown, ZERO_REPLAY_WARNING } from '../src/backtest/state';
 
 const DAY = 86_400;
 
@@ -74,7 +74,7 @@ async function loadMarket(cfg: BotConfig, from: number, to: number, cacheDir: st
       { label: 'Active liquidity', value: liq, source: 'on-chain actual' },
     );
   }
-  if (gas > 0) onChain.push({ label: 'Gas price', value: gas, unit: 'native per gas', source: 'on-chain actual' });
+  if (gas > 0) onChain.push({ label: 'Current gas price', value: gas, unit: 'native per gas', source: 'on-chain actual' });
   const data: HarnessData = { candles, poolLiquidity: liq > 0 ? liq : undefined, onChain };
   const next: BotConfig = {
     ...cfg,
@@ -96,9 +96,25 @@ async function main() {
   const fromArg = arg('--from');
   const toArg = arg('--to');
   const blocks: string[] = [loaded.note, ''];
-  const jsonBots: unknown[] = [];
-  const calibrations = [];
+  const jsonBots: Record<string, unknown>[] = [];
   let replayed = 0;
+
+  const skippedRow = (bot: (typeof loaded.bots)[number], reason: string) => {
+    const row = {
+      id: bot.id,
+      pair: pairLabel(bot.config),
+      unit: bot.config.quote.symbol,
+      recordedPerDay: recordedPerDay(bot),
+      replayedPerDay: null as number | null,
+      netError: null as number | null,
+      movesError: null as number | null,
+      calibrated: false,
+      skip: reason,
+    };
+    jsonBots.push(row);
+    blocks.push(`${row.pair} ${bot.id}: not replayed (${reason}) (modeled).`);
+    blocks.push('');
+  };
 
   for (const bot of loaded.bots) {
     const span = bot.window
@@ -113,8 +129,7 @@ async function main() {
       cfg = await resolvePool(cfg, cacheDir);
       const why = blockReason(cfg);
       if (why) {
-        blocks.push(`${bot.id}: ${why}, so this bot was not replayed.`);
-        blocks.push('');
+        skippedRow(bot, why);
         continue;
       }
       const market = await loadMarket(cfg, from, to, cacheDir);
@@ -122,23 +137,44 @@ async function main() {
       cfg = market.cfg;
       if (bot.depth) data.poolDepth = bot.depth;
     } catch (e) {
-      blocks.push(`${bot.id}: replay did not run (${(e as Error).message}).`);
-      blocks.push('');
+      skippedRow(bot, `replay did not run (${(e as Error).message})`);
       continue;
     }
     replayed++;
     const cal = calibrateBot({ ...bot, config: cfg }, data);
-    calibrations.push({
-      botId: cal.botId, fitted: cal.fitted, feeK: cal.feeK, slippageBps: cal.slippageBps,
-      dwellMs: cal.config.dwellMs ?? 0, error: cal.error, note: cal.note,
-    });
     const summary = runBot(cal.config, data);
     const w: RunWindow = { from, to, inSample: cal.fitted };
     blocks.push(renderMarkdown([summary], w).trimEnd());
     blocks.push(calibrationMarkdown(cal));
     blocks.push('');
-    jsonBots.push({ id: bot.id, summary: summaryJson([summary], w).bots[0], calibration: calibrations[calibrations.length - 1] });
+    jsonBots.push({
+      id: bot.id,
+      pair: pairLabel(cal.config),
+      unit: cal.config.quote.symbol,
+      recordedPerDay: cal.recordedPerDay,
+      replayedPerDay: cal.replayedPerDay,
+      netError: cal.netError,
+      movesError: cal.movesError,
+      calibrated: cal.calibrated,
+      summary: summaryJson([summary], w).bots[0],
+      calibration: {
+        botId: cal.botId, fitted: cal.fitted, feeK: cal.feeK, slippageBps: cal.slippageBps,
+        dwellMs: cal.config.dwellMs ?? 0,
+        recordedPerDay: cal.recordedPerDay, replayedPerDay: cal.replayedPerDay,
+        netError: cal.netError, movesError: cal.movesError, calibrated: cal.calibrated,
+        error: cal.error, note: cal.note,
+      },
+    });
   }
+
+  blocks.push(whatIfMarkdown(jsonBots.map((b) => ({
+    id: String(b.id),
+    pair: String(b.pair),
+    unit: String(b.unit),
+    replayedPerDay: b.replayedPerDay as number | null,
+    calibrated: b.calibrated === true,
+  }))));
+  blocks.push('');
 
   const failed = replayExit(loaded.source, loaded.bots.length, replayed);
   if (failed) {
@@ -152,7 +188,10 @@ async function main() {
   if (md) { mkdirSync(dirname(resolve(md)), { recursive: true }); writeFileSync(md, text); }
   if (js) {
     mkdirSync(dirname(resolve(js)), { recursive: true });
-    writeFileSync(js, JSON.stringify({ source: loaded.source, note: loaded.note, replayed, bots: jsonBots }, null, 2));
+    const whatIf = jsonBots.filter((b) => b.calibrated === true).map((b) => ({
+      id: b.id, pair: b.pair, unit: b.unit, recordedPerDay: b.recordedPerDay, replayedPerDay: b.replayedPerDay, netError: b.netError,
+    }));
+    writeFileSync(js, JSON.stringify({ source: loaded.source, note: loaded.note, replayed, whatIf, bots: jsonBots }, null, 2));
   }
   if (failed) process.exit(failed);
 }

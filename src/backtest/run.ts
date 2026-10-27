@@ -64,6 +64,10 @@ export interface BotConfig {
   lowerPrice?: number;
   upperPrice?: number;
   gridCount?: number;
+  /** Quote per base when the bot opened. A grid seeds its levels from this, not from the first candle. */
+  startPrice?: number;
+  /** Seconds. Candles before this are not replayed. */
+  startedAt?: number;
   reinvest?: boolean;
   recenter?: boolean;
   trend?: TrendConfig;
@@ -136,6 +140,14 @@ function usdOf(cfg: BotConfig, price: number): { base: number; quote: number } {
   return { base, quote };
 }
 
+/** USD for one unit of the quote coin. A flipped pair (ETH quoted, USDC as base) uses the base stable and the price. */
+function usdPerQuoteUnit(cfg: BotConfig, price: number): number {
+  if (cfg.usdPerQuote != null) return cfg.usdPerQuote;
+  if (STABLES.has(cfg.quote.symbol)) return 1;
+  if (price > 0 && (cfg.usdPerBase != null || STABLES.has(cfg.base.symbol))) return (cfg.usdPerBase ?? 1) / price;
+  return 0;
+}
+
 function priceChanges(cfg: BotConfig, start: number, end: number): { symbol: string; pct: number }[] {
   const out: { symbol: string; pct: number }[] = [];
   if (STABLES.has(cfg.quote.symbol)) out.push({ symbol: cfg.quote.symbol, pct: 0 });
@@ -157,8 +169,8 @@ function finish(cfg: BotConfig, g: {
   priceStart: number; priceEnd: number; netVsHold: number;
 }, extra?: { onChain?: NamedNumber[]; modelNotes?: NamedNumber[]; simFills?: SimFill[] }): BotSummary {
   if (!(g.days > 0)) throw new Error('the window is empty');
-  const usd = usdOf(cfg, g.priceEnd);
-  const usdPerDay = (g.base * usd.base + g.quote * usd.quote) / g.days;
+  // One unit: every fee coin is already in the quote coin at the price when it was earned. `g.quote` is the net of that.
+  const usdPerDay = (g.quote / g.days) * usdPerQuoteUnit(cfg, g.priceEnd);
   const tier = cfg.feeTier ?? cfg.feeBps * 100;
   const modelNotes: NamedNumber[] = [...(extra?.modelNotes ?? [])];
   if (cfg.kind === 'lp') {
@@ -168,11 +180,10 @@ function finish(cfg: BotConfig, g: {
     );
   }
   return {
-    title: `${cfg.base.symbol}/${cfg.quote.symbol} ${kindWord[cfg.kind]}`,
+    title: `${cfg.chain} ${cfg.base.symbol}/${cfg.quote.symbol} ${kindWord[cfg.kind]}`,
     kind: cfg.kind,
     rates: [
       { symbol: cfg.quote.symbol, perDay: g.quote / g.days, source: 'modeled' },
-      { symbol: cfg.base.symbol, perDay: g.base / g.days, source: 'modeled' },
     ],
     usdPerDay, usdSource: 'modeled',
     moves: g.moves, movesWord: g.movesWord,
@@ -245,13 +256,12 @@ function runLp(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     shouldMove: e.lpShouldMove,
   });
   const price = r.priceEnd > 0 ? r.priceEnd : priceGuess;
-  const gasBase = cfg.gasToken === 'base' && price > 0 ? r.gas / price : 0;
-  const gasQuoteAmt = cfg.gasToken === 'base' ? 0 : r.gas;
   const endValue = r.endCoins.base * price + r.endCoins.quote - r.gas;
   const holdValue = r.startCoins.base * price + r.startCoins.quote;
+  // r.fees values each coin at the price of the minute it was earned. r.net subtracts gas, the open/move swap, and move loss.
   return finish(cfg, {
-    base: r.feeCoins.base - gasBase,
-    quote: r.feeCoins.quote - gasQuoteAmt - r.swapCost - r.moveLoss,
+    base: 0,
+    quote: r.net,
     days: r.days, moves: r.moves, movesWord: 'Moves',
     timeInRange: r.inRange, timeWord: 'Time in range',
     feeQuote: r.feeCoins.quote + (price > 0 ? r.feeCoins.base * price : 0),
@@ -275,10 +285,14 @@ function runGrid(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
   if (!(cfg.lowerPrice && cfg.upperPrice && cfg.gridCount)) throw new Error('a grid needs lowerPrice, upperPrice and gridCount');
   const costs = costsOf(cfg, depthOf(data));
   const px = (mid: number) => sellOf(mid, cfg.feeBps);
+  const bars = cfg.startedAt != null ? candles.filter((c) => c.t >= cfg.startedAt!) : candles;
+  const series = bars.length >= 2 ? bars : candles;
   let lower = cfg.lowerPrice, upper = cfg.upperPrice;
   let levels = e.calculateGridLevels(lower, upper, cfg.gridCount);
   const per = e.buyAmountPerInterval(cfg.gridCount, cfg.capital);
-  let intervals = e.buildIntervals(levels, px(candles[0].o), per);
+  // The bot opened at its saved start price, on its saved levels. The first candle open is a later print.
+  const seedMid = cfg.startPrice != null && cfg.startPrice > 0 ? cfg.startPrice : series[0].o;
+  let intervals = e.buildIntervals(levels, px(seedMid), per);
   let quote = cfg.capital;
   let base = 0;
   let fills = 0;
@@ -309,22 +323,26 @@ function runGrid(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     }
     fills++;
   };
-  const seeded = e.seedIntervals(intervals, px(candles[0].o), { pls: 0, cost: 0 }, candles[0].t * 1000);
+  const seeded = e.seedIntervals(intervals, px(seedMid), { pls: 0, cost: 0 }, series[0].t * 1000);
   intervals = seeded.intervals;
-  if (seeded.job) take(seeded.job, seeded.job.levelPrice, candles[0].t);
-  let prev = px(candles[0].o);
+  if (seeded.job) take(seeded.job, seeded.job.levelPrice, series[0].t);
+  let prev = px(seedMid);
   let inBars = 0;
   let recenter: RecenterState = { enabled: !!cfg.recenter, aboveSince: null, lastAt: null, count: 0 };
-  for (const bar of candles) {
+  const walk = (mid: number, t: number) => {
+    const p = px(mid);
+    if (p === prev) return;
+    const ev = e.evaluateTick(intervals, p, t * 1000);
+    intervals = ev.intervals;
+    for (const q of ev.queued) take(q, q.levelPrice, t);
+    prev = p;
+  };
+  // The first print can open away from the price the bot actually started at. Cross that gap, or the levels in
+  // between never fill.
+  walk(series[0].o, series[0].t);
+  for (const bar of series) {
     const path = bar.c >= bar.o ? [bar.o, bar.l, bar.h, bar.c] : [bar.o, bar.h, bar.l, bar.c];
-    for (const mid of path) {
-      const p = px(mid);
-      if (p === prev) continue;
-      const ev = e.evaluateTick(intervals, p, bar.t * 1000);
-      intervals = ev.intervals;
-      for (const q of ev.queued) take(q, q.levelPrice, bar.t);
-      prev = p;
-    }
+    for (const mid of path) walk(mid, bar.t);
     const close = px(bar.c);
     if (close >= lower && close <= upper) inBars++;
     if (recenter.enabled) {
@@ -345,15 +363,15 @@ function runGrid(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
       }
     }
   }
-  const priceEnd = candles[candles.length - 1].c;
+  const priceEnd = series[series.length - 1].c;
   const endValue = base * priceEnd + quote;
   return finish(cfg, {
     base: 0, quote: realized,
-    days: (candles[candles.length - 1].t - candles[0].t) / day,
+    days: (series[series.length - 1].t - series[0].t) / day,
     moves: fills, movesWord: 'Fills',
-    timeInRange: inBars / candles.length, timeWord: 'Time in range',
+    timeInRange: inBars / series.length, timeWord: 'Time in range',
     feeQuote,
-    priceStart: candles[0].o, priceEnd,
+    priceStart: seedMid, priceEnd,
     netVsHold: endValue - cfg.capital,
   }, { onChain: data.onChain, simFills });
 }

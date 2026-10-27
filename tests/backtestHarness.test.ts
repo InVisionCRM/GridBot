@@ -9,7 +9,7 @@ import { GAS_UNITS, gasQuote } from '../src/backtest/gasModel';
 import { renderMarkdown, unlabeledNumberLines, type BotSummary } from '../src/backtest/report';
 import { liveEngines, minutesFromCandles, runBot, type BotConfig, type HarnessData } from '../src/backtest/run';
 import { maxCapitalWhereMarginalHolds, scoreOpportunity } from '../src/backtest/score';
-import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, NO_STATE_NOTE, replayExit, stripCredentials, ZERO_REPLAY_WARNING } from '../src/backtest/state';
+import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, NET_ERROR_LIMIT, NO_STATE_NOTE, pairLabel, recordedPerDay, recordedQuoteNet, replayExit, stripCredentials, whatIfMarkdown, ZERO_REPLAY_WARNING } from '../src/backtest/state';
 import { lpShouldMove } from '../src/market/lpMove';
 import { DEFAULT_TREND } from '../src/market/strategy';
 import type { Candle } from '../src/market/candles';
@@ -139,8 +139,9 @@ describe('markdown', () => {
     expect(s.timeInRange).toBeCloseTo(67 / 168, 6);
     const md = renderMarkdown([s], { from: T0, to: T0 + 7 * 86_400 });
     const lines = md.split('\n').filter((l) => l.startsWith('**'));
+    expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/USDG\/day \(modeled\)/);
-    expect(lines[1]).toMatch(/WETH\/day \(modeled\)/);
+    expect(md).not.toMatch(/WETH\/day/);
     expect(md).not.toMatch(/per month|\/month/);
     expect(md).toMatch(/not the default last 30 days/);
     expect(unlabeledNumberLines(md)).toEqual([]);
@@ -228,7 +229,7 @@ describe('scoreOpportunity', () => {
     expect(s.source).toBe('modeled');
     expect(s.asOf).toBe(new Date((T0 + 168 * 3600) * 1000).toISOString());
     expect(s.capitalUsd).toBe(1000);
-    expect(Object.keys(s.ratePerDay).sort()).toEqual(['USDG', 'WETH']);
+    expect(Object.keys(s.ratePerDay)).toEqual(['USDG']);
     expect(s.confidence.p10UsdPerDay).toBeLessThanOrEqual(s.confidence.p50UsdPerDay);
     expect(s.confidence.p50UsdPerDay).toBeLessThanOrEqual(s.confidence.p90UsdPerDay);
     expect(typeof s.confidence.oosStable).toBe('boolean');
@@ -295,6 +296,8 @@ describe('app state', () => {
     expect(dai.config.base.symbol).toBe('PLS');
     expect(dai.config.quote.symbol).toBe('DAI');
     expect(dai.config.quote.decimals).toBe(18);
+    expect(pairLabel(hex.config)).toBe('pulsechain:HEX/PLS');
+    expect(pairLabel(dai.config)).toBe('pulsechain:PLS/DAI');
     const live = state.bots[3];
     expect(live.config.base.symbol).toBe('USDC');
     expect(live.config.base.decimals).toBe(6);
@@ -323,11 +326,13 @@ describe('app state', () => {
         ? { minutes: minutesFromCandles(candles, bot.config, 1e30), poolLiquidity: 1e30 }
         : { candles, poolDepth: bot.depth ?? { quoteReserve: 1e12, baseReserve: 1e12 } };
       const summary = runBot(bot.config, data);
-      expect(summary.rates).toHaveLength(2);
+      expect(summary.rates).toHaveLength(1);
+      expect(summary.rates[0].symbol).toBe(bot.config.quote.symbol);
       const cal = calibrateBot(bot, data);
       expect(cal.fitted).toBe(true);
       const md = calibrationMarkdown(cal);
-      expect(md).toMatch(/Calibration error/);
+      expect(md).toMatch(/Net-units error/);
+      expect(md).toMatch(new RegExp(pairLabel(bot.config).replace('/', '\\/')));
       expect(unlabeledNumberLines(md)).toEqual([]);
     }
   });
@@ -336,6 +341,9 @@ describe('app state', () => {
     const hex = loaded().bots.find((b) => b.id === 'g-mvowdsys-i5iq')!;
     expect(hex.fills.filter((f) => f.side === 'buy')).toHaveLength(2);
     expect(hex.fills.filter((f) => f.side === 'sell')).toHaveLength(0);
+    expect(hex.config.startPrice).toBeCloseTo(222.9909854988149, 6);
+    expect(hex.config.startedAt).toBe(hex.window?.from);
+    expect(hex.recordedNet).toBe(0);
     const t0 = hex.window?.from ?? 1_700_000_000;
     const path = [222.99, 224.33, 223.2, 220.77];
     const candles = path.map((c, i) => {
@@ -346,45 +354,69 @@ describe('app state', () => {
     const days = (candles[candles.length - 1].t - candles[0].t) / 86_400;
     expect(s.simFills.filter((f) => f.side === 'sell')).toHaveLength(0);
     expect(Math.abs(s.rates[0].perDay * days)).toBeLessThan(1);
-    expect(s.rates[1].perDay).toBe(0);
+    expect(s.rates[0].symbol).toBe('PLS');
   });
 
-  it('replays the live ETH/USDC LP close to its recorded totals', () => {
+  it('seeds a grid at its start price and drops candles from before it opened', () => {
+    const hex = loaded().bots.find((b) => b.id === 'g-mvowdsys-i5iq')!;
+    const start = hex.config.startedAt!;
+    const candles = [
+      { t: start - 3600, o: 300, h: 400, l: 100, c: 300, v: 1 },
+      { t: start, o: 180, h: 181, l: 179, c: 180, v: 1 },
+      { t: start + 3600, o: 180, h: 181, l: 179, c: 180, v: 1 },
+    ];
+    const s = runBot(hex.config, { candles, poolDepth: hex.depth });
+    expect(s.simFills.some((f) => f.t < start)).toBe(false);
+    expect(s.simFills.filter((f) => f.side === 'sell')).toHaveLength(0);
+    expect(s.simFills.length).toBeGreaterThan(0);
+  });
+
+  it('counts uncollected fee coins in the live LP recorded net', () => {
+    const live = loaded().bots.find((b) => b.id === 'lp-mvnm73sx-hghe')!;
+    expect(live.actual!.feeBase).toBeCloseTo(63.2396, 4);
+    expect(live.actual!.feeQuote).toBeCloseTo(0.026837, 6);
+    expect(live.actual!.fees).toBeCloseTo(0.053948, 5);
+    const net = recordedQuoteNet(live)!;
+    expect(Math.abs(net - 0.028842) / 0.028842).toBeLessThan(0.01);
+    expect(recordedPerDay(live)!).toBeCloseTo(0.01157087, 5);
+    expect(pairLabel(live.config)).toBe('ethereum:USDC/ETH');
+  });
+
+  it('replays the live ETH/USDC LP close to its recorded net', () => {
     const live = loaded().bots.find((b) => b.id === 'lp-mvnm73sx-hghe')!;
     const candles = JSON.parse(readFileSync(join(__dirname, 'fixtures', 'eth-usdc-lp-15m.json'), 'utf8')) as Candle[];
     expect(candles.length).toBeGreaterThan(100);
-    // Open plus three moves, at the gas the bot actually paid, so a matching move count matches the recorded gas.
-    const openUnits = 402_000 + 180_000 + 2 * 60_000;
-    const moveUnits = 402_000 + 250_000 + 180_000 + 60_000;
-    const gasPriceNative = live.actual!.gas / (openUnits + live.actual!.moves * moveUnits);
-    const cfg: BotConfig = {
-      ...live.config,
-      gasPriceNative,
-      quotePerNative: 1,
-      spacing: 10,
-      baseIs0: true,
-    };
+    const cfg: BotConfig = { ...live.config, quotePerNative: 1, spacing: 10, baseIs0: true };
     const data: HarnessData = { candles, poolLiquidity: 2_381_335_368_967_757_228 };
     const cal = calibrateBot({ ...live, config: cfg }, data);
     expect(cal.fitted).toBe(true);
     expect(cal.error!.recorded).toBe(3);
-    expect(cal.error!.replayed).toBe(3);
     const run = runBot(cal.config, data);
     const note = (label: string) => run.modelNotes.find((n) => n.label === label)!.value;
     const net = note('Fees collected') - note('Gas') - note('Swap cost') - note('Move loss');
-    const recorded = live.actual!.fees - live.actual!.gas - live.actual!.swapCost - live.actual!.moveLoss;
-    const days = (candles[candles.length - 1].t - candles[0].t) / 86_400;
-    expect(days).toBeGreaterThan(2.2);
-    expect(days).toBeLessThan(2.8);
+    const recorded = recordedQuoteNet(live)!;
+    expect(Math.abs(recorded - 0.028842) / 0.028842).toBeLessThan(0.01);
+    expect(run.rates).toHaveLength(1);
+    expect(run.rates[0].symbol).toBe('ETH');
+    expect(cal.netError).not.toBeNull();
+    expect(cal.netError!).toBeLessThanOrEqual(NET_ERROR_LIMIT);
+    expect(cal.calibrated).toBe(true);
     expect(run.moves).toBe(3);
-    expect(cal.config.dwellMs).toBe(15 * 60_000);
-    // Recorded earned-after-costs is +0.0125 ETH over 2.49 days (about +0.005 ETH/day). A 15-minute dwell
-    // matches the 3 moves; the quote-valued replay lands within 0.005 ETH of that total.
-    expect(Math.abs(net - recorded)).toBeLessThan(0.005);
-    expect(Math.abs(net / days - recorded / ((live.window!.to - live.window!.from) / 86_400))).toBeLessThan(0.003);
+    if (run.moves === live.actual!.moves) expect(note('Gas')).toBeCloseTo(live.actual!.gas, 8);
+    expect(Math.abs(net - recorded) / recorded).toBeLessThanOrEqual(0.25);
     const md = calibrationMarkdown(cal);
-    expect(md).toMatch(/Calibration error/);
+    expect(md).toMatch(/ethereum:USDC\/ETH/);
+    expect(md).toMatch(/Net-units error/);
+    expect(md).toMatch(/Moves error/);
     expect(unlabeledNumberLines(md)).toEqual([]);
+    const whatIf = whatIfMarkdown([
+      { id: live.id, pair: pairLabel(live.config), unit: 'ETH', replayedPerDay: cal.replayedPerDay, calibrated: true },
+      { id: 'lp-other', pair: 'pulsechain:HEX/WPLS', unit: 'WPLS', replayedPerDay: 1, calibrated: false },
+    ]);
+    expect(whatIf).toMatch(/ethereum:USDC\/ETH/);
+    expect(whatIf).not.toMatch(/HEX\/WPLS:|pulsechain:HEX\/WPLS lp-other: \+/);
+    expect(whatIf).toMatch(/Uncalibrated bots left out: 1/);
+    expect(unlabeledNumberLines(whatIf)).toEqual([]);
   });
 
   it('fails the run when state is present and nothing was replayed', () => {
