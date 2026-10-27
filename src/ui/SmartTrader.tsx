@@ -11,6 +11,7 @@ import { errMsg, botView, type AnyObj, type Nav } from './model';
 import { L } from './Tip';
 import { useOpportunities } from './Opportunities';
 import { TokenTraderPanel } from './TokenTrader';
+import { haltText } from './haltText';
 
 type Risk = 'safe' | 'medium' | 'any';
 interface Opts { grid: boolean; lp: boolean; newTokens: boolean; risk: Risk; slots: number; stopLossPct: number }
@@ -200,8 +201,8 @@ function AccountCard({ s, x, nav, busy, run }: { s: AnyObj; x: AnyObj; nav: Nav;
       </div>
       {x.halted && <div className="banner error"><span className="grow">Stopped by the loss limit: {x.halted}.</span></div>}
       {x.killed && (
-        <div className="banner error">
-          <span className="grow">Stopped by {x.killed}: nothing is sent for this budget (no swap, close or new bot). Its bots stay stopped until you resume them on their pages.</span>
+        <div className="banner error" role="status">
+          <span className="grow">Stopped by {x.killed}{x.killHalt ? ` (${haltText(x.killHalt)})` : ''}: nothing is sent for this budget (no swap, close or new bot). Its bots stay stopped until you resume them on their pages.</span>
           <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/autopilot/carry-on', 'POST', { chainId: x.chainId }))}>Carry on</button>
         </div>
       )}

@@ -20,7 +20,7 @@
  * budget's coin at today's prices; the gas its swaps pay comes out of the account's own coin of the chain.
  */
 import { FundsError, type Holding, type MultiBot } from './multi';
-import { systemHalt } from './audit';
+import { systemHalt, type Halt } from './audit';
 import type { Store } from './store';
 import type { Emit } from './activity';
 import type { Mode } from './engine';
@@ -60,8 +60,10 @@ export interface Account {
   bots: AutoBot[]; pending: PendingSwap[]; startedAt: number;
   /** Stopped by the loss limit: why */
   halted: string | null;
-  /** Stopped by KILL ALL / STOP chain: nothing is sent for it until it is turned on again */
+  /** Stopped by Stop all / STOP chain: nothing is sent for it (no swap, close or new bot) until Carry on */
   killed: string | null;
+  /** The stop audit record of that press */
+  killHalt?: Halt | null;
   /** What bots removed by hand had cost: out of its hands, so out of the loss limit's baseline */
   withdrawn: number;
 }
@@ -151,7 +153,7 @@ export class Autopilot {
     // Version 1 kept its swaps' gas apart; it now comes out of the account's own coin of the chain
     if (raw && raw.version !== 2) for (const a of this.state.accounts) if (this.chainOn(a.budget.chainId)) this.add(a, this.nativeSym(a.budget.chainId), -a.gasNative);
     d.bot.holdings = () => this.holdings();
-    d.bot.onStop = (chainId) => this.kill(chainId);
+    d.bot.stopHooks.push((chainId, halt) => this.kill(chainId, halt));
   }
 
   private now() { return (this.d.now ?? Date.now)(); }
@@ -408,7 +410,7 @@ export class Autopilot {
         const x = a.coins[a.budget.coin] ?? 0;
         if (!a.halted && !this.holds(a) && x > 0) await this.d.bot.assertCoin(a.budget.chainId, coin(a.budget.chainId, a.budget.coin), x);
       }
-      if (this.kills.slice(k).some((c) => c == null || this.state.budgets.some((b) => b.chainId === c))) throw new Error('KILL ALL or STOP was pressed while it was turning on, so it stays off.');
+      if (this.kills.slice(k).some((c) => c == null || this.state.budgets.some((b) => b.chainId === c))) throw new Error('Stop all or STOP was pressed while it was turning on, so it stays off.');
       for (const b of offs) b.retiring = null; // asked to close but never started (a stopped bot): cancelled by turning on
       if (!this.state.accounts.length) this.state.accounts = this.state.budgets.map((b) => ({ budget: b, coins: { [b.coin]: b.amount }, gasNative: 0, bots: [], pending: [], startedAt: this.now(), halted: null, killed: null, withdrawn: 0 }));
       this.state.on = true;
@@ -426,7 +428,7 @@ export class Autopilot {
    */
   turnOff(sell: boolean) {
     this.state.on = false;
-    if (sell) { this.state.closeAll = true; for (const a of this.state.accounts) a.killed = null; }
+    if (sell) { this.state.closeAll = true; for (const a of this.state.accounts) { a.killed = null; a.killHalt = null; } }
     this.say(sell ? 'off: closing its bots to cash' : 'off: its bots keep running on their own; turn it on again to manage them');
     this.save();
   }
@@ -434,20 +436,22 @@ export class Autopilot {
    * KILL ALL (chainId null) or STOP chain: nothing more is sent for those budgets (no swap, close or new bot) until
    * Carry on. On or off is left as it was.
    */
-  kill(chainId: number | null) {
+  kill(chainId: number | null, halt: Halt) {
     this.kills.push(chainId);
-    const why = chainId == null ? 'KILL ALL' : `STOP ${this.chainName(chainId)}`;
+    const why = chainId == null ? 'Stop all' : `STOP ${this.chainName(chainId)}`;
     const hit = this.state.accounts.filter((a) => chainId == null || a.budget.chainId === chainId);
     if (!hit.length) return;
-    for (const a of hit) a.killed = why;
+    for (const a of hit) { a.killed = why; a.killHalt = halt; }
     this.say(`${why}: nothing more is sent for ${hit.map((a) => this.chainName(a.budget.chainId)).join(', ')} until you carry on`, 'warn', chainId ?? undefined);
+    // The stop audit: the same record the bots got, so the smart trader's stop is traceable to the press.
+    this.d.emit({ type: 'stopped', kind: 'system', level: 'warn', notify: true, msg: `Smart trader stopped by ${why}`, data: { halt }, ...(chainId != null ? { chainId } : {}) });
     this.save();
   }
   /** After KILL ALL / STOP chain: that budget sends again (closes, swaps back, and new bots while it is on). */
   carryOn(chainId: number) {
     const a = this.state.accounts.find((x) => x.budget.chainId === chainId && x.killed);
     if (!a) throw new Error(`The ${this.chainName(chainId)} budget isn't stopped.`);
-    a.killed = null;
+    a.killed = null; a.killHalt = null;
     this.state.reviewedAt = null;
     this.say(`${this.chainName(chainId)}: carrying on after the stop`, 'info', chainId);
     this.save();
@@ -728,7 +732,7 @@ export class Autopilot {
       this.failed.delete(wayKey(c.o, c.how));
       this.say(`opened ${c.label} as a ${c.how === 'lp' ? `liquidity range ±${(c.o.lp!.bandPct * 100).toFixed(0)}%` : `grid ±${(c.o.grid!.bandPct * 100).toFixed(0)}%, ${c.o.grid!.gridCount} levels`} with ${fmt(amount)} ${spend}${spend !== a.budget.coin ? ` (≈ ${fmt(amount * r)} ${a.budget.coin})` : ''}: ${why}`, 'success', chainId);
       // KILL ALL / STOP while it was starting: stopped at once (it keeps its slot; Resume and Carry on bring it back)
-      if (a.killed) { if (c.how === 'grid') bot.stop(id); else bot.stopLp(id); this.say(`${c.label} started as ${a.killed} came: stopped at once`, 'warn', chainId); }
+      if (a.killed) { const h = a.killHalt ?? systemHalt('autopilot', a.killed, this.now()); if (c.how === 'grid') bot.stop(id, h); else bot.stopLp(id, h); this.say(`${c.label} started as ${a.killed} came: stopped at once`, 'warn', chainId); }
       this.save();
       return true;
     } catch (e) {
@@ -749,7 +753,7 @@ export class Autopilot {
         return {
           chainId: c, chain: this.chainName(c), coin: a.budget.coin, amount: a.budget.amount,
           coins: a.coins, free: this.free(a), value: this.value(a), pending: a.pending.length, startedAt: a.startedAt,
-          halted: a.halted, killed: a.killed, withdrawn: a.withdrawn, gasNative: a.gasNative, nativeSym: on ? this.nativeSym(c) : null, holds: this.holds(a),
+          halted: a.halted, killed: a.killed ?? null, killHalt: a.killHalt ?? null, withdrawn: a.withdrawn, gasNative: a.gasNative, nativeSym: on ? this.nativeSym(c) : null, holds: this.holds(a),
           bots: a.bots.map((b) => {
             const here = on && this.d.bot.hasBot(b.kind, b.id);
             const v = here ? this.d.bot.botValue(b.kind, b.id) : null, r = this.rate(c, b.spend), st = here ? this.d.bot.botStatus(b.kind, b.id) : null;

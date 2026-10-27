@@ -180,8 +180,14 @@ export class MultiBot {
   readonly taxWatch: TaxWatch;
   /** The smart trader's live coins not in a bot (set by it): counted in allocations, so no bot or Convert takes them */
   holdings: (() => Holding[]) | null = null;
-  /** Told of KILL ALL (chainId null) and STOP chain, after the bots are stopped: the smart trader stops too */
-  onStop: ((chainId: number | null) => void) | null = null;
+  /**
+   * Told of Stop all (chainId null) and STOP chain, after the bots are stopped, with the audit record: the smart trader
+   * and the token trader stop opening anything new. The one stop hook system (it replaced onStop).
+   */
+  readonly stopHooks: ((chainId: number | null, halt: Halt) => void)[] = [];
+  /** Stop all / STOP chain presses, numbered: a start that was under way when one landed is refused (stopWins) */
+  private stopSeq = 0;
+  private stopLog: { seq: number; chainId: number | null; halt: Halt }[] = [];
 
   constructor(private readonly d: MultiDeps) {
     this.hub = d.hub ?? Hub.single(d.net, d.reader, d.signer, { gate: new TxGate(), nonce: new SharedNonce() });
@@ -331,17 +337,20 @@ export class MultiBot {
 
   // ── Grids ──────────────────────────────────────────────────────────────
   async add(p: StartParams): Promise<string> {
+    const guard = this.startGuard(() => this.hub.def(p.stable ?? this.d.net.defaultQuote).chainId);
     if (p.mode === 'live') await this.assertCovers(p.stable ?? this.d.net.defaultQuote, p.totalCapitalUsd, p.limits);
     const slot = freshState(this.d.net);
     slot.limits = { ...this.multi.defaults, ...(p.limits ?? {}) };
     this.multi.grids.push(slot);
     this.persist();
     const eng = this.attach(slot.id);
-    try { await eng.start({ ...p, limits: slot.limits }); } catch (e) { this.remove(slot.id); throw e; }
+    try { await eng.start({ ...p, limits: slot.limits, guard: p.guard ?? guard }); } catch (e) { this.remove(slot.id); throw e; }
     return slot.id;
   }
   async start(id: string, p: StartParams) {
     const eng = this.engine(id);
+    const guard = p.guard ?? this.startGuard(() => this.hub.def(p.stable ?? eng.state.stable).chainId);
+    p = { ...p, guard };
     // A running grid is refused by eng.start; checking coverage first would report a misleading shortfall.
     if (p.mode === 'live' && eng.state.status !== 'running') await this.assertCovers(p.stable ?? eng.state.stable, p.totalCapitalUsd, p.limits);
     await eng.start(p);
@@ -429,13 +438,14 @@ export class MultiBot {
 
   // ── Trend bots ─────────────────────────────────────────────────────────
   async addTrend(p: TrendStartParams): Promise<string> {
+    const guard = p.guard ?? this.startGuard(() => this.hub.def(p.quote).chainId);
     if (p.mode === 'live') await this.assertCovers(p.quote, p.capital, p.limits);
     const slot = freshTrend(this.d.net);
     slot.limits = { ...this.multi.defaults, ...(p.limits ?? {}) };
     this.multi.trends.push(slot);
     this.persist();
     const eng = this.attachTrend(slot.id);
-    try { await eng.start({ ...p, limits: slot.limits }); } catch (e) { this.removeTrend(slot.id, true); throw e; }
+    try { await eng.start({ ...p, limits: slot.limits, guard }); } catch (e) { this.removeTrend(slot.id, true); throw e; }
     return slot.id;
   }
   resumeTrend(id: string) { this.trend(id).resume(); }
@@ -470,6 +480,7 @@ export class MultiBot {
 
   // ── Liquidity-position bots ─────────────────────────────────────────────
   async addLp(p: LpStartParams): Promise<string> {
+    const guard = p.guard ?? this.startGuard(() => this.hub.def(p.market).chainId);
     if (p.mode === 'live') {
       await this.assertCovers(p.market, p.capital, p.limits);
       if (p.baseAmount) this.assertHolds(p.market, p.baseAmount);
@@ -478,7 +489,7 @@ export class MultiBot {
     this.multi.lps.push(slot);
     this.persist();
     const eng = this.attachLp(slot.id);
-    try { await eng.start(p); } catch (e) { this.removeLp(slot.id, true); throw e; }
+    try { await eng.start({ ...p, guard }); } catch (e) { this.removeLp(slot.id, true); throw e; }
     return slot.id;
   }
   stopLp(id: string, why?: Halt) { this.lp(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/lps/:id/stop', this.now())); }
@@ -555,16 +566,43 @@ export class MultiBot {
     return { base: s.idle.base, quote: v - s.idle.base * s.lastPrice! };
   }
 
+  /** Mark a start: the guard it gets says which Stop all / STOP chain (for its chain) landed while it was starting. */
+  private startGuard(chainOf: () => number): () => Halt | null {
+    const mark = this.stopSeq;
+    return () => {
+      let chainId: number | null = null;
+      try { chainId = chainOf(); } catch { /* unknown market: only Stop all applies */ }
+      for (const s of this.stopLog) if (s.seq > mark && (s.chainId == null || s.chainId === chainId)) return s.halt;
+      return null;
+    };
+  }
+  private noteStop(chainId: number | null, halt: Halt) {
+    this.stopLog.push({ seq: ++this.stopSeq, chainId, halt });
+    if (this.stopLog.length > 50) this.stopLog.shift();
+    for (const h of this.stopHooks) {
+      try { h(chainId, halt); } catch (e) { this.d.log.error(`stop hook: ${(e as Error).message}`); }
+    }
+  }
+
   /** KILL ALL: stop every grid and trend bot; queued jobs dropped, nothing new is sent. */
-  stopAll() {
-    const halt = requestHalt('stop-all', 'POST /api/bot/stop-all', this.now());
+  stopAll(why?: Halt) {
+    const halt = why ?? requestHalt('stop-all', 'POST /api/bot/stop-all', this.now());
     let n = 0;
     for (const e of this.engines.values()) if (e.state.status === 'running') { e.stop(halt); n++; }
     for (const e of this.trendEngines.values()) if (e.state.status === 'running') { e.stop(halt); n++; }
     for (const e of this.lpEngines.values()) if (e.state.status === 'running') { e.stop(halt); n++; }
     this.d.log.warn(`KILL ALL — ${n} bot(s) stopped (grids, trend and liquidity bots).`);
     this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'error', notify: true, msg: `KILL ALL — ${n} bot(s) stopped`, data: { halt } });
-    this.onStop?.(null);
+    this.noteStop(null, halt);
+  }
+
+  /** Stop one bot by id, whatever its kind (POST /api/bot/stop { id }). */
+  stopById(id: string): 'grid' | 'trend' | 'lp' {
+    const halt = requestHalt('bot-stop', 'POST /api/bot/stop', this.now());
+    if (this.multi.grids.some((g) => g.id === id)) { this.stop(id, halt); return 'grid'; }
+    if (this.multi.trends.some((g) => g.id === id)) { this.stopTrend(id, halt); return 'trend'; }
+    if (this.multi.lps.some((g) => g.id === id)) { this.stopLp(id, halt); return 'lp'; }
+    throw new Error(`Unknown bot ${id}`);
   }
 
   /** Stop every bot on one chain (other chains keep running). */
@@ -577,7 +615,7 @@ export class MultiBot {
     for (const e of this.lpEngines.values()) if (e.chainId === c.id && e.state.status === 'running') { e.stop(halt); n++; }
     this.d.log.warn(`STOP ${c.name} — ${n} bot(s) stopped.`);
     this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'warn', notify: true, chainId: c.id, msg: `STOP ${c.name} — ${n} bot(s) stopped`, data: { halt } });
-    this.onStop?.(c.id);
+    this.noteStop(c.id, halt);
     return n;
   }
 

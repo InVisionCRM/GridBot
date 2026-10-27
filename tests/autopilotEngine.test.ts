@@ -327,10 +327,10 @@ describe('smart trader: stops, races and settling (paper, mock chain)', () => {
     let once = true;
     gate.run = async (fn) => { const r = await run(fn); if (once) { once = false; bot.stopAll(); } return r; };
     await ap.turnOn();
-    expect(acct().killed).toBe('KILL ALL');
+    expect(acct().killed).toBe('Stop all');
     expect(acct().bots).toHaveLength(0);
     expect(bot.status().grids).toHaveLength(0);
-    expect(log()).toMatch(/couldn't open HEX\/PLS: stopped meanwhile \(KILL ALL\): nothing more is sent/);
+    expect(log()).toMatch(/couldn't open HEX\/PLS: stopped meanwhile \(Stop all\): nothing more is sent/);
     expect(log()).not.toMatch(/skipped until the next daily review/);
     ap.carryOn(NET.chainId);
     await ap.tick();
@@ -391,7 +391,7 @@ describe('smart trader: stops, races and settling (paper, mock chain)', () => {
     ];
     bot.stopAll();
     ap.carryOn(NET.chainId);
-    expect(ap.state.accounts.map((a) => a.killed)).toEqual([null, 'KILL ALL']);
+    expect(ap.state.accounts.map((a) => a.killed)).toEqual([null, 'Stop all']);
   });
 
   it("budgets can't be set up anew while a check is running (an open under way would be left behind)", async () => {
@@ -615,7 +615,7 @@ describe('smart trader (live, mock chain)', () => {
     t.acct().coins = { DAI: 0, PLS: 300 / P0 }; // PLS to swap back
     t.bot.stopAll();
     expect(t.ap.state.on).toBe(true);
-    expect(t.acct().killed).toBe('KILL ALL');
+    expect(t.acct().killed).toBe('Stop all');
     const sends = t.chain.sent.length;
     await t.ap.tick();
     expect(t.chain.sent.length).toBe(sends);
@@ -629,7 +629,7 @@ describe('smart trader (live, mock chain)', () => {
     const t = setup({ mode: 'live', amount: 300 });
     const check = t.bot.assertCoin.bind(t.bot);
     t.bot.assertCoin = async (...a) => { await check(...a); t.bot.stopAll(); };
-    await expect(t.ap.turnOn()).rejects.toThrow(/KILL ALL or STOP was pressed while it was turning on/);
+    await expect(t.ap.turnOn()).rejects.toThrow(/Stop all or STOP was pressed while it was turning on/);
     expect(t.ap.state.on).toBe(false);
     expect(t.bot.status().grids).toHaveLength(0);
   });

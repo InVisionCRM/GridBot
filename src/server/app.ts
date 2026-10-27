@@ -247,7 +247,14 @@ export function createApp(o: AppOpts) {
   }));
   // Back-compat aliases (single-grid era)
   app.post('/api/bot/start', wrap(async (req) => { const id = await bot.add(startBody(req.body ?? {})); void bot.tickAll(); return { ok: true, id }; }));
-  app.post('/api/bot/stop', wrap(() => bot.stopAll()));
+  // Single-grid era alias. It used to stop every bot with an empty body; now it stops one bot ({ id }) and stops all
+  // only with an explicit { all: true }. Like every host route it answers loopback only (phones: owner login).
+  app.post('/api/bot/stop', wrap((req) => {
+    const b = (req.body ?? {}) as { id?: unknown; all?: unknown };
+    if (b.all === true) { bot.stopAll(); return { ok: true, stopped: 'all' }; }
+    if (typeof b.id === 'string' && b.id) return { ok: true, stopped: bot.stopById(b.id) };
+    throw new Error('Send { "id": "<bot id>" } to stop one bot, or { "all": true } to stop every bot.');
+  }));
   app.post('/api/bot/resume', wrap(() => {
     const g = bot.status().grids.find((x) => x.config && x.status !== 'running');
     if (!g) throw new Error('No stopped grid to resume');
@@ -335,6 +342,7 @@ export function createApp(o: AppOpts) {
   app.post('/api/autopilot/carry-on', wrap((req) => { ap().carryOn(Number(req.body?.chainId)); void ap().tick(); return plain(ap().status()); }));
   // { sell: true } closes every bot it runs to cash; false leaves them running unmanaged
   app.post('/api/autopilot/off', wrap((req) => { ap().turnOff(req.body?.sell === true); void ap().tick(); return plain(ap().status()); }));
+  // { chainId }: that budget opens and swaps again after Stop all / STOP chain
   app.post('/api/autopilot/review', wrap(async () => { await ap().review(true); void bot.tickAll(); return plain(ap().status()); }));
 
   const tt = () => { if (!o.tokenTrader) throw new Error('The token trader is not available.'); return o.tokenTrader; };
@@ -352,6 +360,8 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
   app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
+  // After Stop all / STOP chain: new buys and snipes may happen again
+  app.post('/api/token-trader/resume-entries', wrap(() => { tt().resumeEntries(); return plain(tt().status()); }));
 
   // ── Friends' copies: the host's Tools → Friends, and the relay the copies fetch candles through ─────
   app.get('/api/host/gecko', wrap(async (req, res) => {
