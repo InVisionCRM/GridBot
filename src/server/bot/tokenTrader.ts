@@ -77,6 +77,12 @@ export interface Position {
   tp2Done: boolean;
   source: 'scan' | 'snipe';
   exitPlan: string;
+  /**
+   * Live only: a split sell stopped partway (a part failed, reverted, or Off completely landed between parts). The
+   * token amount is re-read from the wallet before this position may sell again; the remaining parts are never
+   * assumed sold.
+   */
+  reconcile?: boolean;
 }
 
 export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null }
@@ -123,6 +129,7 @@ export interface LiveFill { tokens: number; spent: number; spentUsd: number; pri
 export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string }
 
 const HOUR = 3600_000;
+const num = (n: number) => +n.toPrecision(6);
 const FEED_MAX = 80;
 const TRADE_MAX = 200;
 
@@ -155,6 +162,11 @@ export class TokenTrader {
     };
     signerReady?: (chainId: number) => boolean;
     sniper?: PoolSniper;
+    /**
+     * The wallet's on-chain balance of a live position's token (human units), for reconciling after a partial,
+     * failed or halted split sell. null = unknown (no key, read failed).
+     */
+    balanceOf?: (p: Position) => Promise<number | null>;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
   }) {
@@ -169,7 +181,8 @@ export class TokenTrader {
    * out on the first boot after the update.
    */
   private migrateOffMode(loaded: TraderState | null | undefined) {
-    if (!loaded || loaded.version !== 1 || loaded.on !== false || loaded.offMode != null) return;
+    // Only a file that is explicitly on skips the check: a missing `on` is not "on".
+    if (!loaded || loaded.version !== 1 || loaded.on === true || loaded.offMode != null) return;
     const live = this.state.positions.filter((p) => p.mode === 'live').length;
     if (live > 0) {
       this.state.offMode = 'full';
@@ -321,11 +334,12 @@ export class TokenTrader {
     if (this.busy || !this.canSell()) return;
     this.busy = true;
     try {
+      // cleared first: a sell that stopped partway sets it inside exits() and must stay visible
+      this.lastError = null;
       if (this.state.on) await this.takeSnipes();
       await this.exits();
       // Turned off while the snipes or exits were awaited: no new entries this tick.
       if (this.state.on) await this.scanEntries();
-      this.lastError = null;
     } catch (e) {
       this.lastError = (e as Error).message;
     } finally {
@@ -471,6 +485,22 @@ export class TokenTrader {
     };
   }
 
+  /**
+   * Set a live position's tokens from the wallet. Other open live positions in the same token keep their share; this one
+   * gets what is left. true = reconciled (flag cleared); false = balance unknown, so it must not sell this tick.
+   */
+  private async reconcile(p: Position): Promise<boolean> {
+    const bal = this.d.balanceOf ? await this.d.balanceOf(p).catch(() => null) : null;
+    if (bal == null || !Number.isFinite(bal)) return false;
+    const others = this.state.positions.filter((x) => x !== p && x.mode === 'live' && x.chainId === p.chainId && x.token.toLowerCase() === p.token.toLowerCase())
+      .reduce((s, x) => s + x.tokens, 0);
+    const before = p.tokens;
+    p.tokens = Math.max(0, Math.min(bal - others, p.entryTokens));
+    p.reconcile = false;
+    if (Math.abs(before - p.tokens) > p.entryTokens * 1e-6) this.say(`${p.label}: tokens set from the wallet, ${num(before)} → ${num(p.tokens)}`, 'warn');
+    return true;
+  }
+
   private async exits() {
     const left: Position[] = [];
     for (const p of this.state.positions) {
@@ -482,30 +512,50 @@ export class TokenTrader {
         // Off completely landed while the mark was read: don't sell (a live send is refused by canSell too).
         if (!this.canSell()) { left.push(p); continue; }
       }
+      if (p.mode === 'live' && p.reconcile) {
+        // the last split sell stopped partway: take the wallet's balance before deciding anything
+        if (!(await this.reconcile(p))) { left.push(p); continue; }
+        if (!(p.tokens > p.entryTokens * 1e-8)) continue;
+      }
       if (p.price > p.peak) p.peak = p.price;
       const d = decideExit(this.exitOf(p));
       p.exitPlan = d.action === 'hold' ? 'hold' : d.why;
       if (d.action === 'hold') { left.push(p); continue; }
       const qty = Math.min(p.tokens, p.entryTokens * d.frac);
       const parts = splitSell(qty, Math.max(p.tokenReserve, 1e-12), p.feeBps, this.state.options.maxImpact);
-      let quote = 0, sold = 0;
+      let quote = 0, sold = 0, stopped: string | null = null;
       if (p.mode === 'live' && this.d.live) {
+        // Each part's fill is booked as it lands. A part that fails, or Off completely between parts, stops the rest;
+        // what really left the wallet is then read back (reconcile), never assumed.
         for (const part of parts) {
-          const s = await this.d.live.sell(p, part, this.limits());
-          quote += s.quoteOut; sold += s.tokensIn;
+          if (!this.canSell()) { stopped = 'turned off completely'; break; }
+          try {
+            const s = await this.d.live.sell(p, part, this.limits());
+            quote += s.quoteOut; sold += s.tokensIn;
+          } catch (e) { stopped = (e as Error).message; break; }
         }
       } else {
         const model = this.model(p);
         for (const part of parts) { quote += simSell(part, p.price, model).quote; sold += part; }
       }
-      p.tokens -= sold;
-      const usd = quote * p.usdPerSpend;
-      const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
-      this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why: d.why, pnlUsd: usd - cost });
-      this.say(`sold ${p.label}: ${d.why}`, usd - cost >= 0 ? 'success' : 'warn');
-      if (d.why.startsWith('take profit') && !p.tp1Done) p.tp1Done = true;
-      else if (d.why.startsWith('take profit')) p.tp2Done = true;
-      if (p.tokens > p.entryTokens * 1e-8) left.push(p);
+      p.tokens = Math.max(0, p.tokens - sold);
+      if (sold > 0) {
+        const usd = quote * p.usdPerSpend;
+        const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
+        const why = stopped ? `${d.why} (partial: ${num(sold)} of ${num(qty)})` : d.why;
+        this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost });
+        this.say(`sold ${p.label}: ${why}`, usd - cost >= 0 ? 'success' : 'warn');
+        // A take profit that sold anything counts as taken (re-running it would sell another full third).
+        if (d.why.startsWith('take profit') && !p.tp1Done) p.tp1Done = true;
+        else if (d.why.startsWith('take profit')) p.tp2Done = true;
+      }
+      if (stopped) {
+        this.lastError = `${p.label}: sell stopped after ${num(sold)} of ${num(qty)} — ${stopped}`;
+        this.say(`${p.label}: sell stopped partway (${stopped}); reading the wallet balance before it sells again`, 'warn');
+        p.reconcile = true;
+        await this.reconcile(p);
+      }
+      if (p.tokens > p.entryTokens * 1e-8 || p.reconcile) left.push(p);
     }
     this.state.positions = left;
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;

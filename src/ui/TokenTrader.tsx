@@ -15,6 +15,21 @@ export function choiceText(c: { livePositions: number }): string {
   return `Token trader has ${c.livePositions} live positions unwatched — choose: run exits / keep fully off`;
 }
 
+/** The confirm before "Run exits" restarts live selling on positions nobody watched since the update. */
+export function runExitsConfirmText(n: number): string {
+  return `Run exits now? ${n} live position${n === 1 ? '' : 's'} will be sold by ${n === 1 ? 'its' : 'their'} exit rules (take profit, trailing stop, stop-loss, time stop) with real money, starting on the next tick. No new buys.`;
+}
+
+/**
+ * The banner's choice. "Run exits" resumes real sells on positions nobody watched since the update, so it asks first;
+ * "Keep fully off" changes nothing and needs no confirm. null = cancelled (nothing posted).
+ */
+export async function pickChoice(mode: 'exits' | 'full', livePositions: number,
+  d: { confirm: (msg: string) => boolean; post: (mode: 'exits' | 'full') => Promise<AnyObj> }): Promise<AnyObj | null> {
+  if (mode === 'exits' && !d.confirm(runExitsConfirmText(livePositions))) return null;
+  return d.post(mode);
+}
+
 /**
  * App-wide, until chosen: an old "off" token-trader file with LIVE positions loads off completely, so no real sell
  * goes out before Kyle picks. "Run exits" = off for new buys (exits running); "Keep fully off" = off completely.
@@ -29,7 +44,10 @@ export function TokenTraderChoiceBanner() {
   if (!c) return null;
   const pick = async (mode: 'exits' | 'full') => {
     setBusy(true);
-    try { const x = await http('/api/token-trader/off', 'POST', { mode }); setC(x?.pendingChoice ?? null); setErr(null); } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
+    try {
+      const x = await pickChoice(mode, c.livePositions, { confirm: (m) => confirm(m), post: (m) => http('/api/token-trader/off', 'POST', { mode: m }) });
+      if (x) { setC(x?.pendingChoice ?? null); setErr(null); }
+    } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
   };
   return (
     <div className="banner error" role="alert">
@@ -150,11 +168,15 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
 
 function numIn(v: string) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 
-/** "On · paper" / "Off for new buys · exits running (N)" / "Off completely, no exits" */
+/**
+ * "On · paper" / "Off for new buys · exits running (N)" / "Off completely, no exits".
+ * Each number once per card: when the new-buys-stopped banner is up it carries "Exits still managed: N", so the tag
+ * drops its (N).
+ */
 export function modeLabel(t: AnyObj, o: AnyObj): string {
   if (t.runMode === 'on' || (t.runMode == null && t.on)) return `On · ${o.mode}`;
   if (t.runMode === 'full') return 'Off completely, no exits';
-  return `Off for new buys · exits running (${t.exitsManaged ?? 0})`;
+  return t.entriesHalt ? 'Off for new buys · exits running' : `Off for new buys · exits running (${t.exitsManaged ?? 0})`;
 }
 
 async function offCompletely(t: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<void>) {

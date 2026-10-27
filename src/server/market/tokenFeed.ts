@@ -4,6 +4,7 @@
  * on the trader, is used only to broadcast the signed transaction.
  */
 import { JsonRpcProvider } from 'ethers';
+import { readDecimals } from '../../live/decimals';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
@@ -90,6 +91,14 @@ export function createTokenTrader(o: {
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk),
     resolve: (hit) => resolveHit(o.hub, hit),
+    // the signer's on-chain balance of the position's token (reconcile after a sell that stopped partway)
+    balanceOf: async (p) => {
+      const rt = o.hub.rt(p.chainId);
+      if (!rt.signer) return null;
+      const owner = await rt.signer.getAddress();
+      const [raw, dec] = await Promise.all([rt.tokenBalance(owner, p.token), readDecimals(rt.reader, p.chainId, p.token)]);
+      return Number(raw) / 10 ** dec;
+    },
     live: {
       buy: async (pool, spend, limits) => {
         const draft = await draftOf(o.hub, pool);
