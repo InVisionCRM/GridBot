@@ -31,7 +31,7 @@ import { ERC20, V3_NPM } from '../dex/abis';
 import { readCall, sameAddr } from '../dex/types';
 import { LpPool, type Coins, type PoolView } from '../lp/lpPool';
 import { collectAllData, collectData, exitData, mintTx } from '../lp/npmCalls';
-import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type ReceiptLike, type TxSender } from './chain';
+import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type Quote, type ReceiptLike, type TxSender } from './chain';
 import { checkProfitMode, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
@@ -74,6 +74,8 @@ export interface LpStep {
   tries: number;
   /** close: after taking the position out, sell the base coin back to the quote coin ("close to cash") */
   toCash?: boolean;
+  /** close to cash: even the smallest piece of the sale was over the price-impact cap; the next try is not before this */
+  waitUntil?: number;
 }
 
 export interface LpState {
@@ -155,6 +157,8 @@ export interface LpDeps {
 const MAX_TRIES = 3;
 /** A native base side keeps this many times the open's estimated gas out of the position, so the open can pay for itself. */
 const OPEN_GAS_HEADROOM = 2;
+/** A close to cash whose smallest sale is over the price-impact cap tries again after this long (as a grid's) */
+const CASH_WAIT_MS = 10 * 60_000;
 const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
@@ -360,7 +364,9 @@ export class LpEngine {
       return false;
     }
     if (this.state.closing) return false;
-    const busy = !!(this.state.step?.hash || this.state.step?.swap);
+    // A tick may be sending a step's transaction right now (its hash is set when the send returns): ending or replacing
+    // the step here would lose that transaction. As for one already sent, it is settled first and the close follows.
+    const busy = this.ticking || !!(this.state.step?.hash || this.state.step?.swap);
     if (!this.state.position && !busy) {
       this.noteClose(why);
       this.markArchived();
@@ -480,6 +486,8 @@ export class LpEngine {
         const busy = !!(step?.hash || step?.swap);
         // Don't replace a tx already sent. Otherwise the next work is the exit, not a new range.
         if (!busy && this.state.position && step?.action !== 'close') this.state.step = { action: 'close', stage: 'exit', tries: 0 };
+        // Out of the pool with an open or a move not sent yet: nothing of it went out, so it is dropped
+        else if (!busy && !this.state.position && step && step.action !== 'close') this.state.step = null;
       }
       if (this.state.step) {
         // a sent tx is always settled, even while stopped; new work only while running
@@ -659,7 +667,8 @@ export class LpEngine {
     for (let i = 0; i < 8 && this.state.step; i++) {
       const before = key();
       await this.advanceOnce(pool, v);
-      if (this.state.step?.hash || this.state.step?.swap || key() === before) return;
+      // Stopped, or closing: the tx already sent is settled, nothing new starts (but the close's own steps)
+      if (this.state.status !== 'running' || (this.state.closing && this.state.step?.action !== 'close') || this.state.step?.hash || this.state.step?.swap || key() === before) return;
     }
   }
   private async advanceOnce(pool: LpPool, v: PoolView) {
@@ -739,15 +748,18 @@ export class LpEngine {
     this.ev('info', `Liquidity ${this.label}: ${s.stage} reverted; trying again`, { level: 'warn' });
     return null;
   }
+  /** Send a step's tx through the chain's queue; nothing is sent while the bot isn't running (KILL ALL, paused). */
   private async send(s: LpStep, req: { to: string; data: string; value: bigint }) {
+    if (this.state.status !== 'running') return;
     const run = async () => {
+      if (this.state.status !== 'running') return; // stopped while it waited its turn
       s.hash = await (this.executor as LiveExecutor).sendTx(req);
       s.sentAt = this.now();
       this.save();
     };
     const g = this.gate;
     if (g) await g.run(run); else await run();
-    this.log('info', `sent ${s.action} ${s.stage} ${s.hash}`);
+    if (s.hash) this.log('info', `sent ${s.action} ${s.stage} ${s.hash}`);
   }
 
   /** Remove all liquidity, collect principal + fees, burn the NFT (one multicall). */
@@ -853,17 +865,24 @@ export class LpEngine {
         q = bestQ;
       }
       try {
-        const f = await this.executor.execute(q, { canSend: () => true, onSent: (_stage, hash) => this.log('info', `sent swap ${hash}`) });
+        const f = await this.execute(q, 'swap');
         this.state.totals.gas += f.gasPls * v.price;
         this.applySwap(side, f.amountInHuman, f.amountOutHuman, v.price);
       } catch (e) {
         const o = e instanceof ExecError ? e.opts : {};
         if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
+        if (o.aborted) return;
         if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price }; return; }
         throw e;
       }
     }
     s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
+  }
+  /** Swaps go through the chain's queue (one at a time per chain, as the bots' and the smart trader's); only while running. */
+  private async execute(q: Quote, what: string) {
+    const run = () => this.executor.execute(q, { canSend: () => this.state.status === 'running', onSent: (_stage, hash) => this.log('info', `sent ${what} ${hash}`) });
+    const g = this.gate;
+    return g ? g.run(run) : run();
   }
   private closed() {
     this.state.step = null;
@@ -873,8 +892,9 @@ export class LpEngine {
 
   /**
    * Close to cash: sell the idle base coin back to the quote coin, in pieces when all of it would go over the
-   * price-impact cap (halved down to 1/64); then closed. A broadcast sell is settled by hash like the range swap.
-   * Dust is left: base worth under twice the sale's gas, or under 0.01% of what the bot holds.
+   * price-impact cap (halved down to 1/64; when even that is over, the next try is in 10 minutes); then closed. A sale
+   * of the chain's own coin leaves room for its gas. A broadcast sell is settled by hash like the range swap. Dust is
+   * left: base worth under twice the sale's gas, or under 0.01% of what the bot holds.
    */
   private async sellToCash(v: PoolView, s: LpStep) {
     if (s.swap) {
@@ -885,28 +905,49 @@ export class LpEngine {
       s.swap = undefined;
       return;
     }
+    if (s.waitUntil != null && this.now() < s.waitUntil) return;
     const idle = this.state.idle;
     // What is left is dust: under 0.01% of what the bot holds (checked first: a quote for a few wei of a coin fails
     // with "rounds to zero"), or worth under twice the sale's gas.
     if (!(idle.base * v.price >= (idle.base * v.price + idle.quote) * 1e-4)) return this.closed();
     let amount = idle.base, q = await this.executor.quote('sell', amount, this.state.limits);
     if (idle.base * v.price < 2 * q.gasPlsEstimate * v.price) return this.closed();
-    while (q.priceImpact > this.state.limits.maxPriceImpact && amount > idle.base / 64) {
+    if (this.state.mode === 'live' && this.def!.base.native) {
+      // The gas this bot paid came out of the same coin: sell what the wallet has, less room for this sale's gas
+      const room = (await this.executor.balances()).pls - OPEN_GAS_HEADROOM * q.gasPlsEstimate;
+      if (room < amount) {
+        // What the wallet can't pay for beyond that went on gas (the bot's value already counts the gas it paid)
+        if (!(room * v.price >= 2 * q.gasPlsEstimate * v.price)) { this.ev('info', `Liquidity ${this.label}: the ${idle.base.toPrecision(4)} ${this.baseSym} left in its count went on gas`); return this.closed(); }
+        amount = room;
+        q = await this.executor.quote('sell', amount, this.state.limits);
+      }
+    }
+    const all = amount;
+    while (q.priceImpact > this.state.limits.maxPriceImpact && amount > all / 64) {
       amount /= 2;
       q = await this.executor.quote('sell', amount, this.state.limits);
     }
     if (!q.balanceOk) throw new Error(`can't sell the ${this.baseSym} back: ${q.balanceNote}`);
-    if (q.priceImpact > this.state.limits.maxPriceImpact) throw new Error(`selling the ${this.baseSym} back would move the price ${(q.priceImpact * 100).toFixed(2)}% even in 1/64 pieces (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%); trying again on the next check`);
+    if (q.priceImpact > this.state.limits.maxPriceImpact) return this.waitToSell(s, `selling the ${this.baseSym} back would move the price ${(q.priceImpact * 100).toFixed(2)}% even in 1/64 pieces (cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%)`);
+    s.waitUntil = undefined;
     try {
-      const f = await this.executor.execute(q, { canSend: () => true, onSent: (_stage, hash) => this.log('info', `sent sell ${hash}`) });
+      const f = await this.execute(q, 'sell');
       this.state.totals.gas += f.gasPls * v.price;
       this.applySwap('sell', f.amountInHuman, f.amountOutHuman, v.price);
     } catch (e) {
       const o = e instanceof ExecError ? e.opts : {};
       if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
+      if (o.aborted) return;
       if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price }; return; }
       throw e;
     }
+  }
+
+  /** The sale back can't go now: the next try in 10 minutes, said once (not on every check) */
+  private waitToSell(s: LpStep, why: string) {
+    const first = s.waitUntil == null;
+    s.waitUntil = this.now() + CASH_WAIT_MS;
+    this.ev('info', `Liquidity ${this.label}: ${why}; trying again every ${CASH_WAIT_MS / 60_000} minutes`, { level: 'warn', notify: first });
   }
 
   /** A swap to the range's mix landed; its cost is what went in less what came out, at the mid price. */

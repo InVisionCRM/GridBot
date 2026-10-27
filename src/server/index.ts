@@ -6,14 +6,14 @@ import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
 import { DurableJsonStore } from './bot/durableStore';
 import { ActivityBus } from './bot/activity';
-import { createSigners, loadEnv, readCopy, readSettings, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
+import { createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
 import { Router, type RouterFile } from './router/router';
 import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
 import { CandleSync, geckoBackfill, onchainBackfill } from './market/backfill';
 import { VersionCheck } from './system/version';
-import { DailyScanner, scanDepsFromHub, type ScanFile } from './market/scanner';
+import { DailyScanner, localScan, scanDepsFromHub, type ScanFile } from './market/scanner';
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
@@ -41,8 +41,10 @@ const copy = readCopy();
 // Every configured chain gets a fallback RPC reader; signers come from PRIVATE_KEY / PRIVATE_KEY_<SLUG> (env.ts only).
 const dataDir = path.dirname(cfg.stateFile);
 log.attach(path.join(dataDir, 'server.log'));
+// A friend's copy gets its key from the host over IPC (never through its environment).
+const friendKey = copy ? await receiveFriendKey() : undefined;
 const { hub, readers } = buildHub({
-  net: cfg.net, env: process.env, signerFactory: createSigners,
+  net: cfg.net, env: process.env, signerFactory: (chains) => (copy ? createSigners(chains, { friendKey }) : createSigners(chains)),
   custom: new JsonStore<CustomFile>(path.join(dataDir, 'custom.json')),
 });
 const legacyReader = readers.get(cfg.net.chainId)!;
@@ -93,7 +95,8 @@ const backfill = async (pair: string, source: 'gecko' | 'onchain', days: number)
 const dailyScan: DailyScanner | undefined = !copy && sync.enabled ? new DailyScanner(scanDepsFromHub(hub, candles, {
   gecko, store: new JsonStore<ScanFile>(path.join(dataDir, 'picks.json')), approval: cfg.approval, emit: activity.emitEvent,
 })) : undefined;
-const scanner = copy ? hostScan(copy.hostUrl, copy.host) : dailyScan;
+const scanSource = copy ? hostScan(copy.hostUrl, copy.host) : dailyScan;
+const scanner = scanSource ? localScan(hub, scanSource) : undefined;
 
 const version = copy ? null : await VersionCheck.start(process.cwd(), process.env.NODE_ENV !== 'production');
 const entry = fileURLToPath(import.meta.url);
@@ -154,6 +157,8 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   bot.startLoop(cfg.pollMs);
   sync.start();
   dailyScan?.start();
+  // A first check at once: its prices and unconfirmed swaps are read now, not a minute after a restart
+  void autopilot.tick();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
   if (friends instanceof FriendsHost) {
