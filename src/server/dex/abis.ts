@@ -104,5 +104,27 @@ export const V3_ROUTER = new Interface([
   'function factory() view returns (address)',
   'function WETH9() view returns (address)',
 ]);
+/** V4 PoolManager. `factory` on the V4 dex config is this singleton; pools are Initialize logs, not getPool. */
+export const V4_POOL_MANAGER = new Interface([
+  'event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)',
+]);
+/** V4 StateView: live price, liquidity and the LP fee (hundredths of a bip), including dynamic-fee pools. */
+export const V4_STATE_VIEW = new Interface([
+  'function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)',
+  'function getLiquidity(bytes32 poolId) view returns (uint128)',
+]);
+/** V4 Quoter. Not a view; eth_call returns (amountOut, gasEstimate) normally on Robinhood. */
+export const V4_QUOTER = new Interface([
+  'function quoteExactInputSingle(((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) poolKey,bool zeroForOne,uint128 exactAmount,bytes hookData) params) returns (uint256 amountOut, uint256 gasEstimate)',
+]);
+/** Universal Router execute. V4 swaps are command 0x10 (V4_SWAP); the input is built in v4PoolKey.ts. */
+export const V4_ROUTER = new Interface([
+  'function execute(bytes commands, bytes[] inputs, uint256 deadline) payable',
+]);
+/** Canonical Permit2. ERC-20s are approved here; Permit2 then approves the Universal Router. */
+export const PERMIT2 = new Interface([
+  'function approve(address token, address spender, uint160 amount, uint48 expiration)',
+  'function allowance(address user, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)',
+]);
 export const ARB_NODE_INTERFACE = new Interface(['function gasEstimateL1Component(address to, bool contractCreation, bytes data) payable returns (uint64 gasEstimateForL1, uint256 baseFee, uint256 l1BaseFeeEstimate)']);
 export const ARB_NODE_INTERFACE_ADDR = '0x00000000000000000000000000000000000000C8';

@@ -13,6 +13,8 @@ import { ChainRuntime } from './runtime';
 import { discoverPools, type DiscoveredPool } from '../dex/discovery';
 import { readTokenMeta, type TokenMeta } from '../dex/tokens';
 import { classify, depthAt, hopFor, simulateRoundTrip, type ProbeResult } from '../dex/safety';
+import { assessHook } from '../dex/v4Hooks';
+import { simulateV4RoundTrip, v4Leg } from '../dex/v4Safety';
 import { isInconclusive } from '../bot/taxWatch';
 import { sameAddr } from '../dex/types';
 import { toUnits } from '../../live/swapMath';
@@ -311,7 +313,7 @@ export class Hub {
     const draft: MarketDef = {
       key: marketKey(rt.cfg, token.symbol, q.symbol, (k) => this.defs.has(k)), chainId: rt.cfg.id,
       base, quote: { address: quote.address, symbol: quote.symbol, decimals: quote.decimals, name: quote.name },
-      pool: { dex: chosen.dex, kind: chosen.kind, address: chosen.address, feeBps: chosen.feeBps, ...(chosen.feeTier != null ? { feeTier: chosen.feeTier } : {}) },
+      pool: takenPool(chosen),
       probe, quoteKind: q.kind, custom: true, candlePool: chosen.address, addedAt: this.now(),
     };
     result.draft = draft;
@@ -384,19 +386,35 @@ export class Hub {
       let prep = null;
       if (!sameAddr(d.quote.address, wn)) {
         const pools = await discoverPools(rt, { address: wn, symbol: 'W', decimals: 18 }, d.quote, { refQuote: nat ? 20 / (quoteUsd ?? 1) : 1, quoteUsd });
-        const p = pools.find((x) => x.refOut != null);
+        // Prep is a V2/V3 hop inside the probe. Skip a V4 pool here so the funding route stays the one V2/V3 would have used.
+        const p = pools.find((x) => x.refOut != null && x.kind !== 'v4');
         if (!p) throw new Error(`no ${rt.cfg.wrappedNative.symbol}/${d.quote.symbol} pool to fund the simulation`);
         prep = hopFor(rt.adapter(p.dex), p, wn, d.quote.address);
       }
-      probe = await simulateRoundTrip(rt, { weth: wn, wethIn, prep, buy: hopFor(ad, d.pool, d.quote.address, d.base.address), sell: hopFor(ad, d.pool, d.base.address, d.quote.address) });
+      if (d.pool.kind === 'v4') {
+        probe = await simulateV4RoundTrip(rt, {
+          weth: wn, wethIn, prep,
+          buy: v4Leg(d.pool, d.quote.address, d.base.address, ad.cfg, wn),
+          sell: v4Leg(d.pool, d.base.address, d.quote.address, ad.cfg, wn),
+        });
+      } else {
+        probe = await simulateRoundTrip(rt, { weth: wn, wethIn, prep, buy: hopFor(ad, d.pool, d.quote.address, d.base.address), sell: hopFor(ad, d.pool, d.base.address, d.quote.address) });
+      }
     } catch (e) {
       simError = (e as { shortMessage?: string }).shortMessage ?? (e as Error).message;
       simError = simError.slice(0, 140);
     }
-    return {
-      report: classify({ probe, simError, proxy: token.proxy, depth, liquidityUsd, now: this.now(), poolKind: d.pool.kind, flags: token.flags ?? null, decimals: token.decimals }),
-      probe,
-    };
+    const report = classify({ probe, simError, proxy: token.proxy, depth, liquidityUsd, now: this.now(), poolKind: d.pool.kind, flags: token.flags ?? null, decimals: token.decimals });
+    if (d.pool.kind === 'v4') {
+      const decision = assessHook(d.pool.v4?.hooks, ad.cfg.hookAllowlist);
+      if (!decision.allowed) {
+        report.risk = 'blocked';
+        report.liveAllowed = false;
+        report.taxMode = 'blocked';
+        report.reasons = [decision.reason ?? 'V4 hook rejected', ...report.reasons];
+      }
+    }
+    return { report, probe };
   }
 
   /** Persist a custom market (re-inspects server-side; the client's data is never trusted). */
@@ -472,7 +490,8 @@ export class Hub {
   marketOnPool(chainId: number, dex: string, pool: string, a: string, b: string): string | null {
     const pair = (x: string, y: string) => (sameAddr(x, a) && sameAddr(y, b)) || (sameAddr(x, b) && sameAddr(y, a));
     return this.byChain(chainId).find((m) => m.pool.dex === dex
-      && (m.pool.kind === 'v3' ? sameAddr(m.pool.address, pool) : pair(m.base.address, m.quote.address)))?.key ?? null;
+      && (m.pool.kind === 'v4' ? sameAddr(m.pool.address, pool)
+        : m.pool.kind === 'v3' ? sameAddr(m.pool.address, pool) : pair(m.base.address, m.quote.address)))?.key ?? null;
   }
   /** This app's market for two coins on any pool, turned to spend `quote`; null when it has none */
   marketForCoins(chainId: number, base: string, quote: string): string | null {
@@ -520,7 +539,7 @@ export class Hub {
     key = unflipKey(key);
     this.tvlCache.delete(key + '~');
     const d = this.def(key);
-    if (!d.candleKind) d.candleKind = d.pool.kind;
+    if (!d.candleKind && d.pool.kind !== 'v4') d.candleKind = d.pool.kind;
     if (req.reset) {
       if (d.custom) throw new Error('Custom markets have no registry default; pick a pool');
       const orig = this.o.markets.find((m) => m.key === key);
@@ -535,7 +554,7 @@ export class Hub {
     const pick = req.auto ? choice.best : choice.pools.find((p) => req.pool && sameAddr(p.address, req.pool));
     if (!pick) throw new Error(req.auto ? `No quotable pool for ${this.label(key)}` : `Pool ${req.pool} is not a ${d.base.symbol}/${d.quote.symbol} pool on ${this.chain(d.chainId).name}`);
     if (pick.refOut == null || pick.mid == null) throw new Error(`${pick.dexName} pool ${pick.address} cannot be quoted${pick.error ? `: ${pick.error}` : ''}`);
-    d.pool = { dex: pick.dex, kind: pick.kind, address: pick.address, feeBps: pick.feeBps, ...(pick.feeTier != null ? { feeTier: pick.feeTier } : {}) };
+    d.pool = takenPool(pick);
     d.poolMode = req.auto ? 'auto' : 'manual';
     if (!d.custom) (this.custom.pools ??= {})[key] = { pool: { ...d.pool }, mode: d.poolMode, candleKind: d.candleKind };
     this.tvlCache.delete(key);
@@ -566,7 +585,8 @@ export class Hub {
     key = unflipKey(key); // flipped series are derived (inverted) from the original's candles
     const d = this.def(key), c = this.chain(d.chainId);
     return {
-      key, label: this.label(key), network: c.geckoSlug, pool: d.candlePool || d.pool.address, kind: d.candlePool ? (d.candleKind ?? d.pool.kind) : d.pool.kind,
+      key, label: this.label(key), network: c.geckoSlug, pool: d.candlePool || d.pool.address,
+      kind: d.candlePool ? (d.candleKind ?? (d.pool.kind === 'v4' ? 'v4' : d.pool.kind)) : (d.pool.kind === 'v4' ? 'v4' : d.pool.kind),
       base: { address: d.base.address, decimals: d.base.decimals }, quote: { address: d.quote.address, decimals: d.quote.decimals },
       feeBps: d.pool.feeBps, logChunk: c.logChunk,
     };
@@ -592,4 +612,13 @@ export class Hub {
       taxOf: (addr) => this.taxOf(d.chainId, addr),
     });
   }
+}
+
+/** Pool fields copied onto a market. V2/V3 stay dex/kind/address/fee; a V4 pool also keeps its PoolKey. */
+function takenPool(p: DiscoveredPool): MarketDef['pool'] {
+  return {
+    dex: p.dex, kind: p.kind, address: p.address, feeBps: p.feeBps,
+    ...(p.feeTier != null ? { feeTier: p.feeTier } : {}),
+    ...(p.v4 ? { v4: { ...p.v4 } } : {}),
+  };
 }

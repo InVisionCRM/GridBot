@@ -40,14 +40,28 @@ export async function discoverPools(
           const rb = fromUnits(baseIs0 ? st.reserve0 : st.reserve1, base.decimals), rq = fromUnits(baseIs0 ? st.reserve1 : st.reserve0, quote.decimals);
           row.mid = rb > 0 ? rq / rb : null;
         }
-        const [bb, bq] = await Promise.all([rt.tokenBalance(st.pool.address, base.address), rt.tokenBalance(st.pool.address, quote.address)]);
-        row.balBase = fromUnits(bb, base.decimals);
-        row.balQuote = fromUnits(bq, quote.decimals);
-        row.address = st.pool.address;
         const amt = toUnits(o.refQuote.toFixed(Math.min(quote.decimals, 8)), quote.decimals);
-        const q = await ad.quote(p, quote.address, base.address, amt);
-        row.refOut = fromUnits(q.amountOut, base.decimals);
-        row.refImpact = q.impact;
+        if (p.kind === 'v4') {
+          // V4 balances sit in the PoolManager, not at the pool id. Virtual reserves of the active range are the depth.
+          row.balBase = fromUnits(baseIs0 ? st.reserve0 : st.reserve1, base.decimals);
+          row.balQuote = fromUnits(baseIs0 ? st.reserve1 : st.reserve0, quote.decimals);
+          row.address = st.pool.address;
+          const q = await ad.quote(p, quote.address, base.address, amt);
+          if (q.lpFee != null) row.feeBps = q.lpFee / 100;
+          if (q.hook && !q.hook.allowed) row.error = q.hook.reason ?? 'V4 hook rejected';
+          else {
+            row.refOut = fromUnits(q.amountOut, base.decimals);
+            row.refImpact = q.impact;
+          }
+        } else {
+          const [bb, bq] = await Promise.all([rt.tokenBalance(st.pool.address, base.address), rt.tokenBalance(st.pool.address, quote.address)]);
+          row.balBase = fromUnits(bb, base.decimals);
+          row.balQuote = fromUnits(bq, quote.decimals);
+          row.address = st.pool.address;
+          const q = await ad.quote(p, quote.address, base.address, amt);
+          row.refOut = fromUnits(q.amountOut, base.decimals);
+          row.refImpact = q.impact;
+        }
       } catch (e) { row.error = (e as Error).message.slice(0, 120); }
       out.push(row);
     }));

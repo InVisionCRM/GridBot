@@ -179,6 +179,8 @@ async function discover(hub: Hub, gecko: GeckoSource): Promise<FreshPool[]> {
     const take = (rows: typeof fresh, source: 'new' | 'trending') => {
       for (const row of rows) {
         const dex = rt.cfg.dexes.find((d) => d.gecko === row.dex);
+        // V4 rows stay out of the token trader. Labelling them V3 would try to swap a pool id on a V3 router.
+        if (dex?.kind === 'v4') continue;
         const feeBps = dex?.feeBps ?? (dex?.feeTiers?.[0] != null ? dex.feeTiers[0] / 100 : 30);
         const pool = fromTopPool(row, { id: rt.cfg.id, spend, kind: dex?.kind === 'v2' ? 'v2' : 'v3', feeBps }, source);
         if (pool) out.push(pool);

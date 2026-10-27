@@ -22,6 +22,7 @@ import { amountToUnits } from '../../live/decimals';
 import { NO_TAX, afterTax, type Taxes } from '../../live/tax';
 import type { SharedNonce } from './txGate';
 import { ERC20, FACTORY, PAIR, ROUTER, WPLS_EVENTS } from '../dex/abis';
+import { encodePermit2Approve, UINT160_MAX, UINT48_MAX } from '../dex/v4PoolKey';
 import type { DexAdapter } from '../dex/types';
 import { V2Adapter } from '../dex/v2';
 
@@ -102,6 +103,15 @@ export interface Quote {
   block: string | null;
   /** Minimum the WALLET must receive after tax (= call.amountOutMin on V2; V3's router minimum is pre-tax) */
   walletMin?: bigint;
+  /** V4: LP fee in hundredths of a bip, read at quote time. Present so a later ledger can record the tier at entry and exit. */
+  lpFee?: number;
+  /** V4: the pool's fee is the dynamic-fee flag; lpFee is the live value. */
+  dynamicFee?: boolean;
+  /**
+   * V4 ERC-20 input only. The token is already approved to Permit2 (`spender`); this is the second approval,
+   * Permit2 → Universal Router. Absent for V2/V3 and for native input. LiveExecutor sends it only when set.
+   */
+  permit2?: { token: string; spender: string; amount: bigint };
 }
 
 export interface Fill {
@@ -381,10 +391,16 @@ export class Quoter {
     const amountOutMin = applySlippage(ad.kind === 'v2' ? quotedOut : routerOut, limits.slippageBps);
     const walletMin = applySlippage(quotedOut, limits.slippageBps);
     const deadline = deadlineFromNow(limits.deadlineMinutes);
-    const built = ad.buildSwap({ pool, tokenIn, tokenOut, amountIn, amountOutMin, recipient: account, deadline, feeOnTransfer });
-    const approveAmount = allowance == null ? null : approvalNeeded(tokenIn, allowance, amountIn);
+    const hookBlocked = q.hook?.allowed === false;
+    const built = hookBlocked
+      ? { to: ad.cfg.router, data: '0x', value: 0n, method: 'v4-rejected', args: [q.hook?.reason ?? 'V4 hook rejected'] }
+      : ad.buildSwap({ pool, tokenIn, tokenOut, amountIn, amountOutMin, recipient: account, deadline, feeOnTransfer });
+    // V4 native input (currency address(0)) sends value and needs no ERC-20 approval. V2/V3 native input is already tokenIn === NATIVE.
+    const nativeIn = tokenIn === NATIVE || (ad.kind === 'v4' && built.value > 0n);
+    const approveAmount = allowance == null || nativeIn ? null : approvalNeeded(tokenIn, allowance, amountIn);
+    const permit2 = !hookBlocked && ad.kind === 'v4' && !nativeIn ? { token: tokenIn, spender: ad.cfg.router, amount: amountIn } : undefined;
     const gasPrice = fee.maxFeePerGas ?? fee.gasPrice ?? 0n;
-    const units = BigInt((approveAmount != null ? this.chain.gasUnits.approve : 0) + this.chain.gasUnits.swap);
+    const units = BigInt((approveAmount != null ? this.chain.gasUnits.approve : 0) + (permit2 ? this.chain.gasUnits.approve : 0) + this.chain.gasUnits.swap);
     const l1 = await this.l1(built.to, built.data, gasPrice);
     const gasWei = units * gasPrice + l1.wei;
     const amountInHuman = fromUnits(amountIn, decimalsIn);
@@ -395,7 +411,9 @@ export class Quoter {
       path: [aIn, aOut], amountIn, amountOutMin, deadline,
     };
     let block: string | null = null;
-    if (taxed && ad.kind === 'v3' && this.def.safety?.taxMode !== 'v3-proven') block = 'taxed token on a V3 pool that was not proven by simulation — switch to a V2 pool';
+    if (hookBlocked) block = q.hook?.reason ?? 'V4 hook rejected';
+    if (!block && taxed && ad.kind === 'v3' && this.def.safety?.taxMode !== 'v3-proven') block = 'taxed token on a V3 pool that was not proven by simulation — switch to a V2 pool';
+    if (!block && taxed && ad.kind === 'v4' && this.def.safety?.taxMode !== 'v4-proven') block = 'taxed token on a V4 pool that was not proven by simulation — paper only until the round trip passes';
     const s = this.def.safety;
     // Token limits are in the custom token's units: the base classically, the quote when flipped.
     const tokAmt = this.tokenSide === 'base' ? (side === 'buy' ? routerOutHuman : amountInHuman) : (side === 'buy' ? amountInHuman : routerOutHuman);
@@ -411,6 +429,9 @@ export class Quoter {
       poolPrice: side === 'buy' ? poolInHuman / routerOutHuman : routerOutHuman / poolInHuman,
       balanceOk: !block, balanceNote: block,
       routerOut, poolIn, taxInPct, taxOutPct, feeOnTransfer, block, walletMin,
+      ...(q.lpFee != null ? { lpFee: q.lpFee } : {}),
+      ...(q.dynamicFee != null ? { dynamicFee: q.dynamicFee } : {}),
+      ...(permit2 ? { permit2 } : {}),
     };
   }
 }
@@ -600,6 +621,7 @@ export class LiveExecutor implements Executor {
       new ExecError(msg, { gasPls: fromUnits(gasWei, 18) * k, gasNative: fromUnits(gasWei, 18), approvalTxHash, swapTxHash, ...extra });
 
     if (!hooks.canSend()) throw fail('stopped before sending', { aborted: true });
+    if (q.call.method === 'v4-rejected') throw fail(q.block ?? 'V4 pool rejected', { aborted: true });
 
     if (q.approveAmount != null) {
       const amt = this.opts.approval === 'max' ? MaxUint256 : q.approveAmount;
@@ -618,6 +640,35 @@ export class LiveExecutor implements Executor {
       }
       gasWei += gasOf(r);
       if (r.status !== 1) throw fail('approve reverted', { retryable: true });
+    }
+
+    if (q.permit2) {
+      if (!hooks.canSend()) throw fail('stopped before the Permit2 approval', { aborted: true });
+      const owner = await this.address();
+      const needAmt = this.opts.approval === 'max' ? q.amountIn : q.permit2.amount;
+      const cur = this.quoter.adapter.permit2Allowance
+        ? await this.quoter.adapter.permit2Allowance(owner, q.permit2.token, q.permit2.spender)
+        : null;
+      const stillValid = cur != null && cur.amount >= needAmt && cur.expiration >= q.call.deadline;
+      if (!stillValid) {
+        const amt = this.opts.approval === 'max' ? UINT160_MAX : q.permit2.amount;
+        const exp = this.opts.approval === 'max' ? UINT48_MAX : q.call.deadline;
+        let tx: SentTx;
+        try {
+          tx = await this.send({ to: q.spender, data: encodePermit2Approve(q.permit2.token, q.permit2.spender, amt, exp), value: 0n });
+        } catch (e) {
+          throw fail(`Permit2 approve send failed: ${shortErr(e)}`, { retryable: true });
+        }
+        approvalTxHash = approvalTxHash ?? tx.hash;
+        hooks.onSent('approve', tx.hash);
+        let r: ReceiptLike;
+        try { r = await this.waitFor(tx); } catch (e) {
+          if (this.opts.sharedNonce) this.opts.sharedNonce.invalidate(); else this.nonce = null;
+          throw fail(`Permit2 approve not confirmed: ${shortErr(e)}`, { retryable: true });
+        }
+        gasWei += gasOf(r);
+        if (r.status !== 1) throw fail('Permit2 approve reverted', { retryable: true });
+      }
     }
 
     if (!hooks.canSend()) throw fail('stopped between approve and swap', { aborted: true });
@@ -709,12 +760,13 @@ export class PaperExecutor implements Executor {
     const mw = this.quoter.def.safety?.maxWalletTokens;
     const tokBase = this.quoter.tokenSide === 'base';
     if (mw != null && side === (tokBase ? 'buy' : 'sell') && (tokBase ? b.pls : b.stable) + q.quotedOutHuman > mw * 0.999) { q.balanceOk = false; q.balanceNote = `paper holding + ${side} would exceed the token's max wallet ${mw.toPrecision(6)}`; }
-    if (q.block && !q.block.startsWith('taxed token on a V3')) { q.balanceOk = false; q.balanceNote = q.block; }
+    if (q.block && !q.block.startsWith('taxed token on a V3') && !q.block.startsWith('taxed token on a V4')) { q.balanceOk = false; q.balanceNote = q.block; }
     else if (q.block) { q.balanceOk = true; q.balanceNote = null; }
     return q;
   }
   async execute(q: Quote, hooks: ExecHooks): Promise<Fill> {
     if (!hooks.canSend()) throw new ExecError('stopped', { aborted: true });
+    if (q.call.method === 'v4-rejected') throw new ExecError(q.block ?? 'V4 pool rejected', { aborted: true });
     const hash = `paper-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     if (q.approveAmount != null) this.approved.add(`${q.spender}:${q.tokenIn}`);
     // Paper fill = the post-tax quote (taxes measured by the safety probe are applied in Quoter.quote).
