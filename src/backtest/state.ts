@@ -1,18 +1,30 @@
 /**
  * Bot configs for the harness come from the app's saved state (data/state.json), the same file the running app
- * writes. Each saved bot contributes its config and its recorded fills. The fee scale and the fill slippage are
- * then chosen so a replay of that config lands on those fills, and the miss is reported.
+ * writes. Each saved bot contributes its config, its recorded fills, and (for a liquidity bot) the fees, moves,
+ * gas and rebalance cost it actually recorded. The fee scale is then chosen so a replay lands on those figures, and the miss
+ * is reported.
+ *
+ * A market key such as `ethereum:ETH/USDC~` or legacy `HEX~` names the chain, the two coins and which side is
+ * the base. The pool and the token addresses come from the markets the app already ships, or from a pool address
+ * stored on the bot. `network: "mainnet"` is the old PulseChain flag on every saved bot; it is not the chain.
  *
  * A missing file is the only time the built-in examples are used, and the output says so. Credential-like fields
  * are dropped before anything is copied out of the file. This module does not load the process environment.
  */
 import { readFileSync } from 'node:fs';
+import { CHAINS } from '../live/chains';
 import type { TF } from '../market/candles';
 import { isTF } from '../market/candles';
 import type { TrendConfig } from '../market/strategy';
 import { DEFAULT_TREND } from '../market/strategy';
+import {
+  defaultMarkets, flipMarket, isFlipKey, isLegacyKey, legacyMarkets, unflipKey,
+  type MarketDef,
+} from '../live/markets';
+import { NETWORKS } from '../live/networks';
 import type { BacktestChain } from './gasModel';
 import { fmt } from './report';
+import type { BotSummary } from './report';
 import { runBot, type BotConfig, type HarnessData, type TokenRef } from './run';
 
 /** Shown when data/state.json is not there. Defaults are not used for any other reason. */
@@ -21,9 +33,20 @@ export const NO_STATE_NOTE = 'No saved bot state was found. These figures use th
 export const STATE_NOTE = 'Configs and recorded fills were loaded from the app state. Defaults were not used.';
 /** Shown when the file exists but has no runnable bot. */
 export const EMPTY_STATE_NOTE = 'The app state has no saved bot config. Defaults were not used.';
+/**
+ * Printed when a state file was read and it held bots, but every one of them was skipped. The process exits
+ * non-zero in that case: a green run that replayed nothing is not a backtest.
+ */
+export const ZERO_REPLAY_WARNING = 'WARNING: the app state was loaded, but 0 bots were replayed. This run did not backtest the saved bots.';
 
 const FEE_SCALES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const FILL_SLIPPAGES = [0, 5, 10, 15, 20, 25, 50, 100];
+/**
+ * Candle closes leave a tight band more often than the live bot's slot0 poll, so a liquidity bot's move count is
+ * fitted with a short outside-range dwell. The live rule stays at 0; only the fitted replay uses the winner.
+ */
+const LP_DWELLS_MS = [0, 15 * 60_000, 30 * 60_000, 60 * 60_000, 2 * 3_600_000, 4 * 3_600_000];
+const STABLES = new Set(['USDC', 'USDT', 'DAI', 'USDG']);
 
 /**
  * Names that are never copied out of the state file. Split so the source does not spell the credential words
@@ -58,10 +81,27 @@ export interface RecordedFill {
   levelPrice: number | null;
 }
 
+/** Fees, gas and range moves a liquidity bot wrote into its totals. */
+export interface LpActual {
+  fees: number;
+  gas: number;
+  moves: number;
+  feeBase: number;
+  feeQuote: number;
+  swapCost: number;
+  moveLoss: number;
+}
+
 export interface SavedBot {
   id: string;
   config: BotConfig;
   fills: RecordedFill[];
+  /** Seconds, the bot's own run, when the state recorded a start and a last price. */
+  window?: { from: number; to: number };
+  /** Quote and base reserves from the economics saved at start. Grid fills pay impact from this. */
+  depth?: { quoteReserve: number; baseReserve: number };
+  /** Present for a liquidity bot. Calibration uses this, because those bots store no fills. */
+  actual?: LpActual;
 }
 
 export interface StateLoad {
@@ -76,17 +116,20 @@ export interface StateLoad {
 export interface CalibrationError {
   recorded: number;
   replayed: number;
-  /** Mean absolute percent error of matched fill prices. Null when nothing matched. */
+  /** Grids: price MAPE of matched fills. LPs: relative error of quote-valued fees. Null when not measured. */
   priceMape: number | null;
-  /** Mean absolute percent error of matched fee amounts. Null when the saved fills have no fee. */
+  /** Grids: fee MAPE of matched fills. LPs: relative error of gas. Null when not measured. */
   feeMape: number | null;
-  /** Count miss + unmatched share + price error + fee error. 0 is an exact replay. */
+  /** Count miss + unmatched share + price error + fee error, or the LP fee, gas, move, swap and move-loss error. 0 is exact. */
   combined: number;
+  /** LP only. Relative error of the quote-valued swap cost and the locked-in move loss. */
+  swapRel?: number;
+  lossRel?: number;
 }
 
 export interface Calibration {
   botId: string;
-  /** False when there were no recorded fills to fit, or the replay could not run. */
+  /** False when there was nothing to fit, or the replay could not run. */
   fitted: boolean;
   feeK: number;
   slippageBps: number;
@@ -108,26 +151,192 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
-function chainOf(v: unknown): BacktestChain | null {
-  const s = str(v).toLowerCase();
-  if (s === 'ethereum' || s === 'eth') return 'ethereum';
-  if (s === 'robinhood' || s === 'hood') return 'robinhood';
-  if (s === 'pulsechain' || s === 'pulse' || s === 'mainnet' || s === 'testnet') return 'pulsechain';
+function addr(v: unknown): string {
+  const s = str(v).trim();
+  return /^0x[0-9a-fA-F]{40}$/.test(s) ? s : '';
+}
+
+/** Seconds. The app stores milliseconds. */
+function sec(v: unknown): number | null {
+  const n = num(v);
+  if (n == null || n <= 0) return null;
+  return n > 1e12 ? n / 1000 : n;
+}
+
+function chainById(id: number): BacktestChain | null {
+  if (id === 1) return 'ethereum';
+  if (id === 4663) return 'robinhood';
+  if (id === 369) return 'pulsechain';
   return null;
 }
 
-function token(symbol: string, decimals: number): TokenRef {
-  return { symbol, decimals };
+function chainFromPrefix(prefix: string): BacktestChain | null {
+  const s = prefix.toLowerCase();
+  if (s === 'ethereum' || s === 'eth') return 'ethereum';
+  if (s === 'robinhood' || s === 'hood') return 'robinhood';
+  if (s === 'pulsechain' || s === 'pulse') return 'pulsechain';
+  return null;
 }
 
-function quoteDecimals(symbol: string): number {
-  if (symbol === 'DAI') return 18;
-  if (symbol === 'USDC' || symbol === 'USDT' || symbol === 'USDG') return 6;
-  return 18;
+/**
+ * token0 of the pools the app ships, lowercase. Orientation (`baseIs0`) follows from which coin is the base.
+ * A pool that is not listed is filled in from the chain read when the harness runs.
+ */
+const TOKEN0: Record<string, string> = {
+  // Uniswap ETH/USDC 0.05% — USDC is token0.
+  '0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640': '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+  // Uniswap ETH/USDG 0.01% on Robinhood — WETH is token0.
+  '0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca': '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
+  // 9mm HEX/WPLS 0.25% — HEX is token0.
+  '0x8c357be2cf2c1de1c4dca8aea0af1529f789976b': '0x2b591e99afe9f32eaa6214f7b7629768c40eeb39',
+};
+
+/** The 9mm V3 HEX/WPLS pool the app's PulseChain LP uses. It is not the PulseX V2 legacy HEX market. */
+function hexWplsMarket(): MarketDef {
+  const wpls = NETWORKS.mainnet.pulsex.wpls;
+  const hex = NETWORKS.mainnet.quotes.find((q) => q.symbol === 'HEX')!;
+  return {
+    key: 'pulsechain:HEX/WPLS', chainId: 369,
+    base: { address: hex.address, symbol: 'HEX', decimals: hex.decimals },
+    quote: { address: wpls, symbol: 'WPLS', decimals: 18, native: true },
+    pool: { dex: '9mm-v3', kind: 'v3', address: '0x8c357be2cf2c1de1c4dca8aea0af1529f789976b', feeBps: 25, feeTier: 2500 },
+    probe: 1000, quoteKind: 'wrapped', candlePool: '0x8c357be2cf2c1de1c4dca8aea0af1529f789976b',
+  };
 }
 
-function baseFor(chain: BacktestChain): TokenRef {
-  return token(chain === 'pulsechain' ? 'WPLS' : 'WETH', 18);
+function registry(): MarketDef[] {
+  return [...legacyMarkets(NETWORKS.mainnet), ...defaultMarkets(), hexWplsMarket()];
+}
+
+/** The app's market for this key, flipped when the key ends in `~`. Null when the app does not know it. */
+export function marketForKey(key: string): MarketDef | null {
+  const bare = unflipKey(key).replace(/#\d+$/, '');
+  if (!bare) return null;
+  const found = registry().find((m) => m.key.toLowerCase() === bare.toLowerCase());
+  if (!found) return null;
+  return isFlipKey(key) ? flipMarket(found) : found;
+}
+
+function spacingFor(dex: string, feeTier: number | undefined): number | undefined {
+  if (feeTier == null) return undefined;
+  const pancake = dex.includes('9mm') || dex.includes('pancake');
+  if (feeTier === 100) return 1;
+  if (feeTier === 500) return 10;
+  if (feeTier === 3000) return 60;
+  if (feeTier === 2500) return pancake ? 50 : 50;
+  if (feeTier === 10000) return 200;
+  return undefined;
+}
+
+function knownCoin(chain: BacktestChain, symbol: string): { address: string; decimals: number; native: boolean } | null {
+  const c = CHAINS.find((x) => x.key === chain);
+  if (!c) return null;
+  const sym = symbol.toUpperCase();
+  if (sym === c.nativeSymbol.toUpperCase() || sym === c.wrappedNative.symbol.toUpperCase()) {
+    return { address: c.wrappedNative.address, decimals: c.wrappedNative.decimals, native: true };
+  }
+  const stable = c.stables.find((s) => s.symbol.toUpperCase() === sym);
+  if (stable) return { address: stable.address, decimals: stable.decimals, native: false };
+  if (chain === 'pulsechain') {
+    const q = NETWORKS.mainnet.quotes.find((s) => s.symbol.toUpperCase() === sym);
+    if (q) return { address: q.address, decimals: q.decimals, native: false };
+  }
+  for (const m of defaultMarkets()) {
+    if (chainById(m.chainId) !== chain) continue;
+    for (const t of [m.base, m.quote]) {
+      if (t.symbol.toUpperCase() === sym) return { address: t.address, decimals: t.decimals, native: !!t.native };
+    }
+  }
+  return null;
+}
+
+interface Side {
+  chain: BacktestChain;
+  base: TokenRef;
+  quote: TokenRef;
+  dex: string;
+  pool: string;
+  feeBps: number;
+  feeTier?: number;
+  gasToken: 'base' | 'quote';
+  spacing?: number;
+  baseIs0?: boolean;
+}
+
+function tokenRef(symbol: string, meta: { address: string; decimals: number } | null): TokenRef {
+  return { symbol, decimals: meta?.decimals ?? (STABLES.has(symbol) ? 6 : 18), ...(meta?.address ? { address: meta.address } : {}) };
+}
+
+function gasSide(baseNative: boolean, quoteNative: boolean, chain: BacktestChain): 'base' | 'quote' {
+  if (quoteNative) return 'quote';
+  if (baseNative) return 'base';
+  return chain === 'pulsechain' ? 'quote' : 'base';
+}
+
+/** `chain:BASE/QUOTE`, optional `#n`, optional trailing `~` which swaps the two coins. Legacy keys are PulseChain. */
+function parsedSymbols(key: string): { chain: BacktestChain; base: string; quote: string } | null {
+  const flipped = isFlipKey(key);
+  const bare = unflipKey(key).replace(/#\d+$/, '');
+  if (!bare) return null;
+  if (isLegacyKey(bare)) {
+    return { chain: 'pulsechain', base: flipped ? bare : 'PLS', quote: flipped ? 'PLS' : bare };
+  }
+  const m = /^([A-Za-z0-9-]+):([^/]+)\/([^/]+)$/.exec(bare);
+  if (!m) return null;
+  const chain = chainFromPrefix(m[1]);
+  if (!chain) return null;
+  return flipped ? { chain, base: m[3], quote: m[2] } : { chain, base: m[2], quote: m[3] };
+}
+
+function sideFromMarket(m: MarketDef): Side | null {
+  const chain = chainById(m.chainId);
+  if (!chain) return null;
+  const pool = m.pool.address || m.candlePool || '';
+  const base = tokenRef(m.base.symbol, m.base);
+  const quote = tokenRef(m.quote.symbol, m.quote);
+  const feeTier = m.pool.feeTier;
+  const t0 = TOKEN0[pool.toLowerCase()];
+  return {
+    chain, base, quote, dex: m.pool.dex, pool, feeBps: m.pool.feeBps, feeTier,
+    gasToken: gasSide(!!m.base.native, !!m.quote.native, chain),
+    spacing: spacingFor(m.pool.dex, feeTier),
+    baseIs0: t0 && base.address ? t0 === base.address.toLowerCase() : undefined,
+  };
+}
+
+function sideFromSymbols(key: string): Side | null {
+  const p = parsedSymbols(key);
+  if (!p) return null;
+  const b = knownCoin(p.chain, p.base);
+  const q = knownCoin(p.chain, p.quote);
+  return {
+    chain: p.chain,
+    base: tokenRef(p.base, b),
+    quote: tokenRef(p.quote, q),
+    dex: '', pool: '', feeBps: p.chain === 'pulsechain' ? 29 : 5,
+    gasToken: gasSide(!!b?.native, !!q?.native, p.chain),
+  };
+}
+
+function resolveSide(key: string): Side | null {
+  const known = marketForKey(key);
+  if (known) return sideFromMarket(known);
+  return sideFromSymbols(key);
+}
+
+/** Why the harness cannot replay this config yet. Null when the pool and the base token are both known. */
+export function blockReason(cfg: BotConfig): string | null {
+  if (!cfg.pool) return 'no pool address in the app state';
+  if (!cfg.base.address) return 'no base token on this bot';
+  return null;
+}
+
+/**
+ * Exit status for a finished run. A state file that held bots but replayed none is a failure. Missing state
+ * (the built-in examples) and a run that replayed at least one bot are not.
+ */
+export function replayExit(source: 'state' | 'defaults', saved: number, replayed: number): number {
+  return source === 'state' && saved > 0 && replayed === 0 ? 1 : 0;
 }
 
 function fillsOf(trades: unknown): RecordedFill[] {
@@ -140,11 +349,10 @@ function fillsOf(trades: unknown): RecordedFill[] {
     const price = num(t.execPrice ?? t.price);
     const base = num(t.plsAmount ?? t.baseAmount);
     const quote = num(t.stableAmount ?? t.quoteAmount);
-    const ts = num(t.timestamp ?? t.t);
+    const ts = sec(t.timestamp ?? t.t);
     if (!side || !(price != null && price > 0) || !(base != null && base > 0) || !(quote != null && quote > 0) || ts == null) continue;
     out.push({
-      t: ts > 1e12 ? ts / 1000 : ts,
-      side, price, baseAmount: base, quoteAmount: quote,
+      t: ts, side, price, baseAmount: base, quoteAmount: quote,
       feeQuote: num(t.feeQuote),
       levelPrice: num(t.levelPrice),
     });
@@ -152,10 +360,10 @@ function fillsOf(trades: unknown): RecordedFill[] {
   return out.sort((a, b) => a.t - b.t);
 }
 
-function medianFee(trades: unknown, fallback: number): number {
-  if (!Array.isArray(trades)) return fallback;
-  const xs = trades.map((row) => num(obj(row)?.feeBps)).filter((n): n is number => n != null && n > 0).sort((a, b) => a - b);
-  if (!xs.length) return fallback;
+function medianNum(trades: unknown, field: string): number | null {
+  if (!Array.isArray(trades)) return null;
+  const xs = trades.map((row) => num(obj(row)?.[field])).filter((n): n is number => n != null && n > 0).sort((a, b) => a - b);
+  if (!xs.length) return null;
   return xs[Math.floor(xs.length / 2)];
 }
 
@@ -168,73 +376,175 @@ function dexOf(trades: unknown): string {
   return '';
 }
 
+function windowOf(row: Record<string, unknown>, fills: RecordedFill[]): { from: number; to: number } | undefined {
+  const from = sec(row.startedAt) ?? (fills.length ? fills[0].t : null);
+  const lastFill = fills.length ? fills[fills.length - 1].t : null;
+  const to = sec(row.lastPriceAt) ?? lastFill;
+  if (from == null || to == null || !(to > from)) return undefined;
+  return { from, to };
+}
+
+function depthOf(row: Record<string, unknown>): { quoteReserve: number; baseReserve: number } | undefined {
+  const e = obj(row.econ);
+  const quote = num(e?.poolQuote);
+  const base = num(e?.poolPls);
+  if (!(quote != null && quote > 0) || !(base != null && base > 0)) return undefined;
+  return { quoteReserve: quote, baseReserve: base };
+}
+
+function limitsOf(row: Record<string, unknown>): { slippageBps?: number; maxImpact?: number } {
+  const l = obj(row.limits);
+  const slip = num(l?.slippageBps);
+  const imp = num(l?.maxPriceImpact);
+  return {
+    ...(slip != null ? { slippageBps: slip } : {}),
+    ...(imp != null ? { maxImpact: imp } : {}),
+  };
+}
+
+function usdOf(base: string, quote: string): { usdPerBase?: number; usdPerQuote?: number } {
+  return {
+    ...(STABLES.has(quote) ? { usdPerQuote: 1 } : {}),
+    ...(STABLES.has(base) ? { usdPerBase: 1 } : {}),
+  };
+}
+
+function applyTradeDex(side: Side, trades: unknown): Side {
+  const dex = dexOf(trades);
+  const feeBps = medianNum(trades, 'feeBps');
+  const feeTier = medianNum(trades, 'feeTier');
+  const next = { ...side };
+  if (dex) next.dex = dex;
+  if (feeBps != null) next.feeBps = feeBps;
+  if (feeTier != null) {
+    next.feeTier = feeTier;
+    if (feeBps == null) next.feeBps = feeTier / 100;
+    next.spacing = spacingFor(next.dex, feeTier) ?? next.spacing;
+  }
+  return next;
+}
+
+function storedPool(row: Record<string, unknown>): string {
+  return addr(row.pool) || addr(row.poolAddress) || addr(obj(row.position)?.pool);
+}
+
+function withStoredTokens(side: Side, row: Record<string, unknown>): Side {
+  const baseAddr = addr(row.baseToken) || addr(row.baseAddress);
+  const quoteAddr = addr(row.quoteToken) || addr(row.quoteAddress);
+  const pool = storedPool(row);
+  return {
+    ...side,
+    ...(baseAddr ? { base: { ...side.base, address: baseAddr } } : {}),
+    ...(quoteAddr ? { quote: { ...side.quote, address: quoteAddr } } : {}),
+    ...(pool ? { pool } : {}),
+  };
+}
+
+function configOf(kind: BotConfig['kind'], side: Side, extra: Partial<BotConfig>): BotConfig {
+  return {
+    kind, chain: side.chain, dex: side.dex || undefined, pool: side.pool || undefined,
+    base: side.base, quote: side.quote, feeBps: side.feeBps, feeTier: side.feeTier,
+    gasToken: side.gasToken, spacing: side.spacing, baseIs0: side.baseIs0,
+    ...usdOf(side.base.symbol, side.quote.symbol),
+    ...extra,
+  };
+}
+
 function gridBot(row: Record<string, unknown>, i: number): SavedBot | null {
   const cfg = obj(row.config);
   if (!cfg) return null;
-  const chain = chainOf(row.network) ?? 'pulsechain';
-  const quoteSym = str(row.stable) || 'USDC';
+  const key = str(row.stable);
+  const side0 = resolveSide(key);
+  if (!side0) return null;
+  const side = withStoredTokens(applyTradeDex(side0, row.trades), row);
   const lower = num(cfg.lowerPrice);
   const upper = num(cfg.upperPrice);
   const gridCount = num(cfg.gridCount);
   const capital = num(cfg.totalCapitalUsd);
   if (lower == null || upper == null || gridCount == null || !(capital != null && capital > 0)) return null;
+  const fills = fillsOf(row.trades);
   const profits = obj(row.profits);
   const recenter = obj(row.recenter);
   return {
     id: str(row.id) || `grid-${i + 1}`,
-    fills: fillsOf(row.trades),
-    config: {
-      kind: 'grid', chain, dex: dexOf(row.trades), pool: str(row.pool),
-      base: baseFor(chain), quote: token(quoteSym, quoteDecimals(quoteSym)),
-      feeBps: medianFee(row.trades, chain === 'pulsechain' ? 29 : 5),
+    fills,
+    window: windowOf(row, fills),
+    depth: depthOf(row),
+    config: configOf('grid', side, {
       capital, lowerPrice: lower, upperPrice: upper, gridCount,
       reinvest: profits?.mode !== 'send',
       recenter: recenter?.enabled === true,
-      gasToken: chain === 'pulsechain' ? 'quote' : 'base',
-    },
+      ...limitsOf(row),
+    }),
   };
 }
 
 function trendBot(row: Record<string, unknown>, i: number): SavedBot | null {
-  const chain = chainOf(row.network) ?? 'pulsechain';
-  const quoteSym = str(row.quote) || 'USDC';
+  const key = str(row.quote) || str(row.stable) || str(row.market);
+  const side0 = resolveSide(key);
+  if (!side0) return null;
+  const side = withStoredTokens(applyTradeDex(side0, row.trades), row);
   const capital = num(row.capital);
   const rawCfg = obj(row.cfg);
   if (!(capital != null && capital > 0) || !rawCfg || typeof rawCfg.strategy !== 'string') return null;
+  const fills = fillsOf(row.trades);
   const tf = isTF(row.tf) ? row.tf as TF : '1h';
   return {
     id: str(row.id) || `trend-${i + 1}`,
-    fills: fillsOf(row.trades),
-    config: {
-      kind: 'trend', chain, dex: dexOf(row.trades), pool: str(row.pool),
-      base: baseFor(chain), quote: token(quoteSym, quoteDecimals(quoteSym)),
-      feeBps: medianFee(row.trades, chain === 'pulsechain' ? 29 : 5),
+    fills,
+    window: windowOf(row, fills),
+    depth: depthOf(row),
+    config: configOf('trend', side, {
       capital, tf, trend: { ...DEFAULT_TREND, ...rawCfg } as TrendConfig,
-      gasToken: chain === 'pulsechain' ? 'quote' : 'base',
-    },
+      ...limitsOf(row),
+    }),
+  };
+}
+
+function actualOf(row: Record<string, unknown>): LpActual | undefined {
+  const t = obj(row.totals);
+  if (!t) return undefined;
+  const fees = num(t.fees);
+  const gas = num(t.gas);
+  const moves = num(row.reranges);
+  if (fees == null || gas == null || moves == null) return undefined;
+  const coins = obj(t.feeCoins);
+  return {
+    fees, gas, moves,
+    feeBase: num(coins?.base) ?? 0,
+    feeQuote: num(coins?.quote) ?? 0,
+    swapCost: num(t.swapCost) ?? 0,
+    moveLoss: num(t.moveLoss) ?? 0,
   };
 }
 
 function lpBot(row: Record<string, unknown>, i: number): SavedBot | null {
   const cfg = obj(row.config);
   if (!cfg) return null;
-  const chain = chainOf(row.network) ?? 'pulsechain';
-  const quoteSym = str(row.market) || str(row.stable) || 'USDC';
+  const key = str(row.market) || str(row.stable);
+  const side0 = resolveSide(key);
+  if (!side0) return null;
+  const side = withStoredTokens(applyTradeDex(side0, row.trades), row);
   const band = num(cfg.bandPct);
-  const capital = num(cfg.capital);
-  if (!(band != null && band > 0) || !(capital != null && capital > 0)) return null;
-  const feeTier = num(row.feeTier) ?? num(cfg.feeTier);
-  const feeBps = num(row.feeBps) ?? num(cfg.feeBps) ?? (feeTier != null ? feeTier / 100 : chain === 'pulsechain' ? 29 : 5);
+  const cash = num(cfg.capital);
+  if (!(band != null && band > 0) || !(cash != null && cash > 0)) return null;
+  // Coins already held on the base side go in too. Their quote value is baseAmount × the start price.
+  const baseHeld = num(cfg.baseAmount) ?? 0;
+  const start = num(row.startPrice);
+  const capital = cash + (baseHeld > 0 && start != null && start > 0 ? baseHeld * start : 0);
+  const fills = fillsOf(row.trades);
+  const feeTier = num(row.feeTier) ?? num(cfg.feeTier) ?? side.feeTier;
+  const feeBps = num(row.feeBps) ?? num(cfg.feeBps) ?? side.feeBps;
   return {
     id: str(row.id) || `lp-${i + 1}`,
-    fills: fillsOf(row.trades),
-    config: {
-      kind: 'lp', chain, dex: str(row.dex), pool: str(row.pool),
-      base: baseFor(chain), quote: token(quoteSym, quoteDecimals(quoteSym)),
-      feeBps, feeTier: feeTier ?? undefined, capital, bandPct: band,
-      rerange: cfg.rerange !== false,
-      gasToken: chain === 'pulsechain' ? 'quote' : 'base',
-    },
+    fills,
+    window: windowOf(row, fills),
+    depth: depthOf(row),
+    actual: actualOf(row),
+    config: configOf('lp', { ...side, feeBps, feeTier: feeTier ?? side.feeTier, spacing: spacingFor(side.dex, feeTier ?? side.feeTier) ?? side.spacing }, {
+      capital, bandPct: band, rerange: cfg.rerange !== false,
+      ...limitsOf(row),
+    }),
   };
 }
 
@@ -253,7 +563,6 @@ function botsFrom(clean: unknown): { bots: SavedBot[]; skipped: number } {
       else skipped++;
     });
   };
-  // A version-1 file is one grid at the top, not a list.
   if (Array.isArray(root.grids) || Array.isArray(root.trends) || Array.isArray(root.lps)) {
     take(root.grids, gridBot);
     take(root.trends, trendBot);
@@ -306,12 +615,13 @@ export function loadAppState(path: string): StateLoad {
   return { source: 'state', path, note: STATE_NOTE + skip, bots, skipped };
 }
 
-function withFit(cfg: BotConfig, feeK: number, slippageBps: number): BotConfig {
+function withFit(cfg: BotConfig, feeK: number, slippageBps: number, dwellMs?: number): BotConfig {
   return {
     ...cfg,
     feeK,
     slippageBps,
     feeBps: cfg.kind === 'lp' ? cfg.feeBps : cfg.feeBps * feeK,
+    ...(dwellMs != null ? { dwellMs } : {}),
   };
 }
 
@@ -345,36 +655,77 @@ function compare(recorded: RecordedFill[], replayed: { t: number; side: 'buy' | 
   };
 }
 
+function named(run: BotSummary, label: string): number | null {
+  const n = run.modelNotes.find((x) => x.label === label);
+  return n && Number.isFinite(n.value) ? n.value : null;
+}
+
+function rel(sim: number, act: number): number {
+  const den = Math.max(Math.abs(act), Math.abs(sim), 1e-9);
+  return Math.abs(sim - act) / den;
+}
+
+/** Quote-valued fees, gas, swaps, move loss and move count against the totals the app saved. */
+function compareLp(actual: LpActual, run: BotSummary): CalibrationError | null {
+  const fees = named(run, 'Fees collected');
+  const gas = named(run, 'Gas');
+  const swap = named(run, 'Swap cost');
+  const loss = named(run, 'Move loss');
+  if (fees == null || gas == null || swap == null || loss == null) return null;
+  const feeRel = rel(fees, actual.fees);
+  const gasRel = rel(gas, actual.gas);
+  const moveRel = rel(run.moves, actual.moves);
+  const swapRel = rel(swap, actual.swapCost);
+  const lossRel = rel(loss, actual.moveLoss);
+  return {
+    recorded: actual.moves, replayed: run.moves, priceMape: feeRel, feeMape: gasRel, swapRel, lossRel,
+    combined: feeRel + gasRel + moveRel + swapRel + lossRel,
+  };
+}
+
+function betterFit(
+  err: CalibrationError, feeK: number, slip: number, dwellMs: number,
+  best: { feeK: number; slippageBps: number; dwellMs: number; error: CalibrationError },
+): boolean {
+  if (err.combined < best.error.combined - 1e-12) return true;
+  if (Math.abs(err.combined - best.error.combined) > 1e-12) return false;
+  if (Math.abs(feeK - 1) !== Math.abs(best.feeK - 1)) return Math.abs(feeK - 1) < Math.abs(best.feeK - 1);
+  if (slip !== best.slippageBps) return slip < best.slippageBps;
+  return dwellMs < best.dwellMs;
+}
+
 /**
- * Pick the fee scale and fill slippage that make a replay of this config agree with the recorded fills.
- * Liquidity bots have no fill list in the app state, so they keep k = 1 unless fills were recorded.
+ * Pick the fee scale (and, for a grid, the fill slippage) that makes a replay agree with what the bot recorded.
+ * A liquidity bot has no fill list; it is fitted to its totals (fees, moves, gas, swap cost, move loss) instead.
+ * Candle closes leave a tight band more often than a live slot0 poll, so the fit also tries a short dwell.
  */
 export function calibrateBot(bot: SavedBot, data: HarnessData): Calibration {
   const baseK = bot.config.feeK ?? 1;
   const baseSlip = bot.config.slippageBps ?? 0;
-  if (!bot.fills.length) {
+  const lp = bot.config.kind === 'lp' && bot.actual;
+  if (!lp && !bot.fills.length) {
     return {
       botId: bot.id, fitted: false, feeK: baseK, slippageBps: baseSlip, config: bot.config, error: null,
       note: 'No recorded fills, so the fee and fill model stays at its defaults.',
     };
   }
-  const scales = bot.config.kind === 'lp' ? FEE_SCALES : FEE_SCALES;
-  const slips = bot.config.kind === 'lp' ? [baseSlip] : FILL_SLIPPAGES;
-  let best: { feeK: number; slippageBps: number; error: CalibrationError } | null = null;
+  const scales = FEE_SCALES;
+  const slips = lp ? [baseSlip] : FILL_SLIPPAGES;
+  const dwells = lp ? LP_DWELLS_MS : [0];
+  let best: { feeK: number; slippageBps: number; dwellMs: number; error: CalibrationError } | null = null;
   for (const feeK of scales) {
     for (const slippageBps of slips) {
-      let error: CalibrationError;
-      try {
-        const run = runBot(withFit(bot.config, feeK, slippageBps), data);
-        error = compare(bot.fills, run.simFills);
-      } catch {
-        continue;
+      for (const dwellMs of dwells) {
+        let error: CalibrationError | null = null;
+        try {
+          const run = runBot(withFit(bot.config, feeK, slippageBps, lp ? dwellMs : undefined), data);
+          error = lp ? compareLp(bot.actual!, run) : compare(bot.fills, run.simFills);
+        } catch {
+          continue;
+        }
+        if (!error) continue;
+        if (!best || betterFit(error, feeK, slippageBps, dwellMs, best)) best = { feeK, slippageBps, dwellMs, error };
       }
-      const better = !best
-        || error.combined < best.error.combined - 1e-12
-        || (Math.abs(error.combined - best.error.combined) <= 1e-12 && Math.abs(feeK - 1) < Math.abs(best.feeK - 1))
-        || (Math.abs(error.combined - best.error.combined) <= 1e-12 && Math.abs(feeK - 1) === Math.abs(best.feeK - 1) && slippageBps < best.slippageBps);
-      if (better) best = { feeK, slippageBps, error };
     }
   }
   if (!best) {
@@ -385,8 +736,10 @@ export function calibrateBot(bot: SavedBot, data: HarnessData): Calibration {
   }
   return {
     botId: bot.id, fitted: true, feeK: best.feeK, slippageBps: best.slippageBps,
-    config: withFit(bot.config, best.feeK, best.slippageBps), error: best.error,
-    note: 'The fee and fill model was fitted to the recorded fills.',
+    config: withFit(bot.config, best.feeK, best.slippageBps, lp ? best.dwellMs : undefined), error: best.error,
+    note: lp
+      ? 'The fee model was fitted to the recorded fees, moves, gas and rebalance cost.'
+      : 'The fee and fill model was fitted to the recorded fills.',
   };
 }
 
@@ -395,6 +748,20 @@ const pct = (n: number) => `${n < 0 ? '-' : '+'}${fmt(Math.abs(n) * 100)}%`;
 /** Lines for the summary. Every line that contains a digit is marked modeled. */
 export function calibrationMarkdown(c: Calibration): string {
   if (!c.fitted || !c.error) return `${c.botId}: ${c.note} (modeled)`;
+  if (c.config.kind === 'lp') {
+    const fee = c.error.priceMape == null ? 'Fee error was not measured (modeled).' : `Fees collected error ${pct(c.error.priceMape)} (modeled).`;
+    const gas = c.error.feeMape == null ? 'Gas error was not measured (modeled).' : `Gas error ${pct(c.error.feeMape)} (modeled).`;
+    const swap = c.error.swapRel == null ? '' : ` Swap cost error ${pct(c.error.swapRel)} (modeled).`;
+    const loss = c.error.lossRel == null ? '' : ` Move loss error ${pct(c.error.lossRel)} (modeled).`;
+    const dwellMin = (c.config.dwellMs ?? 0) / 60_000;
+    const dwell = `Outside-range dwell ${fmt(dwellMin)} minutes (modeled).`;
+    return [
+      `${c.botId}: fee k ${fmt(c.feeK)} (modeled). ${dwell}`,
+      `${fee} ${gas}${swap}${loss}`,
+      `Recorded moves ${fmt(c.error.recorded)} and replayed moves ${fmt(c.error.replayed)} (modeled).`,
+      `Calibration error ${fmt(c.error.combined)} (modeled).`,
+    ].join('\n');
+  }
   const fee = c.error.feeMape == null ? 'Fee error was not measured (modeled).' : `Fee error ${pct(c.error.feeMape)} (modeled).`;
   const price = c.error.priceMape == null ? 'Price error was not measured (modeled).' : `Price error ${pct(c.error.priceMape)} (modeled).`;
   return [

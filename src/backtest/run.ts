@@ -257,7 +257,16 @@ function runLp(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     feeQuote: r.feeCoins.quote + (price > 0 ? r.feeCoins.base * price : 0),
     priceStart: r.priceStart, priceEnd: price,
     netVsHold: endValue - holdValue,
-  }, { onChain: data.onChain });
+  }, {
+    onChain: data.onChain,
+    // Quote-valued totals, so an LP with no fill list can be checked against the app's recorded totals.
+    modelNotes: [
+      { label: 'Fees collected', value: r.fees, unit: cfg.quote.symbol, source: 'modeled' },
+      { label: 'Gas', value: r.gas, unit: cfg.quote.symbol, source: 'modeled' },
+      { label: 'Swap cost', value: r.swapCost, unit: cfg.quote.symbol, source: 'modeled' },
+      { label: 'Move loss', value: r.moveLoss, unit: cfg.quote.symbol, source: 'modeled' },
+    ],
+  });
 }
 
 function runGrid(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {

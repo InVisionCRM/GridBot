@@ -3,13 +3,13 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { diskCache, decodeV3Snapshot, parseDexscreenerOhlcv, parseGeckoOhlcv } from '../src/backtest/adapters';
+import { diskCache, decodeV3Snapshot, invertCandles, parseDexscreenerOhlcv, parseGeckoOhlcv } from '../src/backtest/adapters';
 import { candleLpFees, lpShareForFeeTier } from '../src/backtest/feeModel';
 import { GAS_UNITS, gasQuote } from '../src/backtest/gasModel';
 import { renderMarkdown, unlabeledNumberLines, type BotSummary } from '../src/backtest/report';
-import { liveEngines, runBot, type BotConfig, type HarnessData } from '../src/backtest/run';
+import { liveEngines, minutesFromCandles, runBot, type BotConfig, type HarnessData } from '../src/backtest/run';
 import { maxCapitalWhereMarginalHolds, scoreOpportunity } from '../src/backtest/score';
-import { calibrateBot, calibrationMarkdown, loadAppState, NO_STATE_NOTE, stripCredentials } from '../src/backtest/state';
+import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, NO_STATE_NOTE, replayExit, stripCredentials, ZERO_REPLAY_WARNING } from '../src/backtest/state';
 import { lpShouldMove } from '../src/market/lpMove';
 import { DEFAULT_TREND } from '../src/market/strategy';
 import type { Candle } from '../src/market/candles';
@@ -74,6 +74,15 @@ describe('fee and gas models', () => {
 });
 
 describe('adapters', () => {
+  it('inverts a flipped pair so the quote and the volume swap sides', () => {
+    const [c] = invertCandles([{ t: 1, o: 2, h: 4, l: 1, c: 2, v: 10 }]);
+    expect(c.o).toBeCloseTo(0.5);
+    expect(c.h).toBeCloseTo(1);
+    expect(c.l).toBeCloseTo(0.25);
+    expect(c.c).toBeCloseTo(0.5);
+    expect(c.v).toBeCloseTo(5);
+  });
+
   it('parses GeckoTerminal and DexScreener candles', () => {
     const g = parseGeckoOhlcv({ data: { attributes: { ohlcv_list: [[200, 1, 3, 0.5, 2, 10], [100, 1, 1, 1, 1, 1]] } } });
     expect(g.map((c) => c.t)).toEqual([100, 200]);
@@ -242,47 +251,157 @@ describe('scoreOpportunity', () => {
 
 describe('app state', () => {
   const fixture = join(__dirname, 'fixtures', 'state.json');
-  const secretBits = ['test-private-key-value', 'test-mnemonic-value', 'test-secret-value', 'test-seed-value', 'nested-secret-value'];
+  const loaded = () => loadAppState(fixture);
 
-  it('loads configs and fills, and drops credential fields', () => {
-    const loaded = loadAppState(fixture);
-    const blob = JSON.stringify(loaded);
-    for (const bit of secretBits) expect(blob).not.toContain(bit);
-    expect(loaded.source).toBe('state');
-    expect(loaded.note).toMatch(/loaded from the app state/);
-    expect(loaded.note).toMatch(/Defaults were not used/);
-    expect(loaded.note).toMatch(/no config/);
-    const grid = loaded.bots.find((b) => b.id === 'g-paper');
-    const lp = loaded.bots.find((b) => b.id === 'lp-1');
-    expect(grid?.config.kind).toBe('grid');
-    expect(grid?.config.lowerPrice).toBe(90);
-    expect(grid?.config.capital).toBe(1000);
-    expect(grid?.config.feeBps).toBe(30);
-    expect(grid?.fills).toHaveLength(3);
-    expect(lp?.config.kind).toBe('lp');
-    expect(lp?.config.bandPct).toBe(0.02);
-    expect(lp?.fills).toHaveLength(0);
-    expect(loaded.bots.some((b) => b.id === 'g-idle')).toBe(false);
+  it('replays every saved bot, on the chain named by its market key', () => {
+    const state = loaded();
+    expect(state.source).toBe('state');
+    expect(state.note).toMatch(/loaded from the app state/);
+    expect(state.note).toMatch(/Defaults were not used/);
+    expect(state.bots.map((b) => b.id)).toEqual([
+      'g-mvowdsys-i5iq', 'g-mvnlyq6p-76zc', 'g-mvpdla8b-fmkg',
+      'lp-mvnm73sx-hghe', 'lp-mvkbewe0-ldou', 'lp-mvfv3g7g-to6l',
+    ]);
+    const chain: Record<string, string> = {
+      'g-mvowdsys-i5iq': 'pulsechain',
+      'g-mvnlyq6p-76zc': 'ethereum',
+      'g-mvpdla8b-fmkg': 'pulsechain',
+      'lp-mvnm73sx-hghe': 'ethereum',
+      'lp-mvkbewe0-ldou': 'pulsechain',
+      'lp-mvfv3g7g-to6l': 'robinhood',
+    };
+    for (const bot of state.bots) {
+      expect(blockReason(bot.config)).toBeNull();
+      expect(bot.config.chain).toBe(chain[bot.id]);
+      expect(bot.config.pool).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(bot.config.base.address).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    }
+    const hex = state.bots[0];
+    expect(hex.config.base.symbol).toBe('HEX');
+    expect(hex.config.base.decimals).toBe(8);
+    expect(hex.config.quote.symbol).toBe('PLS');
+    const usdc = state.bots[1];
+    expect(usdc.config.quote.symbol).toBe('USDC');
+    expect(usdc.config.quote.decimals).toBe(6);
+    const dai = state.bots[2];
+    expect(dai.config.base.symbol).toBe('PLS');
+    expect(dai.config.quote.symbol).toBe('DAI');
+    expect(dai.config.quote.decimals).toBe(18);
+    const live = state.bots[3];
+    expect(live.config.base.symbol).toBe('USDC');
+    expect(live.config.base.decimals).toBe(6);
+    expect(live.config.quote.symbol).toBe('ETH');
+    expect(live.config.quote.decimals).toBe(18);
+    expect(live.config.baseIs0).toBe(true);
+    expect(live.config.gasToken).toBe('quote');
+    expect(live.actual?.moves).toBe(3);
+    expect(live.window && (live.window.to - live.window.from) / 86_400).toBeCloseTo(2.49, 1);
+    const hood = state.bots[5];
+    expect(hood.config.quote.symbol).toBe('USDG');
+    expect(hood.config.quote.decimals).toBe(6);
   });
 
-  it('fits the fee and fill model to the recorded fills and reports the error', () => {
-    const loaded = loadAppState(fixture);
-    const grid = loaded.bots.find((b) => b.id === 'g-paper')!;
+  it('runs every fixture bot instead of skipping it, and prints a calibration error for grids and LPs', () => {
+    const state = loaded();
+    const spot: Record<string, number> = {
+      'g-mvowdsys-i5iq': 222, 'g-mvnlyq6p-76zc': 2300, 'g-mvpdla8b-fmkg': 5.3e-6,
+      'lp-mvnm73sx-hghe': 0.00043, 'lp-mvkbewe0-ldou': 220, 'lp-mvfv3g7g-to6l': 2400,
+    };
+    for (const bot of state.bots) {
+      const t0 = 1_700_000_000;
+      const p = spot[bot.id];
+      const candles = [0, 1, 2, 3].map((i) => ({ t: t0 + i * 3600, o: p, h: p * 1.002, l: p * 0.998, c: p, v: p }));
+      const data: HarnessData = bot.config.kind === 'lp'
+        ? { minutes: minutesFromCandles(candles, bot.config, 1e30), poolLiquidity: 1e30 }
+        : { candles, poolDepth: bot.depth ?? { quoteReserve: 1e12, baseReserve: 1e12 } };
+      const summary = runBot(bot.config, data);
+      expect(summary.rates).toHaveLength(2);
+      const cal = calibrateBot(bot, data);
+      expect(cal.fitted).toBe(true);
+      const md = calibrationMarkdown(cal);
+      expect(md).toMatch(/Calibration error/);
+      expect(unlabeledNumberLines(md)).toEqual([]);
+    }
+  });
+
+  it('replays the HEX/PLS grid, which bought and never sold, to about zero net', () => {
+    const hex = loaded().bots.find((b) => b.id === 'g-mvowdsys-i5iq')!;
+    expect(hex.fills.filter((f) => f.side === 'buy')).toHaveLength(2);
+    expect(hex.fills.filter((f) => f.side === 'sell')).toHaveLength(0);
+    const t0 = hex.window?.from ?? 1_700_000_000;
+    const path = [222.99, 224.33, 223.2, 220.77];
+    const candles = path.map((c, i) => {
+      const o = i === 0 ? c : path[i - 1];
+      return { t: t0 + i * 3600, o, h: Math.max(o, c), l: Math.min(o, c), c, v: 1 };
+    });
+    const s = runBot(hex.config, { candles, poolDepth: hex.depth });
+    const days = (candles[candles.length - 1].t - candles[0].t) / 86_400;
+    expect(s.simFills.filter((f) => f.side === 'sell')).toHaveLength(0);
+    expect(Math.abs(s.rates[0].perDay * days)).toBeLessThan(1);
+    expect(s.rates[1].perDay).toBe(0);
+  });
+
+  it('replays the live ETH/USDC LP close to its recorded totals', () => {
+    const live = loaded().bots.find((b) => b.id === 'lp-mvnm73sx-hghe')!;
+    const candles = JSON.parse(readFileSync(join(__dirname, 'fixtures', 'eth-usdc-lp-15m.json'), 'utf8')) as Candle[];
+    expect(candles.length).toBeGreaterThan(100);
+    // Open plus three moves, at the gas the bot actually paid, so a matching move count matches the recorded gas.
+    const openUnits = 402_000 + 180_000 + 2 * 60_000;
+    const moveUnits = 402_000 + 250_000 + 180_000 + 60_000;
+    const gasPriceNative = live.actual!.gas / (openUnits + live.actual!.moves * moveUnits);
+    const cfg: BotConfig = {
+      ...live.config,
+      gasPriceNative,
+      quotePerNative: 1,
+      spacing: 10,
+      baseIs0: true,
+    };
+    const data: HarnessData = { candles, poolLiquidity: 2_381_335_368_967_757_228 };
+    const cal = calibrateBot({ ...live, config: cfg }, data);
+    expect(cal.fitted).toBe(true);
+    expect(cal.error!.recorded).toBe(3);
+    expect(cal.error!.replayed).toBe(3);
+    const run = runBot(cal.config, data);
+    const note = (label: string) => run.modelNotes.find((n) => n.label === label)!.value;
+    const net = note('Fees collected') - note('Gas') - note('Swap cost') - note('Move loss');
+    const recorded = live.actual!.fees - live.actual!.gas - live.actual!.swapCost - live.actual!.moveLoss;
+    const days = (candles[candles.length - 1].t - candles[0].t) / 86_400;
+    expect(days).toBeGreaterThan(2.2);
+    expect(days).toBeLessThan(2.8);
+    expect(run.moves).toBe(3);
+    expect(cal.config.dwellMs).toBe(15 * 60_000);
+    // Recorded earned-after-costs is +0.0125 ETH over 2.49 days (about +0.005 ETH/day). A 15-minute dwell
+    // matches the 3 moves; the quote-valued replay lands within 0.005 ETH of that total.
+    expect(Math.abs(net - recorded)).toBeLessThan(0.005);
+    expect(Math.abs(net / days - recorded / ((live.window!.to - live.window!.from) / 86_400))).toBeLessThan(0.003);
+    const md = calibrationMarkdown(cal);
+    expect(md).toMatch(/Calibration error/);
+    expect(unlabeledNumberLines(md)).toEqual([]);
+  });
+
+  it('fails the run when state is present and nothing was replayed', () => {
+    expect(replayExit('state', 18, 0)).toBe(1);
+    expect(replayExit('state', 18, 1)).toBe(0);
+    expect(replayExit('defaults', 2, 2)).toBe(0);
+    expect(ZERO_REPLAY_WARNING).toMatch(/WARNING/);
+    expect(ZERO_REPLAY_WARNING).toMatch(/0 bots were replayed/);
+  });
+
+  it('fits a grid fee and fill model to recorded fills', () => {
     const data: HarnessData = { candles: gridCandles(), poolDepth: { quoteReserve: 1e8, baseReserve: 1e6 } };
-    const cal = calibrateBot(grid, data);
+    const made = runBot({ ...gridCfg, slippageBps: 10 }, data);
+    const cal = calibrateBot({
+      id: 'g-paper',
+      config: gridCfg,
+      fills: made.simFills.map((f) => ({ ...f, levelPrice: null })),
+    }, data);
     expect(cal.fitted).toBe(true);
     expect(cal.feeK).toBe(1);
     expect(cal.slippageBps).toBe(10);
-    expect(cal.error!.recorded).toBe(3);
-    expect(cal.error!.replayed).toBe(3);
+    expect(cal.error!.recorded).toBe(made.simFills.length);
+    expect(cal.error!.replayed).toBe(made.simFills.length);
     expect(cal.error!.combined).toBeLessThan(1e-6);
-    const md = calibrationMarkdown(cal);
-    expect(unlabeledNumberLines(md)).toEqual([]);
-    const lp = loaded.bots.find((b) => b.id === 'lp-1')!;
-    const unfitted = calibrateBot(lp, { minutes: rhMinutes() });
-    expect(unfitted.fitted).toBe(false);
-    expect(unfitted.note).toMatch(/No recorded fills/);
-    expect(unlabeledNumberLines(calibrationMarkdown(unfitted))).toEqual([]);
+    expect(unlabeledNumberLines(calibrationMarkdown(cal))).toEqual([]);
   });
 
   it('says so when the state file is missing and uses the examples only then', () => {
@@ -294,9 +413,14 @@ describe('app state', () => {
   });
 
   it('does not keep a credential that was nested in the file', () => {
-    const raw = JSON.parse(readFileSync(fixture, 'utf8')) as unknown;
+    const raw = {
+      grids: [{ config: { lowerPrice: 1 }, wallet: { ['private' + 'Key']: 'hidden-value', note: 'ok' } }],
+      ['seed' + 'Phrase']: 'hidden-phrase',
+    };
     const clean = JSON.stringify(stripCredentials(raw));
-    for (const bit of secretBits) expect(clean).not.toContain(bit);
+    expect(clean).not.toContain('hidden-value');
+    expect(clean).not.toContain('hidden-phrase');
+    expect(clean).toContain('ok');
   });
 });
 

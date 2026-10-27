@@ -58,10 +58,28 @@ export function parseDexscreenerOhlcv(body: unknown): Candle[] {
   return out.sort((a, b) => a.t - b.t);
 }
 
-export function geckoOhlcvUrl(network: string, pool: string, baseToken: string, beforeSec?: number): string {
-  const q = new URLSearchParams({ aggregate: '1', limit: '1000', currency: 'token', token: baseToken });
+/**
+ * Prices quoted in the other coin, turned into prices of that other coin. A flipped market (USDC per ETH fetched
+ * for an ETH-per-USDC bot) uses this. Volume was in the fetched quote, so it is divided by that price.
+ */
+export function invertCandles(candles: Candle[]): Candle[] {
+  return candles.map((c) => ({
+    t: c.t,
+    o: 1 / c.o,
+    h: 1 / c.l,
+    l: 1 / c.h,
+    c: 1 / c.c,
+    v: c.c > 0 ? c.v / c.c : 0,
+  }));
+}
+
+export function geckoOhlcvUrl(
+  network: string, pool: string, baseToken: string, beforeSec?: number,
+  bar: { unit: 'hour' | 'minute'; n: number } = { unit: 'hour', n: 1 },
+): string {
+  const q = new URLSearchParams({ aggregate: String(bar.n), limit: '1000', currency: 'token', token: baseToken });
   if (beforeSec) q.set('before_timestamp', String(beforeSec));
-  return `https://api.geckoterminal.com/api/v2/networks/${network}/pools/${pool}/ohlcv/hour?${q}`;
+  return `https://api.geckoterminal.com/api/v2/networks/${network}/pools/${pool}/ohlcv/${bar.unit}?${q}`;
 }
 
 export function dexscreenerOhlcvUrl(screenerChain: string, pool: string, from: number, to: number): string {
@@ -84,11 +102,24 @@ export async function diskCache<T>(dir: string, key: string, load: () => Promise
   return { value, hit: false };
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function getJson(url: string, fetchFn: FetchLike, cacheDir: string): Promise<unknown> {
+  const host = new URL(url).host;
   const { value } = await diskCache(cacheDir, url, async () => {
-    const r = await fetchFn(url, { headers: { accept: 'application/json' } });
-    if (!r.ok) throw new Error(`HTTP ${r.status} from ${new URL(url).host}`);
-    return r.json();
+    // GeckoTerminal answers 429 and asks for about a minute. A cached miss waits and tries again; other errors do not.
+    let wait = 65_000;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const r = await fetchFn(url, { headers: { accept: 'application/json' } });
+      if (r.status === 429 && attempt < 3 && host.includes('geckoterminal')) {
+        await sleep(wait);
+        wait = Math.min(wait * 2, 180_000);
+        continue;
+      }
+      if (!r.ok) throw new Error(`HTTP ${r.status} from ${host}`);
+      return r.json();
+    }
+    throw new Error(`HTTP 429 from ${host}`);
   });
   return value;
 }
@@ -101,6 +132,8 @@ export async function loadCandles(o: {
   from: number;
   to: number;
   source?: 'gecko' | 'dexscreener' | 'auto';
+  /** Bar size in minutes. 60 is one hour. 15 uses the minute endpoint, which a short window needs to count range moves. */
+  barMinutes?: number;
   cacheDir: string;
   fetchFn?: FetchLike;
 }): Promise<{ candles: Candle[]; source: 'gecko' | 'dexscreener' }> {
@@ -110,7 +143,7 @@ export async function loadCandles(o: {
   const errors: string[] = [];
   if (want !== 'dexscreener') {
     try {
-      const candles = await geckoRange(chain.geckoSlug!, o.pool, o.baseToken, o.from, o.to, fetchFn, o.cacheDir);
+      const candles = await geckoRange(chain.geckoSlug!, o.pool, o.baseToken, o.from, o.to, fetchFn, o.cacheDir, o.barMinutes ?? 60);
       if (candles.length) return { candles, source: 'gecko' };
       errors.push('GeckoTerminal returned no candles');
     } catch (e) { errors.push((e as Error).message); }
@@ -123,11 +156,14 @@ export async function loadCandles(o: {
   return { candles, source: 'dexscreener' };
 }
 
-async function geckoRange(network: string, pool: string, base: string, from: number, to: number, fetchFn: FetchLike, cacheDir: string): Promise<Candle[]> {
+async function geckoRange(network: string, pool: string, base: string, from: number, to: number, fetchFn: FetchLike, cacheDir: string, barMinutes: number): Promise<Candle[]> {
   const out: Candle[] = [];
-  let before = to + 1;
+  const bar = barMinutes >= 60 ? { unit: 'hour' as const, n: Math.max(1, Math.round(barMinutes / 60)) } : { unit: 'minute' as const, n: barMinutes };
+  // A before_timestamp past "now" is rejected. Clamp so a window that ends on the latest price still loads.
+  const now = Math.floor(Date.now() / 1000);
+  let before = Math.min(to, now) + 1;
   for (let page = 0; page < 8; page++) {
-    const rows = parseGeckoOhlcv(await getJson(geckoOhlcvUrl(network, pool, base, before), fetchFn, cacheDir));
+    const rows = parseGeckoOhlcv(await getJson(geckoOhlcvUrl(network, pool, base, before, bar), fetchFn, cacheDir));
     if (!rows.length) break;
     out.push(...rows);
     if (rows[0].t <= from) break;

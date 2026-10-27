@@ -8,10 +8,11 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { CHAINS } from '../src/live/chains';
-import { loadCandles, readGasPrice, readV3Pool, type FetchLike } from '../src/backtest/adapters';
+import { invertCandles, loadCandles, readGasPrice, readV3Pool, type FetchLike } from '../src/backtest/adapters';
+import { discoverPool } from '../src/backtest/pools';
 import { renderMarkdown, summaryJson, type RunWindow } from '../src/backtest/report';
 import { runBot, type BotConfig, type HarnessData } from '../src/backtest/run';
-import { calibrateBot, calibrationMarkdown, loadAppState } from '../src/backtest/state';
+import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, replayExit, ZERO_REPLAY_WARNING } from '../src/backtest/state';
 
 const DAY = 86_400;
 
@@ -35,14 +36,30 @@ function rpcFor(chain: BotConfig['chain']): string {
   return c.rpcs[0];
 }
 
+async function resolvePool(cfg: BotConfig, cacheDir: string): Promise<BotConfig> {
+  if (!blockReason(cfg)) return cfg;
+  const found = await discoverPool(cfg, rpcFor(cfg.chain), cacheDir, fetchFn);
+  if (!found) return cfg;
+  return { ...cfg, ...found };
+}
+
 async function loadMarket(cfg: BotConfig, from: number, to: number, cacheDir: string): Promise<{ data: HarnessData; cfg: BotConfig }> {
   if (!cfg.pool) throw new Error('no pool address on this bot');
   const base = cfg.base.address;
   if (!base) throw new Error('no base token on this bot');
   const source = (arg('--source') as 'gecko' | 'dexscreener' | 'auto' | undefined) ?? 'auto';
-  const { candles } = await loadCandles({
-    chain: cfg.chain, pool: cfg.pool, baseToken: base, from, to, source, cacheDir, fetchFn,
-  });
+  // A couple of days of hourly closes step out of a ±1% band more often than the live bot moved. Fifteen-minute
+  // bars cover that window in one page; longer windows stay hourly.
+  const barMinutes = to - from <= 14 * 86_400 ? 15 : 60;
+  const candleArgs = { chain: cfg.chain, pool: cfg.pool, from, to, source, cacheDir, fetchFn, barMinutes };
+  let candles;
+  try {
+    candles = (await loadCandles({ ...candleArgs, baseToken: base })).candles;
+  } catch (e) {
+    // A flipped pair is quoted the other way by the candle source. Invert that series into this bot's prices.
+    if (!cfg.quote.address) throw e;
+    candles = invertCandles((await loadCandles({ ...candleArgs, baseToken: cfg.quote.address })).candles);
+  }
   const rpc = rpcFor(cfg.chain);
   const pool = await readV3Pool(cfg.pool, rpc, cacheDir, fetchFn).catch(() => null);
   const gas = await readGasPrice(rpc, cacheDir, fetchFn).catch(() => 0);
@@ -81,41 +98,53 @@ async function main() {
   const blocks: string[] = [loaded.note, ''];
   const jsonBots: unknown[] = [];
   const calibrations = [];
+  let replayed = 0;
 
   for (const bot of loaded.bots) {
-    const span = bot.fills.length
-      ? { from: Math.min(...bot.fills.map((f) => f.t)), to: Math.max(...bot.fills.map((f) => f.t)) + 3600 }
-      : { from: now - 30 * DAY, to: now };
+    const span = bot.window
+      ?? (bot.fills.length
+        ? { from: Math.min(...bot.fills.map((f) => f.t)), to: Math.max(...bot.fills.map((f) => f.t)) + 3600 }
+        : { from: now - 30 * DAY, to: now });
     const from = fromArg ? Number(fromArg) : span.from;
     const to = toArg ? Number(toArg) : span.to;
     let cfg = bot.config;
     let data: HarnessData | null = null;
     try {
-      if (cfg.kind === 'lp' || cfg.pool) {
-        const market = await loadMarket(cfg, from, to, cacheDir);
-        data = market.data;
-        cfg = market.cfg;
+      cfg = await resolvePool(cfg, cacheDir);
+      const why = blockReason(cfg);
+      if (why) {
+        blocks.push(`${bot.id}: ${why}, so this bot was not replayed.`);
+        blocks.push('');
+        continue;
       }
+      const market = await loadMarket(cfg, from, to, cacheDir);
+      data = market.data;
+      cfg = market.cfg;
+      if (bot.depth) data.poolDepth = bot.depth;
     } catch (e) {
       blocks.push(`${bot.id}: replay did not run (${(e as Error).message}).`);
       blocks.push('');
       continue;
     }
-    if (!data) {
-      blocks.push(`${bot.id}: no pool address in the app state, so this bot was not replayed.`);
-      blocks.push('');
-      continue;
-    }
+    replayed++;
     const cal = calibrateBot({ ...bot, config: cfg }, data);
-    calibrations.push({ botId: cal.botId, fitted: cal.fitted, feeK: cal.feeK, slippageBps: cal.slippageBps, error: cal.error, note: cal.note });
+    calibrations.push({
+      botId: cal.botId, fitted: cal.fitted, feeK: cal.feeK, slippageBps: cal.slippageBps,
+      dwellMs: cal.config.dwellMs ?? 0, error: cal.error, note: cal.note,
+    });
     const summary = runBot(cal.config, data);
-    const w: RunWindow = { from, to };
+    const w: RunWindow = { from, to, inSample: cal.fitted };
     blocks.push(renderMarkdown([summary], w).trimEnd());
     blocks.push(calibrationMarkdown(cal));
     blocks.push('');
     jsonBots.push({ id: bot.id, summary: summaryJson([summary], w).bots[0], calibration: calibrations[calibrations.length - 1] });
   }
 
+  const failed = replayExit(loaded.source, loaded.bots.length, replayed);
+  if (failed) {
+    blocks.unshift(ZERO_REPLAY_WARNING, '');
+    process.stderr.write(`${ZERO_REPLAY_WARNING}\n`);
+  }
   const text = blocks.join('\n').replace(/\n{3,}/g, '\n\n') + '\n';
   process.stdout.write(text);
   const md = arg('--md');
@@ -123,8 +152,9 @@ async function main() {
   if (md) { mkdirSync(dirname(resolve(md)), { recursive: true }); writeFileSync(md, text); }
   if (js) {
     mkdirSync(dirname(resolve(js)), { recursive: true });
-    writeFileSync(js, JSON.stringify({ source: loaded.source, note: loaded.note, bots: jsonBots }, null, 2));
+    writeFileSync(js, JSON.stringify({ source: loaded.source, note: loaded.note, replayed, bots: jsonBots }, null, 2));
   }
+  if (failed) process.exit(failed);
 }
 
 main().catch((e) => {
