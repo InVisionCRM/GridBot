@@ -144,6 +144,9 @@ export default function App() {
           </div>
         ))}
         {stale && <div className="banner warn" role="status"><span className="grow">No update from the bot server for a while: what you see may be out of date. Reconnecting…</span><button type="button" className="btn ghost small-btn" onClick={() => void refresh()}>Refresh</button></div>}
+        {(s?.safetyStale?.length ?? 0) > 0 && (
+          <div className="banner" role="status"><span className="grow"><b>Safety check out of date:</b> {(s.safetyStale as { key: string; label: string; why: string }[]).map((x) => `${x.label} (${x.why})`).join('; ')}. Showing the last known results; bots keep running. Re-check from Markets.</span></div>
+        )}
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}
 
         <ViewError key={`${view.v}:${'id' in view ? view.id : ''}:${'tab' in view ? view.tab : ''}:${view.v === 'holdings' ? view.focus ?? '' : ''}`} onHome={() => nav({ v: 'home' })}>

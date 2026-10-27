@@ -78,6 +78,8 @@ export interface Position {
   sellTax: number;
   sellSimOk: boolean;
   feeBps: number;
+  /** The pool's fee can change between blocks: re-read before each sell */
+  dynamicFee?: boolean;
   quoteReserve: number;
   tokenReserve: number;
   usdPerSpend: number;
@@ -146,6 +148,8 @@ export class TokenTrader {
     };
     signerReady?: (chainId: number) => boolean;
     sniper?: PoolSniper;
+    /** A dynamic-fee pool's fee() right now, in bps (read before every sizing and sell; never cached). */
+    feeNow?: (p: { chainId: number; pool: string }) => Promise<number>;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
   }) {
@@ -332,6 +336,12 @@ export class TokenTrader {
     if (this.state.positions.some((p) => p.pool.toLowerCase() === pool.pool.toLowerCase() && p.chainId === pool.chainId)) return;
     // Checked again after the safety check's awaits: a Stop all that landed meanwhile wins.
     if (!this.canBuy(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: 'new buys are stopped' }); return; }
+    if (pool.dynamicFee) {
+      // the fee at quote time: it may have moved since discovery
+      const fee = this.d.feeNow ? await this.d.feeNow(pool).catch(() => null) : null;
+      if (fee == null) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: "could not read the pool's current fee" }); return; }
+      pool = { ...pool, feeBps: fee };
+    }
     const sized = sizeBuy({
       perTradeUsd: o.perTradeUsd, totalUsd: o.totalUsd, openUsd: this.openUsd(),
       quoteReserve: pool.quoteReserve, usdPerSpend: pool.usdPerSpend, feeBps: pool.feeBps,
@@ -355,7 +365,7 @@ export class TokenTrader {
       label: `${pool.tokenSymbol}/${pool.spendSymbol}`, token: pool.token, spend: pool.spend, mode: o.mode,
       entryPrice: entry, entryMid: pool.price, entryBasis: 'effective', price, peak: price, tokens, entryTokens: tokens, spent, spentUsd, openedAt: this.now(),
       entryVolume: pool.volumeUsd, volume: pool.volumeUsd, entryLiq: pool.liquidityUsd, liq: pool.liquidityUsd,
-      entrySellTax: sellTax, sellTax, sellSimOk: true, feeBps: pool.feeBps, quoteReserve: pool.quoteReserve,
+      entrySellTax: sellTax, sellTax, sellSimOk: true, feeBps: pool.feeBps, ...(pool.dynamicFee ? { dynamicFee: true } : {}), quoteReserve: pool.quoteReserve,
       tokenReserve: pool.tokenReserve, usdPerSpend: pool.usdPerSpend, buyTax, tp1Done: false, tp2Done: false, source, exitPlan: 'hold',
     };
     this.state.positions.push(pos);
@@ -433,6 +443,11 @@ export class TokenTrader {
       const d = decideExit(this.exitOf(p));
       p.exitPlan = d.action === 'hold' ? 'hold' : d.why;
       if (d.action === 'hold') { left.push(p); continue; }
+      if (p.dynamicFee && this.d.feeNow) {
+        // the fee this sell pays, read now (keeps the last one if the read fails)
+        const fee = await this.d.feeNow(p).catch(() => null);
+        if (fee != null) p.feeBps = fee;
+      }
       const qty = Math.min(p.tokens, p.entryTokens * d.frac);
       const parts = splitSell(qty, Math.max(p.tokenReserve, 1e-12), p.feeBps, this.state.options.maxImpact);
       let quote = 0, sold = 0;
