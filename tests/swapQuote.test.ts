@@ -128,7 +128,7 @@ describe('swap quotes', () => {
       }
       throw new Error('no amount with a slippage remainder');
     };
-    const in6 = pick(reserveU, reserveW, 1_500_000n);
+    const in6 = pick(reserveU, reserveW, 50_000_000n);
     const toWeth = await service.quote({
       chainId: 4663, tokenIn: USDG.address, tokenOut: WETH.address, amountIn: in6, owner: OWNER, mode: 'paper', slippageBps: slip,
     });
