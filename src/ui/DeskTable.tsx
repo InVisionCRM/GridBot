@@ -2,7 +2,7 @@
 import { useMemo, useState } from 'react';
 import { BotRow } from './botRow';
 import { chainOf } from './chains';
-import { bucketItems, emptyQuery, nextSort, type DeskQuery, type DeskSort, deskItems } from './deskTable';
+import { bucketItems, emptyQuery, nextSort, type DeskQuery, type DeskSort, deskItems } from './deskTableModel';
 import { cls, usd } from './fmt';
 import type { AnyObj, Nav } from './model';
 
