@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { join } from 'node:path';
 import { JsonStore } from '../bot/store';
-import { Friends, LoginGate, loginOf, type Friend, type FriendsFile } from './accounts';
+import { Friends, LoginGate, loginOf, type Friend, type FriendsFile, type LoginGateFile } from './accounts';
 import { Copies, portFree, type CopySpec, type CopyStatus } from './copies';
 import { createGateway, proxyUpgrade, type GatewayDeps } from './gateway';
 import { OwnerLogin, type OwnerConfig } from './owner';
@@ -28,7 +28,7 @@ export class FriendsHost {
   private server: http.Server | null = null;
   /** Ports handed out by sign-ups still in progress, so two at once can't get the same one */
   private reserved = new Set<number>();
-  private readonly gate = new LoginGate();
+  private readonly gate: LoginGate;
 
   constructor(private readonly o: {
     secret: Buffer; dataDir: string;
@@ -47,6 +47,8 @@ export class FriendsHost {
     gatewayHost?: string | null;
   }) {
     const root = join(o.dataDir, 'friends');
+    // failure counters survive a restart (atomic write; hashed names, no secrets)
+    this.gate = new LoginGate(Date.now, new JsonStore<LoginGateFile>(join(root, 'login-limits.json')));
     this.owner = new OwnerLogin(o.hostAuth ?? null, this.gate);
     this.friends = new Friends(new JsonStore<FriendsFile>(join(root, 'friends.json')), o.secret, {
       hostAddresses: o.hostAddresses, gate: this.gate, reserved: (login) => this.owner.isOwnerName(login),

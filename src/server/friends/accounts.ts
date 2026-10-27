@@ -32,33 +32,108 @@ const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
 /** Names log in without regard to case or extra spaces. */
 export const loginOf = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
 
+/** Each lock after the first doubles (15 min, 30 min, 1 h …) up to this. */
+export const LOCK_MAX_MS = 24 * 3600_000;
+/** A name with no failure for this long starts again at the first lock length. */
+export const STRIKE_RESET_MS = 24 * 3600_000;
+/** Most names the counters file keeps (oldest dropped): random names can't grow it without bound. */
+export const GATE_MAX_NAMES = 2000;
+
+/** data/friends/login-limits.json. Names and owner identities are sha256 hashes; no password, hash or cookie. */
+export interface LoginGateFile {
+  v: 1;
+  /** sha256(login) → failures since the last lock, lock end, locks so far (backoff), last failure */
+  names: Record<string, { n: number; until: number; strikes: number; last: number }>;
+  /** failure times in the last minute (the all-logins pause) */
+  recent: number[];
+  /** sha256 of Tailscale-User-Login values that logged in as the owner (plus HOST_TAILNET_LOGINS) */
+  ownerIds: string[];
+}
+
+const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+/** Tailscale login names compare without case or spaces. */
+export const tailnetIdOf = (raw: string) => raw.trim().toLowerCase();
+
 /**
- * Shared by friend and owner log-ins so one burst of guesses hits one limit: 5 wrong tries locks that name for
- * 15 min, and 30 failures in a minute pauses every login.
+ * Shared by friend and owner log-ins so one burst of guesses hits one limit: LOCK_AFTER wrong tries lock that name,
+ * for LOCK_MS the first time and twice as long each time after (up to LOCK_MAX_MS; back to LOCK_MS after a quiet
+ * STRIKE_RESET_MS), and GLOBAL_FAILS_PER_MIN failures in a minute pause every login. With a store the counters survive
+ * a restart (atomic JsonStore write). `trusted` (the owner from a known device, this computer or their own tailnet
+ * login, decided by the gateway) skips the lock and the pause; the password is still checked and a wrong one still
+ * counts.
  */
 export class LoginGate {
-  private fails = new Map<string, { n: number; until: number }>();
-  private recent: number[] = [];
-  constructor(private readonly now: () => number = Date.now) {}
+  private f: LoginGateFile;
+  constructor(private readonly now: () => number = Date.now, private readonly store?: Store<LoginGateFile>) {
+    let loaded: LoginGateFile | null = null;
+    try { loaded = store?.load() ?? null; } catch { loaded = null; }
+    this.f = loaded?.v === 1 ? { v: 1, names: loaded.names ?? {}, recent: loaded.recent ?? [], ownerIds: loaded.ownerIds ?? [] } : { v: 1, names: {}, recent: [], ownerIds: [] };
+  }
 
-  begin(login: string) {
+  private save() {
+    if (!this.store) return;
     const now = this.now();
-    this.recent = this.recent.filter((t) => t > now - 60_000);
-    if (this.recent.length >= GLOBAL_FAILS_PER_MIN) throw new Error('Too many wrong passwords just now. Wait a minute and try again.');
-    const lock = this.fails.get(login);
-    if (lock && lock.until > now) throw new Error(`Too many wrong passwords for this name. Try again in ${Math.ceil((lock.until - now) / 60_000)} min.`);
+    this.f.recent = this.f.recent.filter((t) => t > now - 60_000);
+    const keys = Object.keys(this.f.names);
+    for (const k of keys) { const e = this.f.names[k]; if (e.until <= now && now - e.last > STRIKE_RESET_MS) delete this.f.names[k]; }
+    const left = Object.entries(this.f.names);
+    if (left.length > GATE_MAX_NAMES) {
+      left.sort((a, b) => a[1].last - b[1].last);
+      for (const [k] of left.slice(0, left.length - GATE_MAX_NAMES)) delete this.f.names[k];
+    }
+    try { this.store.save(this.f); } catch { /* counters stay in memory; the next save retries */ }
+  }
+
+  /** Lock length for the k-th lock (1-based). */
+  static lockMs(strikes: number): number {
+    return Math.min(LOCK_MAX_MS, LOCK_MS * 2 ** Math.max(0, strikes - 1));
+  }
+
+  /** ms until this name may try again (0 = not locked). */
+  lockedFor(login: string): number {
+    const e = this.f.names[sha(login)];
+    return e ? Math.max(0, e.until - this.now()) : 0;
+  }
+
+  begin(login: string, o: { trusted?: boolean } = {}) {
+    if (o.trusted) return;
+    const now = this.now();
+    this.f.recent = this.f.recent.filter((t) => t > now - 60_000);
+    if (this.f.recent.length >= GLOBAL_FAILS_PER_MIN) throw new Error('Too many wrong passwords just now. Wait a minute and try again.');
+    const wait = this.lockedFor(login);
+    if (wait > 0) throw new Error(`Too many wrong passwords for this name. Try again in ${Math.ceil(wait / 60_000)} min.`);
   }
 
   fail(login: string) {
     const now = this.now();
-    this.recent.push(now);
-    const l = this.fails.get(login) ?? { n: 0, until: 0 };
+    this.f.recent.push(now);
+    const k = sha(login);
+    const l = this.f.names[k] ?? { n: 0, until: 0, strikes: 0, last: 0 };
+    if (l.last && now - l.last > STRIKE_RESET_MS && l.until <= now) { l.strikes = 0; l.n = 0; }
     l.n++;
-    if (l.n >= LOCK_AFTER) { l.n = 0; l.until = now + LOCK_MS; }
-    this.fails.set(login, l);
+    l.last = now;
+    if (l.n >= LOCK_AFTER) { l.n = 0; l.strikes++; l.until = now + LoginGate.lockMs(l.strikes); }
+    this.f.names[k] = l;
+    this.save();
   }
 
-  ok(login: string) { this.fails.delete(login); }
+  ok(login: string) {
+    const k = sha(login);
+    if (!(k in this.f.names)) return;
+    delete this.f.names[k];
+    this.save();
+  }
+
+  /** The owner's own Tailscale login (Tailscale-User-Login): its tailnet devices skip the lock. */
+  trustOwnerId(raw: string) {
+    const h = sha(tailnetIdOf(raw));
+    if (!raw.trim() || this.f.ownerIds.includes(h)) return;
+    this.f.ownerIds.push(h);
+    this.save();
+  }
+  isOwnerId(raw: string | null | undefined): boolean {
+    return !!raw?.trim() && this.f.ownerIds.includes(sha(tailnetIdOf(raw)));
+  }
 }
 
 export function cleanName(raw: string): string {

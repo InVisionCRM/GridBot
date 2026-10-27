@@ -77,3 +77,32 @@ export function cookieValue(header: string | undefined, name: string): string | 
 export function sessionCookie(value: string | null, maxAgeMs = SESSION_MS): string {
   return `${COOKIE}=${value ?? ''}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${value ? Math.floor(maxAgeMs / 1000) : 0}`;
 }
+
+// ── Owner device ──────────────────────────────────────────────────────
+/**
+ * Set on every successful owner log-in and kept after log-out: marks the browser as one the owner used before, so it
+ * skips a lockout that someone else's guesses caused (it never skips the password). Signed with a key derived from the
+ * session key; holds only the issue time.
+ */
+export const DEVICE_COOKIE = 'gb_device';
+export const DEVICE_MS = 400 * 86_400_000;
+const deviceKey = (sessionKey: Buffer) => createHmac('sha256', sessionKey).update('owner-device-v1').digest();
+
+export function signDevice(sessionKey: Buffer, issuedAt: number): string {
+  const body = `d1.${Math.floor(issuedAt)}`;
+  return `${body}.${b64(mac(deviceKey(sessionKey), body))}`;
+}
+
+/** Issue time of a genuine owner-device cookie, or null (missing, forged, wrong shape, older than DEVICE_MS). */
+export function readDevice(sessionKey: Buffer, value: string | undefined, now: number): number | null {
+  const m = /^d1\.(\d{1,16})\.([A-Za-z0-9_-]+)$/.exec(value ?? '');
+  if (!m) return null;
+  const want = mac(deviceKey(sessionKey), `d1.${m[1]}`), got = Buffer.from(m[2], 'base64url');
+  if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+  const at = Number(m[1]);
+  return at <= now && now - at < DEVICE_MS ? at : null;
+}
+
+export function deviceCookie(value: string): string {
+  return `${DEVICE_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${Math.floor(DEVICE_MS / 1000)}`;
+}
