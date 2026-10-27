@@ -49,7 +49,10 @@ export interface FreshPool {
   quoteReserve: number;
   /** Token-side depth, human units (sell impact) */
   tokenReserve: number;
+  /** The pool's swap fee in bps, read from the pool (V3 fee()) or the DEX's V2 fee; never a DEX-wide default tier */
   feeBps: number;
+  /** The pool's fee can change between blocks: read it again before every quote (sizing, sells) */
+  dynamicFee?: boolean;
   /** Spend per token */
   price: number;
   usdPerSpend: number;
