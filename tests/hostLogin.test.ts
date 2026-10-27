@@ -13,7 +13,7 @@ import { Friends, LOCK_AFTER, LoginGate, type FriendsFile } from '../src/server/
 import { checkPassword, cookieValue, hashPassword, HOST_ID, readSession, signSession } from '../src/server/friends/auth';
 import { createGateway, proxyUpgrade } from '../src/server/friends/gateway';
 import { OwnerLogin, formatPassHash, parsePassHash } from '../src/server/friends/owner';
-import { configuredHosts, requestHostAllowed } from '../src/server/friends/publicHost';
+import { configuredHosts, isLocalOrTailnetIp, requestHostAllowed, viaFunnel } from '../src/server/friends/publicHost';
 import { subKey } from '../src/server/friends/vault';
 import { takeHostAuth } from '../src/server/env';
 import { createApp } from '../src/server/app';
@@ -204,7 +204,7 @@ describe('owner gateway', () => {
 
   it('an owner cookie reaches the host API with a localhost Host and, on a change, a localhost Origin', async () => {
     const { gw, hostPort, hostSeen, friendSeen, ownerCookie } = await setup();
-    const health = await raw(gw, '/api/health', { host: PUBLIC, cookie: ownerCookie, 'x-forwarded-for': '100.1.2.3', 'x-forwarded-host': 'evil.example' });
+    const health = await raw(gw, '/api/health', { host: PUBLIC, cookie: ownerCookie, 'x-forwarded-for': '100.101.2.3', 'x-forwarded-host': 'evil.example' });
     expect(health.status).toBe(200);
     expect(JSON.parse(health.text)).toMatchObject({ ok: true });
     expect(health.text).not.toContain(ownerHash.hash);
@@ -301,6 +301,45 @@ describe('owner gateway', () => {
     expect(origin.text).toContain('forbidden origin');
   });
 
+  it('through Tailscale Funnel the owner cannot log in, and an owner cookie is not honored; the tailnet and loopback still work', async () => {
+    const { gw, hostSeen, ownerCookie, friendSeen, friendCookie } = await setup();
+    const login = (extra: http.OutgoingHttpHeaders) => raw(gw, '/login', {
+      host: PUBLIC, origin: `https://${PUBLIC}`, 'content-type': 'application/x-www-form-urlencoded', ...extra,
+    }, `name=owner&password=${encodeURIComponent(PASS)}`);
+    // Funnel: Tailscale's marker, or a public client address in X-Forwarded-For (Serve sets it, replacing a client's)
+    for (const h of [
+      { 'tailscale-funnel-request': '?1', 'x-forwarded-for': '203.0.113.7' },
+      { 'tailscale-funnel-request': '?1' },
+      { 'x-forwarded-for': '203.0.113.7' },
+      { 'x-forwarded-for': '100.64.0.1, 203.0.113.7' },
+      { 'x-forwarded-for': '2001:db8::1' },
+    ]) {
+      const r = await login(h);
+      expect(r.status).toBe(400);
+      expect(r.text).toMatch(/not through Tailscale Funnel/);
+      expect(r.headers['set-cookie']).toBeUndefined();
+    }
+    // the refusals didn't count as wrong passwords: the owner name isn't locked
+    const tailnet = await login({ 'x-forwarded-for': '100.101.102.103', 'tailscale-user-login': 'kyle@example.com' });
+    expect(tailnet.status).toBe(303);
+    expect(String(tailnet.headers['set-cookie'])).toContain('gb_session=');
+    const v6 = await login({ 'x-forwarded-for': 'fd7a:115c:a1e0::1234' });
+    expect(v6.status).toBe(303);
+    const loop = await raw(gw, '/login', { host: '127.0.0.1', origin: 'http://127.0.0.1', 'content-type': 'application/x-www-form-urlencoded' }, `name=owner&password=${encodeURIComponent(PASS)}`);
+    expect(loop.status).toBe(303);
+    // an owner cookie over Funnel: treated as logged out, never proxied to the host app
+    const before = hostSeen.length;
+    const api = await raw(gw, '/api/bot/status', { host: PUBLIC, cookie: ownerCookie, 'tailscale-funnel-request': '?1' });
+    expect(api.status).toBe(401);
+    const stop = await raw(gw, '/api/bot/stop-all', { host: PUBLIC, cookie: ownerCookie, origin: `https://${PUBLIC}`, 'content-type': 'application/json', 'x-forwarded-for': '198.51.100.2' }, '{}');
+    expect(stop.status).toBe(401);
+    expect(hostSeen.length).toBe(before);
+    // friends still work through Funnel
+    const fr = await raw(gw, '/api/health', { host: PUBLIC, cookie: friendCookie, 'tailscale-funnel-request': '?1', 'x-forwarded-for': '203.0.113.7' });
+    expect(JSON.parse(fr.text)).toMatchObject({ who: 'friend' });
+    expect(friendSeen.at(-1)?.['tailscale-funnel-request']).toBeUndefined();
+  });
+
   it('an upgrade for the owner is proxied without the cookie; a friend upgrade does not hit the host', async () => {
     const hostSeen: http.IncomingHttpHeaders[] = [];
     const friendSeen: http.IncomingHttpHeaders[] = [];
@@ -331,11 +370,12 @@ describe('owner gateway', () => {
     const srv = http.createServer(createGateway(deps));
     srv.on('upgrade', (req, socket, head) => proxyUpgrade(deps, req, socket, head));
     const gw = await listen(srv);
-    const open = (cookie: string) => new Promise<string>((resolve, reject) => {
+    const open = (cookie: string, extra: Record<string, string> = {}) => new Promise<string>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1', port: gw, path: '/ws',
-        headers: { Host: PUBLIC, Connection: 'Upgrade', Upgrade: 'websocket', Cookie: cookie, 'X-Forwarded-For': '100.1.2.3' },
+        headers: { Host: PUBLIC, Connection: 'Upgrade', Upgrade: 'websocket', Cookie: cookie, 'X-Forwarded-For': '100.101.2.3', ...extra },
       });
+      req.on('response', (res) => resolve(`status ${res.statusCode}`));
       req.on('upgrade', (_res, socket, head) => {
         let data = head.toString();
         socket.on('data', (c) => { data += c.toString(); });
@@ -346,6 +386,9 @@ describe('owner gateway', () => {
       setTimeout(() => reject(new Error('upgrade timed out')), 2000);
     });
     const ownerCookie = `gb_session=${signSession(sessionKey, { f: HOST_ID, s: 1, e: Date.now() + 1e9, role: 'host' })}`;
+    // through Funnel the owner's socket is refused and never reaches the host app
+    expect(await open(ownerCookie, { 'Tailscale-Funnel-Request': '?1' }).catch((e) => String(e))).not.toContain('hello-ws');
+    expect(hostSeen).toHaveLength(0);
     expect(await open(ownerCookie)).toContain('hello-ws');
     expect(hostSeen[0].cookie).toBeUndefined();
     expect(hostSeen[0].host).toBe(`127.0.0.1:${hostPort}`);
@@ -354,5 +397,20 @@ describe('owner gateway', () => {
     expect(await open(friendCookie)).toContain('friend-ws');
     expect(hostSeen).toHaveLength(1);
     expect(friendSeen[0].cookie).toBeUndefined();
+  });
+});
+
+describe('Funnel detection', () => {
+  it('tells loopback and tailnet addresses from public ones', () => {
+    for (const ip of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '100.64.0.1', '100.127.255.254', 'fd7a:115c:a1e0::1', '[fd7a:115c:a1e0::1]']) expect(isLocalOrTailnetIp(ip)).toBe(true);
+    for (const ip of ['100.63.255.255', '100.128.0.1', '203.0.113.7', '10.0.0.1', '192.168.1.2', '2001:db8::1', '', 'garbage']) expect(isLocalOrTailnetIp(ip)).toBe(false);
+  });
+  it('marks Funnel by its header or a public forwarded address', () => {
+    expect(viaFunnel({}, '127.0.0.1')).toBe(false);
+    expect(viaFunnel({ 'x-forwarded-for': '100.100.1.1' }, '127.0.0.1')).toBe(false);
+    expect(viaFunnel({ 'tailscale-funnel-request': '?1' }, '127.0.0.1')).toBe(true);
+    expect(viaFunnel({ 'x-forwarded-for': '8.8.8.8' }, '127.0.0.1')).toBe(true);
+    expect(viaFunnel({ 'x-forwarded-for': '' }, '127.0.0.1')).toBe(true);
+    expect(viaFunnel({}, '192.168.1.5')).toBe(true);
   });
 });
