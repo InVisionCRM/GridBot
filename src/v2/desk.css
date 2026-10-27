@@ -127,7 +127,7 @@
     linear-gradient(180deg, rgba(32, 37, 43, 0.94), rgba(16, 19, 23, 0.9));
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(18px);
+  backdrop-filter: none;
 }
 .v2 .hero-main { grid-area: main; min-width: 0; }
 .v2 .hero-side { grid-area: side; min-width: 0; display: flex; align-items: center; }
@@ -226,11 +226,19 @@
 .v2 .status-mark.shape-square i { border-radius: 2px; }
 .v2 .status-mark.shape-hollow i { background: transparent; border: 1.5px solid currentColor; border-radius: 50%; box-sizing: border-box; }
 .v2 .status-mark.tone-in { color: var(--profit); }
-.v2 .status-mark.tone-in i { box-shadow: 0 0 0 0 currentColor; animation: v2-ring 1.8s ease-out infinite; }
+.v2 .status-mark.tone-in i { position: relative; }
+.v2 .status-mark.tone-in i::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: inherit;
+  border: 1px solid currentColor;
+  animation: v2-ring 1.8s ease-out infinite;
+}
 .v2 .status-mark.tone-near { color: var(--accent); }
 .v2 .status-mark.tone-out { color: var(--loss); }
 .v2 .status-mark.tone-idle { color: var(--label); }
-@keyframes v2-ring { from { box-shadow: 0 0 0 0 currentColor; } to { box-shadow: 0 0 0 6px transparent; } }
+@keyframes v2-ring { from { transform: scale(0.55); opacity: 0.7; } to { transform: scale(1.9); opacity: 0; } }
 
 .v2 .range-track { position: relative; display: block; height: 8px; border-radius: 99px; background: #2b3139; margin: 8px 0; }
 .v2 .range-track i { position: absolute; top: 0; bottom: 0; border-radius: 99px; background: rgba(240, 185, 11, 0.35); }
@@ -294,6 +302,9 @@
   overflow: auto;
   padding: 16px 16px 28px;
   border-radius: 18px 18px 0 0;
+}
+@media (max-width: 1079px) {
+  .v2 .sheet { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
 }
 .v2 .sheet header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .v2 .sheet-eq { font-family: var(--mono); font-size: 13px; line-height: 1.45; }
@@ -418,7 +429,7 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .v2 .ticker-track,
-  .v2 .status-mark.tone-in i,
+  .v2 .status-mark.tone-in i::after,
   .v2 .ambient,
   .v2 .shimmer::after,
   .v2 .spark path,
