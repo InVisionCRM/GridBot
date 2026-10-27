@@ -1,18 +1,29 @@
 import { AnimatePresence, motion } from 'motion/react';
 import { useEffect, useRef, useState } from 'react';
 import type { ActivityItem } from './metrics';
-import { formatWhen } from './format';
+import { formatWhen, shortenFigures } from './format';
 
-const ROW = 52;
+const ROW = 48;
+const KIND = { fill: 'Fill', recenter: 'Range', fee: 'Fee' } as const;
 
 export function ActivityTape({ items, full = false }: { items: ActivityItem[]; full?: boolean }) {
-  if (full) return <VirtualTape items={items} />;
+  const [openId, setOpenId] = useState<string | null>(null);
+  const open = items.find((item) => item.id === openId) ?? null;
+  return (
+    <div className="tape-wrap">
+      {full ? <VirtualTape items={items} openId={openId} onOpen={setOpenId} /> : <Peek items={items} openId={openId} onOpen={setOpenId} />}
+      {open && <p className="tape-detail">{open.text}</p>}
+    </div>
+  );
+}
+
+function Peek({ items, openId, onOpen }: { items: ActivityItem[]; openId: string | null; onOpen: (id: string | null) => void }) {
   const peek = items.slice(0, 7);
   return (
     <div className="tape" aria-label="Activity">
       <AnimatePresence initial={false}>
         {peek.map((item) => (
-          <motion.article
+          <motion.div
             key={item.id}
             className={`tape-row tone-${item.tone}`}
             layout
@@ -21,8 +32,8 @@ export function ActivityTape({ items, full = false }: { items: ActivityItem[]; f
             exit={{ opacity: 0 }}
             transition={{ type: 'spring', bounce: 0, visualDuration: 0.28 }}
           >
-            <Row item={item} />
-          </motion.article>
+            <Row item={item} open={openId === item.id} onOpen={onOpen} />
+          </motion.div>
         ))}
       </AnimatePresence>
       {!peek.length && <p className="muted">Nothing yet.</p>}
@@ -30,17 +41,25 @@ export function ActivityTape({ items, full = false }: { items: ActivityItem[]; f
   );
 }
 
-function Row({ item }: { item: ActivityItem }) {
+function Row({ item, open, onOpen }: { item: ActivityItem; open: boolean; onOpen: (id: string | null) => void }) {
+  const short = shortenFigures(item.text);
   return (
-    <>
+    <button
+      type="button"
+      className="tape-hit"
+      title={item.text}
+      aria-expanded={open}
+      onClick={() => onOpen(open ? null : item.id)}
+    >
       <time>{formatWhen(item.t)}</time>
-      <b>{item.kind}</b>
-      <span>{item.text}</span>
-    </>
+      <span className="kind-pill">{KIND[item.kind]}</span>
+      <b>{item.pair || 'Bot'}</b>
+      <span className="tape-msg">{open ? item.text : short}</span>
+    </button>
   );
 }
 
-function VirtualTape({ items }: { items: ActivityItem[] }) {
+function VirtualTape({ items, openId, onOpen }: { items: ActivityItem[]; openId: string | null; onOpen: (id: string | null) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ scroll: 0, height: 480 });
   useEffect(() => {
@@ -59,9 +78,9 @@ function VirtualTape({ items }: { items: ActivityItem[] }) {
     <div ref={ref} className="tape tape-full" aria-label="Activity">
       <div style={{ height: items.length * ROW, position: 'relative' }}>
         {items.slice(start, end).map((item, i) => (
-          <article key={item.id} className={`tape-row tape-abs tone-${item.tone}`} style={{ transform: `translateY(${(start + i) * ROW}px)`, height: ROW }}>
-            <Row item={item} />
-          </article>
+          <div key={item.id} className={`tape-row tape-abs tone-${item.tone}`} style={{ transform: `translateY(${(start + i) * ROW}px)`, height: ROW }}>
+            <Row item={item} open={openId === item.id} onOpen={onOpen} />
+          </div>
         ))}
       </div>
       {!items.length && <p className="muted">Nothing yet.</p>}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { adaptStatus } from '../src/v2/adapt-status';
-import { formatPx, formatTokenLine, formatWhen } from '../src/v2/format';
+import { formatPx, formatTokenLine, formatUsd, formatWhen } from '../src/v2/format';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
 
 const AS_OF = sanitizedStatus.spotsAt;
@@ -26,6 +26,7 @@ describe('adaptStatus', () => {
     // quote fees 0.004 − gas 0.001 − swap 0.002 − rebalance 0.003
     expect(eth?.amount).toBeCloseTo(-0.002);
     expect(lp?.metrics.generatedUsd).toBeCloseTo(0.02 * 2000);
+    expect(lp?.metrics.aprPct).toBeCloseTo(40 / 2000);
     expect(lp?.metrics.tokenTaxesUsd).toBeNull();
     expect(lp?.metrics.realizedRebalanceLossUsd).toBeCloseTo(0.003 * 2000);
   });
@@ -41,6 +42,7 @@ describe('adaptStatus', () => {
 
   it('sums live dollars and does not fold paper into the headline', () => {
     expect(desk.portfolio.generatedUsd).toBeCloseTo(40);
+    expect(desk.portfolio.generatedPerDayUsd).toBeCloseTo(20);
     expect(desk.portfolio.paperGeneratedUsd).toBeCloseTo(15.5);
     expect(desk.portfolio.tokens.map((t) => t.symbol).sort()).toEqual(['ETH', 'USDC']);
     expect(desk.portfolio.feesTodayLiveUsd).toBeNull();
@@ -49,6 +51,7 @@ describe('adaptStatus', () => {
 
   it('drops activity that is not a fill, fee, or range move, and strips hex', () => {
     expect(desk.activity).toHaveLength(2);
+    expect(desk.activity.find((a) => a.botId === 'grid-paper')?.pair).toBe('AAA/USDC');
     expect(desk.activity.some((a) => /0x/i.test(a.text))).toBe(false);
     expect(JSON.stringify(desk)).not.toMatch(/0x[0-9a-fA-F]{8,}/);
   });
@@ -85,6 +88,68 @@ describe('adaptStatus', () => {
     expect(d.est.d7?.[0].amount).toBeCloseTo(3 * 7 * 86_400 / (4 * 3600));
     expect(d.est.d365).toBeNull();
     expect(d.est.usd.d365).toBeNull();
+    expect(d.aprPct).toBeNull();
+  });
+
+  it('rounds each live bot to cents before the home total', () => {
+    const now = 1_700_000_000_000;
+    const row = (id: string, realized: number) => ({
+      id, mode: 'live', status: 'running', label: `${id}/USDC`, base: id, quoteSym: 'USDC',
+      usdPerQuote: 1, price: 1, startedAt: now - 86_400_000,
+      config: { totalCapitalUsd: 10 },
+      pnl: { realized, unrealized: 0, gasUsd: 0 },
+      stats: { roundTrips: 2, totalFees: 0 },
+    });
+    const mixed = adaptStatus({ spotsAt: now, grids: [row('AAA', 1.006), row('BBB', 1.006)] }, [], now);
+    const cards = mixed.bots.map((b) => b.metrics.generatedUsd);
+    const sum = (cards[0] ?? 0) + (cards[1] ?? 0);
+    expect(cards).toEqual([1.01, 1.01]);
+    expect(mixed.portfolio.generatedUsd).toBeCloseTo(sum, 10);
+    expect(formatUsd(mixed.portfolio.generatedUsd, true)).toBe(formatUsd(sum, true));
+    expect(formatUsd(mixed.portfolio.generatedUsd, true)).toBe('+$2.02');
+  });
+
+  it('dashes APR on a one-minute bot with one fill, and on an older bot with one fill', () => {
+    const now = 1_700_000_000_000;
+    const bot = (id: string, ageMs: number, trips: number) => ({
+      id, mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
+      usdPerQuote: 1, price: 1, startedAt: now - ageMs,
+      config: { totalCapitalUsd: 10 },
+      pnl: { realized: 1, unrealized: 0, gasUsd: 0 },
+      stats: { roundTrips: trips, totalFees: 0 },
+      trades: [{ side: 'sell', failed: false, timestamp: now - 30_000, realizedPnlUsd: 1 }],
+    });
+    const minute = adaptStatus({ spotsAt: now, grids: [bot('baby', 60_000, 1)] }, [], now);
+    expect(minute.bots[0].metrics.ageSec).toBeCloseTo(60);
+    expect(minute.bots[0].metrics.aprPct).toBeNull();
+    expect(minute.bots[0].metrics.est.d1).toBeNull();
+    expect(minute.portfolio.generatedPerDayUsd).toBeNull();
+
+    const oneFill = adaptStatus({ spotsAt: now, grids: [bot('one', 2 * 86_400_000, 1)] }, [], now);
+    expect(oneFill.bots[0].metrics.aprPct).toBeNull();
+
+    const ready = adaptStatus({ spotsAt: now, grids: [bot('two', 2 * 86_400_000, 2)] }, [], now);
+    expect(ready.bots[0].metrics.aprPct).toBeCloseTo(1 / 10);
+  });
+
+  it('flips a stable base under one dollar and leaves PLS/DAI alone', () => {
+    const eth = desk.prices.find((p) => p.symbol.startsWith('ETH/USDC'));
+    expect(eth?.symbol).toBe('ETH/USDC·ETH');
+    expect(eth?.price).toBeCloseTo(2000);
+    const now = 1_700_000_000_000;
+    const pls = adaptStatus({
+      spotsAt: now,
+      grids: [{
+        id: 'pls', mode: 'paper', status: 'stopped', label: 'PLS/DAI', base: 'PLS', quoteSym: 'DAI',
+        usdPerQuote: 1, price: 5.093e-6, startedAt: now - 86_400_000,
+        config: { totalCapitalUsd: 1 },
+        pnl: { realized: 0, unrealized: 0 },
+        stats: { roundTrips: 0 },
+      }],
+    }, [], now);
+    const row = pls.prices[0];
+    expect(row?.symbol).toBe('PLS/DAI');
+    expect(row?.price).toBeCloseTo(5.093e-6);
   });
 });
 

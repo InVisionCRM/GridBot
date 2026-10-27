@@ -1,17 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { CandlestickSeries, createChart, createSeriesMarkers, type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type SeriesMarker, type Time, type UTCTimestamp } from 'lightweight-charts';
-import type { CandleBar, FillMark, RangeBlock } from './metrics';
+import type { CandleBar, FillMark } from './metrics';
 import { T, chartBase } from '../ui/theme';
 
 const ts = (s: number) => s as UTCTimestamp;
 
 /** Live candles. Levels and the LP band come from the server payload. */
 export function CandlePane({
-  candles, levels, range, fills, flashLevel,
+  candles, levels, fills, flashLevel,
 }: {
   candles: CandleBar[];
   levels: number[];
-  range: RangeBlock | null;
   fills: FillMark[];
   flashLevel: number | null;
 }) {
@@ -21,7 +20,6 @@ export function CandlePane({
   const lines = useRef<IPriceLine[]>([]);
   const markersApi = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const seeded = useRef(false);
-  const [band, setBand] = useState<{ top: number; height: number } | null>(null);
   const [ripples, setRipples] = useState<{ id: string; y: number }[]>([]);
   const seen = useRef(0);
 
@@ -85,18 +83,11 @@ export function CandlePane({
       }
     }
     seen.current = fills.length;
-    if (range) {
-      const y1 = s.priceToCoordinate(range.upper);
-      const y2 = s.priceToCoordinate(range.lower);
-      if (y1 != null && y2 != null) setBand({ top: Math.min(y1, y2), height: Math.max(2, Math.abs(y2 - y1)) });
-      else setBand(null);
-    } else setBand(null);
-  }, [candles, levels, range, fills, flashLevel]);
+  }, [candles, levels, fills, flashLevel]);
 
   return (
     <div className="candle-host">
       <div ref={host} className="candle-el" />
-      {band && <i className="lp-band" style={{ top: band.top, height: band.height }} />}
       {ripples.map((r) => <i key={r.id} className="fill-ripple" style={{ top: r.y }} />)}
     </div>
   );

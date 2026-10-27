@@ -29,6 +29,13 @@ function mul(q: number | null, k: number | null): number | null {
   if (q == null || k == null) return null;
   return q * k;
 }
+/** One rounding for every headline dollar, so a sum cannot disagree with its parts. */
+function cents(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+function centsOrNull(n: number | null): number | null {
+  return n == null ? null : cents(n);
+}
 function qty(symbol: string, amount: number | null, usd: number | null): TokenQty | null {
   if (!symbol || amount == null) return null;
   return { symbol, amount, usd };
@@ -72,7 +79,7 @@ function estimates(age: number | null, tokens: TokenQty[], usd: number | null): 
     const f = window / age;
     return {
       tokens: tokens.map((t) => ({ symbol: t.symbol, amount: t.amount * f, usd: t.usd == null ? null : t.usd * f })),
-      usd: usd == null ? null : usd * f,
+      usd: usd == null ? null : cents(usd * f),
     };
   };
   const d1 = one(MIN_AGE.d1, WIN.d1);
@@ -90,8 +97,11 @@ function estimates(age: number | null, tokens: TokenQty[], usd: number | null): 
   };
 }
 
-function apr(generatedUsd: number | null, capital: number | null): number | null {
+/** Age gate matches D1. A known fill count also needs two samples, so one fill cannot print a yearly figure. */
+function apr(generatedUsd: number | null, capital: number | null, ageSec: number | null, samples: number | null): number | null {
   if (generatedUsd == null || capital == null || !(capital > 0)) return null;
+  if (ageSec == null || ageSec < MIN_AGE.d1) return null;
+  if (samples != null && samples < 2) return null;
   return generatedUsd / capital;
 }
 
@@ -126,20 +136,22 @@ function rangeBlock(lower: number | null, upper: number | null, current: number 
   return { lower, upper, current, inRange: inside };
 }
 
-function shell(partial: Omit<BotMetrics, 'est' | 'aprPct' | 'totalPnlUsd' | 'totalPnlPct' | 'headline'> & { generated: TokenQty[] }): BotMetrics {
-  const totalPnlUsd = partial.generatedUsd != null && partial.priceChangeUsd != null
-    ? partial.generatedUsd + partial.priceChangeUsd
+function shell(partial: Omit<BotMetrics, 'est' | 'aprPct' | 'totalPnlUsd' | 'totalPnlPct' | 'headline' | 'generatedUsd'> & { generated: TokenQty[]; generatedUsd: number | null }, samples: number | null): BotMetrics {
+  const generatedUsd = centsOrNull(partial.generatedUsd);
+  const totalPnlUsd = generatedUsd != null && partial.priceChangeUsd != null
+    ? generatedUsd + partial.priceChangeUsd
     : null;
   const totalPnlPct = totalPnlUsd != null && partial.capitalInUsd != null && partial.capitalInUsd > 0
     ? totalPnlUsd / partial.capitalInUsd
     : null;
   return {
     ...partial,
+    generatedUsd,
     headline: 'generated',
     totalPnlUsd,
     totalPnlPct,
-    aprPct: apr(partial.generatedUsd, partial.capitalInUsd),
-    est: estimates(partial.ageSec, partial.generated, partial.generatedUsd),
+    aprPct: apr(generatedUsd, partial.capitalInUsd, partial.ageSec, samples),
+    est: estimates(partial.ageSec, partial.generated, generatedUsd),
   };
 }
 
@@ -183,7 +195,7 @@ function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
     ageSec: ageOf(startedAt, asOf),
     capitalInUsd: mul(capitalQ, k),
     currentValueUsd: mul(capitalQ != null && realizedQ != null && unrealQ != null ? capitalQ + realizedQ + unrealQ : null, k),
-    realizedUsd: generatedUsd,
+    realizedUsd: centsOrNull(generatedUsd),
     unrealizedUsd: mul(unrealQ, k),
     feesCollected: keep([qty(quote, feesQ, mul(feesQ, k))]),
     feesOwed: [],
@@ -201,7 +213,7 @@ function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
     range: rangeBlock(lower, upper, price, null),
     asOf,
     calc: blankCalc('grid'),
-  });
+  }, num(stats?.roundTrips) ?? (trades.length ? trades.map(rec).filter((t) => t && t.failed !== true).length : null));
   return desk(metrics, str(g.label) || `${base}/${quote}`, base, quote, chain, str(g.dexName), price, spark);
 }
 
@@ -291,7 +303,7 @@ function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
     range: rangeBlock(num(pos?.lower), num(pos?.upper), price, inRange),
     asOf,
     calc: blankCalc('lp'),
-  });
+  }, null);
   return desk(metrics, str(lp.label) || `${base}/${quote}`, base, quote, chain, str(lp.dexName), price, []);
 }
 
@@ -311,7 +323,14 @@ function sumUsd(bots: BotDesk[], runningOnlyMissing: boolean): number | null {
   if (runningOnlyMissing && rows.some((b) => b.metrics.status === 'running' && b.metrics.generatedUsd == null)) return null;
   const known = rows.map((b) => b.metrics.generatedUsd).filter((n): n is number => n != null);
   if (!known.length) return null;
-  return known.reduce((s, n) => s + n, 0);
+  return cents(known.reduce((s, n) => s + n, 0));
+}
+
+function perDayUsd(bots: BotDesk[]): number | null {
+  const running = bots.filter((b) => b.metrics.status === 'running');
+  if (!running.length) return null;
+  if (running.some((b) => b.metrics.est.usd.d1 == null)) return null;
+  return cents(running.reduce((s, b) => s + (b.metrics.est.usd.d1 ?? 0), 0));
 }
 
 function sumTokens(bots: BotDesk[]): TokenQty[] {
@@ -340,6 +359,7 @@ function portfolio(bots: BotDesk[], asOf: number): PortfolioSnapshot {
   return {
     asOf,
     generatedUsd: sumUsd(live, true),
+    generatedPerDayUsd: perDayUsd(live),
     paperGeneratedUsd: sumUsd(paper, true),
     tokens: sumTokens(live),
     paperTokens: sumTokens(paper),
@@ -354,7 +374,21 @@ function portfolio(bots: BotDesk[], asOf: number): PortfolioSnapshot {
   };
 }
 
-function activityOf(events: ActivityEvent[]): ActivityItem[] {
+const STABLES = new Set(['USDC', 'USDG', 'USDT', 'DAI', 'USD']);
+
+/** Engine price is quote per 1 base. Flip only a stable base priced under 1, so PLS/DAI stays put. */
+function tapeOf(b: BotDesk): { symbol: string; price: number | null; change24h: null } {
+  const px = b.price;
+  const base = b.base.toUpperCase();
+  const quote = b.quote.toUpperCase();
+  const chain = b.chain && b.chain !== '—' ? `·${b.chain}` : '';
+  if (px != null && px > 0 && px < 1 && STABLES.has(base) && !STABLES.has(quote)) {
+    return { symbol: `${b.quote}/${b.base}${chain}`, price: 1 / px, change24h: null };
+  }
+  return { symbol: b.pair, price: px, change24h: null };
+}
+
+function activityOf(events: ActivityEvent[], names: Map<string, string>): ActivityItem[] {
   const want = new Set(['filled', 'range', 'queued']);
   const items: ActivityItem[] = [];
   for (const e of events) {
@@ -369,7 +403,7 @@ function activityOf(events: ActivityEvent[]): ActivityItem[] {
       id: `a${t}-${items.length}`,
       t,
       botId: str(e.botId),
-      pair: '',
+      pair: names.get(str(e.botId)) ?? '',
       kind,
       text,
       tone,
@@ -389,7 +423,7 @@ export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = nu
     source,
     portfolio: portfolio(bots, asOf),
     bots,
-    prices: bots.filter((b) => b.price != null).map((b) => ({ symbol: b.pair, price: b.price, change24h: null })),
-    activity: activityOf(events),
+    prices: bots.filter((b) => b.price != null).map(tapeOf),
+    activity: activityOf(events, new Map(bots.map((b) => [b.metrics.botId, b.pair]))),
   };
 }

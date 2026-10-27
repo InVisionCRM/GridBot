@@ -32,7 +32,14 @@ export function DeskApp() {
               {snap && page.v === 'home' && (
                 <HomeView portfolio={snap.portfolio} bots={snap.bots} onOpen={(id) => go({ v: 'bot', id })} />
               )}
-              {snap && page.v === 'bot' && bot && <BotView bot={bot} onBack={() => go({ v: 'home' })} />}
+              {snap && page.v === 'bot' && bot && (
+                <BotView
+                  bot={bot}
+                  activity={snap.activity.filter((a) => a.botId === bot.metrics.botId)}
+                  onBack={() => go({ v: 'home' })}
+                  onActivity={() => go({ v: 'activity' })}
+                />
+              )}
               {snap && page.v === 'bot' && !bot && <p className="muted">That bot is not in this snapshot.</p>}
               {snap && page.v === 'activity' && (
                 <>
@@ -48,10 +55,15 @@ export function DeskApp() {
             {snap && page.v !== 'activity' && (
               <aside className="side-tape glass">
                 <header>
-                  <h2>Activity</h2>
-                  <button type="button" className="text-btn" data-nav="activity" onClick={() => go({ v: 'activity' })}>Full feed</button>
+                  <h2>{page.v === 'bot' ? 'This bot' : 'Activity'}</h2>
+                  <button type="button" className="text-btn" data-nav="activity" onClick={() => go({ v: 'activity' })}>
+                    {page.v === 'bot' ? 'All activity' : 'Full feed'}
+                  </button>
                 </header>
-                <ActivityTape items={snap.activity} />
+                <ActivityTape
+                  key={page.v === 'bot' && bot ? bot.metrics.botId : 'desk'}
+                  items={page.v === 'bot' && bot ? snap.activity.filter((a) => a.botId === bot.metrics.botId) : snap.activity}
+                />
               </aside>
             )}
           </div>

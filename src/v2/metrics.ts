@@ -5,7 +5,9 @@
  * Home's headline is live `generatedUsd` plus per-token chips. Paper is separate.
  * Price change and value versus capital are breakdown context, not the hero.
  * est.d1 / d7 / d365 are generation rates in token units. Null until the window has enough history:
- * about 28 minutes, 3.2 hours, and 7 days. APR is generatedUsd / capitalInUsd, not compounded and not annualized.
+ * about 28 minutes, 3.2 hours, and 7 days. APR is generatedUsd / capitalInUsd once the bot
+ * is at least ~28 minutes old and, when a fill count exists, has at least two fills.
+ * Otherwise APR is null. Not compounded and not annualized.
  * Percents are fractions. Null means the snapshot did not carry the figure.
  */
 
@@ -108,8 +110,10 @@ export interface ActivityItem {
 
 export interface PortfolioSnapshot {
   asOf: number;
-  /** Live bots. Null if a running live bot has no dollar figure. */
+  /** Live bots, summed after each bot's dollars are rounded to cents. Null if a running live bot has no dollar figure. */
   generatedUsd: number | null;
+  /** Sum of running live est.usd.d1. Null when any running live bot has no D1 yet. */
+  generatedPerDayUsd: number | null;
   paperGeneratedUsd: number | null;
   tokens: TokenQty[];
   paperTokens: TokenQty[];

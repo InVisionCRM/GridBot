@@ -75,10 +75,35 @@ export function formatAge(sec: number | null): string {
   return `${(h / 24).toFixed(1)}d`;
 }
 
+/** Collapse long decimals in a log line. Display only; the full line stays on the item. */
+export function shortenFigures(text: string): string {
+  return text.replace(/[+-]?\d[\d,]*(?:\.\d+)?/g, (raw) => {
+    const body = raw.replace(/,/g, '');
+    const frac = body.split('.')[1] ?? '';
+    if (frac.length < 4) return raw;
+    const n = Number(body);
+    if (!Number.isFinite(n)) return raw;
+    const sig = Math.abs(n) >= 1 ? 4 : 3;
+    return String(Number(n.toPrecision(sig)));
+  });
+}
+
 /** Clock time in America/Detroit, not the server's UTC. */
 export function formatWhen(ms: number): string {
   return new Date(ms).toLocaleTimeString('en-US', {
     timeZone: 'America/Detroit',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+/** Date and clock in America/Detroit, for a frozen snapshot label. */
+export function formatStamp(ms: number): string {
+  return new Date(ms).toLocaleString('en-US', {
+    timeZone: 'America/Detroit',
+    month: 'short',
+    day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
     second: '2-digit',
