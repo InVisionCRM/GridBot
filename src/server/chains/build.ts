@@ -8,6 +8,7 @@ import type { Store } from '../bot/store';
 import { FallbackReader, makeRpc } from './fallback';
 import { Hub, type CustomFile } from './hub';
 import { ChainRuntime } from './runtime';
+import { withMulticall } from './multicall';
 
 /** RPC list for a chain: RPC_URL_<SLUG> (comma-separated) first, then legacy RPC_URL for PulseChain, then defaults. */
 export function rpcUrlsFor(c: ChainConfig, env: Record<string, string | undefined>, legacyChainId = 369): string[] {
@@ -53,15 +54,21 @@ export function buildHub(o: {
     readers.set(c.id, new FallbackReader(urls, c.id, urls.map((u) => makeRpc(u, c.id))));
   }
   const signers = o.signers ?? o.signerFactory?.(chains.map((c) => ({ id: c.id, envSlug: c.envSlug, provider: readers.get(c.id)!.current })));
+  const markets = [...legacyMarkets(o.net), ...defaultMarkets(chains)];
+  // Multicall3 read batching (MULTICALL=0 turns it off). balanceOf / decimals batch only on the chain's built-in coins.
+  const batching = o.env.MULTICALL !== '0';
   const runtimes = chains.map((c) => {
     const reader = readers.get(c.id)!;
+    const trusted = new Set([c.wrappedNative.address, ...c.stables.map((x) => x.address),
+      ...markets.filter((m) => m.chainId === c.id).flatMap((m) => [m.base.address, m.quote.address])].map((a) => a.toLowerCase()));
     const w = signers?.get(c.id);
     const signer: TxSender | null = w ? {
       getAddress: () => w.getAddress(),
       sendTransaction: (tx) => w.connect(reader.current).sendTransaction(tx) as ReturnType<TxSender['sendTransaction']>,
     } : null;
-    return new ChainRuntime(c, reader, signer);
+    const rtReader = batching ? withMulticall(reader, { trusted, onOff: (why) => console.warn(`[multicall] ${c.name}: ${why}; reading direct`) }) : reader;
+    return new ChainRuntime(c, rtReader, signer);
   });
-  const hub = new Hub({ runtimes, markets: [...legacyMarkets(o.net), ...defaultMarkets(chains)], legacyNet: o.net, custom: o.custom });
+  const hub = new Hub({ runtimes, markets, legacyNet: o.net, custom: o.custom });
   return { hub, readers };
 }

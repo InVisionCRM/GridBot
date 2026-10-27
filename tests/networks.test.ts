@@ -51,6 +51,11 @@ describe('parseAmountOut (receipt logs)', () => {
     const log = { address: net.pulsex.wpls, topics: [ev.topicHash, zeroPadValue(net.pulsex.routerV2, 32)], data: zeroPadValue('0x0de0b6b3a7640000', 32) };
     expect(parseAmountOut(r([log]), me, NATIVE, net.pulsex.wpls)).toBe(10n ** 18n);
   });
+  it("takes the router's last unwrap: a taxed token swapping its own tax back to PLS earlier in the same tx isn't the wallet's", () => {
+    const ev = WPLS_EVENTS.getEvent('Withdrawal')!;
+    const w = (wei: string) => ({ address: net.pulsex.wpls, topics: [ev.topicHash, zeroPadValue(net.pulsex.routerV2, 32)], data: zeroPadValue(wei, 32) });
+    expect(parseAmountOut(r([w('0x07'), w('0x03e8')]), me, NATIVE, net.pulsex.wpls)).toBe(1000n);
+  });
 });
 
 describe('mainnet HEX / eHEX / PLSX quotes', () => {

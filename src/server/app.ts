@@ -353,15 +353,16 @@ export function createApp(o: AppOpts) {
   app.put('/api/autopilot', wrap((req) => {
     const b = req.body ?? {};
     if (!Array.isArray(b.budgets)) throw new Error('budgets required');
-    ap().configure({ mode: b.mode, options: b.options as AutoOptions, budgets: b.budgets as Budget[] });
+    ap().configure({ mode: b.mode, options: (b.options ?? {}) as Partial<AutoOptions>, budgets: b.budgets as Budget[] });
     return plain(ap().status());
   }));
   app.put('/api/autopilot/options', wrap((req) => { ap().setOptions(req.body ?? {}); return plain(ap().status()); }));
   app.post('/api/autopilot/on', wrap(async () => { await ap().turnOn(); void bot.tickAll(); return plain(ap().status()); }));
+  // { chainId }: that budget sends again after KILL ALL / STOP chain
+  app.post('/api/autopilot/carry-on', wrap((req) => { ap().carryOn(Number(req.body?.chainId)); void ap().tick(); return plain(ap().status()); }));
   // { sell: true } closes every bot it runs to cash; false leaves them running unmanaged
   app.post('/api/autopilot/off', wrap((req) => { ap().turnOff(req.body?.sell === true); void ap().tick(); return plain(ap().status()); }));
   // { chainId }: that budget opens and swaps again after Stop all / STOP chain
-  app.post('/api/autopilot/carry-on', wrap((req) => { ap().carryOn(Number(req.body?.chainId)); void ap().tick(); return plain(ap().status()); }));
   app.post('/api/autopilot/review', wrap(async () => { await ap().review(true); void bot.tickAll(); return plain(ap().status()); }));
 
   const tt = () => { if (!o.tokenTrader) throw new Error('The token trader is not available.'); return o.tokenTrader; };
