@@ -4,8 +4,8 @@ import { chainByKey } from '../src/live/chains';
 import { clearDecimalsCache } from '../src/live/decimals';
 import type { MarketDef, SafetyReport } from '../src/live/markets';
 import { NETWORKS } from '../src/live/networks';
-import { NATIVE, afterTax, applySlippage, getAmountOut } from '../src/live/swapMath';
-import { afterTax as taxAfter } from '../src/live/tax';
+import { NATIVE, applySlippage, getAmountOut } from '../src/live/swapMath';
+import { afterTax } from '../src/live/tax';
 import { ROUTER, V3_QUOTER, V3_ROUTER } from '../src/server/dex/abis';
 import { ChainRuntime } from '../src/server/chains/runtime';
 import { Hub } from '../src/server/chains/hub';
@@ -96,7 +96,7 @@ describe('swap desk rules', () => {
       chainId: 4663, tokenIn: WETH.address, tokenOut: USDG.address, amountIn, owner: OWNER, mode: 'paper', slippageBps: 100,
     });
     const routerOut = getAmountOut(amountIn, raw(100, 18), raw(300_000, 6), 30);
-    const expected = taxAfter(routerOut, 0.03);
+    const expected = afterTax(routerOut, 0.03);
     expect(q.fees.taxOut).toBe(0.03);
     expect(q.expectedOut).toBe(expected);
     expect(q.minOut).toBe(applySlippage(expected, 100));
@@ -129,9 +129,9 @@ describe('swap desk rules', () => {
       chainId: 4663, tokenIn: MEME.address, tokenOut: USDG.address, amountIn: E18, owner: OWNER, mode: 'paper',
     });
     const gasWei = BigInt(RH.gasUnits.swap) * m.gasPrice;
-    expect(q.gasOut).toBe(getAmountOut(gasWei, raw(100, 18), raw(300_000, 6), 30));
-    expect(q.gasOut > 0n).toBe(true);
-    expect(q.route.netOut).toBe(q.expectedOut - q.gasOut);
+    expect(q.route.gasOut).toBe(getAmountOut(gasWei, raw(100, 18), raw(300_000, 6), 30));
+    expect(q.route.gasOut > 0n).toBe(true);
+    expect(q.route.netOut).toBe(q.expectedOut - q.route.gasOut);
   });
 
   it('quotes and swaps a taxed V3 input for the same amount', async () => {

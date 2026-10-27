@@ -301,7 +301,7 @@ export class SwapService {
       try { pools = await ad.findPools(tokenIn, tokenOut); } catch { continue; }
       for (const pool of pools) {
         try {
-          const q = await ad.quote(pool, tokenIn, tokenOut, amountIn, false);
+          const q = await ad.quote(pool, tokenIn, tokenOut, amountIn);
           if (q.amountOut > 0n) return q.amountOut;
         } catch { /* next pool */ }
       }
