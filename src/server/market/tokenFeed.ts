@@ -9,8 +9,10 @@ import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenT
 import { mintInBytecode } from '../../market/tokenChecks';
 import { ROUTER } from '../dex/abis';
 import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
+import type { DexConfig } from '../../live/chains';
 import type { SafetyLimits } from '../../live/limits';
 import type { SharedNonce, TxGate } from '../bot/txGate';
+import { poolFeeBps, readV3FeeBps } from '../dex/poolFee';
 import { JsonStore, type Store } from '../bot/store';
 import type { Emit } from '../bot/activity';
 import type { Hub } from '../chains/hub';
@@ -95,6 +97,8 @@ export function createTokenTrader(o: {
     // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
     quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
     resolve: (hit) => resolveHit(o.hub, hit),
+    // dynamic-fee pools: the fee at quote time (never cached)
+    feeNow: (p) => readV3FeeBps(o.hub.rt(p.chainId).reader, p.pool),
     live: {
       buy: async (pool, spend, limits) => {
         const draft = await draftOf(o.hub, pool);
@@ -182,15 +186,32 @@ async function discover(hub: Hub, gecko: GeckoSource): Promise<FreshPool[]> {
     const take = (rows: typeof fresh, source: 'new' | 'trending') => {
       for (const row of rows) {
         const dex = rt.cfg.dexes.find((d) => d.gecko === row.dex);
-        const feeBps = dex?.feeBps ?? (dex?.feeTiers?.[0] != null ? dex.feeTiers[0] / 100 : 30);
-        const pool = fromTopPool(row, { id: rt.cfg.id, spend, kind: dex?.kind === 'v2' ? 'v2' : 'v3', feeBps }, source);
+        // feeBps is a placeholder until withPoolFees reads the pool's real fee (V3 fee(), or the DEX's V2 fee)
+        const pool = fromTopPool(row, { id: rt.cfg.id, spend, kind: dex?.kind === 'v2' ? 'v2' : 'v3', feeBps: dex?.feeBps ?? 30 }, source);
         if (pool) out.push(pool);
       }
     };
     take(fresh, 'new');
     take(hot, 'trending');
   }
-  return out.slice(0, 40);
+  return withPoolFees(out.slice(0, 40), (id) => hub.rt(id).reader, (p) => hub.rt(p.chainId).cfg.dexes.find((d) => d.gecko === p.dex) ?? null);
+}
+
+/**
+ * Every discovered pool gets its real fee: V2 = the DEX's fee, V3 = the pool's fee() (one eth_call each). A pool whose
+ * fee can't be read is dropped: pricing it at a guessed tier is how 1 % pools were sized as 0.01 % ones.
+ */
+export async function withPoolFees(
+  pools: FreshPool[], readerFor: (chainId: number) => Pick<ChainReader, 'call'>,
+  dexOf: (p: FreshPool) => Pick<DexConfig, 'kind' | 'feeBps' | 'dynamicFee'> | null,
+): Promise<FreshPool[]> {
+  const read = await Promise.all(pools.map(async (p) => {
+    const dex = dexOf(p);
+    if (!dex) return null; // a DEX this app doesn't swap on: inspect() could not find the pool anyway
+    const feeBps = await poolFeeBps(readerFor(p.chainId), p.pool, dex);
+    return feeBps == null ? null : { ...p, kind: dex.kind === 'v2' ? 'v2' as const : 'v3' as const, feeBps, ...(dex.dynamicFee ? { dynamicFee: true } : {}) };
+  }));
+  return read.filter((p): p is NonNullable<typeof p> => !!p);
 }
 
 async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any'): Promise<GateInput> {
@@ -220,13 +241,18 @@ async function resolveHit(hub: Hub, hit: import('./sniper').SnipeHit): Promise<F
     const r = await hub.inspect({ chainId: hit.chainId, address: token, quote: spend, pool: hit.pool });
     const chosen = r.chosen;
     if (!chosen?.mid || !r.token) return null;
+    // the pool's own fee (V3 fee(), V2 DEX fee); unknown = can't price it
+    const dex = rt.cfg.dexes.find((d) => d.id === chosen.dex) ?? null;
+    const feeBps = chosen.feeBps ?? await poolFeeBps(rt.reader, hit.pool, dex);
+    if (feeBps == null) return null;
     const usd = r.quote.kind === 'stable' ? 1 : (await hub.nativeUsdAsync(hit.chainId)) ?? 0;
     const liq = r.safety?.liquidityUsd ?? chosen.tvlUsd ?? 0;
     return {
       chainId: hit.chainId, pool: hit.pool, dex: hit.dex, kind: hit.kind, token, spend,
       tokenSymbol: r.token.symbol, spendSymbol: r.quote.symbol, liquidityUsd: liq, volumeUsd: 0, createdAt: null, source: 'snipe',
       quoteReserve: usd > 0 ? (liq / 2) / usd : 0, tokenReserve: chosen.mid > 0 && usd > 0 ? (liq / 2) / usd / chosen.mid : 0,
-      feeBps: chosen.feeBps ?? 30, price: chosen.mid, usdPerSpend: usd || 1,
+      feeBps, price: chosen.mid, usdPerSpend: usd || 1,
+      ...(dex?.dynamicFee ? { dynamicFee: true } : {}),
     };
   } catch { return null; }
 }
