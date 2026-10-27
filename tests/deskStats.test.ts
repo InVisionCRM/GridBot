@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ageMs, botFacts, DAY_MS, extrapolate, moveParts, winRateOf } from '../src/ui/deskStats';
-import { bucketItems, deskItems, emptyQuery, nextSort } from '../src/ui/deskTable';
+import { bucketItems, deskItems, emptyQuery, nextSort } from '../src/ui/deskTableModel';
 import { allOn, toggleEvery, toggleId } from '../src/ui/botPick';
 
 const now = 1_700_000_000_000;
