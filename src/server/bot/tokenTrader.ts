@@ -9,7 +9,7 @@
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
 import {
-  decideExit, filterFresh, gateToken, sizeBuy, splitSell, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SNIPER_MIN_LIQ_USD,
+  decideExit, filterFresh,   gateToken, sizeBuy, splitSell, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SIZE_IMPACT_CAP, DEFAULT_SNIPER_MIN_LIQ_USD,
   type FreshPool, type GateInput,
 } from '../../market/tokenTrader';
 import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
@@ -41,6 +41,13 @@ export interface TraderOptions {
   risk: 'safe' | 'medium' | 'any';
   maxImpact: number;
   maxPoolShare: number;
+  /**
+   * After sizing, quote that exact size and skip the buy when the impact is over `sizeImpactCap`.
+   * Default off: nothing is quoted for this check, and the 3% sizing cap is the one that applies.
+   */
+  enforceSizeImpact: boolean;
+  /** Used only when `enforceSizeImpact` is on. Default 1%. */
+  sizeImpactCap: number;
   sniper: SniperOptions;
 }
 
@@ -111,6 +118,7 @@ const TRADE_MAX = 200;
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
+  enforceSizeImpact: false, sizeImpactCap: DEFAULT_SIZE_IMPACT_CAP,
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
 
@@ -129,6 +137,12 @@ export class TokenTrader {
     discover?: () => Promise<FreshPool[]>;
     /** Safety inputs for a pool. Required before any buy. */
     assess?: (pool: FreshPool, mode: 'paper' | 'live', risk: TraderOptions['risk']) => Promise<GateInput>;
+    /**
+     * Impact of spending `spend` (human units of the pool's spend token) on this pool.
+     * V3 must be a QuoterV2 (or equivalent tick-walk) quote. Called only when `enforceSizeImpact` is on.
+     * A throw is "could not verify".
+     */
+    quoteImpact?: (pool: FreshPool, spend: number) => Promise<number>;
     /** Latest price, depth, volume, tax, sell simulation. Paper tests can omit this and call mark(). */
     mark?: (p: Position) => Promise<Partial<Position> | null>;
     live?: {
@@ -170,6 +184,7 @@ export class TokenTrader {
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
     if (!(n.maxImpact > 0) || n.maxImpact > HARD_CAPS.maxPriceImpact) throw new Error('Price-impact cap must be between 0% and 5%.');
+    if (!(n.sizeImpactCap > 0) || n.sizeImpactCap > HARD_CAPS.maxPriceImpact) throw new Error('Trade-size impact cap must be between 0% and 5%.');
     if (!(n.maxPoolShare > 0) || n.maxPoolShare > 0.5) throw new Error('Max pool share must be between 0% and 50%.');
     if (n.sniper.mevRpc && !/^https:\/\//.test(n.sniper.mevRpc)) throw new Error('MEV URL must be an https RPC.');
     this.state.options = n;
@@ -286,14 +301,15 @@ export class TokenTrader {
     if (this.state.feed.length > FEED_MAX) this.state.feed.length = FEED_MAX;
   }
 
-  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number }> {
-    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0 };
+  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null }> {
+    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
-    const r = gateToken({ ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) });
-    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0 };
+    const gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
+    const r = gateToken(gate);
+    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate };
   }
 
-  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number) {
+  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput) {
     const o = this.state.options;
     if (this.state.positions.some((p) => p.pool.toLowerCase() === pool.pool.toLowerCase() && p.chainId === pool.chainId)) return;
     // Checked again after the safety check's awaits: a Stop all that landed meanwhile wins.
@@ -304,6 +320,16 @@ export class TokenTrader {
       buyTax, price: pool.price, maxImpact: o.maxImpact, maxPoolShare: o.maxPoolShare || TOKEN_MAX_POOL_SHARE,
     });
     if (!sized) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: 'size is under the limits or the pool is too thin' }); return; }
+    if (o.enforceSizeImpact) {
+      let impact: number | null = null;
+      try {
+        if (!this.d.quoteImpact) throw new Error('no impact quote');
+        const quoted = await this.d.quoteImpact(pool, sized.spend);
+        impact = Number.isFinite(quoted) ? quoted : null;
+      } catch { impact = null; }
+      const again = gateToken({ ...gate, enforceSizeImpact: true, sizeImpact: impact, sizeImpactCap: o.sizeImpactCap });
+      if (!again.ok) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: again.reason ?? 'price impact' }); return; }
+    }
     let tokens = sized.tokens, spent = sized.spend, price = pool.price, spentUsd = sized.usd;
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('live broker missing');
@@ -332,8 +358,8 @@ export class TokenTrader {
     if (pool.kind === 'v4') { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); return; }
     if (this.entriesStopped(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); return; }
     const a = await this.assess(pool);
-    if (!a.ok) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
-    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax);
+    if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
+    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate);
   }
 
   private async scanEntries() {

@@ -17,6 +17,7 @@ import type { Hub } from '../chains/hub';
 import type { GeckoSource } from './gecko';
 import { PoolSniper, type LogSource, type SniperChain } from './sniper';
 import { TokenTrader, type Position, type TraderState } from '../bot/tokenTrader';
+import { quoteTradeImpact } from './tradeImpact';
 
 interface Reader extends ChainReader {
   getBlockNumber(): Promise<number>;
@@ -91,6 +92,8 @@ export function createTokenTrader(o: {
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk),
+    // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
+    quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
     resolve: (hit) => resolveHit(o.hub, hit),
     live: {
       buy: async (pool, spend, limits) => {
