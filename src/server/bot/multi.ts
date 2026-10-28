@@ -1391,7 +1391,7 @@ export class MultiBot {
       if (cur.poolMode === 'manual') continue;
       try {
         const b = (await this.hub.poolOptions(key)).best;
-        if (!b || b.mid == null) continue;
+        if (!b || b.mid == null || (b.kind !== 'v2' && b.kind !== 'v3')) continue;
         const same = b.dex === cur.pool.dex && (b.kind === 'v2' || sameAddr(b.address, cur.pool.address));
         const pool = { dex: b.dex, kind: b.kind, address: b.address, feeBps: b.feeBps, ...(b.feeTier != null ? { feeTier: b.feeTier } : {}) };
         const quoter = same ? this.hub.quoter(key) : this.hub.quoterOnPool(key, pool);

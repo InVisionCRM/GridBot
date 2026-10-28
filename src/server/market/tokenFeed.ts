@@ -223,6 +223,8 @@ async function discover(hub: Hub, gecko: GeckoSource): Promise<FreshPool[]> {
     const take = (rows: typeof fresh, source: 'new' | 'trending') => {
       for (const row of rows) {
         const dex = rt.cfg.dexes.find((d) => d.gecko === row.dex);
+        // V4 rows stay out of the token trader. Labelling them V3 would try to swap a pool id on a V3 router.
+        if (dex?.kind === 'v4') continue;
         // feeBps is a placeholder until withPoolFees reads the pool's real fee (V3 fee(), or the DEX's V2 fee)
         const pool = fromTopPool(row, { id: rt.cfg.id, spend, kind: dex?.kind === 'v2' ? 'v2' : 'v3', feeBps: dex?.feeBps ?? 30 }, source);
         if (pool) out.push(pool);
@@ -236,7 +238,8 @@ async function discover(hub: Hub, gecko: GeckoSource): Promise<FreshPool[]> {
 
 /**
  * Every discovered pool gets its real fee: V2 = the DEX's fee, V3 = the pool's fee() (one eth_call each). A pool whose
- * fee can't be read is dropped: pricing it at a guessed tier is how 1 % pools were sized as 0.01 % ones.
+ * fee can't be read is dropped: pricing it at a guessed tier is how 1 % pools were sized as 0.01 % ones. V4 is dropped
+ * here too: this trader does not swap it, and a pool id must not be relabelled V3.
  */
 export async function withPoolFees(
   pools: FreshPool[], readerFor: (chainId: number) => Pick<ChainReader, 'call'>,
@@ -244,9 +247,10 @@ export async function withPoolFees(
 ): Promise<FreshPool[]> {
   const read = await Promise.all(pools.map(async (p) => {
     const dex = dexOf(p);
-    if (!dex) return null; // a DEX this app doesn't swap on: inspect() could not find the pool anyway
+    // Unknown DEX, or V4: this trader does not swap it. A V4 pool id must not be relabelled V3.
+    if (!dex || dex.kind === 'v4') return null;
     const feeBps = await poolFeeBps(readerFor(p.chainId), p.pool, dex);
-    return feeBps == null ? null : { ...p, kind: dex.kind === 'v2' ? 'v2' as const : 'v3' as const, feeBps, ...(dex.dynamicFee ? { dynamicFee: true } : {}) };
+    return feeBps == null ? null : { ...p, kind: dex.kind, feeBps, ...(dex.dynamicFee ? { dynamicFee: true } : {}) };
   }));
   return read.filter((p): p is NonNullable<typeof p> => !!p);
 }
