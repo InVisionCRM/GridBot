@@ -4,7 +4,7 @@ import { CoinMark } from './coin-mark';
 import type { View } from '../ui/model';
 import { ActivityTape } from './activity-tape';
 import { CandlePane } from './candle-pane';
-import { isLedgerLabel, ledgerLines, sheetRows } from './figures';
+import { coinScale, ledgerLines, sheetRows } from './figures';
 import { formatBag, formatQuotePx, formatStamp, shortenFigures, showsNoFills } from './format';
 import { LpRangeSlot } from './lp-range-slot';
 import type { ActivityItem, BotDesk, BotMetrics, TapePrice } from './metrics';
@@ -27,8 +27,9 @@ function classicView(m: BotMetrics): View {
 
 function Row({ label, value }: { label: string; value: string }) {
   const est = label.startsWith('Est.');
-  const ledger = isLedgerLabel(label);
-  return <li><span>{label}</span><b {...(est ? { 'data-est': '' } : {})} {...(ledger ? { 'data-ledger': '' } : {})}>{value}</b></li>;
+  const total = label === 'Generated';
+  if (label === 'Note') return <li className="note"><span>{value}</span></li>;
+  return <li><span>{label}</span><b {...(est ? { 'data-est': '' } : {})} {...(total ? { 'data-ledger': '' } : {})}>{value}</b></li>;
 }
 
 export function BotView({
@@ -54,6 +55,7 @@ export function BotView({
   const beside = `${activity.map((a) => shortenFigures(a.text).replace(/\$/g, '')).join('\n')} ${prices.map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' ')}`;
   const rows = shot ? sheetRows(shot, { base: shownBase || bot.base, quote: shownQuote || bot.quote }, beside) : [];
   const day = m.est.d1;
+  const scale = coinScale(m);
   return (
     <div className="bot-page" data-bot={m.botId}>
       <button type="button" className="text-btn" onClick={() => { press(); onBack(); }}>Home</button>
@@ -71,9 +73,9 @@ export function BotView({
         {showsNoFills(m) ? <div className="hero-gen">No fills yet</div> : (
           <>
             <p className="eyebrow">Generated</p>
-            <div className="hero-gen">{ledgerLines(m)?.generated ?? <TokenHeadline tokens={m.generated} />}</div>
+            <div className="hero-gen">{ledgerLines(m)?.generated ?? <TokenHeadline tokens={m.generated} scale={scale} />}</div>
             <p className="hero-rate" data-est="">
-              {day == null ? '—' : day.length ? <TokenLine tokens={day} /> : '0'}
+              {day == null ? '—' : day.length ? <TokenLine tokens={day} scale={scale} /> : '0'}
               <span>/day</span>
             </p>
             <p className="muted small">Estimate, not a forecast.</p>

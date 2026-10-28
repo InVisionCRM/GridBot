@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { ReactElement } from 'react';
 import { adaptStatus } from '../src/v2/adapt-status';
 import { BotView } from '../src/v2/bot-view';
-import { repeatedFigures } from '../src/v2/figures';
+import { figureAtoms, isLedgerLabel, normFigure, repeatedFigures, sheetRows } from '../src/v2/figures';
 import { deskStatusPill, formatClockEt, formatQuotePx, formatUnitPx } from '../src/v2/format';
 import { HomeView, Ticker } from '../src/v2/home-view';
 import { ActivityTape } from '../src/v2/activity-tape';
@@ -157,6 +157,21 @@ describe('no money or token figure is repeated on a screen', () => {
       const labels = [...hero.matchAll(/class="eyebrow">([^<]+)/g)].map((m) => m[1]);
       const dupes = labels.filter((label, i) => labels.indexOf(label) !== i);
       expect(dupes, row.pair).toEqual([]);
+    }
+  });
+
+  it('counts a coin amount inside a multi-coin figure', () => {
+    const repeats = repeatedFigures('+63.24 USDC + 0.001731 ETH +63.24 USDC + 0.026837 ETH');
+    expect(repeats).toContain(normFigure('+63.24 USDC'));
+    expect(figureAtoms('+63.24 USDC + 0.001731 ETH').map(normFigure)).toContain(normFigure('+63.24 USDC'));
+  });
+
+  it('does not repeat a coin amount across breakdown rows', () => {
+    for (const row of desk.bots) {
+      const [base, quote] = row.pair.split('/');
+      const rows = sheetRows(row.metrics, { base: base || row.base, quote: quote || row.quote });
+      const ledger = rows.filter((r) => isLedgerLabel(r.label)).map((r) => r.value).join(' ');
+      expect(repeatedFigures(ledger), `${row.pair}: ${ledger}`).toEqual([]);
     }
   });
 

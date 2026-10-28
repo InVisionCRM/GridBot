@@ -130,10 +130,19 @@ export function formatBag(tokens: { symbol: string; amount: number }[] | null | 
   return tokens.map((t) => `${plainAmt(t.amount)} ${t.symbol}`).join(' + ');
 }
 
-export function formatTokenLine(tokens: { symbol: string; amount: number }[] | null | undefined): string {
+function amountText(amount: number, symbol: string, scale?: ReadonlyMap<string, number> | null): string {
+  const decimals = scale?.get(symbol);
+  return decimals == null ? formatAmt(amount) : formatFixedAmt(amount, decimals);
+}
+
+/** One line of signed token amounts. `scale` fixes the decimals for a coin so every screen matches. */
+export function formatTokenLine(
+  tokens: { symbol: string; amount: number }[] | null | undefined,
+  scale?: ReadonlyMap<string, number> | null,
+): string {
   if (!tokens?.length) return '—';
   return tokens.map((t, i) => {
-    const amt = formatAmt(t.amount);
+    const amt = amountText(t.amount, t.symbol, scale);
     if (i === 0) return `${amt} ${t.symbol}`;
     if (t.amount < 0) return `${amt} ${t.symbol}`;
     return `+ ${amt.replace(/^\+/, '')} ${t.symbol}`;

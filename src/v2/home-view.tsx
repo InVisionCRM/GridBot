@@ -2,10 +2,10 @@ import { motion } from 'motion/react';
 import { useState } from 'react';
 import { CoinMark } from './coin-mark';
 import { EquityCurve, Spark } from './equity-curve';
-import { cardReadout, coverFigures, uniqueTape, type CardReadout } from './figures';
+import { cardReadout, coinScale, coverFigures, displayScale, uniqueTape, type CardReadout } from './figures';
 import { formatBag, formatQuotePx, formatTokenLine, pct } from './format';
 import type { BotDesk, BotStatus, PortfolioSnapshot, TapePrice, TokenQty } from './metrics';
-import { isLedgerLabel, ledgerLines, sheetRows } from './figures';
+import { sheetRows } from './figures';
 import { useReducedMotion } from './motion';
 import { PairLabel, PairTitle } from './pair-label';
 import { press } from './press';
@@ -90,22 +90,26 @@ export function HomeView({
   const used = new Set<string>();
   const liveInvested = sumBags(live.map((b) => b.metrics.invested));
   const paperInvested = sumBags(paperBots.map((b) => b.metrics.invested));
+  const liveScale = displayScale(live.map((b) => b.metrics));
+  const paperScale = displayScale(paperBots.map((b) => b.metrics));
   coverFigures([
-    formatTokenLine(portfolio.tokens),
+    formatTokenLine(portfolio.tokens, liveScale),
     formatBag(liveInvested),
-    portfolio.generatedPerDay ? formatTokenLine(portfolio.generatedPerDay) : '',
+    portfolio.generatedPerDay ? formatTokenLine(portfolio.generatedPerDay, liveScale) : '',
     uniqueTape(prices).map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' '),
   ].join(' '), used);
   const liveCards = live.map((bot) => ({
     bot,
-    readout: cardReadout(bot.metrics, portfolio.tokens, 'live', used),
+    readout: cardReadout(bot.metrics, portfolio.tokens, 'live', used, coinScale(bot.metrics), liveScale),
     invested: formatBag(bot.metrics.invested) === formatBag(liveInvested) ? null : formatBag(bot.metrics.invested),
+    scale: coinScale(bot.metrics),
   }));
-  coverFigures(`${formatTokenLine(portfolio.paperTokens)} ${formatBag(paperInvested)}`, used);
+  coverFigures(`${formatTokenLine(portfolio.paperTokens, paperScale)} ${formatBag(paperInvested)}`, used);
   const paperCards = paperBots.map((bot) => ({
     bot,
-    readout: cardReadout(bot.metrics, portfolio.paperTokens, 'paper', used),
+    readout: cardReadout(bot.metrics, portfolio.paperTokens, 'paper', used, coinScale(bot.metrics), paperScale),
     invested: formatBag(bot.metrics.invested) === formatBag(paperInvested) ? null : formatBag(bot.metrics.invested),
+    scale: coinScale(bot.metrics),
   }));
   return (
     <div className="home">
@@ -115,13 +119,11 @@ export function HomeView({
         <p className="eyebrow">Generated</p>
         <div className="hero-top">
           <div className="hero-units">
-            {portfolio.tokens.length
-              ? (live.length === 1 && ledgerLines(live[0].metrics)?.generated) || <TokenHeadline tokens={portfolio.tokens} />
-              : '—'}
+            {portfolio.tokens.length ? <TokenHeadline tokens={portfolio.tokens} scale={liveScale} /> : '—'}
           </div>
         </div>
         <p className="hero-rate" data-est="">
-          {portfolio.generatedPerDay == null ? '—' : portfolio.generatedPerDay.length ? <TokenLine tokens={portfolio.generatedPerDay} /> : '0'}
+          {portfolio.generatedPerDay == null ? '—' : portfolio.generatedPerDay.length ? <TokenLine tokens={portfolio.generatedPerDay} scale={liveScale} /> : '0'}
           <span>/day</span>
         </p>
         <p className="muted small">Estimate, not a forecast.</p>
@@ -134,32 +136,33 @@ export function HomeView({
         </div>
       </section>
       <ModeSection title="Live" cards={liveCards} onOpen={onOpen} />
-      <ModeSection title="Paper" cards={paperCards} tokens={portfolio.paperTokens} invested={paperInvested} onOpen={onOpen} />
+      <ModeSection title="Paper" cards={paperCards} tokens={portfolio.paperTokens} invested={paperInvested} scale={paperScale} onOpen={onOpen} />
     </div>
   );
 }
 
 function ModeSection({
-  title, cards, tokens = [], invested = [], onOpen,
+  title, cards, tokens = [], invested = [], scale = null, onOpen,
 }: {
   title: string;
-  cards: { bot: BotDesk; readout: CardReadout; invested: string | null }[];
+  cards: { bot: BotDesk; readout: CardReadout; invested: string | null; scale: ReadonlyMap<string, number> }[];
   tokens?: TokenQty[];
   invested?: TokenQty[];
+  scale?: ReadonlyMap<string, number> | null;
   onOpen: (id: string) => void;
 }) {
   const open = cards.filter((c) => c.bot.metrics.status !== 'closed');
   const closed = cards.filter((c) => c.bot.metrics.status === 'closed');
   if (!open.length && !closed.length) return null;
-  const item = ({ bot, readout, invested: bag }: { bot: BotDesk; readout: CardReadout; invested: string | null }) => (
-    <BotCard key={bot.metrics.botId} bot={bot} readout={readout} invested={bag} onOpen={onOpen} />
+  const item = ({ bot, readout, invested: bag, scale: botScale }: { bot: BotDesk; readout: CardReadout; invested: string | null; scale: ReadonlyMap<string, number> }) => (
+    <BotCard key={bot.metrics.botId} bot={bot} readout={readout} invested={bag} scale={botScale} onOpen={onOpen} />
   );
   return (
     <section>
       <h2 className="group-title">
         <span className="section-name">{title}</span>
         {invested.length > 0 && <span className="section-units"><span className="section-name">Invested</span> {formatBag(invested)}</span>}
-        {tokens.length > 0 && <span className="section-units"><span className="section-name">Generated</span> <TokenLine tokens={tokens} /></span>}
+        {tokens.length > 0 && <span className="section-units"><span className="section-name">Generated</span> <TokenLine tokens={tokens} scale={scale} /></span>}
       </h2>
       {open.length > 0 && <ul className="bot-list">{open.map(item)}</ul>}
       {closed.length > 0 && (
@@ -172,20 +175,20 @@ function ModeSection({
   );
 }
 
-function CardMade({ readout }: { readout: CardReadout }) {
+function CardMade({ readout, scale }: { readout: CardReadout; scale: ReadonlyMap<string, number> }) {
   if (readout.kind === 'empty') return <p className="card-made"><span>Generated</span> No fills yet</p>;
   if (readout.kind === 'note') return <p className="card-made"><span>Generated</span> <em className="card-note">{readout.text}</em></p>;
   return (
     <>
       <p className="card-made">
         <span>Generated</span>
-        {readout.tokens.length > 0 && <TokenHeadline tokens={readout.tokens} />}
+        {readout.tokens.length > 0 && <TokenHeadline tokens={readout.tokens} scale={scale} />}
       </p>
     </>
   );
 }
 
-function BotCard({ bot, readout, invested, onOpen }: { bot: BotDesk; readout: CardReadout; invested: string | null; onOpen: (id: string) => void }) {
+function BotCard({ bot, readout, invested, scale, onOpen }: { bot: BotDesk; readout: CardReadout; invested: string | null; scale: ReadonlyMap<string, number>; onOpen: (id: string) => void }) {
   const open = () => { press(); onOpen(bot.metrics.botId); };
   return (
     <li>
@@ -216,12 +219,14 @@ function BotCard({ bot, readout, invested, onOpen }: { bot: BotDesk; readout: Ca
           <RangeTrack range={bot.metrics.range} tone={bot.tone} />
         </div>
         {invested && <p className="card-made"><span>Invested</span> {invested}</p>}
-        <CardMade readout={readout} />
+        <CardMade readout={readout} scale={scale} />
         <details className="card-details" onClick={(e) => e.stopPropagation()}>
           <summary>Details</summary>
           <ul className="break">
             {sheetRows(bot.metrics, shownPairParts(bot.pair)).map((row) => (
-              <li key={row.label}><span>{row.label}</span><b {...(row.label.startsWith('Est.') ? { 'data-est': '' } : {})} {...(isLedgerLabel(row.label) ? { 'data-ledger': '' } : {})}>{row.value}</b></li>
+              row.label === 'Note'
+                ? <li key={row.label} className="note"><span>{row.value}</span></li>
+                : <li key={row.label}><span>{row.label}</span><b {...(row.label.startsWith('Est.') ? { 'data-est': '' } : {})} {...(row.label === 'Generated' ? { 'data-ledger': '' } : {})}>{row.value}</b></li>
             ))}
           </ul>
           <p className="muted small">Estimate, not a forecast.</p>
