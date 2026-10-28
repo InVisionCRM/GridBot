@@ -10,9 +10,12 @@ import { Quoter, type ChainReader, type TxSender } from '../bot/chain';
 import type { Store } from '../bot/store';
 import type { SharedNonce, TxGate } from '../bot/txGate';
 import { ChainRuntime } from './runtime';
-import { discoverPools, type DiscoveredPool } from '../dex/discovery';
+import { discoverPools, rankPools, type DiscoveredPool } from '../dex/discovery';
 import { readTokenMeta, type TokenMeta } from '../dex/tokens';
 import { classify, depthAt, hopFor, simulateRoundTrip, type ProbeResult } from '../dex/safety';
+import { assessHook } from '../dex/v4Hooks';
+import { V4_CURRENCY_MISMATCH, v4PoolMatches, v4QuoteForPool } from '../dex/v4';
+import { simulateV4RoundTrip, v4Leg } from '../dex/v4Safety';
 import { isInconclusive } from '../bot/taxWatch';
 import { sameAddr } from '../dex/types';
 import { toUnits } from '../../live/swapMath';
@@ -292,7 +295,21 @@ export class Hub {
     let best: { q: (typeof quoteOptions)[number]; pools: DiscoveredPool[]; usd: number | null } | null = null;
     for (const q of candidates) {
       const usd = await this.quoteTokenUsd(rt.cfg.id, q);
-      const pools = await discoverPools(rt, base, { address: q.address, symbol: q.symbol, decimals: await this.decimalsOf(rt, q.address) }, { refQuote: usd ? 1000 / usd : 1000, quoteUsd: usd });
+      const quoteTok = { address: q.address, symbol: q.symbol, decimals: await this.decimalsOf(rt, q.address) };
+      const disc = { refQuote: usd ? 1000 / usd : 1000, quoteUsd: usd };
+      const pools = await discoverPools(rt, base, quoteTok, disc);
+      // A wrapped quote is either currency on V4. Search address(0) as well, and keep a pool's quoting row.
+      if (sameAddr(q.address, rt.cfg.wrappedNative.address)) {
+        const nativeHits = await discoverPools(rt, base, { ...quoteTok, native: true }, { ...disc, onlyKind: 'v4' });
+        for (const p of nativeHits) {
+          if (p.kind !== 'v4') continue;
+          const id = `${p.dex}:${p.address.toLowerCase()}`;
+          const prev = pools.findIndex((x) => `${x.dex}:${x.address.toLowerCase()}` === id);
+          if (prev >= 0) { if (pools[prev].refOut == null && p.refOut != null) pools[prev] = p; }
+          else pools.push(p);
+        }
+        pools.splice(0, pools.length, ...rankPools(pools));
+      }
       const top = pools[0]?.tvlUsd ?? pools[0]?.tvlQuote ?? -1;
       const cur = best ? best.pools[0]?.tvlUsd ?? best.pools[0]?.tvlQuote ?? -1 : -2;
       if (!best || (pools.length && top > cur)) best = { q, pools, usd };
@@ -304,6 +321,10 @@ export class Hub {
     if (req.pool && !chosen) throw new Error(`Pool ${req.pool} not found for ${token.symbol}/${q.symbol}`);
     const result: InspectResult = { chainId: rt.cfg.id, token, quoteOptions, quote, pools, chosen, draft: null, safety: null, probe: null, existing };
     if (!chosen || chosen.mid == null) return result;
+    if (chosen.kind === 'v4' && !v4PoolMatches(chosen, base, v4QuoteForPool(chosen, { address: quote.address }, rt.cfg.wrappedNative.address))) {
+      if (req.pool) throw new Error(`Pool ${req.pool} ${V4_CURRENCY_MISMATCH}`);
+      return result;
+    }
 
     const quoteUsd = best!.usd;
     const baseUsd = quoteUsd != null ? chosen.mid * quoteUsd : null;
@@ -311,7 +332,7 @@ export class Hub {
     const draft: MarketDef = {
       key: marketKey(rt.cfg, token.symbol, q.symbol, (k) => this.defs.has(k)), chainId: rt.cfg.id,
       base, quote: { address: quote.address, symbol: quote.symbol, decimals: quote.decimals, name: quote.name },
-      pool: { dex: chosen.dex, kind: chosen.kind, address: chosen.address, feeBps: chosen.feeBps, ...(chosen.feeTier != null ? { feeTier: chosen.feeTier } : {}) },
+      pool: takenPool(chosen),
       probe, quoteKind: q.kind, custom: true, candlePool: chosen.address, addedAt: this.now(),
     };
     result.draft = draft;
@@ -319,9 +340,14 @@ export class Hub {
     result.safety = report;
     result.probe = pr ? { stage: pr.stage, err: pr.err, quoteIn: pr.quoteIn.toString(), expectedBuy: pr.expectedBuy.toString(), gotBuy: pr.gotBuy.toString(), transferSent: pr.transferSent.toString(), transferGot: pr.transferGot.toString(), sellIn: pr.sellIn.toString(), expectedSell: pr.expectedSell.toString(), gotSell: pr.gotSell.toString(), gasBuy: Number(pr.gasBuy), gasSell: Number(pr.gasSell) } : null;
     draft.safety = report;
-    // TOKEN/WPLS (or /WETH): buys spend the native coin the wallet holds, wrapped inside the swap, like the flipped
-    // HEX/PLS market. Set after the safety probe, which measures the token itself.
-    if (sameAddr(draft.quote.address, rt.cfg.wrappedNative.address)) draft.quote = { ...draft.quote, symbol: rt.cfg.nativeSymbol, native: true };
+    // TOKEN/WPLS (or /WETH): V2/V3 wrap the native coin inside the router, like the flipped HEX/PLS market.
+    // Set after the safety probe, which measures the token itself.
+    // V4 is exact. The market currency is the pool's: address(0) becomes native, the wrapped address stays WETH.
+    if (sameAddr(draft.quote.address, rt.cfg.wrappedNative.address)) {
+      const v4 = draft.pool.v4;
+      const v4Wrapped = draft.pool.kind === 'v4' && !!v4 && [v4.currency0, v4.currency1].some((c) => sameAddr(c, rt.cfg.wrappedNative.address));
+      if (!v4Wrapped) draft.quote = { ...draft.quote, symbol: rt.cfg.nativeSymbol, native: true };
+    }
     return result;
   }
 
@@ -384,19 +410,35 @@ export class Hub {
       let prep = null;
       if (!sameAddr(d.quote.address, wn)) {
         const pools = await discoverPools(rt, { address: wn, symbol: 'W', decimals: 18 }, d.quote, { refQuote: nat ? 20 / (quoteUsd ?? 1) : 1, quoteUsd });
-        const p = pools.find((x) => x.refOut != null);
+        // Prep is a V2/V3 hop inside the probe. Skip a V4 pool here so the funding route stays the one V2/V3 would have used.
+        const p = pools.find((x) => x.refOut != null && x.kind !== 'v4');
         if (!p) throw new Error(`no ${rt.cfg.wrappedNative.symbol}/${d.quote.symbol} pool to fund the simulation`);
         prep = hopFor(rt.adapter(p.dex), p, wn, d.quote.address);
       }
-      probe = await simulateRoundTrip(rt, { weth: wn, wethIn, prep, buy: hopFor(ad, d.pool, d.quote.address, d.base.address), sell: hopFor(ad, d.pool, d.base.address, d.quote.address) });
+      if (d.pool.kind === 'v4') {
+        probe = await simulateV4RoundTrip(rt, {
+          weth: wn, wethIn, prep,
+          buy: v4Leg(d.pool, d.quote.address, d.base.address, ad.cfg, wn),
+          sell: v4Leg(d.pool, d.base.address, d.quote.address, ad.cfg, wn),
+        });
+      } else {
+        probe = await simulateRoundTrip(rt, { weth: wn, wethIn, prep, buy: hopFor(ad, d.pool, d.quote.address, d.base.address), sell: hopFor(ad, d.pool, d.base.address, d.quote.address) });
+      }
     } catch (e) {
       simError = (e as { shortMessage?: string }).shortMessage ?? (e as Error).message;
       simError = simError.slice(0, 140);
     }
-    return {
-      report: classify({ probe, simError, proxy: token.proxy, depth, liquidityUsd, now: this.now(), poolKind: d.pool.kind, flags: token.flags ?? null, decimals: token.decimals }),
-      probe,
-    };
+    const report = classify({ probe, simError, proxy: token.proxy, depth, liquidityUsd, now: this.now(), poolKind: d.pool.kind, flags: token.flags ?? null, decimals: token.decimals });
+    if (d.pool.kind === 'v4') {
+      const decision = assessHook(d.pool.v4?.hooks, ad.cfg.hookAllowlist);
+      if (!decision.allowed) {
+        report.risk = 'blocked';
+        report.liveAllowed = false;
+        report.taxMode = 'blocked';
+        report.reasons = [decision.reason ?? 'V4 hook rejected', ...report.reasons];
+      }
+    }
+    return { report, probe };
   }
 
   /** Persist a custom market (re-inspects server-side; the client's data is never trusted). */
@@ -413,21 +455,55 @@ export class Hub {
     return r.draft;
   }
 
+  /** A market's safety report went stale (first failure of a run) / was measured again after being stale. */
+  onSafetyStale: ((key: string, report: SafetyReport) => void) | null = null;
+  onSafetyFresh: ((key: string, report: SafetyReport) => void) | null = null;
+
   /**
-   * Re-run the safety probe. `keepMeasured` (the tax watcher's periodic check): a re-check whose simulation didn't run
-   * (an RPC hiccup) measured nothing, so the market keeps its last measured report (and the taxes its quotes use) and
-   * the caller gets the fresh one. Without it (a live start, a manual re-check) the fresh report always replaces it.
+   * Re-run the safety probe.
+   * - Measured: the fresh report replaces the stored one (and clears `stale`).
+   * - The re-check threw (RPC down, pool read failed): the stored report is kept, marked `stale`, and the error is
+   *   re-thrown, so callers behave exactly as before (a grid / trend live start falls back to the stored report, a
+   *   liquidity-bot live start is refused, the tax watcher warns or, after a suspicious event, fails closed).
+   * - The re-check returned no report (no usable pool, no price): the stored report is kept, marked `stale`, and
+   *   returned — its last known values, labelled stale, never silently passed off as fresh.
+   * - `keepMeasured` (the tax watcher's periodic check) and the simulation didn't run: the stored measured report is
+   *   kept (and the taxes its quotes use), marked `stale`; the caller gets the fresh inconclusive one. Without it (a
+   *   live start, a manual re-check) the fresh report replaces it, as before (#32).
+   * Being stale only labels the report: `liveAllowed` and the taxes keep their last known values, and nothing here
+   * pauses or stops a bot.
    */
   async recheck(key: string, o: { keepMeasured?: boolean } = {}): Promise<SafetyReport> {
     key = unflipKey(key);
     const d = this.def(key);
     if (!d.safety) throw new Error(`${this.label(key)} has no safety check (built-in PulseChain market)`);
-    const r = await this.inspect({ chainId: d.chainId, address: d.base.address, quote: d.quote.address, pool: d.pool.address });
+    let r: InspectResult;
+    try {
+      r = await this.inspect({ chainId: d.chainId, address: d.base.address, quote: d.quote.address, pool: d.pool.address });
+    } catch (e) {
+      this.markStale(key, `re-check failed: ${(e as Error).message}`);
+      throw e;
+    }
     const fresh = r.safety ?? null;
-    if (o.keepMeasured && fresh && isInconclusive(fresh) && d.safety && !isInconclusive(d.safety)) return fresh;
-    d.safety = fresh ?? d.safety;
+    if (!fresh) return this.markStale(key, r.chosen ? 'the re-check measured nothing' : 'the re-check found no usable pool');
+    if (o.keepMeasured && isInconclusive(fresh) && !isInconclusive(d.safety)) {
+      this.markStale(key, `simulation didn't run: ${fresh.reasons[0] ?? 'unavailable'}`);
+      return fresh;
+    }
+    const was = d.safety.stale;
+    d.safety = fresh;
     this.persist();
-    return d.safety!;
+    if (was) this.onSafetyFresh?.(key, fresh);
+    return fresh;
+  }
+
+  /** Keep the stored report's values, label them stale. */
+  private markStale(key: string, why: string): SafetyReport {
+    const d = this.def(key), prev = d.safety!, now = this.now();
+    d.safety = { ...prev, stale: { since: prev.stale?.since ?? now, lastTry: now, why: why.slice(0, 160) } };
+    this.persist();
+    if (!prev.stale) this.onSafetyStale?.(key, d.safety);
+    return d.safety;
   }
 
   /**
@@ -438,7 +514,29 @@ export class Hub {
   marketOnPool(chainId: number, dex: string, pool: string, a: string, b: string): string | null {
     const pair = (x: string, y: string) => (sameAddr(x, a) && sameAddr(y, b)) || (sameAddr(x, b) && sameAddr(y, a));
     return this.byChain(chainId).find((m) => m.pool.dex === dex
-      && (m.pool.kind === 'v3' ? sameAddr(m.pool.address, pool) : pair(m.base.address, m.quote.address)))?.key ?? null;
+      && (m.pool.kind === 'v4' ? sameAddr(m.pool.address, pool)
+        : m.pool.kind === 'v3' ? sameAddr(m.pool.address, pool) : pair(m.base.address, m.quote.address)))?.key ?? null;
+  }
+  /** This app's market for two coins on any pool, turned to spend `quote`; null when it has none */
+  marketForCoins(chainId: number, base: string, quote: string): string | null {
+    for (const m of this.byChain(chainId)) {
+      if (sameAddr(m.base.address, base) && sameAddr(m.quote.address, quote)) return m.key;
+      if (sameAddr(m.quote.address, base) && sameAddr(m.base.address, quote)) return `${m.key}~`;
+    }
+    return null;
+  }
+  /**
+   * This app's market for a scanned pool (`ref`: its coin, the coin it spends, the pool), turned to spend ref.quote
+   * ('HEX~' for HEX spending PLS on the PLS/HEX market); null when the pool isn't in this app.
+   */
+  marketFor(chainId: number, dex: string, ref: { address: string; quote: string; pool: string }): string | null {
+    const key = this.marketOnPool(chainId, dex, ref.pool, ref.address, ref.quote);
+    // Not on that pool any more (its pool was switched since the scan): the app's market for the same two coins
+    if (key == null) return this.marketForCoins(chainId, ref.address, ref.quote);
+    const d = this.def(key);
+    if (sameAddr(d.base.address, ref.address) && sameAddr(d.quote.address, ref.quote)) return key;
+    if (sameAddr(d.quote.address, ref.address) && sameAddr(d.base.address, ref.quote)) return `${key}~`;
+    return null;
   }
 
   // ── Pool selection (PulseChain: PulseX V1 / PulseX V2 / 9mm V2 / 9mm V3; elsewhere every configured DEX) ──
@@ -465,7 +563,7 @@ export class Hub {
     key = unflipKey(key);
     this.tvlCache.delete(key + '~');
     const d = this.def(key);
-    if (!d.candleKind) d.candleKind = d.pool.kind;
+    if (!d.candleKind && d.pool.kind !== 'v4') d.candleKind = d.pool.kind;
     if (req.reset) {
       if (d.custom) throw new Error('Custom markets have no registry default; pick a pool');
       const orig = this.o.markets.find((m) => m.key === key);
@@ -479,8 +577,9 @@ export class Hub {
     const choice = await this.poolOptions(key);
     const pick = req.auto ? choice.best : choice.pools.find((p) => req.pool && sameAddr(p.address, req.pool));
     if (!pick) throw new Error(req.auto ? `No quotable pool for ${this.label(key)}` : `Pool ${req.pool} is not a ${d.base.symbol}/${d.quote.symbol} pool on ${this.chain(d.chainId).name}`);
+    if (pick.kind === 'v4' && !v4PoolMatches(pick, d.base, d.quote)) throw new Error(`${pick.dexName} pool ${pick.address}: ${V4_CURRENCY_MISMATCH}`);
     if (pick.refOut == null || pick.mid == null) throw new Error(`${pick.dexName} pool ${pick.address} cannot be quoted${pick.error ? `: ${pick.error}` : ''}`);
-    d.pool = { dex: pick.dex, kind: pick.kind, address: pick.address, feeBps: pick.feeBps, ...(pick.feeTier != null ? { feeTier: pick.feeTier } : {}) };
+    d.pool = takenPool(pick);
     d.poolMode = req.auto ? 'auto' : 'manual';
     if (!d.custom) (this.custom.pools ??= {})[key] = { pool: { ...d.pool }, mode: d.poolMode, candleKind: d.candleKind };
     this.tvlCache.delete(key);
@@ -511,7 +610,8 @@ export class Hub {
     key = unflipKey(key); // flipped series are derived (inverted) from the original's candles
     const d = this.def(key), c = this.chain(d.chainId);
     return {
-      key, label: this.label(key), network: c.geckoSlug, pool: d.candlePool || d.pool.address, kind: d.candlePool ? (d.candleKind ?? d.pool.kind) : d.pool.kind,
+      key, label: this.label(key), network: c.geckoSlug, pool: d.candlePool || d.pool.address,
+      kind: d.candlePool ? (d.candleKind ?? (d.pool.kind === 'v4' ? 'v4' : d.pool.kind)) : (d.pool.kind === 'v4' ? 'v4' : d.pool.kind),
       base: { address: d.base.address, decimals: d.base.decimals }, quote: { address: d.quote.address, decimals: d.quote.decimals },
       feeBps: d.pool.feeBps, logChunk: c.logChunk,
     };
@@ -537,4 +637,13 @@ export class Hub {
       taxOf: (addr) => this.taxOf(d.chainId, addr),
     });
   }
+}
+
+/** Pool fields copied onto a market. V2/V3 stay dex/kind/address/fee; a V4 pool also keeps its PoolKey. */
+function takenPool(p: DiscoveredPool): MarketDef['pool'] {
+  return {
+    dex: p.dex, kind: p.kind, address: p.address, feeBps: p.feeBps,
+    ...(p.feeTier != null ? { feeTier: p.feeTier } : {}),
+    ...(p.v4 ? { v4: { ...p.v4 } } : {}),
+  };
 }
