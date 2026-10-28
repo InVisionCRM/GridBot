@@ -6,7 +6,7 @@
  * The gate blocks safe/medium when this report is unverified, or verified but not at least 90% burned or
  * locked by an allowlisted locker. Nothing in this repo calls a GoPlus-style LP-holder API. The report is
  * attached only when `v3LpLockCheck` is on (default off). With that option off the gate input never carries
- * a report, and gateToken is unchanged.
+ * a report, and gateToken is unchanged. Assess leaves `lpUnlocked` null unless `lpUnlockCheck` is on.
  *
  * Only a burn address, or an allowlisted locker whose code contains getLock and getLocksLength, counts as
  * locked. A contract that merely answers an expiry probe does not.
