@@ -140,6 +140,8 @@ const fresh = (): TraderState => ({ version: 1, on: false, options: structuredCl
 export class TokenTrader {
   private state: TraderState;
   private busy = false;
+  /** Spend coin of a live buy that has started and not yet landed or failed. Not persisted. */
+  private pendingBuy: { chainId: number; address: string; amount: number } | null = null;
   lastError: string | null = null;
 
   constructor(private readonly d: {
@@ -206,7 +208,7 @@ export class TokenTrader {
 
   /**
    * Live positions sit in the wallet: the token they hold, and the spend coin that bought it.
-   * Paper positions move no coins.
+   * A live buy that has not landed yet reserves its spend coin the same way. Paper positions move no coins.
    */
   reservations(): ReservedBalance[] {
     const out: ReservedBalance[] = [];
@@ -216,6 +218,8 @@ export class TokenTrader {
       if (p.tokens > 0) out.push({ chainId: p.chainId, address: p.token, native: native(p.token), amount: p.tokens, source: 'token-trader' });
       if (p.spent > 0) out.push({ chainId: p.chainId, address: p.spend, native: native(p.spend), amount: p.spent, source: 'token-trader' });
     }
+    const pend = this.pendingBuy;
+    if (pend && pend.amount > 0) out.push({ chainId: pend.chainId, address: pend.address, native: native(pend.address), amount: pend.amount, source: 'token-trader' });
     return out;
   }
 
@@ -394,8 +398,13 @@ export class TokenTrader {
     let tokens = sized.tokens, spent = sized.spend, spentUsd = sized.usd;
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('live broker missing');
-      const fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
-      tokens = fill.tokens; spent = fill.spent; spentUsd = fill.spentUsd;
+      this.pendingBuy = { chainId: pool.chainId, address: pool.spend, amount: sized.spend };
+      try {
+        const fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
+        tokens = fill.tokens; spent = fill.spent; spentUsd = fill.spentUsd;
+      } finally {
+        this.pendingBuy = null;
+      }
     }
     // One formula for paper and live: what was spent over what arrived (fee, impact, slippage and buy tax in).
     // A fill that reports no tokens (shouldn't happen) still gets booked, at the mid, never dropped.

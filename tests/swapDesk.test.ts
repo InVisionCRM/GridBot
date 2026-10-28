@@ -2,7 +2,9 @@
 import { describe, expect, it } from 'vitest';
 import { chainByKey } from '../src/live/chains';
 import { clearDecimalsCache } from '../src/live/decimals';
+import { amountToUnits } from '../src/live/decimals';
 import type { MarketDef, SafetyReport } from '../src/live/markets';
+import type { FreshPool, GateInput } from '../src/market/tokenTrader';
 import { NETWORKS } from '../src/live/networks';
 import { NATIVE, applySlippage, getAmountOut } from '../src/live/swapMath';
 import { afterTax } from '../src/live/tax';
@@ -13,8 +15,8 @@ import { Converter } from '../src/server/convert/converter';
 import { Logger } from '../src/server/bot/logger';
 import { MultiBot, type MultiState } from '../src/server/bot/multi';
 import { MemoryStore } from '../src/server/bot/store';
-import { DEFAULT_TRADER, TokenTrader, type Position, type TraderState } from '../src/server/bot/tokenTrader';
-import { SpendHolds } from '../src/server/swap/holds';
+import { DEFAULT_TRADER, TokenTrader, type LiveFill, type Position, type TraderState } from '../src/server/bot/tokenTrader';
+import { SpendHolds, type ReservedBalance } from '../src/server/swap/holds';
 import { SwapService } from '../src/server/swap/service';
 import type { SwapAllocation } from '../src/server/swap/types';
 import { swapForHost } from '../src/server/swap/wire';
@@ -58,7 +60,7 @@ function world(o: { v2?: { a: Tok; aAmt: number; b: Tok; bAmt: number }; v3?: bo
 
 function serviceFor(m: MultiDexMock, o: {
   allocations?: () => SwapAllocation[];
-  reservations?: SwapService['quote'] extends never ? never : import('../src/server/swap/holds').ReservedBalance[];
+  reservations?: ReservedBalance[] | (() => ReservedBalance[]);
   holds?: SpendHolds;
   now?: () => number;
   taxes?: (chainId: number, token: string) => { buy: number; sell: number; transfer: number };
@@ -75,7 +77,7 @@ function serviceFor(m: MultiDexMock, o: {
   const service = new SwapService({
     runtime: () => rt,
     allocations: o.allocations ?? (() => []),
-    reservations: o.reservations ? () => o.reservations! : undefined,
+    reservations: !o.reservations ? undefined : typeof o.reservations === 'function' ? o.reservations : () => o.reservations as ReservedBalance[],
     holds: o.holds ?? new SpendHolds({ now }),
     taxes: o.taxes,
     v3Proven: o.v3Proven,
@@ -297,5 +299,75 @@ describe('swap desk rules', () => {
       tokenOut: WETH.address, decimalsOut: 18, amountInHuman: 12, price: 1, deadline: 1,
     };
     expect(bot.routerReservations()).toEqual([expect.objectContaining({ amount: 12, source: 'in-flight', chainId: NET.chainId })]);
+  });
+
+  it('reserves the spend coin of an in-flight live buy until it lands or fails', async () => {
+    const gate = (): GateInput => ({
+      mode: 'live', risk: 'safe', honeypot: false, sellSimOk: true, paused: false, decimals: 6,
+      buyTax: 0, sellTax: 0, liquidityUsd: 1e5, minLiquidityUsd: 0,
+      canMint: false, canPause: false, canBlacklist: false, proxy: false, lpUnlocked: null,
+      holderConcentration: null, recentLiqPull: false, liveAllowed: true,
+    });
+    const fresh: FreshPool = {
+      chainId: 4663, pool: '0x' + '11'.repeat(20), dex: 'uniswap-v2', kind: 'v2',
+      token: MEME.address, spend: USDG.address, tokenSymbol: 'MEME', spendSymbol: 'USDG',
+      liquidityUsd: 1e5, volumeUsd: 1e4, createdAt: 0, source: 'new',
+      quoteReserve: 1_000_000, tokenReserve: 1_000_000, feeBps: 30, price: 1, usdPerSpend: 1,
+    };
+    async function hangBuy(end: 'fill' | 'fail') {
+      let go!: (v: LiveFill | Error) => void;
+      let started!: () => void;
+      const opened = new Promise<void>((r) => { started = r; });
+      const gateP = new Promise<LiveFill>((resolve, reject) => {
+        go = (v) => (v instanceof Error ? reject(v) : resolve(v));
+      });
+      let spend = 0;
+      const trader = new TokenTrader({
+        store: new MemoryStore<TraderState>(),
+        now: () => 1_800_000_000_000,
+        discover: async () => [fresh],
+        assess: async () => gate(),
+        live: {
+          buy: async (_pool, amount) => { spend = amount; started(); return gateP; },
+          sell: async () => { throw new Error('no sell'); },
+        },
+      });
+      trader.configure({ mode: 'live', perTradeUsd: 800, totalUsd: 800, minPoolAgeSec: 0, chains: [4663] });
+      trader.turnOn();
+      const ticking = trader.tick();
+      await opened;
+      const m = world({ v2: { a: USDG, aAmt: 1_000_000, b: WETH, bAmt: 400 } });
+      fund(m, USDG, 1_000n * E6);
+      const { service } = serviceFor(m, { reservations: () => trader.reservations() });
+      const amountIn = amountToUnits(spend, 6);
+      expect(trader.reservations()).toEqual([
+        { chainId: 4663, address: USDG.address, native: false, amount: spend, source: 'token-trader' },
+      ]);
+      await expect(service.quote({
+        chainId: 4663, tokenIn: USDG.address, tokenOut: WETH.address, amountIn, owner: OWNER, mode: 'live',
+      })).rejects.toThrow(/reservations/);
+      if (end === 'fill') go({ tokens: 100, spent: spend, spentUsd: spend, price: 1, impact: 0 });
+      else go(new Error('buy reverted'));
+      await ticking;
+      return { trader, service, amountIn, spend };
+    }
+
+    const filled = await hangBuy('fill');
+    const usdg = filled.trader.reservations().filter((r) => r.address.toLowerCase() === USDG.address.toLowerCase());
+    expect(usdg).toEqual([{ chainId: 4663, address: USDG.address, native: false, amount: filled.spend, source: 'token-trader' }]);
+    expect(filled.trader.status().positions).toHaveLength(1);
+    const left = await filled.service.quote({
+      chainId: 4663, tokenIn: USDG.address, tokenOut: WETH.address,
+      amountIn: amountToUnits(1_000 - filled.spend, 6), owner: OWNER, mode: 'live',
+    });
+    expect(left.tx).not.toBeNull();
+
+    const failed = await hangBuy('fail');
+    expect(failed.trader.reservations()).toEqual([]);
+    expect(failed.trader.status().positions).toHaveLength(0);
+    const again = await failed.service.quote({
+      chainId: 4663, tokenIn: USDG.address, tokenOut: WETH.address, amountIn: failed.amountIn, owner: OWNER, mode: 'live',
+    });
+    expect(again.tx).not.toBeNull();
   });
 });
