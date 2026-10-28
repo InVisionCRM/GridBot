@@ -119,6 +119,8 @@ export interface BotDesk {
   fills: FillMark[];
   flashLevel: number | null;
   price: number | null;
+  /** Saved with archivedAt. Listed under Closed, and left out of section totals. */
+  archived: boolean;
   change24h: number | null;
   /** Pool fee in basis points, when the snapshot has one. */
   feeBps: number | null;

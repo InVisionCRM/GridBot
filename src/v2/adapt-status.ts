@@ -192,7 +192,7 @@ function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
     run += k != null ? leg * k : leg;
     spark.push(run);
   }
-  return desk(metrics, str(g.label) || `${base}/${quote}`, base, quote, chain, str(g.dexName), price, spark, num(g.feeBps), num(g.priceAt));
+  return desk(metrics, str(g.label) || `${base}/${quote}`, base, quote, chain, str(g.dexName), price, spark, num(g.feeBps), num(g.priceAt), !!g.archivedAt);
 }
 
 function trendBot(status: Rec, t: Rec, asOf: number): BotDesk {
@@ -202,7 +202,7 @@ function trendBot(status: Rec, t: Rec, asOf: number): BotDesk {
   const chain = chainOf(status, t.chainId);
   const server = metricsOf(t, 'trend', asOf);
   const metrics = viewOf(server, asOf);
-  return desk(metrics, str(t.label) || str(t.name) || `${base}/${quote}`, base, quote, chain, str(t.dexName), price, [], num(t.feeBps), num(t.priceAt));
+  return desk(metrics, str(t.label) || str(t.name) || `${base}/${quote}`, base, quote, chain, str(t.dexName), price, [], num(t.feeBps), num(t.priceAt), !!t.archivedAt);
 }
 
 function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
@@ -212,7 +212,7 @@ function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
   const chain = chainOf(status, lp.chainId);
   const server = metricsOf(lp, 'lp', asOf);
   const metrics = withRange(viewOf(server, asOf), base, quote, server.range);
-  return desk(metrics, str(lp.label) || `${base}/${quote}`, base, quote, chain, str(lp.dexName), price, [], num(lp.feeBps), num(lp.priceAt));
+  return desk(metrics, str(lp.label) || `${base}/${quote}`, base, quote, chain, str(lp.dexName), price, [], num(lp.feeBps), num(lp.priceAt), !!lp.archivedAt);
 }
 
 /** Pair people read, without a chain suffix. A stable base under $1 flips to quote/base. */
@@ -226,15 +226,20 @@ function shownPair(base: string, quote: string, price: number | null, label: str
   return label.split('·')[0]?.trim() || label || '—';
 }
 
-function desk(metrics: BotMetrics, label: string, base: string, quote: string, chain: ChainInfo, dex: string, price: number | null, spark: number[], feeBps: number | null, priceAt: number | null): BotDesk {
+function desk(metrics: BotMetrics, label: string, base: string, quote: string, chain: ChainInfo, dex: string, price: number | null, spark: number[], feeBps: number | null, priceAt: number | null, archived = false): BotDesk {
   const tone = metrics.status !== 'running' ? 'idle'
     : metrics.range == null ? 'idle'
     : metrics.range.inRange ? 'in' : 'out';
   return {
     metrics, pair: shownPair(base, quote, price, label), base, quote, chain: chain.short, chainName: chain.name, chainColor: chain.color, dex: dex || '—',
     tone, spark: spark.length > 1 ? spark : [], levels: [], candles: [], fills: [], flashLevel: null,
-    price, change24h: null, feeBps, priceAt,
+    price, change24h: null, feeBps, priceAt, archived,
   };
+}
+
+/** Archived and closed bots stay on the desk, but they are not part of a section total. */
+function inSectionTotal(b: BotDesk): boolean {
+  return !b.archived && b.metrics.status !== 'closed';
 }
 
 function sumUsd(bots: BotDesk[], runningOnlyMissing: boolean): number | null {
@@ -290,8 +295,8 @@ function sumField(bots: BotDesk[], pick: (b: BotDesk) => number | null): number 
 }
 
 function portfolio(bots: BotDesk[], asOf: number): PortfolioSnapshot {
-  const live = bots.filter((b) => b.metrics.mode === 'live');
-  const paper = bots.filter((b) => b.metrics.mode === 'paper');
+  const live = bots.filter((b) => b.metrics.mode === 'live' && inSectionTotal(b));
+  const paper = bots.filter((b) => b.metrics.mode === 'paper' && inSectionTotal(b));
   return {
     asOf,
     generatedUsd: sumUsd(live, true),
@@ -392,10 +397,9 @@ function activityOf(events: ActivityEvent[], names: Map<string, { pair: string; 
 }
 
 export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = num(status.spotsAt) ?? Date.now(), source: DeskSnapshot['source'] = 'snapshot'): DeskSnapshot {
-  const listed = (row: Rec) => !row.archivedAt;
-  const grids = (Array.isArray(status.grids) ? status.grids : []).map(rec).filter((g): g is Rec => !!g && listed(g));
-  const lps = (Array.isArray(status.lps) ? status.lps : []).map(rec).filter((g): g is Rec => !!g && listed(g));
-  const trends = (Array.isArray(status.trends) ? status.trends : []).map(rec).filter((g): g is Rec => !!g && listed(g));
+  const grids = (Array.isArray(status.grids) ? status.grids : []).map(rec).filter((g): g is Rec => !!g);
+  const lps = (Array.isArray(status.lps) ? status.lps : []).map(rec).filter((g): g is Rec => !!g);
+  const trends = (Array.isArray(status.trends) ? status.trends : []).map(rec).filter((g): g is Rec => !!g);
   const bots = [
     ...grids.map((g) => gridBot(status, g, asOf)),
     ...lps.map((lp) => lpBot(status, lp, asOf)),

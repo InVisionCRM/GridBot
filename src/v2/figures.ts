@@ -6,7 +6,7 @@ import type { BotMetrics, TapePrice, TokenQty } from './metrics';
 import { apportion, displayedValue, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, standardUnit, tokenLineParts } from './format';
 
 const SUBSCRIPT_PRICE = /\$0\.0[₀₁₂₃₄₅₆₇₈₉]+\d+/g;
-const FIGURE = /[+−-]?\s*\$\d[\d,]*(?:\.\d+)?|[+−-]?\s*\d[\d,]*(?:\.\d+)?[kMB]\s+[A-Z][A-Z0-9]*|[+−-]\s*\d[\d,]*(?:\.\d+)?\s+[A-Z][A-Z0-9]*|[+−-]?\d+(?:\.\d+)?%/g;
+const FIGURE = /[+−-]?\s*\$\d[\d,]*(?:\.\d+)?|[+−-]?\s*\d[\d,]*(?:\.\d+)?[kMB]\s+[A-Z][A-Z0-9]*|[+−-]\s*\d[\d,]*(?:\.\d+)?\s+[A-Z][A-Z0-9]*|(?<![\d.])0(?:\.0+)?\s+[A-Z][A-Z0-9]*|[+−-]?\d+(?:\.\d+)?%/g;
 
 export function figureAtoms(text: string): string[] {
   const subscripts: string[] = [];
@@ -42,14 +42,15 @@ export function generatedCardLine(bot: TokenQty[], section: TokenQty[], scope: '
   if (!shown.length) return null;
   const sectionShown = section.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
   const line = formatTokenLine(shown);
-  if (line !== '—' && normFigure(line) === normFigure(formatTokenLine(sectionShown))) {
-    const text = `All of the ${scope} total`;
+  const word = scope === 'live' ? 'live' : 'paper';
+  const priced = shown.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
+  const totals = new Map(sectionShown.map((t) => [t.symbol, normFigure(formatTokenLine([t]))]));
+  const matched = priced.filter((t) => totals.get(t.symbol) === normFigure(formatTokenLine([t])));
+  if (priced.length && matched.length === priced.length && priced.length === sectionShown.length) {
+    const text = priced.length === 1 ? `All ${word} ${priced[0].symbol}` : `All ${word} ${priced.map((t) => t.symbol).join(' + ')}`;
     return { text, parts: [text] };
   }
-  const totals = new Map(sectionShown.map((t) => [t.symbol, normFigure(formatTokenLine([t]))]));
-  const word = scope === 'live' ? 'live' : 'paper';
-  const replaced = shown.some((t) => totals.get(t.symbol) === normFigure(formatTokenLine([t])));
-  if (!replaced) return { text: line, parts: tokenLineParts(shown) };
+  if (!matched.length) return { text: line, parts: tokenLineParts(shown) };
   const parts = shown.map((t, i) => {
     const zero = t.amount === 0 || formatAmt(t.amount) === '0';
     if (!zero && totals.get(t.symbol) === normFigure(formatTokenLine([t]))) return `All ${word} ${t.symbol}`;
@@ -65,10 +66,10 @@ export function generatedCardLine(bot: TokenQty[], section: TokenQty[], scope: '
  */
 export function investedLine(bot: TokenQty[], total: TokenQty[], scope: 'live' | 'paper'): string | null {
   if (!bot.length) return '—';
-  const whole = normFigure(formatBag(bot)) === normFigure(formatBag(total));
-  if (whole) return `All of the ${scope} total`;
-  const all = new Map(total.map((t) => [t.symbol, normFigure(formatBag([t]))]));
   const word = scope === 'live' ? 'live' : 'paper';
+  const whole = normFigure(formatBag(bot)) === normFigure(formatBag(total));
+  if (whole) return bot.length === 1 ? `All ${word} ${bot[0].symbol}` : `All ${word} ${bot.map((t) => t.symbol).join(' + ')}`;
+  const all = new Map(total.map((t) => [t.symbol, normFigure(formatBag([t]))]));
   return bot.map((t) => (
     all.get(t.symbol) === normFigure(formatBag([t])) ? `All ${word} ${t.symbol}` : formatBag([t])
   )).join(' + ');
@@ -80,10 +81,15 @@ export function hasGenerated(m: { generated?: TokenQty[] | null }): boolean {
   return (m.generated ?? []).some((t) => Number.isFinite(t.amount));
 }
 
-/** Closed and stopped bots, and anything under a day or without Generated, do not show Est. rows. */
+/** A real earning. An explicit zero (`0 PLS`) is Generated, but it is not an estimate. */
+export function hasEarnings(m: { generated?: TokenQty[] | null }): boolean {
+  return (m.generated ?? []).some((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
+}
+
+/** Closed and stopped bots, and anything under a day or without a non-zero Generated, do not show Est. rows. */
 export function estimatesVisible(m: BotMetrics): boolean {
   if (m.status === 'closed' || m.status === 'stopped') return false;
-  if (!hasGenerated(m)) return false;
+  if (!hasEarnings(m)) return false;
   if (m.ageSec == null || m.ageSec < DAY_SEC) return false;
   return true;
 }
@@ -97,7 +103,6 @@ export type CardReadout =
 export function cardReadout(metrics: BotMetrics, sectionTokens: TokenQty[], scope: 'live' | 'paper'): CardReadout {
   const line = generatedCardLine(metrics.generated, sectionTokens, scope);
   if (!line) return { kind: 'note', text: 'Not calculated yet' };
-  if (line.text === `All of the ${scope} total`) return { kind: 'note', text: line.text };
   return { kind: 'line', text: line.text, parts: line.parts };
 }
 
@@ -296,7 +301,6 @@ function metricsBreakdown(m: BotMetrics, details: boolean): SheetRow[] {
   if (bridge) rows.push({ label: 'Bridge', value: bridge });
   if (!details && generatedText) rows.push({ label: 'Generated', value: generatedText });
   if (details && rows.length) rows.push({ label: 'Adds', value: 'These add up to the Generated above.' });
-  if (!details && rows.length) rows.push({ label: 'Round', value: 'Rows are rounded to add up exactly.' });
   const free = Object.keys(by).filter((symbol) => !symbols.includes(symbol) && (by[symbol].generated !== 0 || by[symbol].earned !== 0));
   if (free.length === 1) rows.push({ label: 'Note', value: `${free[0]} has no costs taken out.` });
   else if (free.length > 1) rows.push({ label: 'Note', value: `${coinList(free)} have no costs taken out.` });
@@ -335,9 +339,6 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
   if (details && rows.length > beforeParts) {
     rows.push({ label: 'Adds', value: 'These add up to the Generated above.' });
   }
-  if (!details && rows.length > beforeParts && !(m.kind === 'grid' && m.fillCount === 0)) {
-    rows.push({ label: 'Round', value: 'Rows are rounded to add up exactly.' });
-  }
   const fromMetrics = metricsBreakdown(m, details);
   if (fromMetrics.length) {
     rows.push(...fromMetrics);
@@ -346,7 +347,9 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
     rows.push({ label: 'Note', value: 'Breakdown coming soon' });
   }
   if (ledger?.untouched) add('Note', ledger.untouched);
-  if (estimatesVisible(m)) {
+  if (!hasEarnings(m) && m.status !== 'closed' && m.status !== 'stopped') {
+    rows.push({ label: 'Note', value: 'No earnings yet, so no estimate.' });
+  } else if (estimatesVisible(m)) {
     const pace = (tokens: TokenQty[] | null | undefined) => (tokens == null || !tokens.length ? '—' : formatTokenLine(tokens));
     rows.push({ label: 'Est. 7d', value: pace(m.est?.d7) });
     rows.push({ label: 'Est. 365d', value: pace(m.est?.d365) });

@@ -4,7 +4,7 @@ import { CoinMark } from './coin-mark';
 import type { View } from '../ui/model';
 import { ActivityTape } from './activity-tape';
 import { CandlePane } from './candle-pane';
-import { estimatesVisible, hasGenerated, ledgerLines, sheetRows } from './figures';
+import { estimatesVisible, hasEarnings, hasGenerated, ledgerLines, sheetRows } from './figures';
 import { formatBag, formatQuotePx, formatStamp, shortenFigures } from './format';
 import { LpRangeSlot } from './lp-range-slot';
 import type { ActivityItem, BotDesk, BotMetrics, TapePrice } from './metrics';
@@ -28,7 +28,6 @@ function classicView(m: BotMetrics): View {
 function Row({ label, value }: { label: string; value: string }) {
   const est = label.startsWith('Est.');
   const total = label === 'Generated';
-  if (label === 'Note' || label === 'Round') return <li className="note"><span>{value}</span></li>;
   return <li><span>{label}</span><b {...(est ? { 'data-est': '' } : {})} {...(total ? { 'data-ledger': '' } : {})}>{value}</b></li>;
 }
 
@@ -88,6 +87,9 @@ export function BotView({
             <p className="muted small">Estimate, not a forecast.</p>
           </>
         )}
+        {!hasEarnings(m) && m.status !== 'closed' && m.status !== 'stopped' && (
+          <p className="muted small">No earnings yet, so no estimate.</p>
+        )}
       </section>
       <div className={candles.length > 1 ? 'chart-frame' : 'chart-frame is-empty'}>
         <RangeSelect value={span} onChange={setSpan} timed={timed} />
@@ -125,8 +127,11 @@ export function BotView({
             </header>
             <p className="muted small">Snapshot · {formatStamp(shot.asOf)}</p>
             <ul className="break">
-              {rows.map((row) => <Row key={row.label} label={row.label} value={row.value} />)}
+              {rows.filter((row) => row.label !== 'Note').map((row) => <Row key={row.label} label={row.label} value={row.value} />)}
             </ul>
+            {rows.some((row) => row.label === 'Note') && (
+              <p className="sheet-notes">{rows.filter((row) => row.label === 'Note').map((row) => <span key={row.value}>{row.value}</span>)}</p>
+            )}
             {showEst && <p className="muted small">Estimate, not a forecast.</p>}
             {shot.kind === 'lp' && <LpRangeSlot pair={bot.pair} />}
             <button type="button" className="text-btn" onClick={() => openClassic(classicView(shot))}>Open the classic page</button>

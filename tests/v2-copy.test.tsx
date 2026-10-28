@@ -216,9 +216,7 @@ describe('v2 copy stays in token units', () => {
           expect(overPrecise(amount[0]), `${bot.metrics.botId} ${row.label} ${amount[0]}`).toBe(false);
         }
       }
-      if (rows.some((r) => (r.label === 'Trade profit before gas' || r.label.endsWith(' fees earned')) && /\d/.test(r.value))) {
-        expect(rows.some((r) => r.value === 'Rows are rounded to add up exactly.'), bot.metrics.botId).toBe(true);
-      }
+      expect(rows.some((r) => r.value === 'Rows are rounded to add up exactly.'), bot.metrics.botId).toBe(false);
       if (bot.metrics.breakdownBasis) {
         expect(rows.some((r) => r.value === 'Breakdown coming soon'), bot.metrics.botId).toBe(false);
       } else if (bot.metrics.kind === 'lp' || bot.metrics.kind === 'grid') {

@@ -2,8 +2,8 @@ import { motion } from 'motion/react';
 import { useState } from 'react';
 import { CoinMark } from './coin-mark';
 import { EquityCurve, Spark } from './equity-curve';
-import { cardReadout, estimatesVisible, investedLine, normFigure, uniqueTape, type CardReadout } from './figures';
-import { formatAmt, formatBag, formatQuotePx, formatTokenLine, pct, tokenLineParts } from './format';
+import { cardReadout, estimatesVisible, investedLine, uniqueTape, type CardReadout } from './figures';
+import { formatBag, formatQuotePx, formatTokenLine, pct } from './format';
 import type { BotDesk, BotStatus, PortfolioSnapshot, TapePrice, TokenQty } from './metrics';
 import { sheetRows } from './figures';
 import { useReducedMotion } from './motion';
@@ -69,51 +69,15 @@ function shownPairParts(pair: string): { base: string; quote: string } {
   return { base: base || pair, quote: quote || '' };
 }
 
-function hasDigit(text: string | null | undefined): boolean {
-  return !!text && /\d/.test(text);
-}
-
-function readoutText(readout: CardReadout): string {
-  return readout.kind === 'line' || readout.kind === 'note' ? readout.text : '';
-}
-
-/** Coins on this bot that are the whole of that coin in the section. */
-function wholeCoins(bot: TokenQty[], section: TokenQty[], bag: boolean): string[] {
-  const fmt = (rows: TokenQty[]) => normFigure(bag ? formatBag(rows) : formatTokenLine(rows));
-  const totals = new Map(section.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0').map((t) => [t.symbol, fmt([t])]));
-  return bot.filter((t) => t.amount !== 0 && totals.get(t.symbol) === fmt([t])).map((t) => t.symbol);
-}
-
-function omitCoins(tokens: TokenQty[], drop: Set<string>): TokenQty[] {
-  return tokens.filter((t) => !drop.has(t.symbol));
-}
-
 interface CardModel {
   bot: BotDesk;
   readout: CardReadout;
   invested: string | null;
   covered: string;
-  dropGen: string[];
-  dropInv: string[];
 }
 
-function presentCard(bot: BotDesk, sectionGen: TokenQty[], sectionInv: TokenQty[], scope: 'live' | 'paper', prices: TapePrice[]): CardModel {
-  let readout = cardReadout(bot.metrics, sectionGen, scope);
-  let invested = investedLine(bot.metrics.invested, sectionInv, scope);
-  const dropGen: string[] = [];
-  const dropInv: string[] = [];
-  if (!hasDigit(readoutText(readout)) && !hasDigit(invested)) {
-    const shown = bot.metrics.generated.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
-    if (shown.length) {
-      readout = { kind: 'line', text: formatTokenLine(shown), parts: tokenLineParts(shown) };
-      dropGen.push(...wholeCoins(shown, sectionGen, false));
-    } else if (bot.metrics.invested.length) {
-      invested = bot.metrics.invested.map((t) => formatBag([t])).join(' + ');
-      dropInv.push(...wholeCoins(bot.metrics.invested, sectionInv, true));
-    }
-  }
-  const covered = `${formatTokenLine(sectionGen)} ${formatBag(sectionInv)} ${uniqueTape(prices).map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' ')}`;
-  return { bot, readout, invested, covered, dropGen, dropInv };
+function countsInTotal(bot: BotDesk): boolean {
+  return !bot.archived && bot.metrics.status !== 'closed';
 }
 
 function sumBags(rows: TokenQty[][]): TokenQty[] {
@@ -134,29 +98,25 @@ export function HomeView({
   const live = bots.filter((b) => b.metrics.mode === 'live');
   const paperBots = bots.filter((b) => b.metrics.mode === 'paper');
   const series = span === 'ALL' ? portfolio.madeSeries : [];
-  const liveInvested = sumBags(live.map((b) => b.metrics.invested));
-  const paperInvested = sumBags(paperBots.map((b) => b.metrics.invested));
-  const liveBuilt = live.map((bot) => presentCard(bot, portfolio.tokens, liveInvested, 'live', prices));
-  const paperBuilt = paperBots.map((bot) => presentCard(bot, portfolio.paperTokens, paperInvested, 'paper', prices));
-  const liveDropGen = new Set(liveBuilt.flatMap((c) => c.dropGen));
-  const liveDropInv = new Set(liveBuilt.flatMap((c) => c.dropInv));
-  const paperDropGen = new Set(paperBuilt.flatMap((c) => c.dropGen));
-  const paperDropInv = new Set(paperBuilt.flatMap((c) => c.dropInv));
-  const liveHeroGen = omitCoins(portfolio.tokens, liveDropGen);
-  const liveHeroInv = omitCoins(liveInvested, liveDropInv);
-  const paperHeroGen = omitCoins(portfolio.paperTokens, paperDropGen);
-  const paperHeroInv = omitCoins(paperInvested, paperDropInv);
-  const liveCards = liveBuilt;
-  const paperCards = paperBuilt;
+  const liveInvested = sumBags(live.filter(countsInTotal).map((b) => b.metrics.invested));
+  const paperInvested = sumBags(paperBots.filter(countsInTotal).map((b) => b.metrics.invested));
+  const cardOf = (bot: BotDesk, tokens: TokenQty[], invested: TokenQty[], scope: 'live' | 'paper'): CardModel => ({
+    bot,
+    readout: cardReadout(bot.metrics, tokens, scope),
+    invested: investedLine(bot.metrics.invested, invested, scope),
+    covered: `${formatTokenLine(tokens)} ${formatBag(invested)} ${uniqueTape(prices).map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' ')}`,
+  });
+  const liveCards = live.map((bot) => cardOf(bot, portfolio.tokens, liveInvested, 'live'));
+  const paperCards = paperBots.map((bot) => cardOf(bot, portfolio.paperTokens, paperInvested, 'paper'));
   return (
     <div className="home">
       <section className="hero glass">
         <p className="eyebrow">Invested</p>
-        <p className="hero-rate bag-line">{liveHeroInv.length ? <BagLine tokens={liveHeroInv} /> : '—'}</p>
+        <p className="hero-rate bag-line">{liveInvested.length ? <BagLine tokens={liveInvested} /> : '—'}</p>
         <p className="eyebrow">Generated</p>
         <div className="hero-top">
           <div className="hero-units">
-            {liveHeroGen.length ? <TokenHeadline tokens={liveHeroGen} /> : '—'}
+            {portfolio.tokens.length ? <TokenHeadline tokens={portfolio.tokens} /> : '—'}
           </div>
         </div>
         <p className="hero-rate" data-est="">
@@ -173,7 +133,7 @@ export function HomeView({
         </div>
       </section>
       <ModeSection title="Live" cards={liveCards} onOpen={onOpen} />
-      <ModeSection title="Paper" cards={paperCards} tokens={paperHeroGen} invested={paperHeroInv} onOpen={onOpen} />
+      <ModeSection title="Paper" cards={paperCards} tokens={portfolio.paperTokens} invested={paperInvested} onOpen={onOpen} />
     </div>
   );
 }
@@ -187,8 +147,9 @@ function ModeSection({
   invested?: TokenQty[];
   onOpen: (id: string) => void;
 }) {
-  const open = cards.filter((c) => c.bot.metrics.status !== 'closed');
-  const closed = cards.filter((c) => c.bot.metrics.status === 'closed');
+  const parked = (c: CardModel) => c.bot.archived || c.bot.metrics.status === 'closed';
+  const open = cards.filter((c) => !parked(c));
+  const closed = cards.filter(parked);
   if (!open.length && !closed.length) return null;
   const item = (card: CardModel) => (
     <BotCard key={card.bot.metrics.botId} bot={card.bot} readout={card.readout} invested={card.invested} covered={card.covered} onOpen={onOpen} />
@@ -224,6 +185,12 @@ function BagLine({ tokens }: { tokens: TokenQty[] }) {
   );
 }
 
+function NoteBlock({ rows }: { rows: { label: string; value: string }[] }) {
+  const notes = rows.filter((row) => row.label === 'Note');
+  if (!notes.length) return null;
+  return <p className="sheet-notes">{notes.map((row) => <span key={row.value}>{row.value}</span>)}</p>;
+}
+
 function CardMade({ readout }: { readout: CardReadout }) {
   if (readout.kind === 'note' && readout.text === 'Not calculated yet') {
     return <p className="card-made"><span>Generated</span> — <em className="card-note">Not calculated yet</em></p>;
@@ -255,6 +222,7 @@ function BotCard({
   onOpen: (id: string) => void;
 }) {
   const open = () => { press(); onOpen(bot.metrics.botId); };
+  const rows = sheetRows(bot.metrics, shownPairParts(bot.pair), covered, true);
   return (
     <li>
       <motion.div
@@ -288,12 +256,13 @@ function BotCard({
         <details className="card-details" onClick={(e) => e.stopPropagation()}>
           <summary>Details</summary>
           <ul className="break">
-            {sheetRows(bot.metrics, shownPairParts(bot.pair), covered, true).map((row) => (
-              row.label === 'Note' || row.label === 'Adds'
-                ? <li key={row.label} className="note"><span>{row.value}</span></li>
+            {rows.filter((row) => row.label !== 'Note').map((row) => (
+              row.label === 'Adds'
+                ? <li key={row.label} className="sheet-notes"><span>{row.value}</span></li>
                 : <li key={row.label}><span>{row.label}</span><b {...(row.label.startsWith('Est.') ? { 'data-est': '' } : {})}>{row.value}</b></li>
             ))}
           </ul>
+          <NoteBlock rows={rows} />
           {estimatesVisible(bot.metrics) && <p className="muted small">Estimate, not a forecast.</p>}
         </details>
       </motion.div>

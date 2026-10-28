@@ -187,6 +187,8 @@ describe('no money or token figure is repeated on a screen', () => {
     const repeats = repeatedFigures('+63.24 USDC + 0.001731 ETH +63.24 USDC + 0.026837 ETH');
     expect(repeats).toContain(normFigure('+63.24 USDC'));
     expect(figureAtoms('+63.24 USDC + 0.001731 ETH').map(normFigure)).toContain(normFigure('+63.24 USDC'));
+    expect(figureAtoms('Generated 0 PLS Est. 24H 0 PLS').map(normFigure)).toContain(normFigure('0 PLS'));
+    expect(repeatedFigures('Generated 0 PLS Est. 24H 0 PLS')).toContain(normFigure('0 PLS'));
     expect(repeatedFigures('Invested 14.00M PLS and the card 14.00M PLS')).toContain(normFigure('14.00M PLS'));
   });
 
@@ -196,6 +198,7 @@ describe('no money or token figure is repeated on a screen', () => {
     expect(repeatedFigures(text), text).toEqual([]);
     expect(text.match(/1\.00 ETH/g)).toHaveLength(1);
     expect(text).toContain('All live ETH');
+    expect(text).toContain('All live USDC + ETH');
     expect(text).toContain('+20.00 USDC');
     expect(text.match(/\+20\.00 USDC/g)).toHaveLength(1);
     expect(text).not.toContain('+2 more');
@@ -273,8 +276,9 @@ describe('no money or token figure is repeated on a screen', () => {
     }, [], now);
     for (const width of widths) {
       const text = screen(home(one, width), width, 'one contributor');
-      expect(text).toContain('All of the live total');
+      expect(text).toContain('All live USDC');
       expect(text.match(/\+63\.24 USDC/g)).toHaveLength(1);
+      expect(repeatedFigures(text), text).not.toContain(normFigure('0 USDC'));
       expect(text).not.toContain('Paper $');
     }
   });

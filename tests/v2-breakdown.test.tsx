@@ -65,13 +65,17 @@ describe('breakdown rows come from botMetrics', () => {
       expect(formatTokenLine(bot?.metrics.generated)).toBe(`0 ${sym}`);
       expect(bot?.metrics.invested).toEqual([{ symbol: sym, amount: 100, usd: null }]);
       const html = renderToStaticMarkup(
-        <HomeView portfolio={desk.portfolio} bots={[bot!]} prices={[]} onOpen={() => {}} />,
+        <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />,
       );
-      const card = textOf(html.split(`data-bot="${id}"`)[1]?.split('card-details')[0] ?? '');
-      expect(card).toContain(`0 ${sym}`);
-      expect(card).not.toContain('In range');
-      expect(card).not.toContain('Not calculated yet');
-      expect(card).not.toMatch(/\bUSD\b/);
+      const chunk = html.split(`data-bot="${id}"`)[1] ?? '';
+      const face = textOf(chunk.split('card-details')[0] ?? '');
+      const full = textOf(chunk.split('data-bot=')[0] ?? chunk);
+      expect(face).toContain(`0 ${sym}`);
+      expect(face).not.toContain('In range');
+      expect(face).not.toContain('Not calculated yet');
+      expect(full).toContain('No earnings yet, so no estimate.');
+      expect(full).not.toContain(`Est. 24H 0 ${sym}`);
+      expect(full).not.toMatch(/\bUSD\b/);
     }
   });
 
@@ -90,17 +94,21 @@ describe('breakdown rows come from botMetrics', () => {
       spotsAt: now,
       lps: [lp('open', 0.001731, null), lp('archived', 5, now - DAY)],
     }, [], now);
-    expect(desk.bots.map((b) => b.metrics.botId)).toEqual(['open']);
+    expect(desk.bots.map((b) => b.metrics.botId).sort()).toEqual(['archived', 'open']);
     const heroEth = desk.portfolio.tokens.find((t) => t.symbol === 'ETH')?.amount;
-    const cardEth = desk.bots[0].metrics.generated.find((t) => t.symbol === 'ETH')?.amount;
+    const cardEth = desk.bots.find((b) => b.metrics.botId === 'open')?.metrics.generated.find((t) => t.symbol === 'ETH')?.amount;
     expect(heroEth).toBeCloseTo(0.001731, 8);
     expect(cardEth).toBeCloseTo(heroEth ?? NaN, 8);
     const html = textOf(renderToStaticMarkup(
       <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />,
     ));
+    expect(html).toContain('Closed · 1');
     expect(html).toContain('0.001731 ETH');
-    expect(html).not.toContain('5.00 ETH');
+    expect(html).toContain('All live USDC + ETH');
     expect((html.match(/0\.001731 ETH/g) ?? []).length).toBe(1);
+    const hero = html.split('LIVE')[0];
+    expect(hero).toContain('0.001731 ETH');
+    expect(hero).not.toMatch(/Generated\s+—/);
   });
 
   it('does not copy Generated into a null 7d estimate', () => {
