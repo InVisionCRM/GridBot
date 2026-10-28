@@ -11,10 +11,12 @@ import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, DEFAULT_MIN_HOLDER_C
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
 import {
-  decideExit, filterFresh,   gateToken, sizeBuy, splitSell, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SIZE_IMPACT_CAP, DEFAULT_SNIPER_MIN_LIQ_USD,
+  decideExit, filterFresh, gateToken, sizeBuy, splitSell, EXIT, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SIZE_IMPACT_CAP, DEFAULT_SNIPER_MIN_LIQ_USD,
   type FreshPool, type GateInput,
   effectiveEntry, sellSidePrice,
 } from '../../market/tokenTrader';
+import { blankPlay, feeTierFromBps, playLeaderboard, type PlayRecord } from '../../metrics/playScore';
+import { MemoryRejects, rejectKey, type RejectSink } from './playRejects';
 import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
 import type { Emit } from './activity';
 import type { Store } from './store';
@@ -136,6 +138,12 @@ export interface TraderState {
   /** Sniper buy timestamps (ms), for the per-hour cap */
   snipesAt: number[];
   /**
+   * Passed plays only. Never trimmed (the trade log's 200-row cap does not apply).
+   * Rejected candidates are not stored here; they go to the append-only reject log.
+   * `status()` leaves this off so that payload stays the trade log.
+   */
+  plays: PlayRecord[];
+  /**
    * Stop all (chains null) or STOP chain: no new buys or snipes there until "Resume new buys". Exits of positions
    * already held keep running. The halt is the stop audit record (who, from where, when).
    */
@@ -144,8 +152,8 @@ export interface TraderState {
   lastHalt?: Halt | null;
 }
 
-export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string }
-export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string }
+export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
+export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
 
 const HOUR = 3600_000;
 const FEED_MAX = 80;
@@ -162,7 +170,27 @@ export const DEFAULT_TRADER: TraderOptions = {
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
 
-const fresh = (): TraderState => ({ version: 1, on: false, options: structuredClone(DEFAULT_TRADER), positions: [], trades: [], feed: [], cursors: {}, snipesAt: [] });
+const fresh = (): TraderState => ({ version: 1, on: false, options: structuredClone(DEFAULT_TRADER), positions: [], trades: [], feed: [], cursors: {}, snipesAt: [], plays: [] });
+
+function signalOf(source: FreshPool['source']): string {
+  if (source === 'trending') return 'trending';
+  if (source === 'snipe') return 'snipe';
+  return 'new_pool';
+}
+
+/** Spend-coin units for 1 native coin. The symbols come from the chain config, so PulseChain matches WPLS and Robinhood matches WETH. */
+function nativeToSpend(pool: FreshPool): number | null {
+  const chain = chainById(pool.chainId);
+  const native = chain?.nativeSymbol.toUpperCase();
+  const wrapped = chain?.wrappedNative.symbol.toUpperCase();
+  const spend = pool.spendSymbol.toUpperCase();
+  const token = pool.tokenSymbol.toUpperCase();
+  if (native && spend === native) return 1;
+  if (wrapped && spend === wrapped) return 1;
+  if (native && token === native && pool.price > 0) return pool.price;
+  if (wrapped && token === wrapped && pool.price > 0) return pool.price;
+  return null;
+}
 
 export class TokenTrader {
   private state: TraderState;
@@ -172,6 +200,7 @@ export class TokenTrader {
   private entryTask: Promise<void> | null = null;
   /** Spend coin of a live buy that has started and not yet landed or failed. Not persisted. */
   private pendingBuy: { chainId: number; address: string; amount: number } | null = null;
+  private readonly rejects: RejectSink;
   lastError: string | null = null;
 
   constructor(private readonly d: {
@@ -211,10 +240,27 @@ export class TokenTrader {
     feeNow?: (p: { chainId: number; pool: string }) => Promise<number>;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
+    /** Rejected candidates. Omitted in tests that only need the in-memory window. */
+    rejects?: RejectSink;
   }) {
     const loaded = d.store.load();
-    this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } } } : fresh();
+    this.rejects = d.rejects ?? new MemoryRejects();
+    this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } }, plays: Array.isArray(loaded.plays) ? loaded.plays : [] } : fresh();
+    this.spillRejects();
     this.migrateEntries();
+  }
+
+  /** Older state files kept rejects next to passed plays. Move them out so the hot file stays small. */
+  private spillRejects() {
+    const kept: PlayRecord[] = [];
+    let moved = false;
+    for (const p of this.state.plays) {
+      if (p.passed && !p.rejected) { kept.push(p); continue; }
+      moved = true;
+      const key = rejectKey(p.chain_id, p.pool_address, p.reason);
+      if (!this.rejects.has(key)) this.rejects.append(p);
+    }
+    if (moved) { this.state.plays = kept; this.save(); }
   }
 
   /**
@@ -267,17 +313,28 @@ export class TokenTrader {
 
   status() {
     const openUsd = this.openUsd();
+    const { plays, ...rest } = this.state;
+    void plays;
     return {
-      ...this.state,
+      ...rest,
       openUsd,
       lastError: this.lastError,
       entriesHalt: this.state.entriesHalt ?? null,
       lastHalt: this.state.lastHalt ?? null,
       /** Open positions whose exits (stops, take-profits) are still managed, also while new buys are stopped */
-      exitsManaged: this.state.on ? this.state.positions.length : 0,
-      positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p) })),
+      exitsManaged: this.state.on ? rest.positions.length : 0,
+      positions: rest.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p) })),
     };
   }
+
+  /** Passed plays. Not trimmed, and not part of `status()`. */
+  plays(): PlayRecord[] { return this.state.plays; }
+
+  /** Recent rejects kept in memory. At most 500. The scorecard reads the log, not this window. */
+  recentRejects(): readonly PlayRecord[] { return this.rejects.window(); }
+
+  /** Leaderboard. Reads the reject log here, never from tick(). */
+  scorecard() { return playLeaderboard([...this.state.plays, ...this.rejects.read()]); }
 
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
     const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
@@ -355,6 +412,7 @@ export class TokenTrader {
     if (!p) return;
     Object.assign(p, m);
     if (m.price != null && m.price > p.peak) p.peak = m.price;
+    if (Object.prototype.hasOwnProperty.call(m, 'feeBps')) this.noteFeeReread(id);
   }
 
   async tick() {
@@ -462,15 +520,109 @@ export class TokenTrader {
     return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate, warn: r.warn ?? null };
   }
 
+  private reject(o: { chainId: number; pool: string; token: string; signal: string; source: string; reason: string; price: number | null; feeBps: number | null; spendSymbol?: string }) {
+    const pool = o.pool.toLowerCase();
+    const key = rejectKey(o.chainId, pool, o.reason);
+    if (this.rejects.has(key)) return;
+    const now = this.now();
+    this.rejects.append(blankPlay({
+      play_id: `rej-${now.toString(36)}-${pool.slice(2, 8)}`,
+      kind: 'play', signal_type: o.signal, source: o.source, passed: false, rejected: true, reason: o.reason,
+      chain_id: o.chainId, pool_address: pool, token_contract: o.token.toLowerCase(),
+      priceAtFlag: o.price,
+      feeTierEntry: o.feeBps != null ? feeTierFromBps(o.feeBps, now, 'pool.feeBps') : null,
+      target_pct: EXIT.tp1, stop_pct: EXIT.hardStop, spend_symbol: o.spendSymbol ?? null,
+    }));
+  }
+
+  private rememberEntry(pos: Position, pool: FreshPool, impact: number, tx: string | null, gasUsed: number | null, gasPrice: number | null, gasNative: number | null) {
+    const now = this.now();
+    this.state.plays.push(blankPlay({
+      play_id: pos.id, kind: 'play', signal_type: signalOf(pool.source), source: pool.dex,
+      passed: true, rejected: false, reason: null,
+      chain_id: pool.chainId, pool_address: pool.pool.toLowerCase(), token_contract: pool.token.toLowerCase(),
+      priceAtFlag: pool.price, entry_at: now, entry_price: pool.price,
+      feeTierEntry: feeTierFromBps(pool.feeBps, now, 'pool.feeBps'),
+      price_impact_entry: impact, tx_entry: tx,
+      gas_used: gasUsed, gas_price: gasPrice, gas_assumed: false,
+      gas_note: gasNative == null ? 'no receipt gas' : null,
+      gas_native: gasNative, native_to_spend: nativeToSpend(pool),
+      entry_gas_native: gasNative, entry_gas_used: gasUsed, entry_gas_price: gasPrice,
+      size_spend: pos.spent, spend_symbol: pool.spendSymbol, usd_per_spend: pool.usdPerSpend,
+      target_pct: EXIT.tp1, stop_pct: EXIT.hardStop,
+    }));
+  }
+
+  private noteFeeReread(id: string) {
+    const play = this.state.plays.find((x) => x.play_id === id);
+    if (play) play.fee_reread = true;
+  }
+
+  private noteSell(p: Position, leg: {
+    quote: number; sold: number; price: number; impact: number | null; txs: string[]; flat: boolean;
+    gas: { native: number; used: number; price: number | null; mixed: boolean } | null;
+  }) {
+    const play = this.state.plays.find((x) => x.play_id === p.id);
+    if (!play || !(leg.sold > 0)) return;
+    play.sold_tokens = (play.sold_tokens ?? 0) + leg.sold;
+    play.exit_notional = (play.exit_notional ?? 0) + leg.price * leg.sold;
+    play.quote_out = (play.quote_out ?? 0) + leg.quote;
+    if (leg.impact == null) play.impact_gap = true;
+    else play.impact_notional = (play.impact_notional ?? 0) + leg.impact * leg.sold;
+    if (leg.txs.length) play.tx_exit = leg.txs[leg.txs.length - 1] ?? null;
+    if (leg.gas == null) play.exit_gas_gap = true;
+    else {
+      const had = (play.exit_gas_used ?? 0) > 0;
+      play.exit_gas_native = (play.exit_gas_native ?? 0) + leg.gas.native;
+      play.exit_gas_used = (play.exit_gas_used ?? 0) + leg.gas.used;
+      if (leg.gas.mixed || leg.gas.price == null) play.exit_gas_mixed = true;
+      else if (!had) play.exit_gas_price = leg.gas.price;
+      else if (play.exit_gas_price !== leg.gas.price) { play.exit_gas_mixed = true; play.exit_gas_price = null; }
+    }
+    if (!leg.flat) return;
+    const sold = play.sold_tokens ?? 0;
+    play.exit_at = this.now();
+    play.exit_price = sold > 0 ? (play.exit_notional ?? 0) / sold : leg.price;
+    play.price_impact_exit = play.impact_gap || !(sold > 0) ? null : (play.impact_notional ?? 0) / sold;
+    play.sell_tax = p.sellTax;
+    const entryPct = typeof play.feeTierEntry === 'object' && play.feeTierEntry ? play.feeTierEntry.feePct : null;
+    const changed = entryPct != null && Math.abs(entryPct - p.feeBps / 10_000) > 1e-12;
+    if (play.fee_reread) play.feeTierExit = feeTierFromBps(p.feeBps, this.now(), 'position.feeBps', changed);
+    else {
+      play.feeTierExit = feeTierFromBps(p.feeBps, play.entry_at, 'assumed:entry-fee-not-reread', false);
+      play.assumptions.push('exit fee tier was not read again; entry fee reused');
+    }
+    const entryNative = play.entry_gas_native;
+    const exitNative = play.exit_gas_native;
+    if (play.exit_gas_gap || entryNative == null || exitNative == null) {
+      play.gas_used = null; play.gas_price = null; play.gas_native = null; play.gas_assumed = false; play.gas_note = 'no receipt gas';
+    } else if (play.exit_gas_mixed || play.entry_gas_used == null || play.entry_gas_price == null || play.exit_gas_price == null || play.entry_gas_price !== play.exit_gas_price) {
+      play.gas_used = null; play.gas_price = null; play.gas_native = entryNative + exitNative; play.gas_assumed = false;
+      play.gas_note = play.entry_gas_price != null && play.exit_gas_price != null && play.entry_gas_price !== play.exit_gas_price
+        ? 'entry and exit gas prices differed; gas_native is the full receipt total and gas_used is left null' : null;
+    } else {
+      play.gas_used = play.entry_gas_used + (play.exit_gas_used ?? 0);
+      play.gas_price = play.entry_gas_price;
+      play.gas_native = entryNative + exitNative;
+      play.gas_assumed = false;
+      play.gas_note = null;
+    }
+  }
+
   private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput, warn: string | null) {
     const o = this.state.options;
+    const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
+    const skip = (why: string) => {
+      this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why });
+      this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: signalOf(pool.source), source: pool.dex, reason: why, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol });
+    };
     if (this.state.positions.some((p) => p.pool.toLowerCase() === pool.pool.toLowerCase() && p.chainId === pool.chainId)) return;
     // Checked again after the safety check's awaits: a Stop all that landed meanwhile wins.
-    if (!this.canBuy(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: 'new buys are stopped' }); return; }
+    if (!this.canBuy(pool.chainId)) { skip('new buys are stopped'); return; }
     if (pool.dynamicFee) {
       // the fee at quote time: it may have moved since discovery
       const fee = this.d.feeNow ? await this.d.feeNow(pool).catch(() => null) : null;
-      if (fee == null) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: "could not read the pool's current fee" }); return; }
+      if (fee == null) { skip("could not read the pool's current fee"); return; }
       pool = { ...pool, feeBps: fee };
     }
     const sized = sizeBuy({
@@ -478,7 +630,8 @@ export class TokenTrader {
       quoteReserve: pool.quoteReserve, usdPerSpend: pool.usdPerSpend, feeBps: pool.feeBps,
       buyTax, price: pool.price, maxImpact: o.maxImpact, maxPoolShare: o.maxPoolShare || TOKEN_MAX_POOL_SHARE,
     });
-    if (!sized) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: 'size is under the limits or the pool is too thin' }); return; }
+    if (!sized) { skip('size is under the limits or the pool is too thin'); return; }
+    let recordedImpact = sized.impact;
     if (o.enforceSizeImpact) {
       let impact: number | null = null;
       try {
@@ -487,15 +640,20 @@ export class TokenTrader {
         impact = Number.isFinite(quoted) ? quoted : null;
       } catch { impact = null; }
       const again = gateToken({ ...gate, enforceSizeImpact: true, sizeImpact: impact, sizeImpactCap: o.sizeImpactCap });
-      if (!again.ok) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: again.reason ?? 'price impact' }); return; }
+      if (!again.ok) { skip(again.reason ?? 'price impact'); return; }
+      if (impact != null) recordedImpact = impact;
     }
     let tokens = sized.tokens, spent = sized.spend, spentUsd = sized.usd;
+    let txEntry: string | null = null, gasUsed: number | null = null, gasPrice: number | null = null, gasNative: number | null = null;
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('live broker missing');
       this.pendingBuy = { chainId: pool.chainId, address: pool.spend, amount: sized.spend };
       try {
         const fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
         tokens = fill.tokens; spent = fill.spent; spentUsd = fill.spentUsd;
+        txEntry = fill.tx ?? null;
+        if (fill.gasUsed != null && fill.gasPriceWei != null) { gasUsed = fill.gasUsed; gasPrice = fill.gasPriceWei; }
+        if (typeof fill.gasNative === 'number' && Number.isFinite(fill.gasNative)) gasNative = fill.gasNative;
       } finally {
         this.pendingBuy = null;
       }
@@ -519,16 +677,21 @@ export class TokenTrader {
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode: o.mode } : { mode: o.mode });
+    this.rememberEntry(pos, pool, recordedImpact, txEntry, gasUsed, gasPrice, gasNative);
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
   }
 
   private async consider(pool: FreshPool, source: 'scan' | 'snipe') {
     const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
-    if (!this.wantChain(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'chain is off' }); return; }
-    if (pool.kind === 'v4') { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); return; }
-    if (this.entriesStopped(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); return; }
+    const skip = (why: string) => {
+      this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why });
+      this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: signalOf(pool.source), source: pool.dex, reason: why, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol });
+    };
+    if (!this.wantChain(pool.chainId)) { skip('chain is off'); return; }
+    if (pool.kind === 'v4') { skip("this app doesn't swap V4"); return; }
+    if (this.entriesStopped(pool.chainId)) { skip('new buys are stopped (Stop all)'); return; }
     const a = await this.assess(pool);
-    if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
+    if (!a.ok || !a.gate) { skip(a.reason ?? 'safety'); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
     await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate, a.warn);
   }
 
@@ -569,13 +732,17 @@ export class TokenTrader {
     for (const n of notes) this.say(n.msg, n.level);
     let room = this.hourRoom();
     for (const hit of hits) {
-      if (sn.chains[hit.chainId] === false) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: hit.pool.slice(0, 8), verdict: 'skipped', why: 'sniper is off for this chain' }); continue; }
-      if (hit.skip) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: 'V4', verdict: 'skipped', why: hit.skip }); continue; }
-      if (hit.kind === 'v4') continue;
+      const rejectHit = (reason: string, label: string, token = hit.token0) => {
+        this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label, verdict: 'skipped', why: reason });
+        this.reject({ chainId: hit.chainId, pool: hit.pool, token, signal: 'snipe', source: hit.dex, reason, price: null, feeBps: hit.fee != null ? hit.fee / 100 : null });
+      };
+      if (sn.chains[hit.chainId] === false) { rejectHit('sniper is off for this chain', hit.pool.slice(0, 8)); continue; }
+      if (hit.skip) { rejectHit(hit.skip, 'V4'); continue; }
+      if (hit.kind === 'v4') { this.reject({ chainId: hit.chainId, pool: hit.pool, token: hit.token0, signal: 'snipe', source: hit.dex, reason: "this app doesn't swap V4", price: null, feeBps: hit.fee != null ? hit.fee / 100 : null }); continue; }
       const pool = await this.d.resolve?.(hit) ?? null;
-      if (!pool) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: hit.pool.slice(0, 8), verdict: 'skipped', why: 'could not price the new pool' }); continue; }
-      if (pool.liquidityUsd < sn.minLiquidityUsd) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}` }); continue; }
-      if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); continue; }
+      if (!pool) { rejectHit('could not price the new pool', hit.pool.slice(0, 8)); continue; }
+      if (pool.liquidityUsd < sn.minLiquidityUsd) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
+      if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `${sn.maxPerHour} snipes an hour already`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       const before = this.state.positions.length;
       await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');
       if (this.state.positions.length > before) { this.state.snipesAt.push(this.now()); room--; }
@@ -597,7 +764,10 @@ export class TokenTrader {
     for (const p of this.state.positions) {
       if (this.d.mark) {
         const m = await this.d.mark(p);
-        if (m) Object.assign(p, m);
+        if (m) {
+          Object.assign(p, m);
+          if (Object.prototype.hasOwnProperty.call(m, 'feeBps')) this.noteFeeReread(p.id);
+        }
       }
       if (p.price > p.peak) p.peak = p.price;
       const d = decideExit(this.exitOf(p));
@@ -606,19 +776,38 @@ export class TokenTrader {
       if (p.dynamicFee && this.d.feeNow) {
         // the fee this sell pays, read now (keeps the last one if the read fails)
         const fee = await this.d.feeNow(p).catch(() => null);
-        if (fee != null) p.feeBps = fee;
+        if (fee != null) { p.feeBps = fee; this.noteFeeReread(p.id); }
       }
       const qty = Math.min(p.tokens, p.entryTokens * d.frac);
       const parts = splitSell(qty, Math.max(p.tokenReserve, 1e-12), p.feeBps, this.state.options.maxImpact);
       let quote = 0, sold = 0;
+      let impactW = 0, impactN = 0, impactGap = false;
+      const exitTxs: string[] = [];
+      let gasNative = 0, gasUsed = 0, gasPrice: number | null = null, gasLegs = 0, gasMixed = false, gasGap = !(p.mode === 'live' && this.d.live);
       if (p.mode === 'live' && this.d.live) {
         for (const part of parts) {
           const s = await this.d.live.sell(p, part, this.limits());
           quote += s.quoteOut; sold += s.tokensIn;
+          if (Number.isFinite(s.impact)) { impactW += s.impact * s.tokensIn; impactN += s.tokensIn; } else impactGap = true;
+          if (s.tx) exitTxs.push(s.tx);
+          if (typeof s.gasNative === 'number' && Number.isFinite(s.gasNative)) {
+            gasNative += s.gasNative;
+            gasLegs++;
+            if (s.gasUsed != null && s.gasPriceWei != null) {
+              gasUsed += s.gasUsed;
+              if (gasPrice == null) gasPrice = s.gasPriceWei;
+              else if (gasPrice !== s.gasPriceWei) { gasMixed = true; gasPrice = null; }
+            }
+          } else gasGap = true;
         }
       } else {
         const model = this.model(p);
-        for (const part of parts) { quote += simSell(part, sellSidePrice(p.price, p.feeBps), model).quote; sold += part; }
+        const px = sellSidePrice(p.price, p.feeBps);
+        for (const part of parts) {
+          const sim = simSell(part, px, model);
+          quote += sim.quote; sold += part;
+          if (Number.isFinite(sim.impactPct)) { impactW += sim.impactPct * part; impactN += part; } else impactGap = true;
+        }
       }
       p.tokens -= sold;
       const usd = quote * p.usdPerSpend;
@@ -627,7 +816,12 @@ export class TokenTrader {
       this.say(`sold ${p.label}: ${d.why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
       if (d.why.startsWith('take profit') && !p.tp1Done) p.tp1Done = true;
       else if (d.why.startsWith('take profit')) p.tp2Done = true;
-      if (p.tokens > p.entryTokens * 1e-8) left.push(p);
+      const flat = !(p.tokens > p.entryTokens * 1e-8);
+      this.noteSell(p, {
+        quote, sold, price: p.price, impact: impactGap || impactN <= 0 ? null : impactW / impactN, txs: exitTxs, flat,
+        gas: gasGap || gasLegs === 0 ? null : { native: gasNative, used: gasUsed, price: gasPrice, mixed: gasMixed },
+      });
+      if (!flat) left.push(p);
     }
     this.state.positions = left;
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;

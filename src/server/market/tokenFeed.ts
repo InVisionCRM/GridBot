@@ -26,6 +26,7 @@ import type { Hub } from '../chains/hub';
 import type { GeckoSource } from './gecko';
 import { PoolSniper, type LogSource, type SniperChain } from './sniper';
 import { TokenTrader, type Position, type TraderState } from '../bot/tokenTrader';
+import { PlayRejectLog } from '../bot/playRejects';
 import { quoteTradeImpact } from './tradeImpact';
 
 interface Reader extends ChainReader {
@@ -94,6 +95,8 @@ function broadcast(url: string, raw: string): Promise<string> {
 export function createTokenTrader(o: {
   hub: Hub; gecko: GeckoSource; store: Store<TraderState>; emit: Emit;
   approval: 'exact' | 'max'; receiptTimeoutMs: number;
+  /** Data directory for the append-only reject log. Omit in tests that keep rejects in memory. */
+  dataDir?: string;
 }): TokenTrader {
   const sniper = new PoolSniper({ chains: sniperChains(o.hub), source: logSource(o.hub) });
   const flags = { v3LpLockCheck: () => false, lpUnlockCheck: () => false };
@@ -141,6 +144,7 @@ export function createTokenTrader(o: {
     resolve: (hit) => resolveHit(o.hub, hit),
     // dynamic-fee pools: the fee at quote time (never cached)
     feeNow: (p) => readV3FeeBps(o.hub.rt(p.chainId).reader, p.pool),
+    rejects: o.dataDir ? new PlayRejectLog(o.dataDir) : undefined,
     live: {
       buy: async (pool, spend, limits) => {
         const draft = await draftOf(o.hub, pool);
@@ -148,13 +152,13 @@ export function createTokenTrader(o: {
         // (sells keep running: they are exits).
         const { q, fill } = await liveSwap(o.hub.rt(pool.chainId), o.hub.draftQuoter(draft), swapOpts(o, pool.chainId, trader.status().options.sniper.mevRpc), 'buy', spend, limits, sendChecks(trader).buy(pool.chainId));
         const usd = fill.amountInHuman * pool.usdPerSpend;
-        return { tokens: fill.amountOutHuman, spent: fill.amountInHuman, spentUsd: usd, price: fill.amountOutHuman > 0 ? fill.amountInHuman / fill.amountOutHuman : pool.price, impact: q.priceImpact, tx: fill.txHash };
+        return { tokens: fill.amountOutHuman, spent: fill.amountInHuman, spentUsd: usd, price: fill.amountOutHuman > 0 ? fill.amountInHuman / fill.amountOutHuman : pool.price, impact: q.priceImpact, tx: fill.txHash, gasUsed: fill.swapGasUsed, gasPriceWei: fill.swapGasPriceWei, gasNative: fill.gasNative };
       },
       sell: async (pos, tokens, limits) => {
         const pool = positionPool(pos);
         const draft = await draftOf(o.hub, pool);
         const { q, fill } = await liveSwap(o.hub.rt(pos.chainId), o.hub.draftQuoter(draft), swapOpts(o, pos.chainId, trader.status().options.sniper.mevRpc), 'sell', tokens, limits, sendChecks(trader).sell());
-        return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash };
+        return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash, gasUsed: fill.swapGasUsed, gasPriceWei: fill.swapGasPriceWei, gasNative: fill.gasNative };
       },
     },
   });
