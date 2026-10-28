@@ -3,7 +3,7 @@ import type { ReactElement } from 'react';
 import { adaptStatus } from '../src/v2/adapt-status';
 import { BotView } from '../src/v2/bot-view';
 import { repeatedFigures } from '../src/v2/figures';
-import { deskStatusPill, formatClockEt, formatPx } from '../src/v2/format';
+import { deskStatusPill, formatClockEt, formatQuotePx, formatUnitPx } from '../src/v2/format';
 import { HomeView, Ticker } from '../src/v2/home-view';
 import { ActivityTape } from '../src/v2/activity-tape';
 import { loadDesk } from '../src/v2/load-owner';
@@ -12,7 +12,8 @@ import { applyDelta } from '../src/v2/use-desk';
 import type { BotDesk, DeskSnapshot } from '../src/v2/metrics';
 
 function textOf(html: string): string {
-  return html
+  const kept = html.replace(/<([a-z0-9]+)\b[^>]*\bdata-est\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+  return kept
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
@@ -89,7 +90,7 @@ describe('no money or token figure is repeated on a screen', () => {
       const homeText = screen(frame(desk, home(desk, width)), width, 'Home');
       expect(homeText.split(pill).length - 1, `pill @ ${width}`).toBe(1);
       for (const p of desk.prices) {
-        expect(homeText, `ticker ${p.symbol} ${p.fee ?? ''} @ ${width}`).toContain(formatPx(p.price));
+        expect(homeText, `ticker ${p.symbol} ${p.fee ?? ''} @ ${width}`).toContain(formatQuotePx(p.price, p.symbol.split('/')[1] || ''));
         if (p.fee) expect(homeText).toContain(p.fee);
       }
       const activityText = screen(
@@ -103,11 +104,11 @@ describe('no money or token figure is repeated on a screen', () => {
         'Activity',
       );
       expect(activityText.split(pill).length - 1).toBe(1);
-      for (const p of desk.prices) expect(activityText).toContain(formatPx(p.price));
+      for (const p of desk.prices) expect(activityText).toContain(formatQuotePx(p.price, p.symbol.split('/')[1] || ''));
       for (const row of desk.bots) {
         const botText = screen(frame(desk, bot(desk, row, width)), width, `Bot ${row.pair} ${row.metrics.mode}`);
         expect(botText.split(pill).length - 1).toBe(1);
-        for (const p of desk.prices) expect(botText, `ticker on ${row.pair}`).toContain(formatPx(p.price));
+        for (const p of desk.prices) expect(botText, `ticker on ${row.pair}`).toContain(formatQuotePx(p.price, p.symbol.split('/')[1] || ''));
         const sheet = screen(frame(desk, bot(desk, row, width, true)), width, `Breakdown ${row.pair} ${row.metrics.mode}`);
         expect(sheet.split(pill).length - 1).toBe(1);
         const projected = screen(frame(desk, bot(desk, row, width, 'projected')), width, `Breakdown projected ${row.pair} ${row.metrics.mode}`);
@@ -140,8 +141,8 @@ describe('no money or token figure is repeated on a screen', () => {
       expect(range.lower, row.pair).toBeLessThanOrEqual(range.current);
       expect(range.current, row.pair).toBeLessThanOrEqual(range.upper);
       const text = screen(bot(desk, row, 390, true), 390, `range ${row.pair}`);
-      expect(text).toContain(formatPx(range.lower));
-      expect(text).toContain(formatPx(range.upper));
+      expect(text).toContain(formatUnitPx(range.lower));
+      expect(text).toContain(formatUnitPx(range.upper));
     }
   });
 

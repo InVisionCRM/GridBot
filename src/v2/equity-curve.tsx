@@ -22,7 +22,7 @@ export function EquityCurve({ points }: { points: number[] }) {
   const up = p[p.length - 1] >= p[0];
   const stroke = up ? '#0ECB81' : '#F6465D';
   return (
-    <svg className="equity" viewBox={`0 0 ${w} ${h}`} role="img" aria-label="Dollars made over time">
+    <svg className="equity" viewBox={`0 0 ${w} ${h}`} role="img" aria-label="Generated over time">
       <defs>
         <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={stroke} stopOpacity="0.38" />

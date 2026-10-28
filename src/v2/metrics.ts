@@ -73,6 +73,14 @@ export interface BotMetrics {
   range: RangeBlock | null;
   asOf: number;
   calc: string;
+  /** Coins deposited, in the engine quote coin. Not dollars. */
+  invested: TokenQty[];
+  /** Fee coins before costs. LP only; empty when the bot has no split. */
+  grossFees: TokenQty[];
+  /** Gas plus swap cost, in the engine quote coin. */
+  feesPaid: TokenQty[];
+  /** Range-move loss, in the engine quote coin. */
+  moveLoss: TokenQty[];
 }
 
 export interface CandleBar { t: number; o: number; h: number; l: number; c: number; v: number }
@@ -84,6 +92,8 @@ export interface BotDesk {
   base: string;
   quote: string;
   chain: string;
+  /** Full chain name, for example Ethereum. */
+  chainName: string;
   chainColor: string;
   dex: string;
   /** in / out / idle from the payload. "near" is only set when the server says so. */
@@ -144,6 +154,8 @@ export interface PortfolioSnapshot {
   madeSeries: number[];
 }
 
+export interface HoldingLine { symbol: string; amount: number; chain: string }
+
 export interface DeskSnapshot {
   /** live: the bot server. snapshot: the gitignored owner file. fixture: the AAA/BBB sample. */
   source: 'live' | 'snapshot' | 'fixture';
@@ -151,6 +163,8 @@ export interface DeskSnapshot {
   bots: BotDesk[];
   prices: TapePrice[];
   activity: ActivityItem[];
+  /** Token balances only. Empty on the live stream, which does not carry a wallet. */
+  holdings: HoldingLine[];
 }
 
 export interface DeskDelta {

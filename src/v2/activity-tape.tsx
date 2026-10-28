@@ -42,12 +42,13 @@ function Peek({ items, openId, onOpen }: { items: ActivityItem[]; openId: string
 }
 
 function Row({ item, open, onOpen }: { item: ActivityItem; open: boolean; onOpen: (id: string | null) => void }) {
-  const short = shortenFigures(item.text);
+  const short = shortenFigures(item.text).replace(/\$/g, '');
+  const full = item.text.replace(/\$/g, '');
   return (
     <button
       type="button"
       className="tape-hit"
-      title={item.text}
+      title={full}
       aria-expanded={open}
       onClick={() => onOpen(open ? null : item.id)}
     >
@@ -56,7 +57,7 @@ function Row({ item, open, onOpen }: { item: ActivityItem; open: boolean; onOpen
         <PairLabel pair={item.pair || 'Bot'} chain={item.chain} />
         <span className="kind-pill">{KIND[item.kind]}</span>
       </span>
-      <span className="tape-msg">{open ? item.text : short}</span>
+      <span className="tape-msg">{open ? full : short}</span>
     </button>
   );
 }

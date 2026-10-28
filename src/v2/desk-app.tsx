@@ -4,12 +4,13 @@ import { Icon } from '../ui/icons';
 import { ActivityTape } from './activity-tape';
 import { BotView } from './bot-view';
 import { deskStatusPill } from './format';
+import { HoldingsView } from './holdings-view';
 import { HomeView, Ticker } from './home-view';
 import { MoreView } from './more-view';
 import { press } from './press';
 import { useDesk } from './use-desk';
 
-type Page = { v: 'home' } | { v: 'bot'; id: string } | { v: 'activity' } | { v: 'more' };
+type Page = { v: 'home' } | { v: 'bot'; id: string } | { v: 'activity' } | { v: 'holdings' } | { v: 'more' };
 
 export function DeskApp() {
   const { snap, stale, failed } = useDesk();
@@ -49,6 +50,7 @@ export function DeskApp() {
                 />
               )}
               {snap && page.v === 'bot' && !bot && <p className="muted">That bot is not in this snapshot.</p>}
+              {snap && page.v === 'holdings' && <HoldingsView rows={snap.holdings} />}
               {snap && page.v === 'activity' && (
                 <>
                   <header className="act-head">
@@ -78,6 +80,7 @@ export function DeskApp() {
           <nav className="tabbar">
             <button type="button" className={page.v === 'home' || page.v === 'bot' ? 'on' : ''} onClick={() => go({ v: 'home' })}><Icon name="home" size={18} /> Home</button>
             <button type="button" data-nav="activity" className={page.v === 'activity' ? 'on' : ''} onClick={() => go({ v: 'activity' })}><Icon name="activity" size={18} /> Activity</button>
+            <button type="button" data-nav="holdings" className={page.v === 'holdings' ? 'on' : ''} onClick={() => go({ v: 'holdings' })}><Icon name="wallet" size={18} /> Holdings</button>
             <button type="button" className={page.v === 'more' ? 'on' : ''} onClick={() => go({ v: 'more' })}><Icon name="more" size={18} /> More</button>
           </nav>
         </div>

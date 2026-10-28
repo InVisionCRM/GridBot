@@ -1,12 +1,13 @@
 import { motion } from 'motion/react';
 import { useState } from 'react';
-import { TokenMark } from '../ui/icons';
+import { CoinMark } from './coin-mark';
 import { EquityCurve, Spark } from './equity-curve';
 import { cardReadout, coverFigures, uniqueTape, type CardReadout } from './figures';
-import { formatPx, formatTokenLine, formatUsd, pct } from './format';
+import { formatBag, formatQuotePx, formatTokenLine, pct } from './format';
 import type { BotDesk, BotStatus, PortfolioSnapshot, TapePrice, TokenQty } from './metrics';
+import { sheetRows } from './figures';
 import { useReducedMotion } from './motion';
-import { PairLabel } from './pair-label';
+import { PairLabel, PairTitle } from './pair-label';
 import { press } from './press';
 import { RangeSelect, type RangeKey } from './range-tabs';
 import { RangeTrack } from './range-track';
@@ -18,7 +19,7 @@ function TapeItem({ p }: { p: TapePrice }) {
     <span className={p.change24h == null ? '' : p.change24h >= 0 ? 'up' : 'down'}>
       <PairLabel pair={p.symbol} chain={p.chain} />
       {p.fee && <i className="tape-fee">{p.fee}</i>}
-      <em className="px">{formatPx(p.price)}</em>
+      <em className="px">{formatQuotePx(p.price, p.symbol.split('/')[1] || '')}</em>
       {p.change24h != null && <em>{pct(p.change24h, 2, true)}</em>}
     </span>
   );
@@ -63,6 +64,17 @@ export function Ticker({ prices }: { prices: TapePrice[] }) {
   );
 }
 
+function shownPairParts(pair: string): { base: string; quote: string } {
+  const [base, quote] = pair.split('/');
+  return { base: base || pair, quote: quote || '' };
+}
+
+function sumBags(rows: TokenQty[][]): TokenQty[] {
+  const map = new Map<string, number>();
+  for (const row of rows) for (const t of row) map.set(t.symbol, (map.get(t.symbol) ?? 0) + t.amount);
+  return [...map.entries()].filter(([, amount]) => amount !== 0).map(([symbol, amount]) => ({ symbol, amount, usd: null }));
+}
+
 export function HomeView({
   portfolio, bots, prices = [], onOpen,
 }: {
@@ -76,36 +88,43 @@ export function HomeView({
   const paperBots = bots.filter((b) => b.metrics.mode === 'paper');
   const series = span === 'ALL' ? portfolio.madeSeries : [];
   const used = new Set<string>();
+  const liveInvested = sumBags(live.map((b) => b.metrics.invested));
+  const paperInvested = sumBags(paperBots.map((b) => b.metrics.invested));
   coverFigures([
     formatTokenLine(portfolio.tokens),
+    formatBag(liveInvested),
     portfolio.generatedPerDay ? formatTokenLine(portfolio.generatedPerDay) : '',
-    formatUsd(portfolio.generatedUsd, false),
-    formatUsd(portfolio.generatedPerDayUsd, false),
-    uniqueTape(prices).map((p) => formatPx(p.price)).join(' '),
+    uniqueTape(prices).map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' '),
   ].join(' '), used);
-  const liveCards = live.map((bot) => ({ bot, readout: cardReadout(bot.metrics, portfolio.tokens, 'live', used) }));
-  coverFigures(`${formatTokenLine(portfolio.paperTokens)} ${formatUsd(portfolio.paperGeneratedUsd, false)}`, used);
-  const paperCards = paperBots.map((bot) => ({ bot, readout: cardReadout(bot.metrics, portfolio.paperTokens, 'paper', used) }));
+  const liveCards = live.map((bot) => ({
+    bot,
+    readout: cardReadout(bot.metrics, portfolio.tokens, 'live', used),
+    invested: formatBag(bot.metrics.invested) === formatBag(liveInvested) ? null : formatBag(bot.metrics.invested),
+  }));
+  coverFigures(`${formatTokenLine(portfolio.paperTokens)} ${formatBag(paperInvested)}`, used);
+  const paperCards = paperBots.map((bot) => ({
+    bot,
+    readout: cardReadout(bot.metrics, portfolio.paperTokens, 'paper', used),
+    invested: formatBag(bot.metrics.invested) === formatBag(paperInvested) ? null : formatBag(bot.metrics.invested),
+  }));
   return (
     <div className="home">
       <section className="hero glass">
+        <p className="eyebrow">Invested</p>
+        <p className="hero-rate">{formatBag(liveInvested)}</p>
         <p className="eyebrow">Generated</p>
         <div className="hero-top">
           <div className="hero-units">
             {portfolio.tokens.length
-              ? <TokenHeadline tokens={portfolio.tokens} usd={portfolio.generatedUsd} />
+              ? <TokenHeadline tokens={portfolio.tokens} />
               : '—'}
           </div>
         </div>
-        <p className="hero-rate">
+        <p className="hero-rate" data-est="">
           {portfolio.generatedPerDay == null ? '—' : portfolio.generatedPerDay.length ? <TokenLine tokens={portfolio.generatedPerDay} /> : '0'}
           <span>/day</span>
         </p>
-        <p className="usd-under">
-          {portfolio.generatedUsd == null ? '—' : `≈ ${formatUsd(portfolio.generatedUsd, false)}`}
-          {' · '}
-          {portfolio.generatedPerDayUsd == null ? '—' : `${formatUsd(portfolio.generatedPerDayUsd, false)}/day`}
-        </p>
+        <p className="muted small">Estimate, not a forecast.</p>
         <div className="hero-meta">
           <p className="hero-stat"><span>Running</span> <b>{portfolio.botsRunning}/{portfolio.botsTotal}</b></p>
         </div>
@@ -115,32 +134,32 @@ export function HomeView({
         </div>
       </section>
       <ModeSection title="Live" cards={liveCards} onOpen={onOpen} />
-      <ModeSection title="Paper" cards={paperCards} tokens={portfolio.paperTokens} usd={portfolio.paperGeneratedUsd} onOpen={onOpen} />
+      <ModeSection title="Paper" cards={paperCards} tokens={portfolio.paperTokens} invested={paperInvested} onOpen={onOpen} />
     </div>
   );
 }
 
 function ModeSection({
-  title, cards, tokens = [], usd = null, onOpen,
+  title, cards, tokens = [], invested = [], onOpen,
 }: {
   title: string;
-  cards: { bot: BotDesk; readout: CardReadout }[];
+  cards: { bot: BotDesk; readout: CardReadout; invested: string | null }[];
   tokens?: TokenQty[];
-  usd?: number | null;
+  invested?: TokenQty[];
   onOpen: (id: string) => void;
 }) {
   const open = cards.filter((c) => c.bot.metrics.status !== 'closed');
   const closed = cards.filter((c) => c.bot.metrics.status === 'closed');
   if (!open.length && !closed.length) return null;
-  const item = ({ bot, readout }: { bot: BotDesk; readout: CardReadout }) => (
-    <BotCard key={bot.metrics.botId} bot={bot} readout={readout} onOpen={onOpen} />
+  const item = ({ bot, readout, invested: bag }: { bot: BotDesk; readout: CardReadout; invested: string | null }) => (
+    <BotCard key={bot.metrics.botId} bot={bot} readout={readout} invested={bag} onOpen={onOpen} />
   );
   return (
     <section>
       <h2 className="group-title">
         <span className="section-name">{title}</span>
+        {invested.length > 0 && <span className="section-units">{formatBag(invested)} invested</span>}
         {tokens.length > 0 && <span className="section-units"><TokenLine tokens={tokens} /></span>}
-        {tokens.length > 0 && usd != null && <small>≈ {formatUsd(usd, false)}</small>}
       </h2>
       {open.length > 0 && <ul className="bot-list">{open.map(item)}</ul>}
       {closed.length > 0 && (
@@ -162,12 +181,11 @@ function CardMade({ readout }: { readout: CardReadout }) {
         <span>Generated</span>
         {readout.tokens.length > 0 && <TokenHeadline tokens={readout.tokens} />}
       </p>
-      {readout.usd && <p className="usd-under">≈ {readout.usd}</p>}
     </>
   );
 }
 
-function BotCard({ bot, readout, onOpen }: { bot: BotDesk; readout: CardReadout; onOpen: (id: string) => void }) {
+function BotCard({ bot, readout, invested, onOpen }: { bot: BotDesk; readout: CardReadout; invested: string | null; onOpen: (id: string) => void }) {
   const open = () => { press(); onOpen(bot.metrics.botId); };
   return (
     <li>
@@ -184,12 +202,12 @@ function BotCard({ bot, readout, onOpen }: { bot: BotDesk; readout: CardReadout;
         transition={{ type: 'spring', bounce: 0, visualDuration: 0.22 }}
       >
         <header>
-          <TokenMark symbol={bot.base} size={28} />
+          <CoinMark symbol={bot.base} size={28} />
           <div>
             <motion.strong layoutId={`pair-${bot.metrics.botId}`}>
-              <PairLabel pair={bot.pair} chain={bot.chain} />
+              <PairTitle pair={bot.pair} chainName={bot.chainName} dex={bot.dex} />
             </motion.strong>
-            <em>{bot.dex} · {bot.metrics.kind} · {bot.metrics.mode}</em>
+            <em>{bot.metrics.kind} · {bot.metrics.mode === 'paper' ? 'Paper' : 'Live'}</em>
           </div>
           <StatusMark tone={bot.tone} status={bot.metrics.status as BotStatus} />
         </header>
@@ -197,7 +215,17 @@ function BotCard({ bot, readout, onOpen }: { bot: BotDesk; readout: CardReadout;
           {bot.spark.length > 1 && <Spark points={bot.spark} />}
           <RangeTrack range={bot.metrics.range} tone={bot.tone} />
         </div>
+        {invested && <p className="card-made"><span>Invested</span> {invested}</p>}
         <CardMade readout={readout} />
+        <details className="card-details" onClick={(e) => e.stopPropagation()}>
+          <summary>Details</summary>
+          <ul className="break">
+            {sheetRows(bot.metrics, shownPairParts(bot.pair)).map((row) => (
+              <li key={row.label}><span>{row.label}</span><b {...(row.label.startsWith('Est.') ? { 'data-est': '' } : {})}>{row.value}</b></li>
+            ))}
+          </ul>
+          <p className="muted small">Estimate, not a forecast.</p>
+        </details>
       </motion.div>
     </li>
   );

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import type { TokenQty } from './metrics';
-import { formatTokenLine, formatUsd } from './format';
+import { formatTokenLine } from './format';
 
 /** Smallest headline size before a line becomes a "+N more" pill. */
 export const HEADLINE_FLOOR_PX = 22;
@@ -94,6 +94,3 @@ export function TokenHeadline({ tokens, usd = null }: { tokens: TokenQty[] | nul
   );
 }
 
-export function UsdLine({ value, sign = true }: { value: number | null; sign?: boolean }) {
-  return <>{formatUsd(value, sign)}</>;
-}

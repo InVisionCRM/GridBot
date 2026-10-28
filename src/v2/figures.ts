@@ -2,8 +2,9 @@
  * A screen shows each money or token figure once.
  * Cards that would restate the hero or the section total say so in words.
  */
-import type { BotMetrics, EstimateBlock, RangeBlock, TapePrice, TokenQty } from './metrics';
-import { formatAge, formatAmt, formatPx, formatTokenLine, formatUsd, pct, showsNoFills } from './format';
+import type { BotMetrics, RangeBlock, TapePrice, TokenQty } from './metrics';
+import { estimates } from '../shared/generated';
+import { formatAge, formatAmt, formatRangePx, formatTokenLine, showsNoFills } from './format';
 
 const SUBSCRIPT_PRICE = /\$0\.0[₀₁₂₃₄₅₆₇₈₉]+\d+/g;
 const FIGURE = /[+−-]?\s*\$\d[\d,]*(?:\.\d+)?|[+−-]\s*\d[\d,]*(?:\.\d+)?[kMB]?\s+[A-Z][A-Z0-9]*|[+−-]?\d+(?:\.\d+)?%/g;
@@ -63,12 +64,9 @@ export function cardReadout(
     return { kind: 'note', text: `All of the ${scope} total` };
   }
   const tokens = metrics.generated.filter((t) => !used.has(tokenKey(t)));
-  const usd = metrics.generatedUsd == null ? null : formatUsd(metrics.generatedUsd, false);
-  const usdOk = usd && usd !== '—' && !used.has(normFigure(usd)) ? usd : null;
-  if (!tokens.length && !usdOk) return { kind: 'note', text: rangeWords(metrics.range) };
+  if (!tokens.length) return { kind: 'note', text: rangeWords(metrics.range) };
   for (const t of tokens) used.add(tokenKey(t));
-  if (usdOk) used.add(normFigure(usdOk));
-  return { kind: 'figures', tokens, usd: usdOk };
+  return { kind: 'figures', tokens, usd: null };
 }
 
 export function uniqueTape(prices: TapePrice[]): TapePrice[] {
@@ -85,71 +83,61 @@ export function uniqueTape(prices: TapePrice[]): TapePrice[] {
 
 export function heroFigureText(m: BotMetrics): string {
   if (showsNoFills(m)) return '';
+  const day = estimates(m.generated, m.ageSec).perDay;
   return [
     formatTokenLine(m.generated),
-    m.est.d1 ? formatTokenLine(m.est.d1) : '',
-    formatUsd(m.generatedUsd, false),
-    formatUsd(m.est.usd.d1, false),
-    m.aprPct == null ? '' : pct(m.aprPct, 1, true),
+    formatBagSafe(m.invested),
+    day ? formatTokenLine(day) : '',
   ].join(' ');
+}
+
+function formatBagSafe(tokens: TokenQty[]): string {
+  return tokens.map((t) => tokenKey(t)).join(' ');
 }
 
 export interface SheetRow { label: string; value: string }
 
-/** Breakdown rows, dropping any figure the hero (or other text already on screen) already shows. */
-export function sheetRows(m: BotMetrics, covered = ''): SheetRow[] {
+/** Omit a gross-fee atom that is already the generated amount, so an unchanged leg is not printed twice. */
+function freshTokens(tokens: TokenQty[], used: Set<string>): TokenQty[] {
+  return tokens.filter((t) => !used.has(tokenKey(t)));
+}
+
+/**
+ * Breakdown rows in token units. Dollar rows and price change are not rendered.
+ * Est. 7d and Est. 365d are included; Est. 24h is the hero /day line, so it is not repeated here.
+ */
+export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, covered = ''): SheetRow[] {
   const used = new Set<string>();
   coverFigures(`${heroFigureText(m)} ${covered}`, used);
   const rows: SheetRow[] = [];
-  const add = (label: string, value: string) => {
+  const add = (label: string, value: string, est = false) => {
+    if (!value || value === '—') return;
     let next = value;
-    for (const atom of figureAtoms(value)) {
-      if (!used.has(normFigure(atom))) continue;
-      next = next.split(atom).join('');
+    if (!est) {
+      for (const atom of figureAtoms(value)) {
+        if (!used.has(normFigure(atom))) continue;
+        next = next.split(atom).join('');
+      }
+      next = next.replace(/\s*·\s*·\s*/g, ' · ').replace(/^\s*·\s*/, '').replace(/\s*·\s*$/, '').replace(/\s{2,}/g, ' ').trim();
+      if (!next) return;
+      if (figureAtoms(value).length > 0 && figureAtoms(next).length === 0) return;
+      coverFigures(next, used);
     }
-    next = next.replace(/\s*·\s*·\s*/g, ' · ').replace(/^\s*·\s*/, '').replace(/\s*·\s*$/, '').replace(/\s{2,}/g, ' ').trim();
-    if (!next) return;
-    if (figureAtoms(value).length > 0 && figureAtoms(next).length === 0) return;
-    coverFigures(next, used);
     rows.push({ label, value: next });
   };
-  const fee = (tokens: TokenQty[], usd: number | null) => (
-    tokens.length ? `${formatTokenLine(tokens)} · ${formatUsd(usd, false)}` : formatUsd(usd, false)
-  );
-  add('Price change', formatUsd(m.priceChangeUsd, true));
-  add('Value', formatUsd(m.currentValueUsd, false));
-  add('Deposited', formatUsd(m.capitalInUsd, false));
-  add('Fees collected', fee(m.feesCollected, m.feesCollectedUsd));
-  add('Fees owed', fee(m.feesOwed, m.feesUncollectedUsd));
-  add('Gas', formatUsd(m.gasUsd, false));
-  add('Swap fees', formatUsd(m.swapCostUsd, false));
-  add('Taxes', formatUsd(m.tokenTaxesUsd, false));
-  add('Rebalance loss', formatUsd(m.realizedRebalanceLossUsd, false));
-  if (m.kind !== 'lp') add('Realized trade profit', formatUsd(m.realizedUsd, true));
+  const gross = freshTokens(m.grossFees, used);
+  if (gross.length) add('Gross fees', formatTokenLine(gross));
+  if (m.feesPaid.length) add('Fees paid', formatTokenLine(m.feesPaid));
+  if (m.moveLoss.length) add('Range-move loss', formatTokenLine(m.moveLoss));
+  const est = estimates(m.generated, m.ageSec);
+  add('Est. 7d', est.d7 == null ? '—' : est.d7.length ? formatTokenLine(est.d7) : '—', true);
+  add('Est. 365d', est.d365 == null ? '—' : est.d365.length ? formatTokenLine(est.d365) : '—', true);
   add('Age', formatAge(m.ageSec));
   add('Moves', m.moveCount == null ? '—' : String(m.moveCount));
   add('Fills', m.fillCount == null ? '—' : String(m.fillCount));
   if (m.range) {
-    add('Range lower', formatPx(m.range.lower));
-    add('Range upper', formatPx(m.range.upper));
+    add('Range', formatRangePx(m.range.lower, m.range.upper, pair.quote, pair.base));
     add('In range', m.range.inRange ? 'yes' : 'no');
   }
   return rows;
-}
-
-export function projectedLines(est: EstimateBlock, covered: string): { label: string; tokens: TokenQty[] | null; usd: string | null }[] {
-  const used = new Set<string>();
-  coverFigures(covered, used);
-  const take = (label: string, tokens: TokenQty[] | null, usd: number | null) => {
-    const keep = (tokens ?? []).filter((t) => !used.has(tokenKey(t)));
-    const usdText = usd == null ? null : formatUsd(usd, true);
-    const usdOk = usdText && usdText !== '—' && !used.has(normFigure(usdText)) ? usdText : null;
-    for (const t of keep) used.add(tokenKey(t));
-    if (usdOk) used.add(normFigure(usdOk));
-    return { label, tokens: keep.length ? keep : null, usd: usdOk };
-  };
-  return [
-    take('Week, projected', est.d7, est.usd.d7),
-    take('Year, projected', est.d365, est.usd.d365),
-  ];
 }

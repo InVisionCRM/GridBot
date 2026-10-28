@@ -92,10 +92,9 @@ describe('adaptStatus', () => {
       }],
     }, [], now);
     const d = day.bots[0].metrics;
-    expect(d.est.d1?.[0].amount).toBeCloseTo(3 * 86_400 / (4 * 3600));
-    expect(d.est.d7?.[0].amount).toBeCloseTo(3 * 7 * 86_400 / (4 * 3600));
+    expect(d.est.d1).toBeNull();
+    expect(d.est.d7).toBeNull();
     expect(d.est.d365).toBeNull();
-    expect(d.est.usd.d365).toBeNull();
     expect(d.aprPct).toBeNull();
 
     const week = adaptStatus({
@@ -108,8 +107,9 @@ describe('adaptStatus', () => {
         stats: { roundTrips: 2, totalFees: 0 },
       }],
     }, [], now);
-    expect(week.bots[0].metrics.est.d7).not.toBeNull();
-    expect(week.bots[0].metrics.est.d365).toBeNull();
+    expect(week.bots[0].metrics.est.d1?.[0].amount).toBeCloseTo(3 / 8);
+    expect(week.bots[0].metrics.est.d7?.[0].amount).toBeCloseTo(3 * 7 / 8);
+    expect(week.bots[0].metrics.est.d365?.[0].amount).toBeCloseTo(3 * 365 / 8);
 
     const month = adaptStatus({
       spotsAt: now,

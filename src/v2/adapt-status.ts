@@ -3,12 +3,12 @@
  * Dollars are only emitted when usdPerQuote is present. Token units stay in the coin they were earned in.
  * Missing figures stay null. This file does not read the network or a wallet.
  */
+import { estimateFactor, estimates as paceEstimates, generatedTokens, lpParts } from '../shared/generated';
 import type { ActivityItem, BotDesk, BotKind, BotMetrics, BotMode, BotStatus, DeskSnapshot, EstimateBlock, PortfolioSnapshot, RangeBlock, TapePrice, TokenQty } from './metrics';
 
 const DAY = 86_400;
 /** 24h needs ~28 min, 7d ~3.2h, 365d 30 days. A week of history is not a year. */
 const MIN_AGE = { d1: 28 * 60, d7: 3.2 * 3600, d365: 30 * DAY };
-const WIN = { d1: DAY, d7: 7 * DAY, d365: 365 * DAY };
 
 type Rec = Record<string, unknown>;
 
@@ -66,6 +66,12 @@ function ageOf(startedAt: number | null, asOf: number): number | null {
   return (asOf - startedAt) / 1000;
 }
 
+function qtyRows(rows: { symbol: string; amount: number }[] | null): TokenQty[] | null {
+  if (rows == null) return null;
+  return rows.map((t) => ({ symbol: t.symbol, amount: t.amount, usd: null }));
+}
+
+/** Windows come from src/shared/generated.ts. Hidden until the bot has run one day. */
 function estimates(age: number | null, tokens: TokenQty[], usd: number | null): EstimateBlock {
   if (usd == null && !tokens.length) {
     return {
@@ -74,24 +80,19 @@ function estimates(age: number | null, tokens: TokenQty[], usd: number | null): 
       needs: 'No generated figure in this snapshot yet.',
     };
   }
-  const one = (min: number, window: number) => {
-    if (age == null || !(age >= min) || !(age > 0)) return { tokens: null as TokenQty[] | null, usd: null as number | null };
-    const f = window / age;
-    return {
-      tokens: tokens.map((t) => ({ symbol: t.symbol, amount: t.amount * f, usd: t.usd == null ? null : t.usd * f })),
-      usd: usd == null ? null : cents(usd * f),
-    };
+  const pace = paceEstimates(tokens.map((t) => ({ symbol: t.symbol, amount: t.amount })), age);
+  const usdOf = (days: number) => {
+    const factor = estimateFactor(age, days);
+    return usd == null || factor == null ? null : cents(usd * factor);
   };
-  const d1 = one(MIN_AGE.d1, WIN.d1);
-  const d7 = one(MIN_AGE.d7, WIN.d7);
-  const d365 = one(MIN_AGE.d365, WIN.d365);
-  const waiting = [d1, d7, d365].some((e) => e.tokens == null);
   return {
-    d1: d1.tokens,
-    d7: d7.tokens,
-    d365: d365.tokens,
-    usd: { d1: d1.usd, d7: d7.usd, d365: d365.usd },
-    needs: waiting ? 'Day, week and year results appear once the bot has run that long.' : '',
+    d1: qtyRows(pace.h24),
+    d7: qtyRows(pace.d7),
+    d365: qtyRows(pace.d365),
+    usd: { d1: usdOf(1), d7: usdOf(7), d365: usdOf(365) },
+    needs: pace.h24 == null
+      ? 'Estimate, not a forecast. Shown once the bot has run a day.'
+      : 'Estimate, not a forecast.',
   };
 }
 
@@ -106,20 +107,28 @@ function apr(generatedUsd: number | null, capital: number | null, ageSec: number
 /** Gas, swap cost, and rebalance loss are denominated in the engine's quote coin, and the desk subtracts them from that coin. */
 function blankCalc(kind: BotKind, quote: string): string {
   const coin = quote || 'the quote coin';
-  if (kind === 'lp') return `Generated = fees in each coin, with gas, swap fees and rebalance loss taken out of ${coin}. Dollars are the engine net × the ${coin} price. Taxes are not in this payload.`;
-  return `Generated = realized trade profit in ${coin} (already net of pool fees and gas). Taxes and a separate swap fee are not in this payload.`;
+  if (kind === 'lp') return `Generated = fees in each coin, with gas, swap fees and rebalance loss taken out of ${coin}. Taxes are not in this payload.`;
+  return `Generated = trade profit in ${coin}, already net of pool fees and gas. Taxes and a separate swap fee are not in this payload.`;
 }
 
-interface ChainInfo { short: string; color: string }
+interface ChainInfo { short: string; name: string; color: string }
 
 function chainOf(status: Rec, chainId: unknown): ChainInfo {
   const id = num(chainId);
   const chains = Array.isArray(status.chains) ? status.chains : [];
   for (const c of chains) {
     const row = rec(c);
-    if (row && num(row.id) === id) return { short: str(row.short) || '—', color: str(row.color) || '#848E9C' };
+    if (row && num(row.id) === id) {
+      const short = str(row.short) || '—';
+      return { short, name: str(row.name) || short, color: str(row.color) || '#848E9C' };
+    }
   }
-  return { short: '—', color: '#848E9C' };
+  return { short: '—', name: '—', color: '#848E9C' };
+}
+
+function coin(symbol: string, amount: number | null): TokenQty[] {
+  if (!symbol || amount == null || !Number.isFinite(amount) || amount === 0) return [];
+  return [{ symbol, amount, usd: null }];
 }
 
 function modeOf(v: unknown): BotMode {
@@ -186,7 +195,8 @@ function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
   const price = num(g.price);
   const startedAt = num(g.startedAt);
   const generatedUsd = mul(realizedQ, k);
-  const generated = keep([qty(quote, realizedQ, generatedUsd)]);
+  const generated = generatedTokens({ kind: 'grid', quote, realized: realizedQ })
+    .map((t) => ({ symbol: t.symbol, amount: t.amount, usd: generatedUsd }));
   const chain = chainOf(status, g.chainId);
   const lower = num(cfg?.lowerPrice);
   const upper = num(cfg?.upperPrice);
@@ -229,6 +239,10 @@ function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
     range: shownRange(base, quote, lower, upper, price, null),
     asOf,
     calc: blankCalc('grid', quote),
+    invested: coin(quote, capitalQ),
+    grossFees: [],
+    feesPaid: coin(quote, feesQ),
+    moveLoss: [],
   }, num(stats?.roundTrips) ?? (trades.length ? trades.map(rec).filter((t) => t && t.failed !== true).length : null));
   return desk(metrics, str(g.label) || `${base}/${quote}`, base, quote, chain, str(g.dexName), price, spark, num(g.feeBps), num(g.priceAt));
 }
@@ -257,6 +271,13 @@ function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
   let feesOwed: TokenQty[] = [];
   let feesCollectedUsd: number | null = null;
   let feesUncollectedUsd: number | null = null;
+  const split = lpParts({
+    kind: 'lp', base, quote,
+    feeCoins: feeCoins ? { base: num(feeCoins.base), quote: num(feeCoins.quote) } : null,
+    gas: num(pnl?.gas), swapCost: num(pnl?.swapCost), moveLoss: num(pnl?.moveLoss),
+    netQuote: num(pnl?.net),
+  });
+  const toQty = (rows: { symbol: string; amount: number }[]): TokenQty[] => rows.map((t) => ({ symbol: t.symbol, amount: t.amount, usd: null }));
   if (pnl && num(pnl.net) != null) {
     const net = num(pnl.net);
     generatedUsd = mul(net, k);
@@ -264,16 +285,7 @@ function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
     gasUsd = mul(num(pnl.gas), k);
     swapUsd = mul(num(pnl.swapCost), k);
     moveUsd = mul(num(pnl.moveLoss), k);
-    const costs = (num(pnl.gas) ?? 0) + (num(pnl.swapCost) ?? 0) + (num(pnl.moveLoss) ?? 0);
-    const baseAmt = num(feeCoins?.base);
-    const quoteAmt = num(feeCoins?.quote);
-    const baseUsd = baseAmt != null && price != null ? mul(baseAmt * price, k) : null;
-    const quoteNet = quoteAmt == null ? null : quoteAmt - costs;
-    generated = keep([
-      qty(base, baseAmt, baseUsd),
-      qty(quote, quoteNet, mul(quoteNet, k)),
-    ]);
-    if (!generated.length && net != null) generated = keep([qty(quote, net, generatedUsd)]);
+    generated = toQty(split.generated);
     const cBase = num(collectedCoins?.base);
     const cQuote = num(collectedCoins?.quote);
     feesCollected = keep([
@@ -319,6 +331,10 @@ function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
     range: shownRange(base, quote, num(pos?.lower), num(pos?.upper), price, inRange),
     asOf,
     calc: blankCalc('lp', quote),
+    invested: coin(quote, capitalQ),
+    grossFees: toQty(split.gross),
+    feesPaid: toQty(split.feesPaid),
+    moveLoss: toQty(split.moveLoss),
   }, null);
   return desk(metrics, str(lp.label) || `${base}/${quote}`, base, quote, chain, str(lp.dexName), price, [], num(lp.feeBps), num(lp.priceAt));
 }
@@ -339,7 +355,7 @@ function desk(metrics: BotMetrics, label: string, base: string, quote: string, c
     : metrics.range == null ? 'idle'
     : metrics.range.inRange ? 'in' : 'out';
   return {
-    metrics, pair: shownPair(base, quote, price, label), base, quote, chain: chain.short, chainColor: chain.color, dex: dex || '—',
+    metrics, pair: shownPair(base, quote, price, label), base, quote, chain: chain.short, chainName: chain.name, chainColor: chain.color, dex: dex || '—',
     tone, spark: spark.length > 1 ? spark : [], levels: [], candles: [], fills: [], flashLevel: null,
     price, change24h: null, feeBps, priceAt,
   };
@@ -511,5 +527,6 @@ export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = nu
     bots,
     prices: deskPrices(bots),
     activity: activityOf(events, new Map(bots.map((b) => [b.metrics.botId, { pair: b.pair, chain: b.chain }]))),
+    holdings: [],
   };
 }

@@ -54,6 +54,42 @@ export function formatAmt(n: number): string {
   return `${sign}${body}`;
 }
 
+/** A price with the dollar sign removed, so the quote token can be named beside it. */
+export function formatUnitPx(x: number | null | undefined): string {
+  if (x == null || !Number.isFinite(x)) return '—';
+  return formatPx(Math.abs(x)).replace(/^\$/, '');
+}
+
+/** Tape and range price: `2,342.18 USDC`, never `$2,342.18`. */
+export function formatQuotePx(amount: number | null | undefined, quote: string): string {
+  if (amount == null || !Number.isFinite(amount)) return '—';
+  const unit = quote.trim();
+  return unit ? `${formatUnitPx(amount)} ${unit}` : formatUnitPx(amount);
+}
+
+/** `2,307.72 – 2,356.69 USDC per ETH`. */
+export function formatRangePx(lower: number, upper: number, quote: string, base: string): string {
+  return `${formatUnitPx(lower)} – ${formatUnitPx(upper)} ${quote} per ${base}`;
+}
+
+function plainAmt(n: number): string {
+  if (!Number.isFinite(n)) return '—';
+  const a = Math.abs(n);
+  if (a === 0) return '0';
+  if (a >= 1e9) return `${(a / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `${(a / 1e6).toFixed(2)}M`;
+  if (a >= 1e4) return `${(a / 1e3).toFixed(a >= 1e5 ? 0 : 1)}k`;
+  if (a >= 100) return a.toLocaleString(undefined, { maximumFractionDigits: 1 });
+  if (a >= 1) return a.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return Number(a.toPrecision(3)).toString();
+}
+
+/** Deposited coins, without a gain sign. `3.50 ETH + 1,000 USDC`. */
+export function formatBag(tokens: { symbol: string; amount: number }[] | null | undefined): string {
+  if (!tokens?.length) return '—';
+  return tokens.map((t) => `${plainAmt(t.amount)} ${t.symbol}`).join(' + ');
+}
+
 export function formatTokenLine(tokens: { symbol: string; amount: number }[] | null | undefined): string {
   if (!tokens?.length) return '—';
   return tokens.map((t, i) => {
