@@ -12,6 +12,7 @@
 import { HARD_CAPS } from '../live/limits';
 import { MAX_TAX, TAX_TOLERANCE } from '../live/tax';
 import { simBuy, simSell, type CostModel } from './costs';
+import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, clampHolderShare, holderBound, thinCoverageReason } from './holders';
 import { capSwap, TOKEN_MAX_POOL_SHARE } from './poolSize';
 import type { LpUnlockEvidence } from './lpUnlock';
 import { v3LockSatisfies, type V3LpReport } from './v3LpLock';
@@ -142,8 +143,38 @@ export interface GateInput {
    * Absent (the default) leaves this gate unchanged.
    */
   v3Lp?: V3LpReport;
-  /** Largest holder as a share of supply. null = unknown, and unknown is not a block. */
+  /**
+   * Largest holder as a share of circulating supply. null = unknown.
+   * Unknown is not a block unless `enforceHolderCheck` is on (safe and medium then fail closed).
+   */
   holderConcentration: number | null;
+  /**
+   * Holder-concentration check. Absent or false: `top10Concentration` and `holdersUnverified` are ignored,
+   * and a null `holderConcentration` stays "not a block", which is today's gate.
+   */
+  enforceHolderCheck?: boolean;
+  /** Top 10 holders as a share of circulating supply. Ignored unless `enforceHolderCheck`. */
+  top10Concentration?: number | null;
+  /** The holder list could not be read. Fails closed for safe and medium only when `enforceHolderCheck`. */
+  holdersUnverified?: boolean;
+  /** Why the read is unverified. Ignored unless `enforceHolderCheck`. */
+  holderUnavailable?: 'no-source' | 'read-failed';
+  /** Chain name used in the unavailable skip reason. */
+  holderChain?: string;
+  /** Largest-holder cap, as a share. Ignored unless `enforceHolderCheck`. Default 10%. */
+  maxHolderShare?: number;
+  /** Top-10 cap, as a share. Ignored unless `enforceHolderCheck`. Default 40%. */
+  maxTop10Share?: number;
+  /** Circulating share a log sample did not measure. Ignored unless `enforceHolderCheck`. */
+  holderUnseen?: number | null;
+  /** The top-10 figure is a full list, so `holderUnseen` is not added to it. */
+  top10Exact?: boolean;
+  /** Explained balances ÷ totalSupply. Ignored unless `enforceHolderCheck`. */
+  holderCoverage?: number | null;
+  /** The log window or the explained supply is too thin to trust the shares. */
+  holderThin?: boolean;
+  holderWindowFrom?: number | null;
+  holderCreationBlock?: number | null;
   recentLiqPull: boolean;
   /** The existing safety classifier. Live still requires this. */
   liveAllowed: boolean;
@@ -166,6 +197,8 @@ export interface GateResult {
   v3Lp?: V3LpReport;
   /** Present only when the input carried an lpUnlockCheck result. */
   lpUnlock?: LpUnlockEvidence;
+  /** Set for aggressive mode when coverage is thin. Safe and medium skip instead. */
+  warn?: string;
 }
 
 /**
@@ -203,6 +236,17 @@ export function gateToken(g: GateInput): GateResult {
   const tax = Math.max(g.buyTax ?? 0, g.sellTax ?? 0);
   if (g.mode === 'live' && tax > maxTax) return hard(`tax ${(tax * 100).toFixed(1)}% is over the ${(maxTax * 100).toFixed(0)}% live cap`);
   if (g.mode === 'live' && !g.liveAllowed) return hard('safety check does not allow live trading');
+  let coverageWarn: string | null = null;
+  if (g.enforceHolderCheck && g.holderThin) {
+    const msg = thinCoverageReason({ coverage: g.holderCoverage ?? null, windowFrom: g.holderWindowFrom, creationBlock: g.holderCreationBlock });
+    if (g.risk === 'safe' || g.risk === 'medium') return hard(msg);
+    coverageWarn = msg;
+  }
+  if (g.enforceHolderCheck && !g.holderThin && g.holdersUnverified && (g.risk === 'safe' || g.risk === 'medium')) {
+    const chain = g.holderChain && g.holderChain.trim() ? g.holderChain.trim() : 'this chain';
+    if (g.holderUnavailable === 'no-source') return hard(`holder concentration unavailable: no holder data source for ${chain}`);
+    return hard(`holder concentration unavailable: holder read failed for ${chain}`);
+  }
   if (g.risk === 'safe' || g.risk === 'medium') {
     if (g.canPause === true) return hard('owner can pause');
     // Both reports are optional. With neither present, only an explicit lpUnlocked true blocks; null does not.
@@ -219,13 +263,26 @@ export function gateToken(g: GateInput): GateResult {
     if (tax > TAX_TOLERANCE) return hard(`tax ${(tax * 100).toFixed(2)}% (safe allows none)`);
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
   }
+  if (g.enforceHolderCheck && !g.holderThin && (g.risk === 'safe' || g.risk === 'medium') && g.holderConcentration != null && g.top10Concentration != null) {
+    const maxHolder = clampHolderShare(g.maxHolderShare ?? DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_HOLDER_SHARE);
+    const maxTop10 = clampHolderShare(g.maxTop10Share ?? DEFAULT_MAX_TOP10_SHARE, DEFAULT_MAX_TOP10_SHARE);
+    const chain = g.holderChain && g.holderChain.trim() ? g.holderChain.trim() : 'this chain';
+    const bound = holderBound({
+      largest: g.holderConcentration, top10: g.top10Concentration, unseen: g.holderUnseen ?? 0, top10Exact: g.top10Exact,
+      maxHolder, maxTop10,
+    });
+    if (bound === 'largest') return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}% (maximum ${(maxHolder * 100).toFixed(0)}%)`);
+    if (bound === 'top10') return hard(`top 10 holders have ${(g.top10Concentration * 100).toFixed(0)}% (maximum ${(maxTop10 * 100).toFixed(0)}%)`);
+    if (bound === 'unread') return hard(`holder concentration unavailable: holder read failed for ${chain}`);
+  }
   if (g.enforceSizeImpact) {
     const why = sizeImpactReason(g.sizeImpact ?? null, g.sizeImpactCap ?? DEFAULT_SIZE_IMPACT_CAP);
     if (why) return hard(why);
   }
   // Honeypot and a failed sell already returned above, so live only still needs the classifier and the tax cap.
-  const passed = { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null };
-  return { ...passed, ...carried() };
+  const passed: GateResult = { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null, ...carried() };
+  if (coverageWarn) passed.warn = coverageWarn;
+  return passed;
 }
 
 export interface BuySize {

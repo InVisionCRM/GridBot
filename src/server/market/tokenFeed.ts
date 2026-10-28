@@ -11,7 +11,10 @@ import { applyLpUnlock, cachedTokenLp, LP_CHECK_TIMEOUT_MS, tokenLpKey, unverifi
 import { unverifiedV3Lp } from '../../market/v3LpLock';
 import { readLiveLpUnlock } from './lpUnlockRead';
 import { readV3LpLock, type V3LockReader } from './v3LpLockRead';
-import { ROUTER } from '../dex/abis';
+import { ERC20, ROUTER } from '../dex/abis';
+import { readCall } from '../dex/types';
+import { fetchJson } from '../fetchJson';
+import { holderApiBase, readHolderConcentration, type HolderChain } from './holderRead';
 import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
 import type { DexConfig } from '../../live/chains';
 import type { SafetyLimits } from '../../live/limits';
@@ -94,11 +97,45 @@ export function createTokenTrader(o: {
 }): TokenTrader {
   const sniper = new PoolSniper({ chains: sniperChains(o.hub), source: logSource(o.hub) });
   const flags = { v3LpLockCheck: () => false, lpUnlockCheck: () => false };
-  const trader = new TokenTrader({
+  const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flags.v3LpLockCheck(), flags.lpUnlockCheck()),
+    // Called only when the holder check is on. Flag off never reaches this, so a scan makes no explorer calls.
+    holders: (pool) => {
+      const rt = o.hub.rt(pool.chainId);
+      const cfg = rt.cfg;
+      const reader = rt.reader as typeof rt.reader & {
+        getBlockNumber?: () => Promise<number>; getLogs?: HolderChain['getLogs'];
+        getCode?: (a: string) => Promise<string>; send?: (method: string, params: unknown[]) => Promise<unknown>;
+      };
+      const chain: HolderChain | undefined = reader.getBlockNumber && reader.getLogs ? {
+        getBlockNumber: () => reader.getBlockNumber!(),
+        getLogs: (f) => reader.getLogs!(f),
+        call: (tx) => reader.call(tx),
+        getCode: async (address, blockTag) => {
+          if (reader.send) {
+            const tag = blockTag === 'latest' ? 'latest' : `0x${blockTag.toString(16)}`;
+            return String(await reader.send('eth_getCode', [address, tag]));
+          }
+          return reader.getCode ? reader.getCode(address) : '0x';
+        },
+      } : undefined;
+      return readHolderConcentration({
+        chainId: pool.chainId, chainName: cfg.name, token: pool.token, exclude: [pool.pool],
+        api: holderApiBase(cfg),
+        spends: [cfg.wrappedNative.address, ...cfg.stables.map((s) => s.address)],
+        dexes: cfg.dexes, geckoSlug: cfg.geckoSlug,
+      }, {
+        fetchJson, chain,
+        minCoverage: trader.status().options.minHolderCoverage,
+        totalSupply: async (chainId, token) => {
+          const [supply] = await readCall<[bigint]>(o.hub.rt(chainId).reader, token, ERC20, 'totalSupply');
+          return supply;
+        },
+      });
+    },
     // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
     quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
     resolve: (hit) => resolveHit(o.hub, hit),
@@ -193,6 +230,8 @@ async function discover(hub: Hub, gecko: GeckoSource): Promise<FreshPool[]> {
     const take = (rows: typeof fresh, source: 'new' | 'trending') => {
       for (const row of rows) {
         const dex = rt.cfg.dexes.find((d) => d.gecko === row.dex);
+        // V4 rows stay out of the token trader. Labelling them V3 would try to swap a pool id on a V3 router.
+        if (dex?.kind === 'v4') continue;
         // feeBps is a placeholder until withPoolFees reads the pool's real fee (V3 fee(), or the DEX's V2 fee)
         const pool = fromTopPool(row, { id: rt.cfg.id, spend, kind: dex?.kind === 'v2' ? 'v2' : 'v3', feeBps: dex?.feeBps ?? 30 }, source);
         if (pool) out.push(pool);
@@ -206,7 +245,8 @@ async function discover(hub: Hub, gecko: GeckoSource): Promise<FreshPool[]> {
 
 /**
  * Every discovered pool gets its real fee: V2 = the DEX's fee, V3 = the pool's fee() (one eth_call each). A pool whose
- * fee can't be read is dropped: pricing it at a guessed tier is how 1 % pools were sized as 0.01 % ones.
+ * fee can't be read is dropped: pricing it at a guessed tier is how 1 % pools were sized as 0.01 % ones. V4 is dropped
+ * here too: this trader does not swap it, and a pool id must not be relabelled V3.
  */
 export async function withPoolFees(
   pools: FreshPool[], readerFor: (chainId: number) => Pick<ChainReader, 'call'>,
@@ -214,9 +254,10 @@ export async function withPoolFees(
 ): Promise<FreshPool[]> {
   const read = await Promise.all(pools.map(async (p) => {
     const dex = dexOf(p);
-    if (!dex) return null; // a DEX this app doesn't swap on: inspect() could not find the pool anyway
+    // Unknown DEX, or V4: this trader does not swap it. A V4 pool id must not be relabelled V3.
+    if (!dex || dex.kind === 'v4') return null;
     const feeBps = await poolFeeBps(readerFor(p.chainId), p.pool, dex);
-    return feeBps == null ? null : { ...p, kind: dex.kind === 'v2' ? 'v2' as const : 'v3' as const, feeBps, ...(dex.dynamicFee ? { dynamicFee: true } : {}) };
+    return feeBps == null ? null : { ...p, kind: dex.kind, feeBps, ...(dex.dynamicFee ? { dynamicFee: true } : {}) };
   }));
   return read.filter((p): p is NonNullable<typeof p> => !!p);
 }
@@ -232,6 +273,8 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
     buyTax: s?.buyTaxPct ?? null, sellTax: s?.sellTaxPct ?? null,
     liquidityUsd: pool.liquidityUsd, minLiquidityUsd: pool.source === 'snipe' ? 0 : 0,
     canMint, canPause: s?.paused != null ? true : null, canBlacklist: s?.blacklist != null ? true : null,
+    // Unknown until the trader's holder check is on. That check fills this in; leaving it null here keeps the gate
+    // identical when the check is off, and keeps this function from calling an explorer on every assess.
     proxy: s?.proxy != null ? true : null, lpUnlocked: null, holderConcentration: null, recentLiqPull: false,
     liveAllowed: s?.liveAllowed ?? false,
   };

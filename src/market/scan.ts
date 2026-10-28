@@ -160,7 +160,7 @@ export interface Opportunity {
   spend: string;
   stack: string;
   dex: string;
-  kind: 'v2' | 'v3';
+  kind: 'v2' | 'v3' | 'v4';
   feeBps: number;
   risk: SafetyReport['risk'] | null;
   /** Why the safety check gave that risk */
