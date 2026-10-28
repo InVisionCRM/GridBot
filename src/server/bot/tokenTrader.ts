@@ -15,6 +15,7 @@ import {
   type FreshPool, type GateInput,
   effectiveEntry, sellSidePrice,
 } from '../../market/tokenTrader';
+import { DEFAULT_MIN_LIQUIDITY_USD, effectiveMinLiquidityUsd, gateMinLiquidityUsd } from '../../market/liquidityFloor';
 import { blankPlay, feeTierFromBps, playLeaderboard, type PlayRecord } from '../../metrics/playScore';
 import { MemoryRejects, rejectKey, type RejectSink } from './playRejects';
 import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
@@ -43,6 +44,13 @@ export interface TraderOptions {
   totalUsd: number;
   /** Scan discovery only. Snipes ignore it. */
   minPoolAgeSec: number;
+  /**
+   * Minimum pool liquidity (USD) for a scan buy and the safety gate. 0 matches the old hardcoded floor,
+   * so existing installs do not start skipping pools. Snipes also still have to clear `sniper.minLiquidityUsd`.
+   */
+  minLiquidityUsd: number;
+  /** When on, the floor in force is at least $50,000. Off by default. Never lowers a higher minimum. */
+  enforceLiquidityFloor: boolean;
   /** Empty = every chain the app trades */
   chains: number[];
   risk: 'safe' | 'medium' | 'any';
@@ -161,6 +169,7 @@ const TRADE_MAX = 200;
 
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
+  minLiquidityUsd: DEFAULT_MIN_LIQUIDITY_USD, enforceLiquidityFloor: false,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
   v3LpLockCheck: false,
   lpUnlockCheck: false,
@@ -318,6 +327,8 @@ export class TokenTrader {
     return {
       ...rest,
       openUsd,
+      /** Liquidity floor scan buys and the gate actually use (the setting, raised to $50,000 when that flag is on). */
+      effectiveMinLiquidityUsd: this.floorUsd(),
       lastError: this.lastError,
       entriesHalt: this.state.entriesHalt ?? null,
       lastHalt: this.state.lastHalt ?? null,
@@ -343,6 +354,8 @@ export class TokenTrader {
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
+    if (!(n.minLiquidityUsd >= 0)) throw new Error('Minimum liquidity must be 0 or more USD.');
+    if (typeof n.enforceLiquidityFloor !== 'boolean') throw new Error('Liquidity floor flag must be on or off.');
     if (!(n.maxImpact > 0) || n.maxImpact > HARD_CAPS.maxPriceImpact) throw new Error('Price-impact cap must be between 0% and 5%.');
     if (!(n.sizeImpactCap > 0) || n.sizeImpactCap > HARD_CAPS.maxPriceImpact) throw new Error('Trade-size impact cap must be between 0% and 5%.');
     if (!(n.maxPoolShare > 0) || n.maxPoolShare > 0.5) throw new Error('Max pool share must be between 0% and 50%.');
@@ -474,6 +487,17 @@ export class TokenTrader {
     return { maxPriceImpact: Math.min(this.state.options.maxImpact, HARD_CAPS.maxPriceImpact), slippageBps: 100, deadlineMinutes: 10 };
   }
 
+  /** Configured minimum, or $50,000 when that flag is on. Does not include the sniper's own minimum. */
+  private floorUsd() { return effectiveMinLiquidityUsd(this.state.options); }
+
+  /** Gate floor for this pool: the floor in force, the sniper minimum on a snipe, and any higher floor assess reported. A reported 0 does not win. */
+  private gateFloor(pool: FreshPool, reported: number | null | undefined) {
+    const o = this.state.options;
+    return gateMinLiquidityUsd(pool, reported, {
+      minLiquidityUsd: o.minLiquidityUsd, enforceLiquidityFloor: o.enforceLiquidityFloor, sniperMinLiquidityUsd: o.sniper.minLiquidityUsd,
+    });
+  }
+
   private wantChain(id: number) {
     const c = this.state.options.chains;
     return !c.length || c.includes(id);
@@ -487,7 +511,7 @@ export class TokenTrader {
   private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null }> {
     if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null, warn: null };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
-    let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
+    let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: this.gateFloor(pool, g.minLiquidityUsd) };
     if (this.state.options.enforceHolderCheck) {
       const chainName = chainById(pool.chainId)?.name ?? `chain ${pool.chainId}`;
       let h: { largest: number | null; top10: number | null; unverified: boolean; unavailable?: 'no-source' | 'read-failed'; chainName?: string; unseen?: number | null; top10Exact?: boolean; coverage?: number | null; thin?: boolean; windowFrom?: number | null; creationBlock?: number | null } = {
@@ -699,21 +723,31 @@ export class TokenTrader {
     if (!this.d.discover) return;
     if (this.state.entriesHalt?.chains === null) return; // stopped everywhere: don't even look
     const pools = await this.d.discover();
-    const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: 0 });
+    const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: this.floorUsd() });
     for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
     const eligible: FreshPool[] = [];
     for (const p of keep) {
       const label = `${p.tokenSymbol}/${p.spendSymbol}`;
-      if (!this.wantChain(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'chain is off' }); continue; }
-      if (p.kind === 'v4') { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); continue; }
-      if (this.entriesStopped(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); continue; }
+      const skip = (why: string) => {
+        this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why });
+        this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
+      };
+      if (!this.wantChain(p.chainId)) { skip('chain is off'); continue; }
+      if (p.kind === 'v4') { skip("this app doesn't swap V4"); continue; }
+      if (this.entriesStopped(p.chainId)) { skip('new buys are stopped (Stop all)'); continue; }
       eligible.push(p);
     }
     // Safety reads, including LP checks, overlap. Each check has its own timeout, so one pool cannot stall the rest.
     const checked = await Promise.all(eligible.map(async (p) => ({ p, a: await this.assess(p) })));
     for (const { p, a } of checked) {
       const label = `${p.tokenSymbol}/${p.spendSymbol}`;
-      if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); continue; }
+      if (!a.ok || !a.gate) {
+        const why = a.reason ?? 'safety';
+        this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why });
+        this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
+        this.say(`skipped ${label}: ${a.reason}`, 'warn');
+        continue;
+      }
       await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn);
     }
   }
@@ -741,7 +775,8 @@ export class TokenTrader {
       if (hit.kind === 'v4') { this.reject({ chainId: hit.chainId, pool: hit.pool, token: hit.token0, signal: 'snipe', source: hit.dex, reason: "this app doesn't swap V4", price: null, feeBps: hit.fee != null ? hit.fee / 100 : null }); continue; }
       const pool = await this.d.resolve?.(hit) ?? null;
       if (!pool) { rejectHit('could not price the new pool', hit.pool.slice(0, 8)); continue; }
-      if (pool.liquidityUsd < sn.minLiquidityUsd) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
+      const minLiq = Math.max(sn.minLiquidityUsd, this.floorUsd());
+      if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${minLiq.toLocaleString('en-US')}` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `liquidity under $${minLiq.toLocaleString('en-US')}`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `${sn.maxPerHour} snipes an hour already`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       const before = this.state.positions.length;
       await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');

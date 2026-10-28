@@ -1,7 +1,7 @@
 /**
  * hub.recheck no longer silently keeps the old report (`fresh ?? d.safety`): when a re-check fails or measures nothing,
  * the last known values stay (for display and the taxes quotes use) but are labelled stale, the status / UI / activity
- * log say so, and nothing pauses or stops a bot because of it. Live starts decide on the last known report, as before.
+ * log say so, and nothing pauses or stops a bot because of it. Live starts need a fresh completed check (Hub.liveCheck).
  */
 import { describe, expect, it } from 'vitest';
 import { NETWORKS } from '../src/live/networks';
@@ -47,7 +47,7 @@ function world(shipped: SafetyReport = measured({ gotBuy: 990n })) {
     pool: { dex: 'uniswap-v3', kind: 'v3', address: pool, feeBps: 30, feeTier: 3000 }, probe: 1, quoteKind: 'wrapped', candlePool: pool, safety: shipped,
   };
   const noSend = { getAddress: async () => ME, sendTransaction: async () => { throw new Error('test: must not send'); } };
-  const hub = new Hub({ runtimes: [new ChainRuntime(CHAINS[0], pls, null), new ChainRuntime(ETH, eth, noSend)], markets: [...legacyMarkets(NET), ETH_DEF, def], legacyNet: NET, custom: new MemoryStore<CustomFile>(), now: () => t });
+  const hub = new Hub({ runtimes: [new ChainRuntime(CHAINS[0], pls, null), new ChainRuntime(ETH, eth, noSend)], markets: [...legacyMarkets(NET), ETH_DEF, def], legacyNet: NET, custom: new MemoryStore<CustomFile>(), now: () => t, safetyRetryMs: [0, 0] });
   const bot = new MultiBot({ net: NET, reader: pls, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub, now: () => t });
   let next: Next = 'none';
   (hub as unknown as { inspect: () => Promise<unknown> }).inspect = async () => {
@@ -131,28 +131,29 @@ describe('Stale never pauses or stops a bot', () => {
   });
 });
 
-describe('Live start with a stale report: decided on the last known report, as before', () => {
-  it('last known passing → not blocked by safety (and warns it is stale)', async () => {
+describe('Live start with a stale report: needs a fresh completed check now (tests/liveStartSafety.test.ts)', () => {
+  it('last known passing → blocked as SAFETY_INCOMPLETE after 3 tries, Start anyway offered; startAnyway then starts it', async () => {
     const outcomes: string[] = [];
     for (const n of ['none', 'throw'] as const) {
       const { bot, key, set } = world();
       set(n);
       const spot = await bot.hub.quoter(key).getPrice();
       const p = { mode: 'live' as const, stable: key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.001 };
-      const res = await bot.add(p).then((id) => ({ id }), (e: Error) => ({ e }));
-      if ('e' in res) expect(res.e.message).not.toMatch(/LIVE blocked/);
-      else bot.stopAll();
-      outcomes.push('e' in res ? res.e.message : 'started');
+      await expect(bot.add(p)).rejects.toMatchObject({ code: 'SAFETY_INCOMPLETE', canStartAnyway: true });
       expect(bot.hub.def(key).safety!.stale).toBeTruthy();
+      const res = await bot.add({ ...p, startAnyway: true }).then((id) => ({ id }), (e: Error) => ({ e }));
+      if ('id' in res) bot.stopAll();
+      outcomes.push('e' in res ? res.e.message : 'started');
     }
     expect(outcomes).toEqual(['started', 'started']);
-  });
+  }, 20_000);
 
-  it('last known failing → still blocked', async () => {
+  it('last known failing → still blocked, and Start anyway is not offered', async () => {
     const { bot, key, set } = world(measured({ stage: 4 }));
     expect(bot.hub.def(key).safety!.liveAllowed).toBe(false);
     set('none');
     const spot = await bot.hub.quoter(key).getPrice();
-    await expect(bot.add({ mode: 'live', stable: key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.001 })).rejects.toThrow(/LIVE blocked/);
-  });
+    await expect(bot.add({ mode: 'live', stable: key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.001, startAnyway: true }))
+      .rejects.toMatchObject({ code: 'SAFETY_INCOMPLETE', canStartAnyway: false, message: expect.stringMatching(/LIVE blocked/) });
+  }, 20_000);
 });

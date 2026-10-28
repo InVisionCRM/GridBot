@@ -7,6 +7,7 @@ import { Alerts, loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs 
 import { preparePushWorker } from './ui/pushClient';
 import { botApi, http } from './ui/api';
 import { usd } from './ui/fmt';
+import { EthUsdCtx, ethUsdOf } from './ui/units';
 import { ChainFilterCtx, chainOf, RefreshCtx, rpcAlerts, type ChainFilter } from './ui/chains';
 import { Home } from './ui/Home';
 import { Bots } from './ui/Bots';
@@ -64,6 +65,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const ver = useVersion();
   const holdings = useHoldings();
+  const ethUsd = useMemo(() => ethUsdOf(s, holdings.data), [s, holdings.data]);
   const [guide, setGuide] = useState(false);
   const closeGuide = useCallback(() => setGuide(false), []);
   const [drawer, setDrawer] = useState(false);
@@ -130,7 +132,7 @@ export default function App() {
     void act(() => (sel ? http(`/api/chains/${sel.id}/stop`, 'POST', undefined, 'header-chain-stop') : botApi('stop-all', 'POST', undefined, 'header-stop-all')));
   };
   return (
-    <ChainFilterCtx.Provider value={chainCtx}><RefreshCtx.Provider value={refresh}><ShowUsdCtx.Provider value={usdCtx}>
+    <ChainFilterCtx.Provider value={chainCtx}><RefreshCtx.Provider value={refresh}><ShowUsdCtx.Provider value={usdCtx}><EthUsdCtx.Provider value={ethUsd}>
       <div className="app">
         <Header
           s={s} view={view} nav={nav} chain={chain} setChain={setChain} showUsd={showUsd} setShowUsd={usdCtx.set}
@@ -175,6 +177,6 @@ export default function App() {
         </>}
         {guide && <Guide onClose={closeGuide} />}
       </div>
-    </ShowUsdCtx.Provider></RefreshCtx.Provider></ChainFilterCtx.Provider>
+    </EthUsdCtx.Provider></ShowUsdCtx.Provider></RefreshCtx.Provider></ChainFilterCtx.Provider>
   );
 }
