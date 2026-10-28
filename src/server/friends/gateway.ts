@@ -16,7 +16,7 @@ import { COOKIE, cookieValue, HOST_ID, readSession, RENEW_MS, sessionCookie, SES
 import type { CopyState } from './copies';
 import type { OwnerLogin } from './owner';
 import { accountPage, copyDownPage, hostDownPage, invitePage, linkGonePage, loginPage, ownerAccountPage, resetPage } from './pages';
-import { requestHostAllowed } from './publicHost';
+import { FUNNEL_OWNER_REFUSED, requestHostAllowed, viaFunnel } from './publicHost';
 
 export interface GatewayDeps {
   friends: Friends;
@@ -92,7 +92,10 @@ export function createGateway(d: GatewayDeps) {
       if (!origin || !d.origins().includes(origin)) return res.status(403).type('text/plain').send('Refused: this request didn\'t come from the GridBot page.');
     }
     const s = readSession(d.sessionKey, cookieValue(req.headers.cookie, COOKIE), now());
-    const ownerOn = !!(s?.role === 'host' && d.owner?.current(s));
+    // Through Funnel (the internet) an owner cookie is not honored: the owner reaches the bots from the tailnet only.
+    const funnel = viaFunnel(req.headers, req.socket.remoteAddress);
+    res.locals.funnel = funnel;
+    const ownerOn = !funnel && !!(s?.role === 'host' && d.owner?.current(s));
     const f = ownerOn || !s || s.role === 'host' ? null : d.friends.current(s);
     res.locals.owner = ownerOn;
     res.locals.friend = f;
@@ -113,6 +116,8 @@ export function createGateway(d: GatewayDeps) {
     const password = field(req, 'password');
     try {
       if (d.owner?.isOwnerName(name)) {
+        // Refused before the password is checked: no guess through Funnel counts, or locks the owner name.
+        if (res.locals.funnel) throw new Error(FUNNEL_OWNER_REFUSED);
         const o = await d.owner.login(name, password);
         stamp(res, ownerSession(o.session));
       } else stamp(res, friendSession(await d.friends.login(name, password)));
@@ -225,9 +230,12 @@ export function proxyUpgrade(d: GatewayDeps, req: http.IncomingMessage, socket: 
     socket.destroy();
   };
   if (!requestHostAllowed(req.headers.host, d.publicHosts?.() ?? [])) return fail(403, 'Forbidden');
+  // Browsers always send Origin on a WebSocket. Another site's page could otherwise open one with the cookie (CSWSH).
+  const origin = req.headers.origin;
+  if (!origin || !d.origins().includes(origin)) return fail(403, 'Forbidden');
   const now = (d.now ?? Date.now)();
   const s = readSession(d.sessionKey, cookieValue(req.headers.cookie, COOKIE), now);
-  const owner = !!(s?.role === 'host' && d.owner?.current(s));
+  const owner = !viaFunnel(req.headers, req.socket.remoteAddress) && !!(s?.role === 'host' && d.owner?.current(s));
   const friend = owner || !s || s.role === 'host' ? null : d.friends.current(s);
   const port = owner ? d.hostPort : friend?.port;
   if (!port) return fail(401, 'Unauthorized');

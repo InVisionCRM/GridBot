@@ -24,7 +24,7 @@ import { pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, type RecenterState } from '../../live/recenter';
 import { noKey } from '../words';
-import { requestHalt, resolveHalt, systemHalt, type Halt } from './audit';
+import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
 
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
@@ -90,6 +90,8 @@ export interface BotState {
   closing?: boolean;
   /** Hidden from the active list. The record (trades, PnL) stays for analytics. Absent on older state. */
   archivedAt?: number | null;
+  /** A close's sales that failed to go through in a row (reverted, rejected: each paid gas), and its next try */
+  closeFails?: { n: number; retryAt: number } | null;
   /** Why this bot last stopped or closed. Absent on state saved before this field existed. */
   halt?: Halt | null;
 }
@@ -121,6 +123,14 @@ export interface EngineDeps {
   hub?: Hub;
 }
 
+/** What MultiBot.tickAll already read this poll, so each grid doesn't read it again. */
+export interface TickCtx {
+  /** This market's price from the poll's price batch */
+  price?: number;
+  /** One wallet read per key per poll (cleared after a trade on the chain) */
+  wallet?: <T>(key: string, read: () => Promise<T>) => Promise<T>;
+}
+
 export interface StartParams extends GridConfig {
   mode: Mode;
   stable?: string;
@@ -129,6 +139,8 @@ export interface StartParams extends GridConfig {
   recenter?: boolean;
   /** Reinvest (default) or send profits to an address; omitted = keep this grid's current setting */
   profits?: ProfitMode;
+  /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
+  guard?: () => Halt | null;
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -148,6 +160,12 @@ function econWarning(e: EconSummary): string | null {
   if (e.ok) return null;
   return `${e.netPerRoundTrip <= 0 ? 'Each completed trade is expected to lose money at this size' : 'Each completed trade is expected to make very little at this size'}: ${e.reasons.join(' ')}`;
 }
+
+/** Job id prefix of a close's sells */
+const CLOSE_JOB = 'close-';
+/** A close whose sales failed this many times in a row (10, 20, 40, 80 min apart) stops for a look: each try pays gas */
+const CLOSE_MAX_FAILS = 5;
+const CLOSE_RETRY_MS = 10 * 60_000;
 
 function newId() {
   return `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -308,6 +326,7 @@ export class GridEngine {
     if (!intervals.some((i) => i.status === 'waitingBuy')) throw new Error(`The price (${price}) is below the range. Start when it's inside the range, or lower the range.`);
     const profits = checkProfitMode(p.profits ?? this.state.profits);
     await this.checkPayoutTarget(profits);
+    this.refuseIfStopped(p.guard);
 
     this.executor = executor;
     const paperReset = p.mode === 'paper';
@@ -332,10 +351,22 @@ export class GridEngine {
     this.ev('started', `Grid started — ${this.label} ${p.lowerPrice.toPrecision(4)}–${p.upperPrice.toPrecision(4)} ×${p.gridCount} (${p.mode})`, { level: 'success' });
   }
 
+  /** Stop all / STOP chain pressed while this start awaited quotes and balances: it wins, and the grid stays off. */
+  private refuseIfStopped(guard?: () => Halt | null) {
+    const h = guard?.();
+    if (!h) return;
+    this.state.halt = { ...h, at: this.now() };
+    this.save();
+    this.ev('stopped', `Grid ${this.label}: not started — ${h.detail} was pressed while it was starting`, { level: 'warn', notify: true, data: { halt: this.state.halt } });
+    throw new StartStopped(h);
+  }
+
   /** Markets with a safety report (custom tokens, verified built-ins): re-run the eth_call buy/sell simulation before going live; honeypot / tax / unknown → refuse. */
   private async requireLiveSafety(key: string) {
     let s = this.hub.def(key).safety ?? null;
-    try { s = await this.hub.recheck(key); } catch (e) { this.tag('warn', `safety re-check failed: ${(e as Error).message}`); }
+    try { s = await this.hub.recheck(key); } catch (e) { s = this.hub.def(key).safety ?? null; this.tag('warn', `safety re-check failed: ${(e as Error).message}`); }
+    // Couldn't re-check: decided on the last known report (as before), and said so.
+    if (s?.stale && s.liveAllowed) this.tag('warn', `starting on the last known safety report from ${new Date(s.at).toISOString()} (stale: ${s.stale.why})`);
     if (!s?.liveAllowed) {
       throw new Error(`LIVE blocked — ${this.hub.label(key)} safety ${s?.risk ?? 'unknown'}: ${(s?.reasons ?? ['no safety check']).join(' ')}`);
     }
@@ -400,6 +431,9 @@ export class GridEngine {
         this.state.status = 'stopped';
         this.state.closing = false;
         this.save();
+        const halt = this.state.halt ?? null;
+        this.ev('stopped', `Grid ${this.label} stopped — can't close: ${this.lastError}. Its coins stay in the wallet.`, { level: 'warn', notify: true, data: { halt } });
+        this.tag('warn', `STOPPED (close requested, market unavailable: ${this.lastError}).`);
         return false;
       }
       this.finishClose();
@@ -408,6 +442,7 @@ export class GridEngine {
     this.noteClose(why);
     this.state.closing = true;
     this.state.status = 'running';
+    this.state.closeFails = null;
     this.closeNote = null;
     this.lastError = null;
     // Drop queued buys. A swap already broadcast is reconciled, never resent.
@@ -426,7 +461,7 @@ export class GridEngine {
     for (const iv of this.state.intervals) {
       if (iv.status !== 'holding' || !(iv.plsAmount > 1e-12) || queued.has(iv.index)) continue;
       this.state.queue.push({
-        id: `close-${this.state.id}-${iv.index}-${this.now().toString(36)}`,
+        id: `${CLOSE_JOB}${this.state.id}-${iv.index}-${this.now().toString(36)}`,
         intervalIndex: iv.index, side: 'sell', triggerPrice: price, levelPrice: iv.sellPrice,
         amount: iv.plsAmount, createdAt: this.now(), manual: true,
       });
@@ -436,7 +471,7 @@ export class GridEngine {
     const free = this.held() - onLevels;
     if (free > 1e-8 && !queued.has(-1)) {
       this.state.queue.push({
-        id: `close-free-${this.state.id}-${this.now().toString(36)}`,
+        id: `${CLOSE_JOB}free-${this.state.id}-${this.now().toString(36)}`,
         intervalIndex: -1, side: 'sell', triggerPrice: price, levelPrice: price,
         amount: free, createdAt: this.now(), manual: true,
       });
@@ -452,6 +487,7 @@ export class GridEngine {
     this.state.queue = [];
     this.state.status = 'stopped';
     this.state.closing = false;
+    this.state.closeFails = null;
     this.state.archivedAt = this.now();
     this.closeNote = null;
     this.save();
@@ -500,6 +536,8 @@ export class GridEngine {
     const band = (c.upperPrice - c.lowerPrice) / (c.upperPrice + c.lowerPrice);
     const next: GridConfig = { ...c, lowerPrice: +(price * (1 - band)).toPrecision(6), upperPrice: +(price * (1 + band)).toPrecision(6) };
     const { summary: econ } = await gridEconomics(this.hub.quoter(this.state.stable), next, this.d.approval ?? 'exact');
+    // Anything that changed while the costs were read (a close, a stop, a trade) wins over the move
+    if (this.state.closing || this.state.status !== 'running' || this.state.config !== c || this.state.inFlight || this.state.queue.length) return;
     const levels = calculateGridLevels(next.lowerPrice, next.upperPrice, next.gridCount);
     // Everything is sold at this point: the levels' buy sizes (start size + reinvested profit) carry over, spread evenly.
     const perLevel = this.state.intervals.reduce((a, i) => a + i.buyAmount, 0) / next.gridCount;
@@ -608,32 +646,42 @@ export class GridEngine {
   }
   stopLoop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  async tick(): Promise<void> {
+  async tick(ctx: TickCtx = {}): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
       if (this.state.inFlight && !this.draining) await this.reconcile();
-      const price = await this.executor.getPrice();
+      // The poll's price batch already read this market's price (MultiBot.tickAll); reading it again per grid doubled
+      // the RPC calls. A grid ticked on its own (or after a trade on its chain this poll) reads its own.
+      const price = ctx.price != null && ctx.price > 0 && !this.state.inFlight ? ctx.price : await this.executor.getPrice();
       this.state.lastPrice = price;
       this.state.lastPriceAt = this.now();
       this.hub.setSpot(this.state.stable, price);
-      try { this.balances = await this.executor.balances(); } catch { /* keep last */ }
+      try {
+        // Live balances are the wallet's: grids on the same market share one read per poll (paper balances are each grid's own).
+        this.balances = this.executor.mode === 'live' && ctx.wallet
+          ? { ...(await ctx.wallet(`bal:${this.state.stable}`, () => this.executor.balances())) }
+          : await this.executor.balances();
+      } catch { /* keep last */ }
       const signer = this.signer;
       if (signer) {
         try {
           if (this.executor.mode === 'live') this.walletBalances = this.balances;
           else {
-            const q = this.hub.quoter(this.state.stable);
-            const a = await signer.getAddress();
-            const [b, st] = await Promise.all([
-              q.base.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.base.address),
-              q.stable.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.stable.address),
-            ]);
-            this.walletBalances = { pls: Number(b) / 10 ** q.base.decimals, stable: Number(st) / 10 ** q.stable.decimals };
+            const read = async () => {
+              const q = this.hub.quoter(this.state.stable);
+              const a = await signer.getAddress();
+              const [b, st] = await Promise.all([
+                q.base.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.base.address),
+                q.stable.native ? q.reader.getBalance(a) : q.tokenBalance(a, q.stable.address),
+              ]);
+              return { pls: Number(b) / 10 ** q.base.decimals, stable: Number(st) / 10 ** q.stable.decimals };
+            };
+            this.walletBalances = { ...(ctx.wallet ? await ctx.wallet(`wallet:${this.state.stable}`, read) : await read()) };
           }
         } catch { /* keep last */ }
       }
-      if (this.state.closing && !this.state.inFlight) this.queueUnwindSells();
+      if (this.state.closing && !this.state.inFlight && !(this.state.closeFails && this.state.closeFails.retryAt > this.now())) this.queueUnwindSells();
       // A close only sells what is already held. New buys and follow-the-price wait until it isn't closing.
       if (this.state.status === 'running' && !this.state.inFlight && !this.state.closing) {
         const { intervals, queued } = evaluateTick(this.state.intervals, price, this.now());
@@ -687,6 +735,22 @@ export class GridEngine {
     }
   }
 
+  /** A close's sale failed to go through: the next try is 10, 20, 40, 80 min later; the 5th failure in a row stops the bot */
+  private closeFailed(why: string) {
+    const n = (this.state.closeFails?.n ?? 0) + 1;
+    if (n >= CLOSE_MAX_FAILS) {
+      this.state.closeFails = null;
+      this.stop(`selling to close failed ${n} times in a row (${why}); Close it again to try again`);
+      return;
+    }
+    const wait = CLOSE_RETRY_MS * 2 ** (n - 1);
+    this.state.closeFails = { n, retryAt: this.now() + wait };
+    // The other sales wait too: they would most likely fail the same way, each paying gas
+    this.state.queue = [];
+    this.closeNote = `selling to close failed (${why}); trying again in ${wait / 60_000} min`;
+    this.save();
+  }
+
   private skip(job: QueuedTrade, why: string) {
     this.state.intervals = onTradeSkipped(this.state.intervals, job);
     if (this.state.closing) this.closeNote = why;
@@ -725,19 +789,22 @@ export class GridEngine {
     let lotCost: number | undefined;
     let roundTripNet: number | undefined;
     let realized = 0;
+    // A sale of a close: in the position and its profit, but not a grid round trip
+    const cash = job.id.startsWith(CLOSE_JOB);
+    if (cash) this.state.closeFails = null;
     if (job.side === 'buy') {
       lotCost = stableAmount + gasQuote;
     } else {
       const pos = replay(this.modeTrades());
       lotCost = iv?.lotCost ?? (pos.plsHeld > 0 ? (pos.costUsd / pos.plsHeld) * plsAmount : undefined);
       realized = applySell(pos, plsAmount, stableAmount, gasQuote, lotCost).realized;
-      roundTripNet = realized;
+      roundTripNet = cash ? undefined : realized;
     }
     this.state.trades.push({
       id: f.txHash, network: this.netKey, side: job.side, intervalIndex: job.intervalIndex, stable: this.state.stable,
       plsAmount, stableAmount, price: execPrice, gasPls, gasUsd: gasQuote, txHash: f.txHash, approvalTxHash: f.approvalTxHash,
       timestamp: this.now(), realizedPnlUsd: realized, paper: this.state.mode === 'paper',
-      triggerPrice: job.triggerPrice, levelPrice: job.levelPrice, quotedPrice: f.quotedPrice, execPrice, slippagePct,
+      triggerPrice: job.triggerPrice, levelPrice: job.levelPrice, ...(cash ? { closeSale: true } : {}), quotedPrice: f.quotedPrice, execPrice, slippagePct,
       fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.seed ? { seed: job.seed } : {}),
       ...(f.taxPct ? { taxPct: f.taxPct } : {}), ...(f.outSource ? { outSource: f.outSource } : {}), ...(f.expectedOut != null ? { expectedOut: f.expectedOut } : {}),
       ...(this.def ? { dex: this.def.pool.dex, feeBps: this.def.pool.feeBps, ...(this.def.pool.feeTier != null ? { feeTier: this.def.pool.feeTier } : {}) } : {}),
@@ -777,6 +844,11 @@ export class GridEngine {
         await sleep(this.d.retryDelayMs ?? 5000);
         continue;
       }
+      // Over the impact cap first: a big sale's quote price includes its own impact, which the units guard would
+      // otherwise report as a units mismatch.
+      if (q.priceImpact > this.state.limits.maxPriceImpact) {
+        return this.skip(job, `price impact ${(q.priceImpact * 100).toFixed(2)}% > cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%${q.priceImpact > 0.5 ? ' (over half the price: a very thin pool for this size, or a units/decimals mismatch in the quote)' : ''}`);
+      }
       // Units guard: the router quote's effective price must be in the same units/direction as the trigger
       // (quote per PLS). A decimals or inversion bug shows up as orders-of-magnitude divergence.
       const ref = this.state.lastPrice ?? job.triggerPrice;
@@ -784,9 +856,6 @@ export class GridEngine {
       const qp = q.poolPrice ?? q.price;
       if (ref > 0 && (qp / ref > 1.5 || qp / ref < 1 / 1.5)) {
         return this.skip(job, `quote price ${qp.toPrecision(6)} inconsistent with spot ${ref.toPrecision(6)} ${this.def?.quote.symbol ?? this.state.stable}/${this.baseSym} — units/decimals mismatch, refusing`);
-      }
-      if (q.priceImpact > this.state.limits.maxPriceImpact) {
-        return this.skip(job, `price impact ${(q.priceImpact * 100).toFixed(2)}% > cap ${(this.state.limits.maxPriceImpact * 100).toFixed(2)}%`);
       }
       if (!q.balanceOk) return this.skip(job, `insufficient balance (${q.balanceNote})`);
       if (job.side === 'sell' && q.amountInHuman > replay(this.modeTrades()).plsHeld * 1.000001 + 1e-9) {
@@ -834,7 +903,11 @@ export class GridEngine {
         if (/reverted/.test((e as Error).message)) this.hub.suspect(this.state.stable, `swap reverted on ${this.label}`);
         this.tag('error', `execute failed (${attempt}/${maxAttempts}): ${(e as Error).message}`);
         this.save();
-        if (!o.retryable || attempt === maxAttempts) return this.skip(job, 'execution failed');
+        if (!o.retryable || attempt === maxAttempts) {
+          this.skip(job, 'execution failed');
+          if (this.state.closing && job.id.startsWith(CLOSE_JOB)) this.closeFailed((e as Error).message);
+          return;
+        }
         await sleep(this.d.retryDelayMs ?? 5000);
       }
     }
@@ -890,6 +963,7 @@ export class GridEngine {
     } else {
       this.recordFailure(job, r.gasPls, f.price, f.swapTxHash, 'swap reverted (reconciled)');
       this.skip(job, 'swap reverted');
+      if (this.state.closing && job.id.startsWith(CLOSE_JOB)) this.closeFailed('swap reverted');
     }
     this.save();
   }

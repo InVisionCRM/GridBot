@@ -1,5 +1,6 @@
 /**
  * Who stopped or closed a bot. Stored on the bot so a restart still shows it.
+ * Stop all also stores this halt on the capital router with subject 'router' (router.halt).
  * Request fields come from the request that is running now (AsyncLocalStorage). A timer, the tax watcher,
  * or startup has no request, so those are recorded as the app itself.
  */
@@ -64,4 +65,9 @@ export function isHalt(v: unknown): v is Halt {
   const o = v as Halt;
   return typeof o.at === 'number' && typeof o.what === 'string' && typeof o.detail === 'string'
     && (o.origin === 'localhost' || o.origin === 'gateway-owner' || o.origin === 'friend-copy' || o.origin === 'system');
+}
+
+/** A start that a Stop all / STOP chain overtook while it was under way. It is refused; `halt` is that press. */
+export class StartStopped extends Error {
+  constructor(readonly halt: Halt) { super(`Not started: ${halt.detail} was pressed while it was starting.`); }
 }
