@@ -15,7 +15,7 @@ import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { Usd } from './money';
 import { showHalt } from './haltText';
-import { isShortRun, rateOrRun, runLength } from './runRate';
+import { isShortRun, rateOrSpan, runLength } from './runRate';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -208,7 +208,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={`Fees earned minus costs and what range moves lost, in ${q}. The coins' own price move isn't in it: that happens whether or not the bot runs.`}>Earned after costs</L></span>
           <div className={`kpi-v ${cls(pnl?.net)}`}>{pnl ? <AnimatedNumber value={pnl.net} format={(x) => qty(x, q, 5)} /> : '—'}</div>
-          <span className="sub">{pnl && b.startValue ? <>{pct(pnl.net / b.startValue, 2, true)} of what you put in · {rateOrRun(pnl.net, runMs, (x) => qty(x, q, 3), (d) => `${qty(d, q, 3)} a day`)}<Usd v={pnl.net} k={k} /></> : ''}</span>
+          <span className="sub">{pnl && b.startValue ? <>{pct(pnl.net / b.startValue, 2, true)} of what you put in · {rateOrSpan(pnl.net, runMs, (d) => `${qty(d, q, 3)} a day`)}<Usd v={pnl.net} k={k} /></> : ''}</span>
         </div>
         <div className="kpi">
           <span><L tip="The coins in the position right now (they change as the price moves inside the range), and its share of the liquidity trading at today's price, which is its share of every trade's fee. Out of range the share is 0.">Liquidity provided</L></span>

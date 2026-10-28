@@ -284,9 +284,9 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           {metrics && facts && <>
             <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
-            <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'Ran under a day: the net for the run, not a yearly rate' : undefined}>{isShortRun(facts.ageMs)
-              // under a day: the run's net % with its length (two lines: the column is narrow), not a yearly rate
-              ? facts.pnlPct == null ? '—' : <>{pct(facts.pnlPct, 1, true)}<small className="desk-run">{runSpan(facts.ageMs)}</small></>
+            <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'Ran under a day: no yearly rate yet (the net % for the run is in the P&L % column)' : undefined}>{isShortRun(facts.ageMs)
+              // under a day: no yearly rate, and the run's net % is already one column to the left, so only "—" and the run length
+              ? <>—<small className="desk-run">{runSpan(facts.ageMs)}</small></>
               : facts.est.d365?.pct == null ? '—' : pct(facts.est.d365.pct, 1, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
             <span className="desk-fees">{facts.feesEarnedUsd == null ? '—' : usd(facts.feesEarnedUsd)}</span>

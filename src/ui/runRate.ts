@@ -3,7 +3,7 @@
  *
  * A rate from a short run says little: STONKD LP #2 showed about −2,361 USDG a day from an 8.8-hour paper run. Under a
  * day, the page shows the net for the run with its length instead ("−866 USDG over 8.8h"). Display only: the numbers
- * behind it (API fields, estimates, sorting) are unchanged.
+ * behind it (API fields, estimates) are unchanged; the APR sort follows what the APR column shows (`aprShown`).
  *
  * "Ran" is the bot's age since its current run started: `startedAt` (`openedAt` for token-trader positions), which a
  * Start or Restart sets and a Resume keeps. It is the same span every per-day figure on the page already divides by, so
@@ -44,5 +44,25 @@ export function runSpan(runMs: number | null | undefined): string {
 export function rateOrRun(net: number | null | undefined, runMs: number | null | undefined, fmtNet: (x: number) => string, rate: (perDay: number) => string): string {
   if (typeof net !== 'number' || !Number.isFinite(net)) return '—';
   if (isShortRun(runMs)) return `${fmtNet(net)} ${runSpan(runMs)}`;
+  return rate(net / ((runMs as number) / DAY_MS));
+}
+
+/**
+ * The number the APR column shows, and sorts by: the yearly estimate once the bot has run a day, otherwise nothing
+ * (the column shows "—" with the run length). Under a day the run's net % is already in the P&L % column, so it is
+ * not repeated here (one figure per screen).
+ */
+export function aprShown(runMs: number | null | undefined, yearPct: number | null | undefined): number | null {
+  if (isShortRun(runMs)) return null;
+  return typeof yearPct === 'number' && Number.isFinite(yearPct) ? yearPct : null;
+}
+
+/**
+ * The tail of a sub-line under a headline net: the per-day rate once the bot has run a day, otherwise only the run
+ * length ("over 8.8h"), because the net itself is the headline right above it.
+ */
+export function rateOrSpan(net: number | null | undefined, runMs: number | null | undefined, rate: (perDay: number) => string): string {
+  if (isShortRun(runMs)) return runSpan(runMs);
+  if (typeof net !== 'number' || !Number.isFinite(net)) return '—';
   return rate(net / ((runMs as number) / DAY_MS));
 }
