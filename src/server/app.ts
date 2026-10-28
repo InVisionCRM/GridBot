@@ -22,6 +22,7 @@ import type { FriendsHost } from './friends/host';
 import type { GeckoRelay } from './friends/relay';
 import type { Autopilot, AutoOptions, Budget } from './bot/autopilot';
 import type { TokenTrader, TraderOptions } from './bot/tokenTrader';
+import type { Router } from './router/router';
 import { noKey } from './words';
 import { fetchJson } from './fetchJson';
 import { StatusFeed } from './statusFeed';
@@ -43,6 +44,8 @@ export interface AppOpts {
   autopilot?: Autopilot;
   /** New-token trader and sniper (server only) */
   tokenTrader?: TokenTrader;
+  /** Capital router settings (host only). Absent in tests that don't construct one. */
+  router?: Router;
   /** A chart was opened: the candle sync keeps every timeframe of that market for a while (server only) */
   viewCandles?: (pair: string) => void;
   /** Liquidity replay over a pool's real trades (server only: reads the chain) */
@@ -362,6 +365,13 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
   app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
+
+  // ── Capital router (settings only; this does not move funds) ──
+  const router = () => { if (!o.router) throw new Error('The capital router is not available.'); return o.router; };
+  app.get('/api/router', wrap(() => router().status()));
+  app.put('/api/router', wrap((req) => router().update(req.body ?? {})));
+  app.post('/api/router/on', wrap(() => router().turnOn()));
+  app.post('/api/router/off', wrap(() => router().turnOff()));
   // After Stop all / STOP chain: new buys and snipes may happen again
   app.post('/api/token-trader/resume-entries', wrap(() => { tt().resumeEntries(); return plain(tt().status()); }));
 
