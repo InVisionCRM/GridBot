@@ -185,8 +185,10 @@ export function gateToken(g: GateInput): GateResult {
   if (g.mode === 'live' && !g.liveAllowed) return hard('safety check does not allow live trading');
   if (g.risk === 'safe' || g.risk === 'medium') {
     if (g.canPause === true) return hard('owner can pause');
-    // The V3 report is optional. When it is absent these two lines are the old check: true blocks, null does not.
+    // The V3 report is optional. When it is absent, only an explicit lpUnlocked true blocks; null does not.
+    // When the check ran, unverified and verified-but-not-locked both block, even if lpUnlocked was left null.
     if (g.v3Lp?.status === 'unverified') return hard('V3 liquidity lock unverified');
+    if (g.v3Lp?.status === 'verified' && !v3LockSatisfies(g.v3Lp)) return hard('liquidity is unlocked');
     if (g.lpUnlocked === true && !v3LockSatisfies(g.v3Lp)) return hard('liquidity is unlocked');
     if (tax > maxTax) return hard(`tax ${(tax * 100).toFixed(1)}% is over the ${(maxTax * 100).toFixed(0)}% cap`);
   }
