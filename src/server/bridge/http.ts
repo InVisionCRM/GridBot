@@ -1,3 +1,4 @@
+import { REDACT_FLOOR } from '../bot/logger';
 import { BridgeError, sanitizeText } from './errors';
 import type { RateLimiter } from './rateLimit';
 import type { BridgeLog } from './types';
@@ -182,12 +183,17 @@ export function baseHeaders(keyHeader?: { name: string; value: string }): Record
   return headers;
 }
 
+/** A quote key is one header token, at least REDACT_FLOOR characters, and at most 256. */
+export function isQuoteKey(v: string): boolean {
+  return v.length >= REDACT_FLOOR && v.length <= 256 && /^[A-Za-z0-9._~+/=-]+$/.test(v);
+}
+
 /** A quote key is a single header token. The value is never put in an error. */
 export function optionalKey(raw: string | undefined, provider: string): string | undefined {
   if (raw == null) return undefined;
   const v = raw.trim();
   if (!v) return undefined;
-  if (v !== raw || !/^[A-Za-z0-9._~+/=-]{6,256}$/.test(v)) {
+  if (v !== raw || !isQuoteKey(v)) {
     throw new BridgeError(provider, 'invalid', `${provider}: quote key was rejected`);
   }
   return v;

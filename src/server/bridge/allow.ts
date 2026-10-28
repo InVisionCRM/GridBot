@@ -1,6 +1,6 @@
-import { Interface, getAddress, zeroPadValue } from 'ethers';
+import { Interface, getAddress, zeroPadValue, type Result } from 'ethers';
 import { bad, lifiFeeAmount, sameAddress } from './parse';
-import { APPROVE_SELECTOR, decodeApprove, encodeApprove } from './tx';
+import { APPROVE_SELECTOR, decodeApprove, encodeApprove, matchesCanonical } from './tx';
 import type { BridgeId, BridgeQuoteRequest, UnsignedTx } from './types';
 
 /**
@@ -170,6 +170,28 @@ function selectorOf(data: string): string {
   return data.slice(0, 10).toLowerCase();
 }
 
+/**
+ * ethers decodeFunctionData ignores trailing bytes. Re-encode and require the original
+ * calldata to be that encoding, byte for byte. Across depositV3 may also be exactly
+ * that encoding plus `1dc0de` and the configured 2-byte integrator id.
+ */
+function decodeExact(provider: string, iface: Interface, name: string, data: string, suffix = ''): Result {
+  let decoded: Result;
+  try {
+    decoded = iface.decodeFunctionData(name, data);
+  } catch {
+    bad(provider, 'deposit calldata is not decodable');
+  }
+  let encoded: string;
+  try {
+    encoded = iface.encodeFunctionData(name, decoded).toLowerCase();
+  } catch {
+    bad(provider, 'deposit calldata is not decodable');
+  }
+  if (!matchesCanonical(data, encoded, suffix)) bad(provider, 'deposit calldata is not canonical');
+  return decoded;
+}
+
 function emptyBytes(data: string): boolean {
   return data === '0x' || data === '0x0';
 }
@@ -304,8 +326,8 @@ function decodeLifi(provider: string, data: string, req: BridgeQuoteRequest): De
   const v1 = LIFI_V1.getFunction('startBridgeTokensViaAcross')!.selector.toLowerCase();
   if (sel === v4swap || sel === v4direct) {
     const decoded = sel === v4swap
-      ? LIFI_V4.decodeFunctionData('swapAndStartBridgeTokensViaAcrossV4', data)
-      : LIFI_V4.decodeFunctionData('startBridgeTokensViaAcrossV4', data);
+      ? decodeExact(provider, LIFI_V4, 'swapAndStartBridgeTokensViaAcrossV4', data)
+      : decodeExact(provider, LIFI_V4, 'startBridgeTokensViaAcrossV4', data);
     const bridge = bridgeFields(decoded[0]);
     const swaps = sel === v4swap ? decoded[1] as ReadonlyArray<{ sendingAssetId: string; fromAmount: bigint; requiresDeposit: boolean }> : null;
     const across = (sel === v4swap ? decoded[2] : decoded[1]) as {
@@ -324,8 +346,8 @@ function decodeLifi(provider: string, data: string, req: BridgeQuoteRequest): De
   }
   if (sel === relaySwap || sel === relayDirect) {
     const decoded = sel === relaySwap
-      ? LIFI_RELAY.decodeFunctionData('swapAndStartBridgeTokensViaRelayDepository', data)
-      : LIFI_RELAY.decodeFunctionData('startBridgeTokensViaRelayDepository', data);
+      ? decodeExact(provider, LIFI_RELAY, 'swapAndStartBridgeTokensViaRelayDepository', data)
+      : decodeExact(provider, LIFI_RELAY, 'startBridgeTokensViaRelayDepository', data);
     const bridge = bridgeFields(decoded[0]);
     const swaps = sel === relaySwap ? decoded[1] as ReadonlyArray<{ sendingAssetId: string; fromAmount: bigint; requiresDeposit: boolean }> : null;
     const extra = (sel === relaySwap ? decoded[2] : decoded[1]) as { orderId: string; depositorAddress: string };
@@ -335,7 +357,7 @@ function decodeLifi(provider: string, data: string, req: BridgeQuoteRequest): De
     return fromBridge(provider, req, bridge, pull, null, null, String(extra.orderId).toLowerCase());
   }
   if (sel === v1) {
-    const bridge = bridgeFields(LIFI_V1.decodeFunctionData('startBridgeTokensViaAcross', data)[0]);
+    const bridge = bridgeFields(decodeExact(provider, LIFI_V1, 'startBridgeTokensViaAcross', data)[0]);
     if (bridge.hasSourceSwaps) bad(provider, 'approval amount is missing');
     return fromBridge(provider, req, bridge, asBig(bridge.minAmount), null, null, null);
   }
@@ -366,7 +388,7 @@ function classifyRelayCall(provider: string, req: BridgeQuoteRequest, router: st
       return { kind: 'approve', spender: approved.spender, amount: approved.amount };
     }
     if (sel === WETH_WITHDRAW.getFunction('withdraw')!.selector.toLowerCase()) {
-      const wad = asBig(WETH_WITHDRAW.decodeFunctionData('withdraw', data)[0]);
+      const wad = asBig(decodeExact(provider, WETH_WITHDRAW, 'withdraw', data)[0]);
       // The WETH sequence check is the one place withdraw, native value, and
       // cleanup amount are compared with amountIn.
       return { kind: 'withdraw', amount: wad };
@@ -380,11 +402,11 @@ function classifyRelayCall(provider: string, req: BridgeQuoteRequest, router: st
       return { kind: 'fund', value };
     }
     if (sel === ROUTER_CALLS.getFunction('cleanupNativeViaCall')!.selector.toLowerCase()) {
-      const cleaned = ROUTER_CALLS.decodeFunctionData('cleanupNativeViaCall', data);
+      const cleaned = decodeExact(provider, ROUTER_CALLS, 'cleanupNativeViaCall', data);
       if (!sameAddress(String(cleaned.to), RELAY_DEPOSITORY)) bad(provider, 'deposit recipient does not match');
       const inner = String(cleaned.data);
       if (selectorOf(inner) !== RELAY_NATIVE.getFunction('depositNative')!.selector.toLowerCase()) bad(provider, 'deposit calldata is not decodable');
-      const native = RELAY_NATIVE.decodeFunctionData('depositNative', inner);
+      const native = decodeExact(provider, RELAY_NATIVE, 'depositNative', inner);
       assertDepositor(provider, getAddress(String(native.depositor)), req.sender, false);
       const amt = asBig(cleaned.amount);
       if (value !== 0n) bad(provider, 'deposit amount does not match');
@@ -392,7 +414,7 @@ function classifyRelayCall(provider: string, req: BridgeQuoteRequest, router: st
     }
     if (sel === ROUTER_CALLS.getFunction('cleanupErc20s')!.selector.toLowerCase()) {
       if (value !== 0n) bad(provider, 'deposit amount does not match');
-      const cleaned = ROUTER_CALLS.decodeFunctionData('cleanupErc20s', data);
+      const cleaned = decodeExact(provider, ROUTER_CALLS, 'cleanupErc20s', data);
       const tokens = cleaned[0] as readonly string[];
       const recipients = cleaned[1] as readonly string[];
       const amounts = cleaned[2] as readonly bigint[];
@@ -409,7 +431,7 @@ function classifyRelayCall(provider: string, req: BridgeQuoteRequest, router: st
   }
   if (sameAddress(target, RELAY_DEPOSITORY)) {
     if (sel === RELAY_NATIVE.getFunction('depositNative')!.selector.toLowerCase()) {
-      const native = RELAY_NATIVE.decodeFunctionData('depositNative', data);
+      const native = decodeExact(provider, RELAY_NATIVE, 'depositNative', data);
       assertDepositor(provider, getAddress(String(native.depositor)), req.sender, false);
       if (value !== req.amountIn) bad(provider, 'deposit amount does not match');
     }
@@ -471,7 +493,7 @@ function auditRelayCalls(provider: string, req: BridgeQuoteRequest, router: stri
 function decodeRelay(provider: string, data: string, req: BridgeQuoteRequest, target: string | undefined): DecodedDeposit | null {
   const sel = selectorOf(data);
   if (sel === RELAY_ERC20.getFunction('depositErc20')!.selector.toLowerCase()) {
-    const erc = RELAY_ERC20.decodeFunctionData('depositErc20', data);
+    const erc = decodeExact(provider, RELAY_ERC20, 'depositErc20', data);
     // Top-level call to the depository: msg.sender is the user, so address(0) is the user.
     assertDepositor(provider, getAddress(String(erc.depositor)), req.sender, true);
     const token = getAddress(String(erc.token));
@@ -484,7 +506,7 @@ function decodeRelay(provider: string, data: string, req: BridgeQuoteRequest, ta
     };
   }
   if (sel === RELAY_NATIVE.getFunction('depositNative')!.selector.toLowerCase()) {
-    const native = RELAY_NATIVE.decodeFunctionData('depositNative', data);
+    const native = decodeExact(provider, RELAY_NATIVE, 'depositNative', data);
     assertDepositor(provider, getAddress(String(native.depositor)), req.sender, false);
     bad(provider, 'approval amount is missing');
   }
@@ -492,7 +514,7 @@ function decodeRelay(provider: string, data: string, req: BridgeQuoteRequest, ta
   if (!target) bad(provider, 'deposit target is not allowlisted');
   const pair = relayPair(req.srcChain, target);
   if (!pair) bad(provider, 'deposit target is not allowlisted');
-  const decoded = RELAY.decodeFunctionData('transferAndMulticall', data);
+  const decoded = decodeExact(provider, RELAY, 'transferAndMulticall', data);
   if (!sameAddress(getAddress(String(decoded.refundTo)), req.sender) || !sameAddress(getAddress(String(decoded.nftRecipient)), req.sender)) {
     bad(provider, 'refund recipient does not match');
   }
@@ -510,13 +532,14 @@ function decodeRelay(provider: string, data: string, req: BridgeQuoteRequest, ta
   };
 }
 
-export function decodeDeposit(provider: BridgeId, data: string, req: BridgeQuoteRequest, target?: string): DecodedDeposit {
+export function decodeDeposit(provider: BridgeId, data: string, req: BridgeQuoteRequest, target?: string, integratorId?: string): DecodedDeposit {
   const sel = selectorOf(data);
   try {
     if (provider === 'across' && sel === DEPOSIT_V3.getFunction('depositV3')!.selector.toLowerCase()) {
-      // Direct depositV3 may end with Across's 1dc0de delimiter plus a 2-byte integrator id.
-      // It is not an ABI argument. Strip that suffix before decoding.
-      const d = DEPOSIT_V3.decodeFunctionData('depositV3', data.replace(/1dc0de[0-9a-f]{4}$/i, ''));
+      // Direct depositV3 may end with Across's 1dc0de delimiter plus the configured 2-byte id.
+      // That tail is not an ABI argument. Any other extra byte is rejected.
+      const suffix = integratorId ? `1dc0de${integratorId}` : '';
+      const d = decodeExact(provider, DEPOSIT_V3, 'depositV3', data, suffix);
       if (!emptyBytes(String(d.message))) bad(provider, 'deposit message is not empty');
       return {
         ...baseDecoded(getAddress(String(d.inputToken)), asBig(d.inputAmount)),
@@ -529,7 +552,7 @@ export function decodeDeposit(provider: BridgeId, data: string, req: BridgeQuote
       };
     }
     if (provider === 'across' && sel === SPOKE_DEPOSIT.getFunction('deposit')!.selector.toLowerCase()) {
-      const d = SPOKE_DEPOSIT.decodeFunctionData('deposit', data);
+      const d = decodeExact(provider, SPOKE_DEPOSIT, 'deposit', data);
       if (!emptyBytes(String(d.message))) bad(provider, 'deposit message is not empty');
       const amount = asBig(d.inputAmount);
       return {
@@ -543,7 +566,7 @@ export function decodeDeposit(provider: BridgeId, data: string, req: BridgeQuote
       };
     }
     if (provider === 'across' && sel === SWAP.getFunction('swapAndBridge')!.selector.toLowerCase()) {
-      const d = SWAP.decodeFunctionData('swapAndBridge', data)[0];
+      const d = decodeExact(provider, SWAP, 'swapAndBridge', data)[0];
       const spoke = ACROSS_SPOKE[req.srcChain];
       if (!spoke || !sameAddress(String(d.spokePool), spoke)) bad(provider, 'spoke pool does not match');
       if (!emptyBytes(String(d.depositData.message))) bad(provider, 'deposit message is not empty');
@@ -584,9 +607,9 @@ export function decodeDeposit(provider: BridgeId, data: string, req: BridgeQuote
  * It is not compared with the destination minimum. That minimum is quote.minOut,
  * which assertQuoteMatches floors against slippage on its own.
  */
-export function assertGuarded(provider: BridgeId, req: BridgeQuoteRequest, deposit: UnsignedTx, approval: UnsignedTx | null) {
+export function assertGuarded(provider: BridgeId, req: BridgeQuoteRequest, deposit: UnsignedTx, approval: UnsignedTx | null, integratorId?: string) {
   assertDepositTarget(provider, req.srcChain, deposit.to);
-  const decoded = decodeDeposit(provider, deposit.data, req, deposit.to);
+  const decoded = decodeDeposit(provider, deposit.data, req, deposit.to, integratorId);
   if (decoded.recipientInCalldata) {
     if (!decoded.recipient || !sameAddress(decoded.recipient, req.recipient)) bad(provider, 'deposit recipient does not match');
   }

@@ -54,7 +54,7 @@ export class AcrossClient implements BridgeProvider {
     const key = quoteKey(this.id, norm);
     return loadQuote(this.d.cache, this.inflight, key, async () => {
       const quote = norm.sameAsset ? await this.fromSuggestedFees(norm) : await this.fromSwap(norm);
-      assertQuoteMatches(norm, quote, this.d.now());
+      assertQuoteMatches(norm, quote, this.d.now(), this.d.integratorId);
       return quote;
     });
   }
@@ -221,7 +221,7 @@ export class AcrossClient implements BridgeProvider {
     };
     if (gas != null) deposit.gasLimit = gas;
     assertDepositTarget(P, req.srcChain, deposit.to);
-    const decoded = decodeDeposit(P, deposit.data, req, deposit.to);
+    const decoded = decodeDeposit(P, deposit.data, req, deposit.to, this.d.integratorId);
     if (decoded.outputAmount != null && decoded.outputAmount !== amountOut) bad(P, 'amountOut does not match');
     const pull = quotedPull(body, req, decoded.amount, decoded.pullAmount);
     const rawApproval = readApproval(body.approvalTxns, req);

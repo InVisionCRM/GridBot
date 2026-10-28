@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { FetchRequest, JsonRpcProvider, Wallet } from 'ethers';
 import { getNetwork, type NetworkKey } from '../live/networks';
 import { REDACT_FLOOR, registerSecret } from './bot/logger';
+import { isQuoteKey } from './bridge/http';
 import { ownerLoginFrom, parsePassHash, type OwnerConfig } from './friends/owner';
 import { vapidSubjectFrom } from './push/send';
 
@@ -92,7 +93,7 @@ function takeOne(name: 'ACROSS_API_KEY' | 'RELAY_API_KEY' | 'LIFI_API_KEY'): str
   delete process.env[name];
   if (!raw || !raw.trim()) return null;
   const v = raw.trim();
-  if (v.length < REDACT_FLOOR) {
+  if (!isQuoteKey(v)) {
     shortQuoteWarnings.push(`${name} was refused`);
     return null;
   }

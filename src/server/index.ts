@@ -6,7 +6,7 @@ import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
 import { DurableJsonStore } from './bot/durableStore';
 import { ActivityBus } from './bot/activity';
-import { createBridgeProviders } from './bridge';
+import { bootBridgeClients } from './bridge';
 import { acrossIntegratorId, bridgeProviderConfig, createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, shortQuoteKeyWarnings, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
 import { Router, type RouterFile } from './router/router';
 import { createApp } from './app';
@@ -46,7 +46,7 @@ const log = new Logger();
 for (const msg of shortQuoteKeyWarnings()) log.warn(msg);
 // Quote clients only. Nothing here selects a route or sends a bridge transaction.
 const quoteKeys = bridgeProviderConfig();
-export const bridgeQuoteClients = createBridgeProviders({
+export const bridgeQuoteClients = bootBridgeClients({
   keys: {
     ...(quoteKeys.across ? { across: quoteKeys.across.apiKey } : {}),
     ...(quoteKeys.relay ? { relay: quoteKeys.relay.apiKey } : {}),

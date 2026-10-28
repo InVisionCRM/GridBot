@@ -1,3 +1,5 @@
+import { REDACT_FLOOR } from '../bot/logger';
+
 export type BridgeErrorCode = 'http' | 'rate_limit' | 'invalid' | 'timeout';
 
 export class BridgeError extends Error {
@@ -15,7 +17,7 @@ export class BridgeError extends Error {
 export function sanitizeText(msg: string, secrets: readonly string[]): string {
   let out = msg;
   for (const s of secrets) {
-    if (s.length < 8) continue;
+    if (s.length < REDACT_FLOOR) continue;
     out = out.split(s).join('[REDACTED]');
     const enc = encodeURIComponent(s);
     if (enc !== s) out = out.split(enc).join('[REDACTED]');

@@ -12,7 +12,7 @@
  * follow that table's relation `same-asset`. Ethereum USDC and Robinhood USDG are not the same
  * coin. Canonical slow routes are not a provider here and must not be added as one.
  */
-import { redact, registerSecret } from '../bot/logger';
+import { REDACT_FLOOR, redact, registerSecret } from '../bot/logger';
 import { BridgeError } from './errors';
 import { QuoteCache, QUOTE_CACHE_TTL_MS } from './cache';
 import type { BridgeDeps } from './deps';
@@ -61,7 +61,7 @@ export function createBridgeProviders(o: BridgeClientOptions = {}): BridgeClient
     lifi: optionalKey(o.keys?.lifi, 'lifi'),
   };
   const secrets = [keys.across, keys.relay, keys.lifi].filter((s): s is string => !!s);
-  for (const secret of secrets) registerSecret(secret, 6);
+  for (const secret of secrets) registerSecret(secret, REDACT_FLOOR);
   const integratorId = normalizeIntegratorId(o.integratorId);
   const sleep = o.sleep ?? delay;
   const log = o.log ? (level: 'info' | 'warn' | 'error', msg: string) => o.log!(level, redact(msg)) : undefined;
@@ -84,6 +84,16 @@ function normalizeIntegratorId(raw: string | undefined): string | undefined {
 
 function deps(common: Omit<BridgeDeps, 'limiter' | 'key' | 'integratorId'>, limiter: RateLimiter, key: string | undefined, integratorId?: string): BridgeDeps {
   return { ...common, limiter, ...(key ? { key } : {}), ...(integratorId ? { integratorId } : {}) };
+}
+
+/** Build the quote clients. A bad key or integrator id does not escape this function. */
+export function bootBridgeClients(o: BridgeClientOptions = {}): BridgeClients {
+  try {
+    return createBridgeProviders(o);
+  } catch {
+    o.log?.('warn', 'bridge quote clients were not started');
+    return createBridgeProviders({ http: o.http, fetch: o.fetch, now: o.now, sleep: o.sleep, timeoutMs: o.timeoutMs, cache: o.cache, limits: o.limits, log: o.log });
+  }
 }
 
 export function bridgeQuote(clients: BridgeClients, provider: BridgeId, req: BridgeQuoteRequest) {
