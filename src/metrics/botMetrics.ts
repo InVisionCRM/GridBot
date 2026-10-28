@@ -155,6 +155,28 @@ export function estHint(age: number | null, windowMs: number): string | null {
 }
 
 /** Milliseconds since start. Null when the start time is missing or in the future. */
+/**
+ * Where a bot's history ends, for rates, estimates and APR (from #50, now in the one server definition). A running
+ * (or still-closing) bot, an idle one or one with no status: now. A paused liquidity bot that still has its position
+ * open: now as well, since it keeps earning fees while paused; freezing the window at the pause would inflate its
+ * per-day figures and APR without limit. A stopped grid / trend, or a closed / archived LP or one with no position
+ * left: its recorded stop / close time (halt.at), else the last thing it did (latest of its last reading, last fill,
+ * last range move, last trade), else when it was archived; never later than now.
+ */
+export function historyEnd(b: Obj, now: number): number {
+  const status = typeof b?.status === 'string' ? b.status : null;
+  if (!status || status === 'running' || status === 'idle' || b.closing) return now;
+  if (b.kind === 'lp' && status === 'stopped' && b.position && !b.archivedAt) return now;
+  const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  const cap = (v: number) => Math.min(v, now);
+  if (ok(b.halt?.at)) return cap(b.halt.at);
+  const lastTrade = Array.isArray(b.trades) ? b.trades.reduce((m: number, t: Obj) => (ok(t?.timestamp) && t.timestamp > m ? t.timestamp : m), 0) : 0;
+  const last = Math.max(...[b.priceAt, b.lastPriceAt, b.lastMoveAt, b.lastRerangeAt, lastTrade].filter(ok), 0);
+  if (last > 0) return cap(last);
+  if (ok(b.archivedAt)) return cap(b.archivedAt);
+  return now;
+}
+
 export function ageMs(startedAt: number | null | undefined, now: number): number | null {
   if (typeof startedAt !== 'number' || !Number.isFinite(startedAt) || startedAt <= 0 || startedAt > now) return null;
   return now - startedAt;
@@ -185,6 +207,8 @@ interface Core {
   generated: Record<string, number> | null; px: Record<string, number | null>;
   dollarsMade: number | null; rebalanceLoss: number | null; taxes: number | null;
   bridge?: BotMetrics['bridgeCosts']; inTransitUsd?: number | null;
+  /** End of the bot's history for rates / estimates / APR (historyEnd); now when absent */
+  end?: number;
 }
 
 /** Σ units × price; null if any non-zero leg has no price. */
@@ -207,7 +231,8 @@ function finish(c: Core, now: number): BotMetrics {
   const totalUsd = usd(total);
   const capUsd = usd(c.capitalIn);
   const pct = total != null && c.capitalIn != null && c.capitalIn > 0 ? total / c.capitalIn : null;
-  const age = ageMs(c.startedAt, now);
+  // rates, estimates and APR span the active history: to now while it runs, to its stop / close time after
+  const age = ageMs(c.startedAt, c.end ?? now);
   // Cross-chain move costs come off the coins generated (hook; empty until bridging exists).
   const bridge = c.bridge ?? null;
   const generated = c.generated && bridge
@@ -284,7 +309,7 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   // liquidation at the day's price, so it is in Total P&L (price change) but not here. Older payloads: realized.
   const gen = num(b.stats?.generated) ?? realized;
   return finish({
-    kind: 'grid', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt),
+    kind: 'grid', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'grid' }, now),
     capitalIn: cap, currentValue: equity == null ? null : equity - sent, paidOut: sent, extraCost: 0,
     realized, unrealized, feesEarned: null, feesCollected: null, feesUncollected: null,
     gas: num(b.stats?.totalGas), swapCost: num(b.stats?.totalFees),
@@ -303,7 +328,7 @@ export function trendMetrics(b: Obj, now = Date.now()): BotMetrics {
   const n = num(b.moveCount);
   const sym = String(b.quoteSym ?? b.quote ?? 'quote');
   return finish({
-    kind: 'trend', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt),
+    kind: 'trend', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'trend' }, now),
     capitalIn: cap, currentValue: equity, paidOut: 0, extraCost: 0,
     realized, unrealized, feesEarned: null, feesCollected: null, feesUncollected: null,
     gas: num(b.pnl?.gas), swapCost: num(b.pnl?.fees),
@@ -371,7 +396,7 @@ export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
   const lo = num(b.position?.lower), hi = num(b.position?.upper);
   const n = num(b.reranges);
   return finish({
-    kind: 'lp', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt),
+    kind: 'lp', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'lp' }, now),
     capitalIn: start, currentValue: p ? value : null, paidOut: sent, extraCost: gas ?? 0,
     realized: num(p?.net), unrealized: num(p?.price),
     feesEarned: num(p?.fees), feesCollected: num(b.totals?.fees), feesUncollected: owed,

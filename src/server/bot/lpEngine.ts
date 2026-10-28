@@ -309,7 +309,7 @@ export class LpEngine {
   private get gate() { const m = this.def; return m ? this.hub.rt(m.chainId).gate : undefined; }
   private log(level: 'info' | 'warn' | 'error', msg: string) { this.d.log[level](`[${this.state.id}] ${msg}`); }
   private ev(type: 'started' | 'stopped' | 'filled' | 'range' | 'error' | 'info' | 'sent', msg: string, extra: { level?: 'info' | 'success' | 'warn' | 'error'; notify?: boolean; data?: Record<string, unknown> } = {}) {
-    this.d.emit?.({ type, msg, botId: this.state.id, kind: 'lp', pair: this.state.market, chainId: this.chainId, ...extra });
+    this.d.emit?.({ type, msg, botId: this.state.id, kind: 'lp', pair: this.state.market, chainId: this.chainId, ...extra, mode: this.state.mode });
   }
   private save() { this.d.store.save(this.state); }
 
