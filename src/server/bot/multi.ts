@@ -37,6 +37,9 @@ import { DEFAULT_TREND, type DrawnLine, type TrendConfig } from '../../market/st
 import { runGridBacktest, runTrendBacktest, sweepTrend, SWEEP_AXES, type BtResult, type SweepKey } from '../../market/backtest';
 import { drawdown, pushCapped, tradeStats } from '../../market/stats';
 
+/** A LIVE resume whose safety check was still running when Stop all / STOP chain / Stop landed: the stop won. */
+export class ResumeCancelled extends Error { readonly code = 'RESUME_CANCELLED'; }
+
 export type AlertType = 'price_above' | 'price_below' | 'rsi_above' | 'rsi_below' | 'grid_range';
 export interface Alert {
   id: string;
@@ -328,13 +331,35 @@ export class MultiBot {
   private needsResumeCheck(mode: string, status: string, key: string) {
     return mode === 'live' && status !== 'running' && this.hub.has(key) && !!this.hub.def(key).safety;
   }
-  private async resumeSafety(id: string, key: string, label: string): Promise<StartOverride | null> {
+  /**
+   * The fresh check for a LIVE resume, then `go` (the engine's resume) — unless a stop landed while the check ran.
+   * The bot is still `stopped` during the check, so Stop all / STOP chain / Stop (this bot) can't reach it through the
+   * engine; the start guard (Stop all / STOP chain, same as add()) and this bot's stop epoch are read again right
+   * before `go`. A stop that landed wins: the bot stays stopped, the cancelled resume is recorded (activity + log), and
+   * the caller gets ResumeCancelled.
+   */
+  private async resumeSafety(id: string, key: string, label: string, go: (o: StartOverride | null) => void): Promise<void> {
+    const guard = this.startGuard(() => this.hub.def(key).chainId);
+    const epoch = this.botStops.get(id)?.seq ?? 0;
     const info = (await this.hub.liveCheck(key, { startAnyway: true })).override;
-    if (!info) return null;
+    const mine = this.botStops.get(id);
+    const halt = guard() ?? (mine && mine.seq !== epoch ? mine.halt : null);
+    if (halt) {
+      const msg = `${label}: resume cancelled — ${halt.what === 'stop-all' ? 'Stop all' : halt.what === 'chain-stop' ? 'STOP chain' : 'Stop'} was pressed while the safety check ran; the bot stays stopped`;
+      this.d.log.warn(msg);
+      this.activity.emitEvent({ type: 'alert', kind: 'system', level: 'warn', notify: true, pair: key, chainId: this.hub.def(key).chainId, botId: id, msg, data: { halt, resumeCancelled: true } });
+      throw new ResumeCancelled(msg);
+    }
+    if (!info) { go(null); return; }
     const audit = startOverride(info, this.now(), 'resume');
+    go(audit);
     this.activity.emitEvent({ type: 'alert', kind: 'system', level: 'warn', notify: true, pair: key, chainId: this.hub.def(key).chainId, botId: id,
       msg: `${label}: resumed on the last passing safety report from ${new Date(info.lastKnownAt).toISOString()} (now stale) — the fresh check couldn't complete (${info.blockedBy})`, data: { startOverride: audit } });
-    return audit;
+  }
+  /** Per-bot Stop presses (stop / stopTrend / stopLp / stopById), so a resume waiting on its safety check can see one landed. */
+  private botStops = new Map<string, { seq: number; halt: Halt }>();
+  private noteBotStop(id: string, halt: Halt) {
+    this.botStops.set(id, { seq: (this.botStops.get(id)?.seq ?? 0) + 1, halt });
   }
 
   /** On-chain unwinds started by Close. They run beside the poll loop and don't wait for each other. */
@@ -487,9 +512,13 @@ export class MultiBot {
   resume(id: string): Promise<void> {
     const e = this.engine(id);
     if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.stable)) { e.resume(); return Promise.resolve(); }
-    return this.resumeSafety(id, e.state.stable, `Grid ${this.hub.label(e.state.stable)}`).then((o) => e.resume(o));
+    return this.resumeSafety(id, e.state.stable, `Grid ${this.hub.label(e.state.stable)}`, (o) => e.resume(o));
   }
-  stop(id: string, why?: Halt) { this.engine(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/grids/:id/stop', this.now())); }
+  stop(id: string, why?: Halt) {
+    const halt = why ?? requestHalt('bot-stop', 'POST /api/bot/grids/:id/stop', this.now());
+    this.engine(id).stop(halt);
+    this.noteBotStop(id, halt);
+  }
   setLimits(id: string, l: Partial<SafetyLimits>) { this.engine(id).setLimits(l); }
   setRecenter(id: string, enabled: boolean) { this.engine(id).setRecenter(enabled); }
   setProfits(id: string, p: ProfitMode) { return this.engine(id).setProfits(p); }
@@ -585,9 +614,13 @@ export class MultiBot {
   resumeTrend(id: string): Promise<void> {
     const e = this.trend(id);
     if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.quote)) { e.resume(); return Promise.resolve(); }
-    return this.resumeSafety(id, e.state.quote, e.state.name || this.hub.label(e.state.quote)).then((o) => e.resume(o));
+    return this.resumeSafety(id, e.state.quote, e.state.name || this.hub.label(e.state.quote), (o) => e.resume(o));
   }
-  stopTrend(id: string, why?: Halt) { this.trend(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/trends/:id/stop', this.now())); }
+  stopTrend(id: string, why?: Halt) {
+    const halt = why ?? requestHalt('bot-stop', 'POST /api/bot/trends/:id/stop', this.now());
+    this.trend(id).stop(halt);
+    this.noteBotStop(id, halt);
+  }
   /** Sell the open trend position and keep watching for the next signal. */
   sellTrend(id: string) {
     const e = this.trend(id);
@@ -630,12 +663,16 @@ export class MultiBot {
     try { await eng.start({ ...p, guard }); } catch (e) { this.removeLp(slot.id, true); throw e; }
     return slot.id;
   }
-  stopLp(id: string, why?: Halt) { this.lp(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/lps/:id/stop', this.now())); }
+  stopLp(id: string, why?: Halt) {
+    const halt = why ?? requestHalt('bot-stop', 'POST /api/bot/lps/:id/stop', this.now());
+    this.lp(id).stop(halt);
+    this.noteBotStop(id, halt);
+  }
   /** Paper, or no safety report: resumes at once (as before). LIVE on a market with a report: fresh check first. */
   resumeLp(id: string): Promise<void> {
     const e = this.lp(id);
     if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.market)) { e.resume(); return Promise.resolve(); }
-    return this.resumeSafety(id, e.state.market, `Liquidity ${this.hub.label(e.state.market)}`).then((o) => e.resume(o));
+    return this.resumeSafety(id, e.state.market, `Liquidity ${this.hub.label(e.state.market)}`, (o) => e.resume(o));
   }
   closeLp(id: string, why?: Halt) {
     const e = this.lp(id);

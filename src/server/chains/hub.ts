@@ -53,7 +53,13 @@ export class SafetyIncomplete extends Error {
   constructor(msg: string, readonly blockedBy: string, readonly canStartAnyway: boolean) { super(msg); }
 }
 
+/** One safety re-check's claim on writing the stored report. `cancelled`: its caller gave up (timed out). */
+export interface CheckTicket { cancelled: boolean }
+
 export class Hub {
+  /** Safety re-checks get increasing numbers; per market, the number of the last one that wrote the stored report. */
+  private checkSeq = 0;
+  private readonly wroteSeq = new Map<string, number>();
   readonly spots: Record<string, number> = {};
   readonly spotAt: Record<string, number> = {};
   private readonly rts = new Map<number, ChainRuntime>();
@@ -445,17 +451,25 @@ export class Hub {
    * Being stale only labels the report: `liveAllowed` and the taxes keep their last known values, and nothing here
    * pauses or stops a bot.
    */
-  async recheck(key: string, o: { keepMeasured?: boolean } = {}): Promise<SafetyReport> {
+  async recheck(key: string, o: { keepMeasured?: boolean; ticket?: CheckTicket } = {}): Promise<SafetyReport> {
     key = unflipKey(key);
     const d = this.def(key);
     if (!d.safety) throw new Error(`${this.label(key)} has no safety check (built-in PulseChain market)`);
+    // Late answers never overwrite: a check whose caller gave up on it (liveCheck timed it out) or that started
+    // before the one whose answer was already stored is discarded (#58 review). Only the stored report is protected;
+    // the caller (if still waiting) gets its own result.
+    const seq = ++this.checkSeq;
+    const late = () => !!o.ticket?.cancelled || seq < (this.wroteSeq.get(key) ?? 0);
+    const wrote = () => { this.wroteSeq.set(key, seq); };
     let r: InspectResult;
     try {
       r = await this.inspect({ chainId: d.chainId, address: d.base.address, quote: d.quote.address, pool: d.pool.address });
     } catch (e) {
-      this.markStale(key, `re-check failed: ${(e as Error).message}`);
+      if (!late()) { this.markStale(key, `re-check failed: ${(e as Error).message}`); wrote(); }
       throw e;
     }
+    if (late()) return r.safety ?? d.safety;
+    wrote();
     const fresh = r.safety ?? null;
     if (!fresh) return this.markStale(key, r.chosen ? 'the re-check measured nothing' : 'the re-check found no usable pool');
     if (o.keepMeasured && isInconclusive(fresh) && !isInconclusive(d.safety)) {
@@ -495,10 +509,12 @@ export class Hub {
       tries++;
       let r: SafetyReport;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      // Promise.race doesn't stop the slow try; the ticket makes its late answer a no-op (never stored).
+      const ticket: CheckTicket = { cancelled: false };
       try {
         r = await Promise.race([
-          this.recheck(key, { keepMeasured: true }),
-          new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`safety check timed out after ${Math.round(left / 1000)} s`)), left); }),
+          this.recheck(key, { keepMeasured: true, ticket }),
+          new Promise<never>((_, rej) => { timer = setTimeout(() => { ticket.cancelled = true; rej(new Error(`safety check timed out after ${Math.round(left / 1000)} s`)); }, left); }),
         ]);
       } catch (e) {
         why = (e as Error).message.slice(0, 160);

@@ -17,7 +17,7 @@ import { classify, type ProbeResult } from '../src/server/dex/safety';
 import { ChainRuntime } from '../src/server/chains/runtime';
 import { Hub, LIVE_CHECK_TRIES, SafetyBlocked, SafetyIncomplete, type CustomFile } from '../src/server/chains/hub';
 import { MemoryStore } from '../src/server/bot/store';
-import { MultiBot, type MultiState } from '../src/server/bot/multi';
+import { MultiBot, ResumeCancelled, type MultiState } from '../src/server/bot/multi';
 import { Logger } from '../src/server/bot/logger';
 import { requestStore } from '../src/server/bot/audit';
 import { isRpcHiccup } from '../src/server/bot/taxWatch';
@@ -46,8 +46,8 @@ const inconclusive = (): SafetyReport => ({ ...measured(), risk: 'unknown', live
 const PASS = measured({ gotBuy: 990n });
 const FAIL = measured({ stage: 4 }); // a completed check that failed
 
-/** What each hub.inspect call does, in order; the last entry repeats. 'hang' never answers. */
-type Step = 'none' | 'throw' | 'rate' | 'hang' | SafetyReport;
+/** What each hub.inspect call does, in order; the last entry repeats. 'hang' never answers. 'defer' waits for release(). */
+type Step = 'none' | 'throw' | 'rate' | 'hang' | 'defer' | SafetyReport;
 
 interface WorldOpts { store?: MemoryStore<MultiState>; steps?: Step[]; bootCheckMs?: number; tryMs?: number }
 function world(shipped: SafetyReport = PASS, o: WorldOpts = {}) {
@@ -69,10 +69,17 @@ function world(shipped: SafetyReport = PASS, o: WorldOpts = {}) {
   });
   let steps: Step[] = o.steps ?? ['none'];
   let calls = 0;
+  const deferred: ((s: Exclude<Step, 'defer' | 'hang'>) => void)[] = [];
+  const answer = (s: Exclude<Step, 'defer' | 'hang'>) => {
+    if (s === 'throw') throw Object.assign(new Error('request timeout (code=TIMEOUT)'), { code: 'TIMEOUT' });
+    if (s === 'rate') throw new Error('429 Too Many Requests: rate limit exceeded');
+    return s === 'none' ? { safety: null, chosen: null } : { safety: s, chosen: {} };
+  };
   (hub as unknown as { inspect: () => Promise<unknown> }).inspect = async () => {
     const s = steps[Math.min(calls, steps.length - 1)];
     calls++;
     if (s === 'hang') return new Promise(() => {});
+    if (s === 'defer') return new Promise((res, rej) => { deferred.push((a) => { try { res(answer(a)); } catch (e) { rej(e); } }); });
     if (s === 'throw') throw Object.assign(new Error('request timeout (code=TIMEOUT)'), { code: 'TIMEOUT' });
     if (s === 'rate') throw new Error('429 Too Many Requests: rate limit exceeded');
     return s === 'none' ? { safety: null, chosen: null } : { safety: s, chosen: {} };
@@ -80,7 +87,10 @@ function world(shipped: SafetyReport = PASS, o: WorldOpts = {}) {
   const store = o.store ?? new MemoryStore<MultiState>();
   const bot = new MultiBot({ net: NET, reader: pls, signer: null, store, log: new Logger(true), hub, now: () => t, bootCheckMs: o.bootCheckMs });
   const set = (...s: Step[]) => { steps = s; calls = 0; };
-  return { hub, bot, store, key: def.key, set, calls: () => calls, tick: (ms: number) => { t += ms; } };
+  /** Answer the i-th deferred inspect call (in call order). */
+  const release = (i: number, a: Exclude<Step, 'defer' | 'hang'>) => deferred[i](a);
+  const waitDeferred = async (n: number) => { for (let k = 0; k < 200 && deferred.length < n; k++) await new Promise((r) => setTimeout(r, 1)); expect(deferred.length).toBeGreaterThanOrEqual(n); };
+  return { hub, bot, store, key: def.key, set, release, waitDeferred, calls: () => calls, tick: (ms: number) => { t += ms; } };
 }
 
 async function gridParams(bot: MultiBot, key: string) {
@@ -521,5 +531,168 @@ describe('API: the block reason and code reach the page; Start anyway is a body 
     const c = await post(port, '/api/bot/grids', { ...body, startAnyway: true }, 'start-anyway');
     expect(c.status).toBe(400);
     expect(c.json).toMatchObject({ code: 'SAFETY_BLOCKED', canStartAnyway: false });
+  });
+});
+
+describe('3b. #58 review: a stop pressed while a LIVE resume waits on its safety check wins', () => {
+  async function stoppedLive() {
+    const w = world(PASS);
+    w.set(PASS);
+    const g = await w.bot.add({ mode: 'live', ...(await gridParams(w.bot, w.key)) });
+    const t = await w.bot.addTrend({ mode: 'live', quote: w.key, tf: '1h', capital: 0.001 });
+    const l = await w.bot.addLp({ mode: 'live', market: w.key, bandPct: 0.1, capital: 0.001 });
+    w.bot.stopAll();
+    const st = () => w.bot.status();
+    const bots = {
+      grid: { id: g, resume: () => w.bot.resume(g), stop: () => w.bot.stop(g), get: () => st().grids.find((x) => x.id === g)! },
+      trend: { id: t, resume: () => w.bot.resumeTrend(t), stop: () => w.bot.stopTrend(t), get: () => st().trends.find((x) => x.id === t)! },
+      lp: { id: l, resume: () => w.bot.resumeLp(l), stop: () => w.bot.stopLp(l), get: () => st().lps.find((x: { id: string }) => x.id === l)! },
+    };
+    return { ...w, bots };
+  }
+  const presses = {
+    'Stop all': (w: Awaited<ReturnType<typeof stoppedLive>>) => w.bot.stopAll(),
+    'STOP chain': (w: Awaited<ReturnType<typeof stoppedLive>>) => { w.bot.stopChain(1); },
+    'Stop (this bot)': (_w: Awaited<ReturnType<typeof stoppedLive>>, b: { stop: () => void }) => b.stop(),
+  } as const;
+
+  for (const [press, doStop] of Object.entries(presses)) {
+    for (const answer of [PASS, 'throw'] as const) {
+      it(`${press} during the check (${answer === 'throw' ? "check can't complete" : 'check passes'}) → the bot does not start after the check returns`, async () => {
+        const w = await stoppedLive();
+        for (const [kind, b] of Object.entries(w.bots)) {
+          w.set('defer', answer === 'throw' ? 'throw' : PASS);
+          const pending = caught(b.resume());
+          await w.waitDeferred(1 + Object.keys(w.bots).indexOf(kind));
+          doStop(w, b);
+          w.release(Object.keys(w.bots).indexOf(kind), answer);
+          const e = await pending;
+          expect(e, kind).toBeInstanceOf(ResumeCancelled);
+          expect(e!.message).toMatch(/resume cancelled/);
+          expect(b.get().status, kind).toBe('stopped');
+          expect(b.get().startOverride ?? null, kind).toBeNull();
+          await w.bot.tickAll();
+          expect(b.get().status, kind).toBe('stopped');
+          const ev = w.bot.activity.recent().filter((x) => /resume cancelled/.test(x.msg)).at(-1)!;
+          expect(ev, kind).toMatchObject({ level: 'warn', botId: b.id, data: { resumeCancelled: true } });
+          expect(w.bot.activity.recent().some((x) => x.botId === b.id && /resumed on the last passing/.test(x.msg))).toBe(false);
+        }
+      });
+    }
+  }
+
+  it('a stop on another chain, or before the resume began, does not cancel it', async () => {
+    const w = await stoppedLive();
+    const b = w.bots.grid;
+    b.stop(); // before the resume
+    w.set('defer', PASS);
+    const pending = caught(b.resume());
+    await w.waitDeferred(1);
+    w.bot.stopChain(369); // PulseChain: not this bot's chain
+    w.release(0, PASS);
+    expect(await pending).toBeNull();
+    expect(b.get().status).toBe('running');
+    w.bot.stopAll();
+  });
+
+  it('a later resume after a cancelled one works normally', async () => {
+    const w = await stoppedLive();
+    const b = w.bots.trend;
+    w.set('defer', PASS);
+    const pending = caught(b.resume());
+    await w.waitDeferred(1);
+    w.bot.stopAll();
+    w.release(0, PASS);
+    expect(await pending).toBeInstanceOf(ResumeCancelled);
+    w.set(PASS);
+    await b.resume();
+    expect(b.get().status).toBe('running');
+    w.bot.stopAll();
+  });
+
+  it('Stop all during a boot check: held bots stay stopped after the check passes', async () => {
+    const first = world();
+    first.set(PASS);
+    await first.bot.add({ mode: 'live', ...(await gridParams(first.bot, first.key)) });
+    await first.bot.bootSafety;
+    const w = world(PASS, { store: first.store, steps: ['defer', PASS] });
+    await w.waitDeferred(1);
+    w.bot.stopAll();
+    w.release(0, PASS);
+    await w.bot.bootSafety;
+    expect(w.bot.status().grids[0].status).toBe('stopped');
+    await w.bot.tickAll();
+    expect(w.bot.status().grids[0].status).toBe('stopped');
+  });
+});
+
+describe('3c. #58 review: a timed-out or superseded safety check never overwrites the report later', () => {
+  it('a try cut off by the timeout that later answers FAIL does not replace the report the decision used', async () => {
+    const w = world(PASS, { tryMs: 30 });
+    w.set(PASS);
+    const id = await w.bot.add({ mode: 'live', ...(await gridParams(w.bot, w.key)) });
+    w.bot.stopAll();
+    w.set('defer', PASS); // try 1 hangs past the timeout, try 2 passes
+    await w.bot.resume(id);
+    expect(w.calls()).toBe(2);
+    expect(w.bot.status().grids[0].status).toBe('running');
+    const before = w.hub.def(w.key).safety!;
+    expect(before.liveAllowed).toBe(true);
+    expect(before.stale ?? null).toBeNull();
+    w.release(0, FAIL); // the slow try finally answers
+    await new Promise((r) => setTimeout(r, 5));
+    const after = w.hub.def(w.key).safety!;
+    expect(after).toEqual(before);
+    expect(after.liveAllowed).toBe(true);
+    w.bot.stopAll();
+  });
+
+  it('every try timed out (resumed on the stale report): the first try answering FAIL afterwards is ignored', async () => {
+    const w = world(PASS, { tryMs: 30 });
+    w.set(PASS);
+    const id = await w.bot.add({ mode: 'live', ...(await gridParams(w.bot, w.key)) });
+    w.bot.stopAll();
+    w.set('defer', 'hang');
+    await w.bot.resume(id);
+    expect(w.bot.status().grids[0].startOverride).toMatchObject({ kind: 'resume', blockedBy: expect.stringMatching(/timed out/) });
+    const before = w.hub.def(w.key).safety!;
+    w.release(0, FAIL);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(w.hub.def(w.key).safety!).toEqual(before);
+    expect(w.hub.def(w.key).safety!.liveAllowed).toBe(true);
+    w.bot.stopAll();
+  });
+
+  it('a timed-out try that later errors does not mark the fresh report stale', async () => {
+    const w = world(PASS, { tryMs: 30 });
+    w.set('defer', PASS);
+    await w.hub.liveCheck(w.key);
+    expect(w.hub.def(w.key).safety!.stale ?? null).toBeNull();
+    w.release(0, 'throw');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(w.hub.def(w.key).safety!.stale ?? null).toBeNull();
+  });
+
+  it('an older re-check that answers after a newer one already stored its result is discarded', async () => {
+    const w = world(PASS);
+    w.set('defer', PASS);
+    const older = w.hub.recheck(w.key); // e.g. the tax watcher's scheduled check, slow RPC
+    await w.waitDeferred(1);
+    const newer = await w.hub.recheck(w.key); // e.g. a live start's try, answers first
+    expect(newer.liveAllowed).toBe(true);
+    w.release(0, FAIL);
+    await older;
+    expect(w.hub.def(w.key).safety!.liveAllowed).toBe(true);
+    expect(w.hub.def(w.key).safety!.risk).toBe(PASS.risk);
+  });
+
+  it('control: a single slow re-check that is neither timed out nor superseded still stores its result', async () => {
+    const w = world(PASS);
+    w.set('defer');
+    const p = w.hub.recheck(w.key);
+    await w.waitDeferred(1);
+    w.release(0, FAIL);
+    await p;
+    expect(w.hub.def(w.key).safety!.liveAllowed).toBe(false);
   });
 });
