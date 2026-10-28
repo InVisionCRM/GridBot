@@ -3,8 +3,6 @@ import { useMemo, useState } from 'react';
 import { BotRow } from './botRow';
 import { chainOf } from './chains';
 import { bucketItems, emptyQuery, nextSort, type DeskQuery, type DeskSort, deskItems } from './deskTableModel';
-import { cls } from './fmt';
-import { unitsText } from './deskStats';
 import type { AnyObj, Nav } from './model';
 
 const TYPES: [DeskQuery['type'], string][] = [['all', 'All'], ['grid', 'Grid'], ['trend', 'Trend'], ['lp', 'Liquidity'], ['trader', 'Token trader'], ['paper', 'Paper']];
@@ -75,6 +73,7 @@ export function DeskTable({ s, bots, nav, pause, close }: {
           {head('name', 'Pair')}
           <span />
           <span>Range</span>
+          <span className="num">Invested</span>
           {head('value', 'Value', true)}
           {head('generated', 'Generated', true)}
           {head('pnl', 'P&L', true)}
@@ -95,11 +94,7 @@ export function DeskTable({ s, bots, nav, pause, close }: {
               <b>{g.name}</b>
               <span className="muted">{g.rows.length}</span>
               <span className="grow" />
-              {/* a one-bot group's totals are that bot's own figures, shown on its row (Kyle: each figure once, #73) */}
-              {g.rows.length > 1 && <>
-                <span className="mono units" title="Value now, per quote coin">{g.valueUnits ? unitsText(g.valueUnits, 3, false) : '—'}</span>
-                <span className={`units ${cls(g.pnl)}`} title="Total P&L, per quote coin">{g.pnlUnits ? unitsText(g.pnlUnits, 3) : '—'}</span>
-              </>}
+              {/* no group totals (Kyle): a total must equal the sum of the rows as shown, and per-coin rounding can't promise that */}
             </button>
             {!shut && g.rows.map((it) => (
               <BotRow key={it.b.id} s={s} b={it.b} nav={nav} pause={pause} close={close} columns metrics expandable open={open === it.b.id} onToggle={() => setOpen((id) => id === it.b.id ? null : it.b.id)} />

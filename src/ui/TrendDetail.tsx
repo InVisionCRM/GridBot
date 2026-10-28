@@ -98,7 +98,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi"><span>Worst drop</span><div className="kpi-v">{pct(t.stats.maxDrawdown, 1)}</div><span className="sub">from the bot's peak value</span></div>
         <div className="kpi"><span>Fees + gas</span><div className="kpi-v"><Amt v={-(t.pnl.fees + t.pnl.gas)} sym={q} k={k} sig={4} /></div><span className="sub">paid so far</span></div>
       </div>
-      <MoneyDetails b={t} />
+      <MoneyDetails b={t} hide={t.position ? ['Open positions'] : []} />
 
       <div className="split wide-left">
         <div className="card">
@@ -108,7 +108,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
             : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact desk height={480}
                 emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
           <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
-          <StatTable b={t} s={s} hide={['Generated']} />
+          <StatTable b={t} s={s} hide={['Generated', 'Win rate']} />
         </div>
         <div className="stack">
           <div className="card">

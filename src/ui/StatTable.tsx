@@ -1,7 +1,7 @@
 /** The figures under a chart. A dash is a figure the stored bot does not have. */
 import { chainOf, mk } from './chains';
 import { botFacts, figuresOf, unitsText } from './deskStats';
-import { ago, dur, pct, px, qty } from './fmt';
+import { dur, pct, pctShown, px, qty } from './fmt';
 import type { AnyObj } from './model';
 
 function poolText(pool: string | null) {
@@ -41,7 +41,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
     ['Est. 24h', rate(gr?.d1, gr?.needs.d1), calc],
     ['Est. 7d', rate(gr?.d7, gr?.needs.d7), calc],
     ['Est. 365d', rate(gr?.d365, gr?.needs.d365), calc],
-    ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pct(f.aprPct, 1, true), calc],
+    ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pctShown(f.aprPct, 1, true), calc],
     ['Age', f.ageMs == null ? '—' : dur(f.ageMs)],
     ['Moves', f.moves.text ?? '—'],
     ['Win rate', f.winRate == null ? '—' : pct(f.winRate, 0)],
@@ -50,7 +50,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
     ['Time in range', f.timeInRange == null ? '—' : pct(f.timeInRange, 0)],
     ['Range', range],
     ['Spacing', spacing],
-    ['Last move', f.lastMoveAt == null ? '—' : ago(f.lastMoveAt)],
+    ['Last move', f.lastMoveAt == null ? '—' : `${dur(Date.now() - f.lastMoveAt)} ago`], // to the tenth, like Age
     ['Chain', f.chain || '—'],
     ['DEX', f.dex || '—'],
     ['Pool', poolText(f.pool)],

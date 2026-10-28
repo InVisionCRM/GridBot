@@ -6,7 +6,7 @@ import { Chart } from './Chart';
 import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { MoneyDetails, type DetailRow } from './MoneyDetails';
-import { ago, cls, dur, num, pct, px, qty } from './fmt';
+import { ago, cls, dur, num, pct, px, qty, qtyFixed, sameShown } from './fmt';
 import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -80,6 +80,7 @@ function RangeControls({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: b
 function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boolean }) {
   const pos = b.position as { lower: number; upper: number };
   const price = b.price as number | null;
+  const gen = metricsOf(b)?.generated ?? null; // to leave out a waiting figure that prints as Generated (each figure once)
   const lower = pos.lower, upper = pos.upper, span = upper - lower;
   const toEdge = price != null && span > 0 ? 1 - Math.abs(price - (lower + upper) / 2) / (span / 2) : null;
   const out = b.inRange === false;
@@ -112,7 +113,7 @@ function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boo
     <div className="lp-health">
       <div className="lp-health-top">
         <span className="small">{px(lower)} – {px(upper)} {q}/{base}</span>
-        <span className={`lp-edge ${out ? 'out' : ''}`}>{out ? `out of range${outFor ? ` ${outFor}m` : ''}` : toEdge != null ? `${Math.max(0, Math.round(toEdge * 100))}% to edge` : ''}</span>
+        <span className={`lp-edge ${out ? 'out' : ''}`}>{out ? `out of range${outFor ? ` ${outFor}m` : ''}` : toEdge != null ? `${Math.max(0, toEdge * 100).toFixed(1)}% to edge` : ''}</span>
       </div>
       <div className="lp-health-bar" title={`range ${px(lower)} – ${px(upper)}${price != null ? ` · price ${px(price)}` : ''}`}>
         <div className="lp-health-track" />
@@ -124,8 +125,8 @@ function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boo
       <div className="lp-health-stats">
         <div>
           <span className="k">Fees waiting</span>
-          <b className="pos">{num(b.owed?.base, 4)} {base}</b>
-          <span className="muted small">{num(b.owed?.quote, 4)} {q}</span>
+          <b className="pos">{waitingText(b.owed?.base, base, gen)}</b>
+          <span className="muted small">{waitingText(b.owed?.quote, q, gen)}</span>
         </div>
         <div>
           <span className="k"><L tip="With compounding on, fees are collected and added back into this range once they are worth the multiple × the estimated gas. Off, they roll in on the next range move or when the bot closes.">Compound at</L></span>
@@ -176,6 +177,26 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
  * Generated (headline), its rates and Est. 24h/7d/365d and the age (Pace), fees paid / earned (Details breakdown),
  * the range, its width and the range moves (the position card).
  */
+/**
+ * When the position was opened. The position opened with the bot (no range move since) is the bot's age again, which
+ * the page shows once already (Pace, or the stat table under a day): then it says so instead of a second age.
+ */
+/**
+ * A coin's waiting fees, or "all of Generated" when they print the same as that coin's Generated in the headline (no
+ * cost taken in that coin yet): the figure is on the screen once already (Kyle).
+ */
+function waitingText(owed: number | null | undefined, sym: string, gen: Record<string, number> | null | undefined): string {
+  const txt = `${num(owed, 4)} ${sym}`;
+  const g = gen?.[sym];
+  return g != null && owed != null && sameShown(qty(g, sym, 5), txt) ? `${sym}: all of Generated` : txt;
+}
+
+function openedText(b: AnyObj, pos: AnyObj): string {
+  const start = typeof b.startedAt === 'number' ? b.startedAt : null;
+  if (start != null && typeof pos.openedAt === 'number' && Math.abs(pos.openedAt - start) < 10 * 60_000) return 'Opened when the bot started';
+  return `Opened ${ago(pos.openedAt)}`;
+}
+
 const LP_SHOWN_ELSEWHERE = ['Generated', 'Age', 'Est. 24h', 'Est. 7d', 'Est. 365d', 'Fees paid', 'Fees earned', 'Range', 'Spacing', 'Moves', 'Last move'] as const;
 
 /**
@@ -287,6 +308,12 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="kpi-row detail-stats" data-testid="top-strip">
+        {/* Kyle: the headline is Invested + Generated, in the bot's own coins (the server's capital in) */}
+        <div className="kpi" data-testid="invested">
+          <span><L tip={`What was put into this bot at the start, in ${m?.quote.symbol ?? 'the quote coin'}.`}>Invested</L></span>
+          <div className="kpi-v coins2"><b>{m?.quote.capitalIn != null && m.quote.symbol ? qtyFixed(m.quote.capitalIn, m.quote.symbol, 5) : '—'}</b></div>
+          <span className="sub">put in at the start</span>
+        </div>
         <div className="kpi">
           <span><L tip={m?.calc ?? 'Generated'}>Generated</L></span>
           <div className="kpi-v coins2">{m?.generated ? <>{Object.entries(m.generated).map(([sym, u]) => <b key={sym} className={cls(u)}>{qty(u, sym, 5)}</b>)}</> : '—'}</div>
@@ -298,7 +325,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <span className="sub">{b.poolShare != null ? <>{pct(b.poolShare, b.poolShare < 0.001 ? 4 : 2)} of the pool's active liquidity</> : 'once the position is open'}</span>
         </div>
       </div>
-      <MoneyDetails b={b} breakdown={lpBreakdown(b)} note="fees earned − costs = Generated, total P&L, price change" />
+      <MoneyDetails b={b} breakdown={lpBreakdown(b)} hide={['Deposit']} note="fees earned − costs = Generated, total P&L, price change" />
 
       <GeneratedPace b={b} />
 
@@ -306,7 +333,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="card">
           <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact desk mid height={480} />
           <p className="muted small">The amber lines are the position's range. It earns fees while the price is between them.</p>
-          <StatTable b={b} s={s} hide={LP_SHOWN_ELSEWHERE} />
+          <StatTable b={b} s={s} hide={metricsOf(b)?.generatedRate.d1 ? LP_SHOWN_ELSEWHERE : LP_SHOWN_ELSEWHERE.filter((k) => k !== 'Age')} />
         </div>
         <div className="stack">
           <div className="card" data-testid="position-card">
@@ -314,7 +341,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
             {pos ? <>
               <RangeHealth b={b} act={act} busy={busy} />
               {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
-              <p className="muted small">Opened {ago(pos.openedAt)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>
+              <p className="muted small">{openedText(b, pos)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>
             </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
             {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
           </div>

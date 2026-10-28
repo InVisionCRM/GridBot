@@ -62,7 +62,7 @@ function LimitsFields({ l, set, quoteNative, quote }: { l: Limits; set: (l: Limi
 }
 
 /** "Amount (PLS)" input with the wallet balance and a Max button. */
-export function AmountField({ label, value, onChange, f }: { label: string; value: string; onChange: (v: string) => void; f: Funds }) {
+export function AmountField({ label, value, onChange, f, echo = true }: { label: string; value: string; onChange: (v: string) => void; f: Funds; echo?: boolean }) {
   return (
     <label><L tip={`How much ${f.symbol} the bot gets, in ${f.symbol}. Max = everything you can use after the gas set-aside and what your other live bots use.`}>{label}</L>
       <span className="pair-pick">
@@ -70,7 +70,8 @@ export function AmountField({ label, value, onChange, f }: { label: string; valu
         <button type="button" className="btn small-btn" disabled={f.max == null || f.max <= 0} title="Everything you can use after the gas set-aside and your other live bots"
           onClick={() => onChange(String(floorSig(f.max!)))}>Max</button>
       </span>
-      <span className="muted">{+value > 0 ? `${amt(+value, f.symbol)} of ` : ''}{f.have == null ? (f.readError ? `your wallet (couldn't read your ${f.symbol} balance: ${f.readError})` : 'your wallet (no signing key: paper only)') : `${amt(f.have, f.symbol)} in your wallet${f.inUse > 0 ? ` · ${amt(f.inUse, f.symbol)} used by your live bots` : ''}`}</span>
+      {/* echo=false: a page whose box is pre-filled with a figure it shows already (the grid's deposit) doesn't print it again */}
+      <span className="muted">{echo && +value > 0 ? `${amt(+value, f.symbol)} of ` : ''}{f.have == null ? (f.readError ? `your wallet (couldn't read your ${f.symbol} balance: ${f.readError})` : 'your wallet (no signing key: paper only)') : `${amt(f.have, f.symbol)} in your wallet${f.inUse > 0 ? ` · ${amt(f.inUse, f.symbol)} used by your live bots` : ''}`}</span>
     </label>
   );
 }

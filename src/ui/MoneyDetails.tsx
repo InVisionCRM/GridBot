@@ -14,7 +14,7 @@
  */
 import type { ReactNode } from 'react';
 import { echoes, metricsOf, unitsText } from './deskStats';
-import { pctShown, qty } from './fmt';
+import { pctShown, qty, qtyFixed } from './fmt';
 
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 import type { AnyObj } from './model';
@@ -23,7 +23,7 @@ import type { BotMetrics } from '../metrics/botMetrics';
 /** A Details row: label, value, tooltip. */
 export type DetailRow = [string, ReactNode, string?];
 /** Rows a page can leave out because it already shows them: 'Total P&L', 'Value now' (keeps the deposit), or a label. */
-export type DetailHide = 'Made at event prices' | 'Total P&L' | 'Price change' | 'Open positions' | 'Value now';
+export type DetailHide = 'Made at event prices' | 'Total P&L' | 'Price change' | 'Open positions' | 'Value now' | 'Deposit';
 
 /**
  * The per-coin lines of metrics.breakdownByCoin, in that coin's units: earned, then each non-zero cost with a minus,
@@ -92,16 +92,18 @@ export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { 
   }
   const tp = rows.find((r) => r[0].startsWith('Total P&L'));
   if (tp && m.totalPnlPct != null && pctShown(m.totalPnlPct, 2) !== '—') tp[1] = `${tp[1]} · ${pctShown(m.totalPnlPct, 2, true)} of capital in`;
-  const deposit = plain(q.capitalIn);
-  const value: [string, string, string] = no.has('Value now')
-    ? ['Deposit', `${deposit} in`, `The capital put in, in ${sym} at today's price.`]
+  const deposit = q.capitalIn == null ? '—' : qtyFixed(q.capitalIn, sym, 5); // exact: reads apart from the value beside it
+  // 'Deposit' hidden: the page shows Invested elsewhere (Kyle: each figure once), so this row is the value now alone
+  const value: [string, string, string] | null = no.has('Value now') && no.has('Deposit') ? null
+    : no.has('Value now') ? ['Deposit', `${deposit} in`, `The capital put in, in ${sym} at today's price.`]
+    : no.has('Deposit') ? ['Value now', plain(q.currentValue), `Current value of the bot's coins, in ${sym} at today's price.`]
     : ['Value vs deposit', `${plain(q.currentValue)} now · ${deposit} in`, `Current value of the bot's coins and the capital put in, in ${sym} at today's price.`];
   return (
     <details className="more money-details" data-testid="money-details">
       <summary>Details <span className="muted small">{note ?? 'made at event prices, total P&L, price change'}</span></summary>
       <table className="stat-table"><tbody>
         {[...coinBreakdownRows(m, num(b.reranges)), ...(breakdown ?? [])].map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
-        {[...rows, value].map(([k, v, t]) => <tr key={k} title={t}><th>{k}</th><td className="mono">{v}</td></tr>)}
+        {[...rows, ...(value ? [value] : [])].map(([k, v, t]) => <tr key={k} title={t}><th>{k}</th><td className="mono">{v}</td></tr>)}
       </tbody></table>
     </details>
   );

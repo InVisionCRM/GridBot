@@ -37,7 +37,9 @@ import { gridMetrics, lpMetrics, trendMetrics } from '../src/metrics/botMetrics'
 import { BotRow } from '../src/ui/botRow';
 import { DeskTable } from '../src/ui/DeskTable';
 import { deskItems, sortItems } from '../src/ui/deskTableModel';
-import { pctShown } from '../src/ui/fmt';
+import { pctShown, qtyFixed } from '../src/ui/fmt';
+import { readFileSync } from 'node:fs';
+import { Bots } from '../src/ui/Bots';
 import { GridDetail } from '../src/ui/GridDetail';
 import { HIDE_WORTH_ON } from '../src/ui/Header';
 import { Holdings } from '../src/ui/Holdings';
@@ -47,7 +49,7 @@ import { ShowUsdCtx } from '../src/ui/money';
 import { StatTable } from '../src/ui/StatTable';
 import { TrendDetail } from '../src/ui/TrendDetail';
 import { ValueOverTime } from '../src/ui/ValueOverTime';
-import { S as REAL } from './helpers/unitsScreens';
+import { HOLDINGS as REAL_HOLDINGS, S as REAL } from './helpers/unitsScreens';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Obj = Record<string, any>;
@@ -55,7 +57,8 @@ type Obj = Record<string, any>;
 const NOW = Date.UTC(2026, 9, 27, 23, 45);
 const H = 3_600_000, D = 24 * H;
 const PEGGED: string[] = []; // crypto units only: each coin is its own unit
-const SYMS = ['USDG', 'SPY', 'NVDA', 'ETH', 'USDC', 'PLS', 'SCHIFFY', 'WETH'];
+// any coin symbol (BUN, HEX, pDAI…), not only the sample's: a capitalised word after a number, but not a clock's AM/PM
+const SYM = '(?!(?:AM|PM)\\b)([a-z]?[A-Z][A-Z0-9]{1,10})';
 
 // ---------------------------------------------------------------- sample data (paper, made up)
 const s0 = {
@@ -108,19 +111,22 @@ const PHONE_HIDDEN = ['desk-spark', 'desk-val', 'desk-pct', 'desk-age', 'desk-ap
 type View = 'desktop' | 'phone';
 
 /** Visible text: a tag is a word break; a hidden element and everything in it is dropped. */
-export function visibleText(html: string, view: View): string {
+export function visibleText(html: string, view: View, rowClass?: string): string {
+  const rows: boolean[] = [];
   const re = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)([^>]*?)(\/?)>|([^<]+)/g;
   let out = '', skip = 0; const stack: boolean[] = [];
   for (let m = re.exec(html); m; m = re.exec(html)) {
     if (m[0].startsWith('<!--')) continue;
     if (m[5] != null) { if (!skip) out += m[5].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#x27;/g, "'"); continue; }
     const [, close, tag0, attrs, self] = m; const tag = tag0.toLowerCase();
-    if (close) { const hid = stack.pop(); if (hid) skip--; out += ' '; continue; }
+    if (close && VOID.has(tag)) { out += ' '; continue; } // an svg <rect></rect>: opened as void, so its close is no element
+    if (close) { const hid = stack.pop(); if (hid) skip--; out += rows.pop() ? ' ⟦/ROW⟧ ' : ' '; continue; }
     const cls = (/class="([^"]*)"/.exec(attrs)?.[1] ?? '').split(/\s+/);
     const shut = tag === 'details' && !/\sopen(?:[\s=>]|$)/.test(attrs); // a closed <details>: only its summary shows
     const hidden = ALWAYS_HIDDEN(tag, cls) || shut || (view === 'desktop' && cls.includes('in-row')) || (view === 'phone' && cls.some((c) => PHONE_HIDDEN.includes(c)));
     if (self || VOID.has(tag)) { out += ' '; continue; }
-    stack.push(hidden); if (hidden) skip++; out += ' ';
+    const isRow = !!rowClass && cls.includes(rowClass) && !skip && !hidden;
+    rows.push(isRow); stack.push(hidden); if (hidden) skip++; out += isRow ? ' ⟦ROW⟧ ' : ' ';
   }
   return out.replace(/\s+/g, ' ');
 }
@@ -139,7 +145,7 @@ export function figures(text: string): Fig[] {
   // ranges first, then blank them so their ends aren't read again
   rest = rest.replace(new RegExp(`${N}\\s?–\\s?${N}`, 'g'), (t, a, b) => { add('range', parseNum(a) * 1e6 + parseNum(b), 0, t); return ' '; });
   rest = rest.replace(new RegExp(`([+\\-−]?)\\s?\\$\\s?${N}`, 'g'), (t, sg, n) => { add('$', neg(sg) * parseNum(n), 0.5 * 10 ** -decs(n), t); return ' '; });
-  rest = rest.replace(new RegExp(`([+\\-−]?)${N}\\s(${SYMS.join('|')})(?![/\\w-])`, 'g'), (t, sg, n, sym) => {
+  rest = rest.replace(new RegExp(`([+\\-−]?)${N}\\s${SYM}(?![/\\w-])`, 'g'), (t, sg, n, sym) => {
     add(PEGGED.includes(sym) ? '$' : sym, neg(sg) * parseNum(n), 0.5 * 10 ** -decs(n), t); return ' ';
   });
   rest = rest.replace(new RegExp(`([+\\-−±]?)${N}\\s?%`, 'g'), (t, sg, n) => { add(sg === '±' ? '±%' : '%', neg(sg) * parseNum(n), 0.5 * 10 ** -decs(n), t); return ' '; });
@@ -157,6 +163,27 @@ export function repeats(figs: Fig[]): string[] {
     if (a.unit === b.unit && Math.abs(a.v - b.v) <= Math.max(a.tol, b.tol) + 1e-9) dup.push(`"${a.text}" and "${b.text}"`);
   }
   return dup;
+}
+
+/**
+ * A list screen (Bots, Home): each bot row is checked on its own and against everything outside the rows (headlines,
+ * group headers), so a total that repeats a row fails. Two different bots that happen to share an amount (both put in
+ * 1 ETH) are two figures, not one repeated.
+ */
+export function listRepeats(html: string, view: View): string[] {
+  const text = visibleText(html, view, 'bot-block');
+  const outside: string[] = [], rowsTxt: string[] = [];
+  let depth = 0, cur = '';
+  for (const part of text.split(/(⟦\/?ROW⟧)/)) {
+    if (part === '⟦ROW⟧') { if (depth++ === 0) { outside.push(cur); cur = ''; } continue; }
+    if (part === '⟦/ROW⟧') { if (--depth === 0) { rowsTxt.push(cur); cur = ''; } continue; }
+    cur += part;
+  }
+  outside.push(cur);
+  const out = figures(outside.join(' '));
+  const dup = new Set(repeats(out));
+  for (const r of rowsTxt) for (const d of repeats([...out, ...figures(r)])) dup.add(d);
+  return [...dup];
 }
 
 const wrap = (el: ReactElement) => h(ShowUsdCtx.Provider, { value: { on: false, set: () => undefined } }, el);
@@ -182,6 +209,13 @@ describe('figure finder (self-check)', () => {
     expect(repeats(figures('8.8h and 9h ago'))).toHaveLength(1);
     expect(repeats(figures('−866 USDG and +866 USDG, 732.2 – 810.0 USDG/SPY, 0 ETH, 0%'))).toHaveLength(0);
     expect(repeats(figures('21.3 SPY and 21.3 USDG'))).toHaveLength(0);
+    expect(repeats(figures('19,099.79 BUN and 19,100 BUN; 03:23 PM and 04:23 PM'))).toHaveLength(1); // any coin, not clocks
+  });
+  it('a list: a total that repeats a row fails; two rows that share an amount do not', () => {
+    const rowOf = (x: string) => `<div class="bot-block"><span>${x}</span></div>`;
+    expect(listRepeats(`<div>${rowOf('1.0000 ETH invested +0.5 ETH')}${rowOf('1.0000 ETH invested +0.7 ETH')}</div>`, 'desktop')).toEqual([]);
+    expect(listRepeats(`<div><b>+0.5 ETH</b>${rowOf('1.0000 ETH +0.5 ETH')}${rowOf('2 ETH +0.7 ETH')}</div>`, 'desktop')).toHaveLength(1);
+    expect(listRepeats(`<div>${rowOf('+0.5 ETH and +0.50 ETH')}</div>`, 'desktop')).toHaveLength(1);
   });
   it('a page that repeats a figure fails; a closed Details hides its figures until opened', () => {
     const html = '<div><b>−866 USDG</b><details><summary>Details</summary><table><tr><th>Net 8.8h</th><td>−866.00 USDG</td></tr></table></details></div>';
@@ -192,7 +226,7 @@ describe('figure finder (self-check)', () => {
 
 describe('each figure once per screen (Kyle, no exemptions)', () => {
   for (const view of ['desktop', 'phone'] as View[]) {
-    it(`Bots list, collapsed (${view})`, () => { expect(repeats(figures(visibleText(desk(), view)))).toEqual([]); });
+    it(`Bots list, collapsed (${view})`, () => { expect(listRepeats(desk(), view)).toEqual([]); });
     for (const b of bots) {
       it(`Bots list, ${b.id} opened (${view})`, () => {
         const html = row(b);
@@ -201,7 +235,7 @@ describe('each figure once per screen (Kyle, no exemptions)', () => {
         expect(repeats(figures(text))).toEqual([]);
       });
     }
-    it(`Home (${view})`, () => { expect(repeats(figures(visibleText(home(), view)))).toEqual([]); });
+    it(`Home (${view})`, () => { expect(listRepeats(home(), view)).toEqual([]); });
     it(`Grid page, a run under a day, Details closed and opened (${view})`, () => {
       expect(repeats(figures(visibleText(gridPage(), view)))).toEqual([]);
       expect(repeats(figures(visibleText(opened(gridPage()), view)))).toEqual([]);
@@ -391,7 +425,8 @@ describe("Holdings: coin amounts per chain, no '$', no cross-coin total, each fi
   it('shows each coin in its own units, stablecoins as "34,000 USDG"', () => {
     const text = visibleText(holdingsPage(), 'desktop');
     for (const want of ['34,000 USDG', '2.5 ETH', '0.75 SPY', '1,234,570 PLS', '21.3 SPY · 16,950.2 USDG', '0.0102 SPY · 4.31 USDG', '1,200 USDG · 0.4 ETH']) expect(text).toContain(want);
-    expect(text).toMatch(/Robinhood Chain[\s\S]*PulseChain|PulseChain[\s\S]*Robinhood Chain/);
+    // the chain names are section headings (labels, so not in the visible-figure text): read them from the page
+    expect(holdingsPage()).toMatch(/Robinhood Chain[\s\S]*PulseChain|PulseChain[\s\S]*Robinhood Chain/);
   });
   it("no '$' anywhere (text, tooltips, labels), and no total: not the net worth, a chain's, the fees' or the grids'", () => {
     for (const html of [holdingsPage(), renderToStaticMarkup(h(Holdings, { s: sH, snap: holdingsSnap as never, loading: false, error: null, reload: noop, nav: noop }))]) {
@@ -439,4 +474,120 @@ describe('Value over time is collapsed and closed by default; the chart is drawn
     expect(shut).not.toMatch(/eq-chart|value USDG|drawdown/);
     expect(shut).toMatch(/Details: value over time/);
   });
+});
+
+// ---------------------------------------------------------------- the lead's #88 fix list, one test per fix
+const textOf = (html: string, view: View = 'desktop') => visibleText(html, view);
+
+describe('#88 fixes: LP page', () => {
+  it('an Invested tile first, then Generated, in coin units (the deposit is not repeated in Details)', () => {
+    for (const id of ['lp-stonkd', 'lp-nvda']) {
+      const html = opened(lpPage(id));
+      const lp = s.lps.find((x: Obj) => x.id === id);
+      expect(html, id).toMatch(/data-testid="invested"/);
+      const strip = textOf(html).split('Generated')[0];
+      expect(strip, id).toMatch(new RegExp(`Invested (i )?${qtyFixed(lp.metrics.quote.capitalIn, 'USDG', 5).replace(/[.+]/g, '\\$&')} put in at the start`));
+      expect(textOf(html), id).not.toMatch(/\$|USD(?!G|C)/);
+      expect(textOf(html).match(new RegExp(qtyFixed(lp.metrics.quote.capitalIn, 'USDG', 5).replace(/[.+]/g, '\\$&'), 'g')), id).toHaveLength(1);
+    }
+    expect(qtyFixed(3.5, 'ETH')).toBe('3.5000 ETH');
+    expect(qtyFixed(34_000, 'USDG')).toBe('34,000 USDG');
+    expect(qtyFixed(1, 'ETH')).toBe('1.0000 ETH');
+  });
+  it('the age shows once: a position opened at the start says so instead of a second age', () => {
+    const text = textOf(opened(lpPage('lp-stonkd')));
+    expect(text).toContain('Opened when the bot started');
+    expect(text).not.toMatch(/Opened \d/);
+    expect(textOf(opened(lpPage('lp-nvda')))).toMatch(/Opened 19h ago/); // a re-ranged position keeps its own age
+  });
+  it('Fees waiting that equal Generated point to it instead of a second figure', () => {
+    const lp = withM({ ...stonkd, id: 'lp-w' });
+    const sx = { ...s, lps: [{ ...lp, owed: { base: lp.metrics.generated.SPY, quote: 4.31 } }] };
+    const text = textOf(opened(lpPage('lp-w', sx)));
+    expect(text).toContain('SPY: all of Generated');
+    expect(repeats(figures(text))).toEqual([]);
+  });
+});
+
+describe('#88 fixes: Bots list (desktop and phone)', () => {
+  for (const view of ['desktop', 'phone'] as View[]) {
+    it(`group total = sum of the rows as displayed: the group headers carry no figure, so there is no total to disagree (${view})`, () => {
+      const html = desk();
+      const heads = html.match(/<button type="button" class="desk-group"[\s\S]*?<\/button>/g) ?? [];
+      expect(heads.length).toBeGreaterThan(0);
+      for (const g of heads) expect(figures(visibleText(g, view)), g).toEqual([]);
+    });
+    it(`each row shows Invested (labelled) and Generated, and no zero without its unit (${view})`, () => {
+      const html = desk();
+      for (const b of bots) {
+        const inv = qtyFixed(b.metrics.quote.capitalIn, b.metrics.quote.symbol, 5);
+        expect(html, b.id).toContain(`${inv}<small class="inv-label"> invested</small>`);
+      }
+      expect(html.match(/class="desk-gen"/g)).toHaveLength(bots.length);
+      const zero = withM({ ...grid, id: 'g-zero', pnl: { realized: 0, unrealized: 0, fees: 0, gas: 0 } });
+      const t = visibleText(row({ ...zero, kind: 'grid' }), view);
+      expect(t).not.toMatch(/(?:^|\s)0(?=\s|$)(?! [A-Za-z])/); // a count reads "0 fills"; a coin amount needs its coin
+    });
+  }
+  it('the column header names Invested', () => {
+    expect(desk()).toMatch(/<span class="num">Invested<\/span>/);
+  });
+});
+
+describe('#88 fixes: grid page', () => {
+  const lv = (n: number) => ({ index: n, lower: 2_100 + n * 50, upper: 2_150 + n * 50, status: 'waitingBuy', buyAmount: 200, plsAmount: 0 });
+  const g2 = { ...grid, id: 'g-lv', intervals: [lv(0), lv(1), lv(2)] };
+  it('an amount every waiting level buys is stated once above the levels', () => {
+    const html = gridPage('g-lv', { ...s, grids: [withM(g2)] });
+    expect(html).toMatch(/data-testid="levels-same">Each level waiting to buy buys 200 USDG</);
+    expect(textOf(html).match(/200 USDG/g)).toHaveLength(1);
+    expect(html.match(/buys \(above\)/g)).toHaveLength(3);
+  });
+  it('the amount hint does not echo the deposit in the box', () => {
+    expect(textOf(gridPage())).not.toMatch(/\d \w+ of your wallet/);
+  });
+  it('APR on a stopped grid: "—", not 0.0%', () => {
+    const stopped = withM({ ...grid, id: 'g-stop', status: 'stopped', startedAt: NOW - 3 * D });
+    stopped.metrics = { ...stopped.metrics, aprPct: 0 };
+    const sx = { ...s, grids: [stopped] };
+    expect(render(h(StatTable, { b: { ...stopped, kind: 'grid' }, s: sx }))).toMatch(/<th>[^<]*APR[^<]*<\/th><td[^>]*>—</);
+    expect(row({ ...stopped, kind: 'grid' }, sx)).toMatch(/<span class="desk-apr"[^>]*>—<\/span>/);
+  });
+});
+
+describe('#88 fixes: Home with one live bot shows its figure once', () => {
+  it('the headline points to the row instead of repeating it', () => {
+    const live = { ...s.lps[1], mode: 'live' };
+    const sx = { ...s, lps: [s.lps[0], live] };
+    const html = render(h(Home, { s: sx, nav: noop, holdings: null, act: noop }));
+    expect(html).toMatch(/data-testid="home-generated-rows">on NVDA LP below</);
+    for (const view of ['desktop', 'phone'] as View[]) expect(listRepeats(html, view)).toEqual([]);
+  });
+});
+
+describe('#88 fixes: phone Details value column wraps instead of clipping at the right edge', () => {
+  it('styles.css: inside the phone media query the Details table is fixed-layout and its cells wrap', () => {
+    const css = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
+    const phone = css.split(/@media \(max-width: ?860px\)/).slice(1).join('\n');
+    expect(phone).toMatch(/\.money-details \.stat-table\s*\{[^}]*table-layout:\s*fixed/);
+    expect(phone).toMatch(/\.money-details \.stat-table (td|th)[^{]*\{[^}]*(overflow-wrap:\s*anywhere|word-break)/);
+  });
+});
+
+describe('each figure once on the real paper fixture too (every bot, every page, desktop and phone)', () => {
+  const rows = [...REAL.grids.map((g: Obj) => ({ ...g, kind: 'grid' })), ...REAL.trends.map((t: Obj) => ({ ...t, kind: 'trend' })), ...REAL.lps.map((l: Obj) => ({ ...l, kind: 'lp' }))];
+  for (const view of ['desktop', 'phone'] as View[]) {
+    it(`Home and the Bots list (${view})`, () => {
+      expect(listRepeats(render(h(Home, { s: REAL, nav: noop, holdings: REAL_HOLDINGS as never, act: noop })), view), 'home').toEqual([]);
+      expect(listRepeats(render(h(Bots, { s: REAL, nav: noop, busy: false, onStopAll: noop } as never)), view), 'bots').toEqual([]);
+    });
+    for (const b of rows) {
+      it(`${b.id}: its row opened, and its page with Details closed and opened (${view})`, () => {
+        expect(repeats(figures(visibleText(row(b, REAL), view))), 'row').toEqual([]);
+        const page = (b.kind === 'lp' ? lpPage : b.kind === 'grid' ? gridPage : trendPage)(b.id, REAL);
+        expect(repeats(figures(visibleText(page, view))), 'closed').toEqual([]);
+        expect(repeats(figures(visibleText(opened(page), view))), 'opened').toEqual([]);
+      });
+    }
+  }
 });

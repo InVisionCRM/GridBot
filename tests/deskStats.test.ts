@@ -181,7 +181,7 @@ describe('estimate hint for a dash', () => {
   it('writes units per token', () => {
     expect(unitsText({ ETH: 0.0062605, USDC: 41.455 })).toBe('+0.00626 ETH · +41.46 USDC');
     expect(unitsText({ PLS: -1_234_567.8 })).toBe('−1,234,568 PLS');
-    expect(unitsText({ ETH: 0, USDC: 0 })).toBe('0');
+    expect(unitsText({ ETH: 0, USDC: 0 })).toBe('0 ETH · 0 USDC'); // a zero keeps its unit (Kyle)
     expect(unitsText(null)).toBe('—');
   });
 });

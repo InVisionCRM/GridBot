@@ -95,7 +95,7 @@ describe('MED 3: the LP page does not restate its headline under a day', () => {
     expect(top).not.toMatch(/over 8\.8h/);
     expect(top).not.toMatch(/of what you put in/);
     // each coin of Generated is printed once in the strip's Generated tile
-    const tile = text(top.slice(0, top.indexOf('Liquidity provided')));
+    const tile = text(top.slice(top.indexOf('Generated'), top.indexOf('Liquidity provided'))); // the Generated tile (Invested sits before it)
     for (const [sym, u] of Object.entries(b.metrics.generated as Record<string, number>)) {
       expect(tile.split(` ${sym}`).length - 1, `${u} ${sym}`).toBe(1);
     }
