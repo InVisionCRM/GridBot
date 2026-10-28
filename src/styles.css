@@ -362,8 +362,10 @@ tr.subrow > td { background: var(--surface-2); }
 .pair-field { position: relative; display: flex; flex-direction: column; gap: 4px; font-size: 0.78rem; color: var(--muted); min-width: 0; }
 .pair-pick { display: flex; gap: 4px; }
 .pair-current { appearance: none; flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; font: inherit; font-size: 0.9rem; color: var(--text); text-align: left; background: var(--bg); border: 1px solid var(--line-2); border-radius: 7px; padding: 7px 9px; cursor: pointer; white-space: nowrap; overflow: hidden; }
-.pair-current b { font-weight: 500; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pair-current b { font-weight: 500; flex: 1 1 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; }
 .pair-current .dex-tag { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* a phone's pair field has room for the chain and the pair; the pool's DEX is in the text under the field and in the picker */
+@media (max-width: 560px) { .pair-current .dex-tag { display: none; } }
 .pair-current:hover { border-color: var(--muted); }
 .pair-current[aria-expanded='true'] { border-color: var(--profit); }
 .pair-current:disabled { opacity: 0.55; cursor: not-allowed; }
