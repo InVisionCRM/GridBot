@@ -7,6 +7,7 @@ import { Alerts, loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs 
 import { preparePushWorker } from './ui/pushClient';
 import { botApi, http } from './ui/api';
 import { usd } from './ui/fmt';
+import { EthUsdCtx, ethUsdOf } from './ui/units';
 import { ChainFilterCtx, chainOf, RefreshCtx, rpcAlerts, type ChainFilter } from './ui/chains';
 import { Home } from './ui/Home';
 import { Bots } from './ui/Bots';
@@ -24,7 +25,6 @@ import { normalizeView, type View } from './ui/model';
 import { Header } from './ui/Header';
 import { Holdings, useHoldings } from './ui/Holdings';
 import { loadShowUsd, saveShowUsd, ShowUsdCtx } from './ui/money';
-import { EthUsdCtx, ethUsdOf } from './ui/units';
 
 function loadView(): View {
   try {
