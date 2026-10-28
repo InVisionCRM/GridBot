@@ -1,0 +1,354 @@
+{
+  "crossSwapType": "bridgeableToBridgeable",
+  "amountType": "exactInput",
+  "checks": {
+    "allowance": {
+      "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "spender": "0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5",
+      "actual": "0",
+      "expected": "10000000"
+    },
+    "balance": {
+      "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "actual": "1109805507",
+      "expected": "10000000"
+    }
+  },
+  "approvalTxns": [
+    {
+      "chainId": 1,
+      "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "data": "0x095ea7b30000000000000000000000005c7bcd6e7de5423a257d81b442095a1a6ced35c5ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "steps": {
+    "bridge": {
+      "inputAmount": "10000000",
+      "outputAmount": "9983732",
+      "tokenIn": {
+        "decimals": 6,
+        "symbol": "USDC",
+        "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "name": "USD Coin",
+        "chainId": 1
+      },
+      "tokenOut": {
+        "decimals": 6,
+        "symbol": "USDG",
+        "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        "name": "Global Dollar",
+        "chainId": 4663
+      },
+      "fees": {
+        "amount": "16268",
+        "pct": "1627500000000000",
+        "token": {
+          "decimals": 6,
+          "symbol": "USDC",
+          "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+          "name": "USD Coin",
+          "chainId": 1
+        },
+        "details": {
+          "type": "across",
+          "relayerCapital": {
+            "amount": "1000",
+            "pct": "100000000000000",
+            "token": {
+              "decimals": 6,
+              "symbol": "USDC",
+              "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+              "name": "USD Coin",
+              "chainId": 1
+            }
+          },
+          "destinationGas": {
+            "amount": "9275",
+            "pct": "927500000000000",
+            "token": {
+              "decimals": 6,
+              "symbol": "USDC",
+              "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+              "name": "USD Coin",
+              "chainId": 1
+            }
+          },
+          "lp": {
+            "amount": "0",
+            "pct": "0",
+            "token": {
+              "decimals": 6,
+              "symbol": "USDC",
+              "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+              "name": "USD Coin",
+              "chainId": 1
+            }
+          },
+          "internalizedSwap": {
+            "pct": "600000000000000",
+            "amount": "5993",
+            "token": {
+              "decimals": 6,
+              "symbol": "USDC",
+              "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+              "name": "USD Coin",
+              "chainId": 1
+            }
+          }
+        }
+      },
+      "provider": "across"
+    }
+  },
+  "inputToken": {
+    "decimals": 6,
+    "symbol": "USDC",
+    "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "name": "USD Coin",
+    "chainId": 1
+  },
+  "outputToken": {
+    "decimals": 6,
+    "symbol": "USDG",
+    "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "name": "Global Dollar",
+    "chainId": 4663
+  },
+  "refundToken": {
+    "decimals": 6,
+    "symbol": "USDC",
+    "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "name": "USD Coin",
+    "chainId": 1
+  },
+  "fees": {
+    "total": {
+      "amount": "16310",
+      "amountUsd": "0.016299999999999999",
+      "token": {
+        "decimals": 6,
+        "symbol": "USDC",
+        "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "name": "USD Coin",
+        "chainId": 1
+      },
+      "pct": "1631029179412209",
+      "details": {
+        "type": "total-breakdown",
+        "swapImpact": {
+          "amount": "42",
+          "amountUsd": "0.000042265107999997",
+          "token": {
+            "decimals": 6,
+            "symbol": "USDC",
+            "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "name": "USD Coin",
+            "chainId": 1
+          },
+          "pct": "4229179412209"
+        },
+        "app": {
+          "amount": "0",
+          "amountUsd": "0.0",
+          "token": {
+            "decimals": 6,
+            "symbol": "USDG",
+            "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+            "name": "Global Dollar",
+            "chainId": 4663
+          },
+          "pct": "0"
+        },
+        "bridge": {
+          "amount": "16268",
+          "amountUsd": "0.016257734892000001",
+          "token": {
+            "decimals": 6,
+            "symbol": "USDC",
+            "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "name": "USD Coin",
+            "chainId": 1
+          },
+          "pct": "1626800000000000",
+          "details": {
+            "type": "across",
+            "lp": {
+              "amount": "0",
+              "amountUsd": "0.0",
+              "token": {
+                "decimals": 6,
+                "symbol": "USDC",
+                "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "name": "USD Coin",
+                "chainId": 1
+              },
+              "pct": "0"
+            },
+            "relayerCapital": {
+              "amount": "1000",
+              "amountUsd": "0.000999369",
+              "token": {
+                "decimals": 6,
+                "symbol": "USDC",
+                "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "name": "USD Coin",
+                "chainId": 1
+              },
+              "pct": "100000000000000"
+            },
+            "destinationGas": {
+              "amount": "3946786915645",
+              "amountUsd": "0.009269147475",
+              "token": {
+                "chainId": 4663,
+                "address": "0x0000000000000000000000000000000000000000",
+                "decimals": 18,
+                "symbol": "ETH"
+              },
+              "pct": "927500000000000"
+            },
+            "internalizedSwap": {
+              "amount": "5993",
+              "amountUsd": "0.005989218417",
+              "token": {
+                "decimals": 6,
+                "symbol": "USDC",
+                "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "name": "USD Coin",
+                "chainId": 1
+              },
+              "pct": "599300000000000"
+            }
+          }
+        }
+      }
+    },
+    "totalMax": {
+      "amount": "16310",
+      "amountUsd": "0.016299999999999999",
+      "token": {
+        "decimals": 6,
+        "symbol": "USDC",
+        "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "name": "USD Coin",
+        "chainId": 1
+      },
+      "pct": "1631029179412209",
+      "details": {
+        "type": "max-total-breakdown",
+        "maxSwapImpact": {
+          "amount": "42",
+          "amountUsd": "0.000042265107999997",
+          "token": {
+            "decimals": 6,
+            "symbol": "USDC",
+            "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "name": "USD Coin",
+            "chainId": 1
+          },
+          "pct": "4229179412209"
+        },
+        "app": {
+          "amount": "0",
+          "amountUsd": "0.0",
+          "token": {
+            "decimals": 6,
+            "symbol": "USDG",
+            "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+            "name": "Global Dollar",
+            "chainId": 4663
+          },
+          "pct": "0"
+        },
+        "bridge": {
+          "amount": "16268",
+          "amountUsd": "0.016257734892000001",
+          "token": {
+            "decimals": 6,
+            "symbol": "USDC",
+            "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "name": "USD Coin",
+            "chainId": 1
+          },
+          "pct": "1626800000000000",
+          "details": {
+            "type": "across",
+            "lp": {
+              "amount": "0",
+              "amountUsd": "0.0",
+              "token": {
+                "decimals": 6,
+                "symbol": "USDC",
+                "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "name": "USD Coin",
+                "chainId": 1
+              },
+              "pct": "0"
+            },
+            "relayerCapital": {
+              "amount": "1000",
+              "amountUsd": "0.000999369",
+              "token": {
+                "decimals": 6,
+                "symbol": "USDC",
+                "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "name": "USD Coin",
+                "chainId": 1
+              },
+              "pct": "100000000000000"
+            },
+            "destinationGas": {
+              "amount": "3946786915645",
+              "amountUsd": "0.009269147475",
+              "token": {
+                "chainId": 4663,
+                "address": "0x0000000000000000000000000000000000000000",
+                "decimals": 18,
+                "symbol": "ETH"
+              },
+              "pct": "927500000000000"
+            },
+            "internalizedSwap": {
+              "amount": "5993",
+              "amountUsd": "0.005989218417",
+              "token": {
+                "decimals": 6,
+                "symbol": "USDC",
+                "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "name": "USD Coin",
+                "chainId": 1
+              },
+              "pct": "599300000000000"
+            }
+          }
+        }
+      }
+    },
+    "originGas": {
+      "amount": "0",
+      "amountUsd": "0.0",
+      "token": {
+        "chainId": 1,
+        "address": "0x0000000000000000000000000000000000000000",
+        "decimals": 18,
+        "symbol": "ETH"
+      }
+    },
+    "submission": null
+  },
+  "inputAmount": "10000000",
+  "maxInputAmount": "10000000",
+  "expectedOutputAmount": "9983732",
+  "minOutputAmount": "9983732",
+  "expectedFillTime": 2,
+  "swapTx": {
+    "ecosystem": "evm",
+    "simulationSuccess": false,
+    "chainId": 1,
+    "to": "0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5",
+    "data": "0xad5425c600000000000000000000000011111111111111111111111111111111111111110000000000000000000000001111111111111111111111111111111111111111000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d168000000000000000000000000000000000000000000000000000000000098968000000000000000000000000000000000000000000000000000000000009856f40000000000000000000000000000000000000000000000000000000000001237000000000000000000000000394311a6aaa0d8e3411d8b62de4578d41322d1bd000000000000000000000000000000000000000000000000000000006ae1395b000000000000000000000000000000000000000000000000000000006ae1557b000000000000000000000000000000000000000000000000000000006ae139b30000000000000000000000000000000000000000000000000000000000000180000000000000000000000000000000000000000000000000000000000000000073c0de",
+    "gas": "0"
+  },
+  "quoteExpiryTimestamp": 1793148779,
+  "id": "45khj-1793145261996-d4c1ac90fd06"
+}

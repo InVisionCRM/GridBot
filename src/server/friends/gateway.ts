@@ -12,11 +12,11 @@ import http from 'node:http';
 import type { Duplex } from 'node:stream';
 import { join } from 'node:path';
 import type { Friend, Friends } from './accounts';
-import { COOKIE, cookieValue, HOST_ID, readSession, RENEW_MS, sessionCookie, SESSION_MS, signSession, type Session } from './auth';
+import { COOKIE, cookieValue, DEVICE_COOKIE, deviceCookie, HOST_ID, readDevice, readSession, RENEW_MS, sessionCookie, SESSION_MS, signDevice, signSession, type Session } from './auth';
 import type { CopyState } from './copies';
 import type { OwnerLogin } from './owner';
 import { accountPage, copyDownPage, hostDownPage, invitePage, linkGonePage, loginPage, ownerAccountPage, resetPage } from './pages';
-import { FUNNEL_OWNER_REFUSED, requestHostAllowed, viaFunnel } from './publicHost';
+import { FUNNEL_OWNER_REFUSED, isLoopbackIp, requestHostAllowed, viaFunnel } from './publicHost';
 
 export interface GatewayDeps {
   friends: Friends;
@@ -41,7 +41,7 @@ export interface GatewayDeps {
   now?: () => number;
 }
 
-const PUBLIC = ['/favicon.svg', '/manifest.webmanifest', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png'];
+const PUBLIC = ['/favicon.svg', '/manifest.webmanifest', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png', '/sw.js'];
 /** Never passed on: the gateway's cookie, where the request came from, and hop-by-hop headers. */
 const DROP_IN = /^(cookie|origin|referer|forwarded|x-forwarded-.*|x-real-ip|tailscale-.*|x-gridbot-via|connection|keep-alive|proxy-.*|upgrade)$/i;
 const DROP_OUT = /^(connection|keep-alive|transfer-encoding|set-cookie)$/i;
@@ -77,6 +77,30 @@ export function createGateway(d: GatewayDeps) {
   /** Express 4 doesn't catch a rejected handler: an error here must never take the host (and its bots) down. */
   const h = (fn: (req: Request, res: Response) => Promise<unknown>) => (req: Request, res: Response, next: NextFunction) => { fn(req, res).catch(next); };
   const me = (res: Response): Friend => res.locals.friend as Friend;
+  const LOCAL_NAME = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+  /**
+   * Whether an owner log-in may skip the lockout (never the password). Called only when the request is not Funnel.
+   *  - known device: a genuine owner-device cookie, or a genuine owner session cookie (any age), either one signed for
+   *    the current owner session number: changing the password (npm run host:password bumps HOST_SESSION) revokes them;
+   *  - this computer: a loopback socket and loopback Host with no forwarding or Tailscale header at all (tailscale serve
+   *    always sets X-Forwarded-For and the public Host, so nothing it forwards qualifies);
+   *  - the owner's own tailnet login: Tailscale-User-Login on a forwarded tailnet request (serve deletes client-sent
+   *    Tailscale-* headers, so a shared device can't claim it). A tailnet address alone is NOT enough: devices shared
+   *    with friends have tailnet addresses too.
+   */
+  const ownerTrust = (req: Request): { trusted: boolean; tailnetId: string | null } => {
+    const hd = req.headers;
+    const forwarded = hd['x-forwarded-for'] != null || hd.forwarded != null || hd['x-real-ip'] != null;
+    const tsHeaders = Object.keys(hd).some((k) => k.startsWith('tailscale-'));
+    const rawId = hd['tailscale-user-login'];
+    const tailnetId = forwarded && typeof rawId === 'string' && rawId.trim() ? rawId.trim() : null;
+    const t = now();
+    const session = d.owner?.session ?? null;
+    const knownDevice = session != null && (readDevice(d.sessionKey, cookieValue(hd.cookie, DEVICE_COOKIE), t, session) != null
+      || (() => { const s = readSession(d.sessionKey, cookieValue(hd.cookie, COOKIE), 0); return !!s && s.role === 'host' && !!d.owner?.current(s); })());
+    const local = !forwarded && !tsHeaders && isLoopbackIp(req.socket.remoteAddress) && LOCAL_NAME.test(String(hd.host ?? ''));
+    return { trusted: knownDevice || local || !!d.owner?.isOwnerTailnet(tailnetId), tailnetId };
+  };
 
   app.use((req, res, next) => {
     if (!requestHostAllowed(req.headers.host, d.publicHosts?.() ?? [])) {
@@ -106,7 +130,10 @@ export function createGateway(d: GatewayDeps) {
 
   if (d.publicDir) {
     const dir = d.publicDir;
-    app.get(PUBLIC, (req, res) => res.sendFile(join(dir, req.path), (e) => { if (e && !res.headersSent) res.status(404).end(); }));
+    app.get(PUBLIC, (req, res) => {
+      if (req.path === '/sw.js') res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(join(dir, req.path), (e) => { if (e && !res.headersSent) res.status(404).end(); });
+    });
   }
 
   // ── Log in / out ─────────────────────────────────────────────────────
@@ -118,8 +145,9 @@ export function createGateway(d: GatewayDeps) {
       if (d.owner?.isOwnerName(name)) {
         // Refused before the password is checked: no guess through Funnel counts, or locks the owner name.
         if (res.locals.funnel) throw new Error(FUNNEL_OWNER_REFUSED);
-        const o = await d.owner.login(name, password);
+        const o = await d.owner.login(name, password, ownerTrust(req));
         stamp(res, ownerSession(o.session));
+        res.append('Set-Cookie', deviceCookie(signDevice(d.sessionKey, now(), o.session)));
       } else stamp(res, friendSession(await d.friends.login(name, password)));
       res.redirect(303, '/');
     } catch (e) { html(res, 400, loginPage(host(), { error: (e as Error).message, name })); }
@@ -189,6 +217,10 @@ export function createGateway(d: GatewayDeps) {
     const owner = res.locals.owner === true;
     const f = res.locals.friend as Friend | null;
     if (!owner && !f) return req.path.startsWith('/api/') ? res.status(401).json({ error: 'Please log in again.', login: true }) : res.redirect(303, '/login');
+    // Lock-screen push is the owner's phones only. A friend session is not proxied to their copy or to the host app.
+    if (!owner && (req.path === '/api/push' || req.path.startsWith('/api/push/'))) {
+      return res.status(403).json({ error: 'Push is only available on the owner login.' });
+    }
     const port = owner ? d.hostPort : f!.port;
     if (!port) {
       return req.path.startsWith('/api/')
