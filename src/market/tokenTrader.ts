@@ -9,11 +9,14 @@
  * Exits, in order: sell simulation failed, tax appeared or rose, liquidity pulled, hard stop, trailing stop,
  * take-profit ladders, time stop, volume decay. A sell is split so each piece stays under the price-impact cap.
  */
+import { usdAsEth } from '../lib/ethUnits';
 import { HARD_CAPS } from '../live/limits';
 import { MAX_TAX, TAX_TOLERANCE } from '../live/tax';
 import { simBuy, simSell, type CostModel } from './costs';
 import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, clampHolderShare, holderBound, thinCoverageReason } from './holders';
 import { capSwap, TOKEN_MAX_POOL_SHARE } from './poolSize';
+import type { LpUnlockEvidence } from './lpUnlock';
+import { v3LockSatisfies, type V3LpReport } from './v3LpLock';
 
 export const DEFAULT_MIN_POOL_AGE_SEC = 24 * 3600;
 export const DEFAULT_SNIPER_MIN_LIQ_USD = 5_000;
@@ -97,7 +100,7 @@ export function filterFresh(pools: FreshPool[], o: { now: number; minAgeMs: numb
     if (p.kind === 'v4') { skipped.push({ pool: p.pool, why: "this app doesn't swap V4" }); continue; }
     if (!(p.price > 0) || !(p.quoteReserve > 0)) { skipped.push({ pool: p.pool, why: 'no price or depth' }); continue; }
     const minL = o.minLiquidityUsd ?? 0;
-    if (p.liquidityUsd < minL) { skipped.push({ pool: p.pool, why: `liquidity $${Math.round(p.liquidityUsd).toLocaleString('en-US')} is below $${minL.toLocaleString('en-US')}` }); continue; }
+    if (p.liquidityUsd < minL) { skipped.push({ pool: p.pool, why: `liquidity ${usdAsEth(p.liquidityUsd)} is below ${usdAsEth(minL)}` }); continue; }
     if (p.createdAt != null && o.minAgeMs > 0 && o.now - p.createdAt < o.minAgeMs) {
       const h = Math.max(0, Math.round((o.now - p.createdAt) / 3600_000));
       skipped.push({ pool: p.pool, why: `pool is ${h}h old (minimum ${Math.round(o.minAgeMs / 3600_000)}h for scan discovery)` });
@@ -125,8 +128,22 @@ export interface GateInput {
   canPause: boolean | null;
   canBlacklist: boolean | null;
   proxy: boolean | null;
-  /** LP can be pulled by the owner (not burned / not locked). null = not detectable. */
+  /**
+   * LP can be pulled by the owner (not burned / not locked). null = not detectable, and null is not a block.
+   * Assess leaves this null unless `lpUnlockCheck` is on. That option fills it from lpRemovable (V2) or the
+   * V3 position-NFT report. Nothing here reads a GoPlus-style LP-holder list.
+   */
   lpUnlocked: boolean | null;
+  /**
+   * Set only when `lpUnlockCheck` ran. `unverified` fails closed for safe/medium.
+   * Absent (the default) leaves this gate unchanged.
+   */
+  lpUnlock?: LpUnlockEvidence;
+  /**
+   * On-chain V3 position-NFT evidence. Set only when the trader option `v3LpLockCheck` is on.
+   * Absent (the default) leaves this gate unchanged.
+   */
+  v3Lp?: V3LpReport;
   /**
    * Largest holder as a share of circulating supply. null = unknown.
    * Unknown is not a block unless `enforceHolderCheck` is on (safe and medium then fail closed).
@@ -173,7 +190,17 @@ export interface GateInput {
   sizeImpactCap?: number;
 }
 
-export interface GateResult { ok: boolean; liveOk: boolean; reason: string | null; /** Set for aggressive mode when coverage is thin. Safe and medium skip instead. */ warn?: string }
+export interface GateResult {
+  ok: boolean;
+  liveOk: boolean;
+  reason: string | null;
+  /** Present only when the input carried a V3 report. */
+  v3Lp?: V3LpReport;
+  /** Present only when the input carried an lpUnlockCheck result. */
+  lpUnlock?: LpUnlockEvidence;
+  /** Set for aggressive mode when coverage is thin. Safe and medium skip instead. */
+  warn?: string;
+}
 
 /**
  * The trade-size impact rule. null impact (the quote threw or never came back) fails closed.
@@ -192,12 +219,19 @@ export function sizeImpactReason(impact: number | null, cap: number): string | n
  */
 export function gateToken(g: GateInput): GateResult {
   const maxTax = g.maxTax ?? MAX_TAX;
-  const hard = (reason: string): GateResult => ({ ok: false, liveOk: false, reason });
+  // No evidence keys unless that check actually ran, so a flag-off result stays { liveOk, ok, reason }.
+  const carried = (): Partial<Pick<GateResult, 'v3Lp' | 'lpUnlock'>> => {
+    const extra: Partial<Pick<GateResult, 'v3Lp' | 'lpUnlock'>> = {};
+    if (g.v3Lp !== undefined) extra.v3Lp = g.v3Lp;
+    if (g.lpUnlock !== undefined) extra.lpUnlock = g.lpUnlock;
+    return extra;
+  };
+  const hard = (reason: string): GateResult => ({ ok: false, liveOk: false, reason, ...carried() });
   if (g.honeypot === true) return hard('honeypot: the sell simulation was blocked');
   if (g.sellSimOk === false) return hard('sell simulation failed');
   if (g.paused === true) return hard('token is paused');
   if (g.decimals == null || !(g.decimals >= 0 && g.decimals <= 36)) return hard('decimals unreadable');
-  if (g.liquidityUsd < g.minLiquidityUsd) return hard(`liquidity $${Math.round(g.liquidityUsd).toLocaleString('en-US')} is under the $${g.minLiquidityUsd.toLocaleString('en-US')} minimum`);
+  if (g.liquidityUsd < g.minLiquidityUsd) return hard(`liquidity ${usdAsEth(g.liquidityUsd)} is under the ${usdAsEth(g.minLiquidityUsd)} minimum`);
   if (g.canMint === true) return hard('owner can mint');
   if (g.recentLiqPull) return hard('liquidity was pulled');
   const tax = Math.max(g.buyTax ?? 0, g.sellTax ?? 0);
@@ -216,7 +250,12 @@ export function gateToken(g: GateInput): GateResult {
   }
   if (g.risk === 'safe' || g.risk === 'medium') {
     if (g.canPause === true) return hard('owner can pause');
-    if (g.lpUnlocked === true) return hard('liquidity is unlocked');
+    // Both reports are optional. With neither present, only an explicit lpUnlocked true blocks; null does not.
+    // When the V3 check ran, unverified and verified-but-not-locked both block, even if lpUnlocked was left null.
+    if (g.v3Lp?.status === 'unverified') return hard('V3 liquidity lock unverified');
+    if (g.v3Lp?.status === 'verified' && !v3LockSatisfies(g.v3Lp)) return hard('liquidity is unlocked');
+    if (g.lpUnlock?.status === 'unverified') return hard(g.lpUnlock.kind === 'v3' ? 'V3 liquidity lock unverified' : 'liquidity lock unverified');
+    if (g.lpUnlocked === true && !v3LockSatisfies(g.v3Lp)) return hard('liquidity is unlocked');
     if (tax > maxTax) return hard(`tax ${(tax * 100).toFixed(1)}% is over the ${(maxTax * 100).toFixed(0)}% cap`);
   }
   if (g.risk === 'safe') {
@@ -242,8 +281,9 @@ export function gateToken(g: GateInput): GateResult {
     if (why) return hard(why);
   }
   // Honeypot and a failed sell already returned above, so live only still needs the classifier and the tax cap.
-  const passed = { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null };
-  return coverageWarn ? { ...passed, warn: coverageWarn } : passed;
+  const passed: GateResult = { ok: true, liveOk: g.liveAllowed && tax <= maxTax, reason: null, ...carried() };
+  if (coverageWarn) passed.warn = coverageWarn;
+  return passed;
 }
 
 export interface BuySize {
@@ -275,8 +315,8 @@ export function sizeBuy(p: {
   const fill = simBuy(fit.amount, sellSidePrice(p.price, p.feeBps), model);
   const usd = fit.amount * p.usdPerSpend;
   const why = fit.why
-    ? `${fit.why}; ${usd.toFixed(2)} USD after fees and ${(((p.buyTax ?? 0) * 100).toFixed(1))}% buy tax`
-    : `${usd.toFixed(2)} USD, price impact ${(fit.impact * 100).toFixed(2)}%`;
+    ? `${fit.why}; ${usdAsEth(usd)} after fees and ${(((p.buyTax ?? 0) * 100).toFixed(1))}% buy tax`
+    : `${usdAsEth(usd)}, price impact ${(fit.impact * 100).toFixed(2)}%`;
   return { spend: fit.amount, usd, tokens: fill.pls, impact: fit.impact, why };
 }
 

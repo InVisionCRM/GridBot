@@ -3,9 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Guide } from './Guide';
 import { useStream, type ActivityEvent } from './ui/useStream';
 import { Activity } from './ui/Activity';
-import { loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs } from './ui/Alerts';
+import { Alerts, loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs } from './ui/Alerts';
+import { preparePushWorker } from './ui/pushClient';
 import { botApi, http } from './ui/api';
-import { usd } from './ui/fmt';
+import { EthUsdCtx, ethUsdOf, inEth } from './ui/units';
 import { ChainFilterCtx, chainOf, RefreshCtx, rpcAlerts, type ChainFilter } from './ui/chains';
 import { Home } from './ui/Home';
 import { Bots } from './ui/Bots';
@@ -18,16 +19,17 @@ import { ViewError } from './ui/ViewError';
 import { Tools } from './ui/Tools';
 import { Opportunities } from './ui/Opportunities';
 import { SmartTrader } from './ui/SmartTrader';
+import { TokenTraderChoiceBanner } from './ui/TokenTrader';
 import { useVersion } from './ui/System';
-import { type View } from './ui/model';
+import { normalizeView, type View } from './ui/model';
 import { Header } from './ui/Header';
 import { Holdings, useHoldings } from './ui/Holdings';
-import { loadShowUsd, saveShowUsd, ShowUsdCtx } from './ui/money';
+import { ShowUsdCtx } from './ui/money';
 
 function loadView(): View {
   try {
-    const v = JSON.parse(localStorage.getItem('view') ?? 'null') as View | null;
-    if (v && ['home', 'bots', 'more', 'opps', 'auto', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
+    const stored = normalizeView(JSON.parse(localStorage.getItem('view') ?? 'null'));
+    if (stored) return stored;
   } catch { /* storage unavailable */ }
   return { v: 'home' };
 }
@@ -57,17 +59,20 @@ export default function App() {
   const [chain, setChainState] = useState<ChainFilter>(loadChain);
   const setChain = (c: ChainFilter) => { setChainState(c); try { localStorage.setItem('chain', String(c)); } catch { /* storage unavailable */ } };
   const chainCtx = useMemo(() => ({ chain, setChain }), [chain]);
-  const [showUsd, setShowUsdState] = useState(loadShowUsd);
-  const usdCtx = useMemo(() => ({ on: showUsd, set: (on: boolean) => { setShowUsdState(on); saveShowUsd(on); } }), [showUsd]);
+  // Crypto units only: the old "$" switch has no dollar mode left (kept as a context so nothing breaks; always off)
+  const usdCtx = useMemo(() => ({ on: false, set: () => undefined }), []);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const ver = useVersion();
   const holdings = useHoldings();
+  // ETH price for dollar totals shown in ETH (net worth): see src/ui/units.tsx
+  const ethUsd = useMemo(() => ethUsdOf(s, holdings.data), [s, holdings.data]);
   const [guide, setGuide] = useState(false);
   const closeGuide = useCallback(() => setGuide(false), []);
   const [drawer, setDrawer] = useState(false);
   const scrolling = useRef(false);
   const scrollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => { void preparePushWorker(); }, []);
   useEffect(() => {
     const move = () => { scrolling.current = true; };
     const end = () => {
@@ -89,7 +94,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', k);
   }, [drawer]);
 
-  // Notify on a large move in total profit (realized + unrealized ≈USD across every bot).
+  // Notify on a large move in total profit: realized + unrealized across LIVE bots (grids, trends and LPs). The
+  // threshold is stored in dollars (prefs.pnlUsd) and set and shown in ETH; the message is in ETH.
   const pnlBase = useRef<number | null>(null);
   useEffect(() => {
     if (!s?.aggregate) return;
@@ -97,10 +103,10 @@ export default function App() {
     if (pnlBase.current == null) { pnlBase.current = total; return; }
     const d = total - pnlBase.current;
     if (Math.abs(d) >= prefs.pnlUsd) {
-      if (prefs.enabled && prefs.pnl) notify('GridBot · profit change', `Total profit moved ${usd(d, true)} → ${usd(total, true)}`, 'pnl');
+      if (prefs.enabled && prefs.pnl) notify('GridBot · profit change', `Live total profit moved ${inEth(d, ethUsd, true)} → ${inEth(total, ethUsd, true)}`, 'pnl');
       pnlBase.current = total;
     }
-  }, [s?.aggregate, prefs]);
+  }, [s?.aggregate, prefs, ethUsd]);
 
   // A detail view falls back to Home when its bot disappears from the status (removed), or on the first status
   // when a stored view points at a bot that no longer exists. A bot that was just created is not in the status
@@ -128,13 +134,14 @@ export default function App() {
     void act(() => (sel ? http(`/api/chains/${sel.id}/stop`, 'POST', undefined, 'header-chain-stop') : botApi('stop-all', 'POST', undefined, 'header-stop-all')));
   };
   return (
-    <ChainFilterCtx.Provider value={chainCtx}><RefreshCtx.Provider value={refresh}><ShowUsdCtx.Provider value={usdCtx}>
+    <ChainFilterCtx.Provider value={chainCtx}><RefreshCtx.Provider value={refresh}><ShowUsdCtx.Provider value={usdCtx}><EthUsdCtx.Provider value={ethUsd}>
       <div className="app">
         <Header
-          s={s} view={view} nav={nav} chain={chain} setChain={setChain} showUsd={showUsd} setShowUsd={usdCtx.set}
+          s={s} view={view} nav={nav} chain={chain} setChain={setChain} 
           connected={connected} ver={ver.v} holdings={holdings.data} onActivity={() => setDrawer(true)} onGuide={() => setGuide(true)}
         />
 
+        {!s?.copy && <TokenTraderChoiceBanner />}
         {rpcAlerts(s).map((c) => (
           <div key={`rpc-${c.id}`} className="banner error" role="alert">
             <span className="grow">
@@ -160,7 +167,8 @@ export default function App() {
           {view.v === 'grid' && <GridDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'trend' && <TrendDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'lp' && <LpDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
-          {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} prefs={prefs} setPrefs={setPrefs} ver={ver} />}
+          {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} ver={ver} />}
+          {view.v === 'alerts' && <Alerts status={s} prefs={prefs} setPrefs={setPrefs} />}
         </ViewError>
 
         {drawer && <>
@@ -172,6 +180,6 @@ export default function App() {
         </>}
         {guide && <Guide onClose={closeGuide} />}
       </div>
-    </ShowUsdCtx.Provider></RefreshCtx.Provider></ChainFilterCtx.Provider>
+    </EthUsdCtx.Provider></ShowUsdCtx.Provider></RefreshCtx.Provider></ChainFilterCtx.Provider>
   );
 }

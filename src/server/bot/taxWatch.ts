@@ -6,6 +6,20 @@
  */
 import type { SafetyReport } from '../../live/markets';
 import { TAX_RISE_EPS, fmtTax, taxRise, taxesOf } from '../../live/tax';
+import { isTransportError } from '../chains/fallback';
+
+/** The check type for the Re-check button (MultiBot.recheckMarket). Any other non-'scheduled' `why` is a suspicious event. */
+export const MANUAL_CHECK = 'manual';
+
+const HICCUP_TEXT = /time[d ]?out|timed out|rate.?limit|too many requests|\b429\b|\b50[234]\b|simulation unavailable|missing revert data|network error|socket hang up|ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|fetch failed|every endpoint/i;
+/**
+ * An RPC hiccup, not an answer about the token: transport failure, timeout, rate limit, the simulation not running.
+ * An ethers error is classified by #41's isTransportError (a real revert is not a hiccup); a plain error by its text.
+ */
+export function isRpcHiccup(e: unknown): boolean {
+  if ((e as { code?: unknown })?.code != null && isTransportError(e)) return true;
+  return HICCUP_TEXT.test(String((e as Error)?.message ?? e));
+}
 
 export interface TaxWatchDeps {
   now(): number;
@@ -66,7 +80,14 @@ export class TaxWatch {
       let next: SafetyReport;
       try { next = await this.d.recheck(key, why); } catch (e) {
         const msg = (e as Error).message.slice(0, 160);
-        // A failed re-check after a suspicious event is treated as unsafe; a failed scheduled one only warns.
+        // The Re-check button hit an RPC hiccup: the hub already marked the market stale. Warn, keep the bots running,
+        // and hand back the last known report (stale). Nothing about the token was learned, so nothing is paused.
+        if (why === MANUAL_CHECK && isRpcHiccup(e)) {
+          this.d.alert(key, 'warn', `${label}: re-check couldn't reach the chain (${msg}); showing the last known report as stale, bots keep running`, false);
+          return { key, rose: null, blocked: false, paused: 0, report: this.d.current(key) ?? null, error: msg };
+        }
+        // A failed re-check after a suspicious event (or a manual one that failed for a non-RPC reason) is treated as
+        // unsafe; a failed scheduled one only warns.
         if (why !== 'scheduled') {
           const n = this.d.pause(key, `tax re-check failed after ${why}: ${msg}`);
           this.d.alert(key, 'error', `${label}: tax re-check FAILED after ${why} — ${n} bot(s) paused (${msg})`, true);
@@ -83,12 +104,14 @@ export class TaxWatch {
         return { key, rose: null, blocked: false, paused: 0, report: next, error: msg };
       }
       // The buy/sell simulation didn't run (RPC timeout, rate limit, eth_call override refused): nothing was measured.
-      // A scheduled check treats that like a failed re-check: it warns and tries again; it never pauses on it. A real
-      // honeypot or paused() flag still pauses. Checks after a suspicious event (or a manual one) keep failing closed.
-      if (why === 'scheduled' && isInconclusive(next) && next.honeypot !== true && next.paused !== true) {
+      // A scheduled or manual (Re-check button) check treats that like an RPC hiccup: it warns (the hub kept the last
+      // measured report, labelled stale); it never pauses on it. A real honeypot or paused() flag still pauses. Checks
+      // after a suspicious event (reverted swap, short fill) keep failing closed.
+      if ((why === 'scheduled' || why === MANUAL_CHECK) && isInconclusive(next) && next.honeypot !== true && next.paused !== true) {
         const msg = (next.reasons[0] ?? 'simulation unavailable').slice(0, 160);
-        this.d.alert(key, 'warn', `${label}: scheduled tax re-check inconclusive (${msg}); bots keep running, will retry`, false);
-        return { key, rose: null, blocked: false, paused: 0, report: next, error: msg };
+        this.d.alert(key, 'warn', `${label}: ${why === 'scheduled' ? 'scheduled tax ' : ''}re-check inconclusive (${msg}); bots keep running${why === 'scheduled' ? ', will retry' : ''}`, false);
+        // The Re-check button shows what it returns: the last measured report, now labelled stale.
+        return { key, rose: null, blocked: false, paused: 0, report: why === MANUAL_CHECK ? (this.d.current(key) ?? next) : next, error: msg };
       }
       const rose = taxRise(taxesOf(prev), taxesOf(next), TAX_RISE_EPS);
       const blocked = !!prev?.liveAllowed && !next.liveAllowed;

@@ -1,6 +1,8 @@
 /** Small charts. Strokes and tracks come from --chart-* so the desk palette restyles them. */
 import { useId } from 'react';
-import { usd } from './fmt';
+import { useContext } from 'react';
+import { pct } from './fmt';
+import { EthUsdCtx, inEthShort } from './units';
 import { rangeTone } from './series';
 
 function lineOf(points: number[], w: number, h: number) {
@@ -56,7 +58,9 @@ export function AreaChart({ points }: { points: number[] }) {
   );
 }
 
-export function Donut({ slices }: { slices: { key: string; label: string; usd: number; color: string }[] }) {
+/** Slices are sized by value (dollars inside, never shown); the centre and legend read in ETH and percent. */
+export function Donut({ slices }: { slices: { key: string; label: string; usd: number; color: string; units?: string }[] }) {
+  const ethUsd = useContext(EthUsdCtx);
   const total = slices.reduce((a, s) => a + s.usd, 0);
   const r = 42;
   const c = 2 * Math.PI * r;
@@ -76,11 +80,11 @@ export function Donut({ slices }: { slices: { key: string; label: string; usd: n
             return el;
           })}
         </svg>
-        <span className="donut-total">{usd(total)}</span>
+        <span className="donut-total">{inEthShort(total, ethUsd)}</span>
       </div>
       <ul>
         {slices.map((s) => (
-          <li key={s.key}><i style={{ background: s.color }} />{s.label}<b>{usd(s.usd)}</b></li>
+          <li key={s.key} title={s.units}><i style={{ background: s.color }} />{s.label}<b>{total > 0 ? pct(s.usd / total, 0) : '—'} · {inEthShort(s.usd, ethUsd)}</b></li>
         ))}
         {!slices.length && <li className="muted">No balances yet</li>}
       </ul>

@@ -27,8 +27,14 @@ import { FriendsHost } from './friends/host';
 import { GeckoRelay, hostScan, relayFetch } from './friends/relay';
 import { Autopilot, type AutopilotState, type ScanView } from './bot/autopilot';
 import { createTokenTrader, tokenTraderStore } from './market/tokenFeed';
+import { tryStartPush } from './push/service';
+import { lpSnapsFromStatus } from './push/lpWatch';
+import { dailySummary } from './push/summary';
+import { chainBootLine, registerRpcUrls } from './chains/rpcUrl';
 
 loadEnv();
+// RPC URLs can hold an API key: register them before anything can log one (logs and the API show the host only).
+registerRpcUrls(process.env);
 const friendsSecret = takeFriendsSecret();
 const hostAuth = takeHostAuth();
 // Before anything copies process.env (a friend's copy must not inherit quote keys).
@@ -49,6 +55,7 @@ const { hub, readers } = buildHub({
   net: cfg.net, env: process.env, signerFactory: (chains) => (copy ? createSigners(chains, { friendKey }) : createSigners(chains)),
   custom: new JsonStore<CustomFile>(path.join(dataDir, 'custom.json')),
 });
+registerRpcUrls(process.env, readers.values());
 const legacyReader = readers.get(cfg.net.chainId)!;
 const activity = new ActivityBus(400, Date.now, path.join(dataDir, 'activity.log'));
 const candles = new CandleStore(path.join(dataDir, 'candles'), 5000);
@@ -123,10 +130,18 @@ const autopilot = new Autopilot({
 });
 const tokenTrader = copy ? undefined : createTokenTrader({
   hub, gecko, store: tokenTraderStore(path.join(dataDir, 'token-trader.json')), emit: activity.emitEvent,
-  approval: cfg.approval, receiptTimeoutMs: 120_000,
+  approval: cfg.approval, receiptTimeoutMs: 120_000, dataDir,
 });
 // Stop all / STOP chain: the token trader and sniper make no new buys there; exits of positions it holds keep running.
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));
+const push = tryStartPush({
+  dir: dataDir,
+  subject: cfg.vapidSubject,
+  log: (level, msg) => log[level](msg),
+  positions: () => { try { return lpSnapsFromStatus(bot.status()); } catch { return []; } },
+  summary: () => { try { return dailySummary(bot.status()); } catch { return { title: 'GridBot · daily summary', body: 'No generated profit to report.' }; } },
+});
+if (push) activity.on('activity', (ev) => { void push.onActivity(ev).catch(() => log.warn('push: event was not sent')); });
 // ROUTER HOOK: host only (a friend's copy has readCopy() set). Stop all calls router.halt.
 const router = new Router({
   store: new JsonStore<RouterFile>(path.join(dataDir, 'router.json')),
@@ -151,9 +166,14 @@ const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
   lpReplay: (q) => lpReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader, router, copy: !!copy,
+  friends, autopilot, tokenTrader, router, copy: !!copy, ...(push ? { push } : {}),
 });
 if (isProd) {
+  app.get('/sw.js', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('js');
+    res.sendFile(path.join(clientDir, 'sw.js'));
+  });
   app.use(express.static(clientDir));
   app.get('*', (_req, res) => res.sendFile(path.join(clientDir, 'index.html')));
 }
@@ -162,7 +182,7 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   log.info(`API on http://127.0.0.1:${cfg.port} · legacy chain ${cfg.net.label} (${cfg.net.chainId})`);
   for (const rt of hub.runtimes()) {
     const addr = rt.signer ? await rt.signer.getAddress().catch(() => null) : null;
-    log.info(`  ${rt.cfg.name} (${rt.cfg.id})${rt.cfg.status === 'testnet' ? ' TESTNET' : ''} · ${rt.tradable ? rt.cfg.dexes.map((d) => d.name).join(', ') : `trading unavailable — ${rt.cfg.trading.reason ?? 'no DEX'}`} · RPC ${rt.reader.currentUrl ?? '?'} · ${addr ? `signer ${addr}` : 'paper only'}`);
+    log.info(chainBootLine(rt, addr));
   }
   bot.address = hub.rt(cfg.net.chainId).signer ? await hub.rt(cfg.net.chainId).signer!.getAddress() : null;
   log.info(`State file ${cfg.stateFile} · poll ${cfg.pollMs}ms · approvals ${cfg.approval} · ${hub.list().length} markets (${hub.customMarkets().length} custom)`);
@@ -173,6 +193,10 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   void autopilot.tick();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
+  if (push) {
+    pushTimer = setInterval(() => { void push.tick().catch(() => log.warn('push: tick failed')); }, 15_000);
+    log.info('Web push ready');
+  }
   if (friends instanceof FriendsHost) {
     for (const rt of hub.runtimes()) if (rt.signer) hostAddresses.push(await rt.signer.getAddress());
     await friends.start().catch((e: Error) => { log.error(e.message); process.exit(1); });
@@ -188,9 +212,11 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 });
 let autopilotTimer: ReturnType<typeof setInterval> | null = null;
 let tokenTimer: ReturnType<typeof setInterval> | null = null;
+let pushTimer: ReturnType<typeof setInterval> | null = null;
 const shutdown = () => {
   if (autopilotTimer) clearInterval(autopilotTimer);
   if (tokenTimer) clearInterval(tokenTimer);
+  if (pushTimer) clearInterval(pushTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
   try { bot.flush(); } catch { /* logged by the store */ }
   if (friends instanceof FriendsHost) friends.stop();

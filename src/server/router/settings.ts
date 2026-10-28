@@ -252,7 +252,7 @@ function strictNum(v: unknown, name: string, min: number, max: number, integer =
 
 function usdMap(v: unknown, known: ReadonlySet<number>, ceiling: number, strict: boolean): Record<string, number> {
   if (v == null) return {};
-  if (!isObj(v)) { if (strict) throw new Error('Per-chain USD caps must be an object of chain id → amount.'); return {}; }
+  if (!isObj(v)) { if (strict) throw new Error('Per-chain caps must be an object of chain id → amount.'); return {}; }
   const out: Record<string, number> = {};
   for (const [k, raw] of entries(v)) {
     const id = Number(k);

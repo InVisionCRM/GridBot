@@ -3,6 +3,7 @@
  * the USD / native-coin oracle and the custom-token flow (inspect → discover pools → safety → add).
  * Engines resolve their market key through the hub; nothing here sends transactions.
  */
+import { ethUsdFromChains, registerHubEthUsd } from '../../lib/ethUnits';
 import type { LiveNetwork } from '../../live/networks';
 import { chainFromNetwork, type ChainConfig } from '../../live/chains';
 import { flipMarket, isFlipKey, isLegacyKey, legacyMarkets, marketKey, marketLabel, unflipKey, type MarketDef, type MarketToken, type SafetyReport } from '../../live/markets';
@@ -42,7 +43,27 @@ export interface InspectResult {
   existing: string | null;
 }
 
+/** How many tries a live start's safety check gets (Hub.liveCheck). */
+export const LIVE_CHECK_TRIES = 3;
+/** One safety-check try is cut off after this long (counts as not completed). */
+export const SAFETY_TRY_TIMEOUT_MS = 20_000;
+/** What a Start anyway went ahead on (audited on the bot: who, when and why it was blocked). */
+export interface StartAnywayInfo { blockedBy: string; tries: number; lastKnownAt: number; lastKnownRisk: SafetyReport['risk'] }
+/** A live start whose safety check completed and failed. There is no Start anyway for this. */
+export class SafetyBlocked extends Error { readonly code = 'SAFETY_BLOCKED'; }
+/** A live start whose safety check couldn't complete (RPC trouble). `canStartAnyway`: the last measured report passed. */
+export class SafetyIncomplete extends Error {
+  readonly code = 'SAFETY_INCOMPLETE';
+  constructor(msg: string, readonly blockedBy: string, readonly canStartAnyway: boolean) { super(msg); }
+}
+
+/** One safety re-check's claim on writing the stored report. `cancelled`: its caller gave up (timed out). */
+export interface CheckTicket { cancelled: boolean }
+
 export class Hub {
+  /** Safety re-checks get increasing numbers; per market, the number of the last one that wrote the stored report. */
+  private checkSeq = 0;
+  private readonly wroteSeq = new Map<string, number>();
   readonly spots: Record<string, number> = {};
   readonly spotAt: Record<string, number> = {};
   private readonly rts = new Map<number, ChainRuntime>();
@@ -51,8 +72,10 @@ export class Hub {
   private custom: CustomFile = { version: 1, tokens: [], markets: [] };
   private tvlCache = new Map<string, { at: number; v: number | null }>();
 
-  constructor(private readonly o: { runtimes: ChainRuntime[]; markets: MarketDef[]; legacyNet: LiveNetwork; custom?: Store<CustomFile>; now?: () => number }) {
+  constructor(private readonly o: { runtimes: ChainRuntime[]; markets: MarketDef[]; legacyNet: LiveNetwork; custom?: Store<CustomFile>; now?: () => number; safetyRetryMs?: number[]; safetyTryTimeoutMs?: number }) {
     for (const r of o.runtimes) this.rts.set(r.cfg.id, r);
+    // the ETH price screen text uses for dollar-only figures (src/lib/ethUnits.ts): this hub's native/stable read
+    registerHubEthUsd(() => this.ethUsd());
     // Shallow copies: the hub owns its defs (pool switches replace d.pool in place so live Quoters follow).
     for (const m of o.markets) if (this.rts.has(m.chainId)) this.defs.set(m.key, { ...m });
     const saved = o.custom?.load();
@@ -184,6 +207,11 @@ export class Hub {
   usdRefKey(chainId: number): string | null {
     const ms = this.byChain(chainId).filter((m) => m.base.native && m.quoteKind === 'stable');
     return (ms.find((m) => !m.custom) ?? ms[0])?.key ?? null;
+  }
+
+  /** Dollars per ETH: Ethereum's native/stable read, else any other ETH-native chain's (same as chains[].nativeUsd). */
+  ethUsd(): number | null {
+    return ethUsdFromChains(this.runtimes().map((r) => ({ id: r.cfg.id, nativeSymbol: r.cfg.nativeSymbol, nativeUsd: this.nativeUsd(r.cfg.id) })));
   }
 
   nativeUsd(chainId: number): number | null {
@@ -366,7 +394,7 @@ export class Hub {
         if (d.quote.native || sameAddr(d.quote.address, rt.cfg.wrappedNative.address)) return 1 / spot;
         if (!this.isStable(d.chainId, d.quote.address)) throw new Error(`${marketLabel(d)}: no native price route`);
         const nat = await this.nativeUsdAsync(d.chainId);
-        if (!nat) throw new Error(`${rt.cfg.name}: no USD price for ${rt.cfg.nativeSymbol}`);
+        if (!nat) throw new Error(`${rt.cfg.name}: no price for ${rt.cfg.nativeSymbol}`);
         return nat / spot;
       },
       l1Fee: rt.cfg.stack !== 'l1' ? (to, data, gp) => rt.l1Fee(to, data, gp) : undefined,
@@ -473,17 +501,25 @@ export class Hub {
    * Being stale only labels the report: `liveAllowed` and the taxes keep their last known values, and nothing here
    * pauses or stops a bot.
    */
-  async recheck(key: string, o: { keepMeasured?: boolean } = {}): Promise<SafetyReport> {
+  async recheck(key: string, o: { keepMeasured?: boolean; ticket?: CheckTicket } = {}): Promise<SafetyReport> {
     key = unflipKey(key);
     const d = this.def(key);
     if (!d.safety) throw new Error(`${this.label(key)} has no safety check (built-in PulseChain market)`);
+    // Late answers never overwrite: a check whose caller gave up on it (liveCheck timed it out) or that started
+    // before the one whose answer was already stored is discarded (#58 review). Only the stored report is protected;
+    // the caller (if still waiting) gets its own result.
+    const seq = ++this.checkSeq;
+    const late = () => !!o.ticket?.cancelled || seq < (this.wroteSeq.get(key) ?? 0);
+    const wrote = () => { this.wroteSeq.set(key, seq); };
     let r: InspectResult;
     try {
       r = await this.inspect({ chainId: d.chainId, address: d.base.address, quote: d.quote.address, pool: d.pool.address });
     } catch (e) {
-      this.markStale(key, `re-check failed: ${(e as Error).message}`);
+      if (!late()) { this.markStale(key, `re-check failed: ${(e as Error).message}`); wrote(); }
       throw e;
     }
+    if (late()) return r.safety ?? d.safety;
+    wrote();
     const fresh = r.safety ?? null;
     if (!fresh) return this.markStale(key, r.chosen ? 'the re-check measured nothing' : 'the re-check found no usable pool');
     if (o.keepMeasured && isInconclusive(fresh) && !isInconclusive(d.safety)) {
@@ -495,6 +531,58 @@ export class Hub {
     this.persist();
     if (was) this.onSafetyFresh?.(key, fresh);
     return fresh;
+  }
+
+  /**
+   * The safety check a LIVE start needs: a fresh check that completes. Up to 3 tries, waiting `safetyRetryMs` between
+   * them (each read already rotates across the chain's RPCs, #41). A try "doesn't complete" when it throws, returns no
+   * report, or its simulation didn't run (and found no honeypot / paused flag); the stored measured report is then kept,
+   * labelled stale (keepMeasured).
+   * - Completed and passing → returned.
+   * - Completed and failing (honeypot, tax over the cap, paused, thin pool, …) → SafetyBlocked. Never bypassable.
+   * - Didn't complete after 3 tries → SafetyIncomplete. `startAnyway` lets the start go ahead on the last known report,
+   *   but only when that report was measured and passed; a token that never passed a check can't be started live.
+   */
+  async liveCheck(key: string, o: { startAnyway?: boolean; deadlineMs?: number } = {}): Promise<{ report: SafetyReport; override: StartAnywayInfo | null }> {
+    key = unflipKey(key);
+    const label = this.label(key);
+    const waits = this.o.safetyRetryMs ?? [1000, 2000];
+    // Each try is cut off after safetyTryTimeoutMs (a hung RPC can't hold a start, resume or boot); `deadlineMs` caps
+    // all tries together (boot). A try cut off counts as not completed.
+    const tryMs = this.o.safetyTryTimeoutMs ?? SAFETY_TRY_TIMEOUT_MS;
+    const end = o.deadlineMs != null ? Date.now() + o.deadlineMs : Infinity;
+    let why = 'no answer', tries = 0;
+    for (let n = 0; n < LIVE_CHECK_TRIES; n++) {
+      if (n > 0 && waits[n - 1]) await new Promise((r) => setTimeout(r, Math.min(waits[n - 1], Math.max(0, end - Date.now()))));
+      const left = Math.min(tryMs, end - Date.now());
+      if (left <= 0) { why = `${why}; out of time`; break; }
+      tries++;
+      let r: SafetyReport;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      // Promise.race doesn't stop the slow try; the ticket makes its late answer a no-op (never stored).
+      const ticket: CheckTicket = { cancelled: false };
+      try {
+        r = await Promise.race([
+          this.recheck(key, { keepMeasured: true, ticket }),
+          new Promise<never>((_, rej) => { timer = setTimeout(() => { ticket.cancelled = true; rej(new Error(`safety check timed out after ${Math.round(left / 1000)} s`)); }, left); }),
+        ]);
+      } catch (e) {
+        why = (e as Error).message.slice(0, 160);
+        if (/safety check timed out/.test(why) && this.def(key).safety) this.markStale(key, why);
+        continue;
+      } finally { clearTimeout(timer); }
+      if (r.stale) { why = r.stale.why; continue; }
+      if (isInconclusive(r) && r.honeypot !== true && r.paused !== true) { why = (r.reasons[0] ?? 'simulation unavailable').slice(0, 160); continue; }
+      if (!r.liveAllowed) throw new SafetyBlocked(`LIVE blocked — ${label} safety ${r.risk}: ${r.reasons.join(' ') || 'failed the safety check'}`);
+      return { report: r, override: null };
+    }
+    const known = this.def(key).safety ?? null;
+    const canStartAnyway = !!known && !isInconclusive(known) && known.liveAllowed;
+    if (o.startAnyway && canStartAnyway) return { report: known!, override: { blockedBy: why, tries, lastKnownAt: known!.at, lastKnownRisk: known!.risk } };
+    const tail = canStartAnyway
+      ? `It last passed on ${new Date(known!.at).toISOString()} (${known!.risk} risk): you can Start anyway.`
+      : 'It has never passed a safety check, so it can\'t be started live.';
+    throw new SafetyIncomplete(`LIVE blocked — couldn't complete the safety check for ${label} after ${tries} ${tries === 1 ? 'try' : 'tries'} (${why}). ${tail}`, why, canStartAnyway);
   }
 
   /** Keep the stored report's values, label them stale. */

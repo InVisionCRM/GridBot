@@ -5,7 +5,7 @@ import { MemoryStore } from '../src/server/bot/store';
 import { NET, MockChain } from './helpers/mockChain';
 
 const P0 = 0.00001;
-const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 };
+const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 };
 
 function make(chain = new MockChain(P0), store = new MemoryStore<MultiState>(), signer: MockChain | null = chain) {
   const log = new Logger(true);
@@ -77,7 +77,7 @@ describe('MultiBot', () => {
     (store as unknown as { data: unknown }).data = {
       version: 1, mode: 'paper', network: 'mainnet', stable: 'DAI', status: 'stopped',
       config: { ...base }, limits: { maxPriceImpact: 0.03, slippageBps: 100, deadlineMinutes: 10 },
-      levels: [], intervals: [], usdPerBuy: 5, queue: [], inFlight: null, trades: [],
+      levels: [], intervals: [], quotePerBuy: 5, queue: [], inFlight: null, trades: [],
       paperStartStable: 30, lastPrice: P0, lastPriceAt: Date.now(),
     };
     const { bot } = make(new MockChain(P0), store, null);
@@ -89,7 +89,7 @@ describe('MultiBot', () => {
   it('starts a tight-spacing grid with a warning instead of refusing it', async () => {
     const { bot } = make(new MockChain(P0), undefined, null);
     const id = await bot.add({
-      mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.98, upperPrice: P0 * 1.02, gridCount: 40, totalCapitalUsd: 50,
+      mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.98, upperPrice: P0 * 1.02, gridCount: 40, totalCapitalQuote: 50,
     });
     const g = bot.status().grids.find((x) => x.id === id)!;
     expect(g.status).toBe('running');
@@ -113,9 +113,9 @@ describe('MultiBot', () => {
     const id = await bot.add({ mode: 'paper', stable: 'DAI', ...base });
     bot.stop(id);
     chain.setBal('DAI', 10);
-    await expect(bot.start(id, { mode: 'live', stable: 'DAI', ...base, totalCapitalUsd: 30 })).rejects.toThrow('Not enough DAI in your wallet. This needs 30 DAI (30 for this bot), and the wallet has 10 DAI. Use a smaller amount, or start it in paper mode.');
+    await expect(bot.start(id, { mode: 'live', stable: 'DAI', ...base, totalCapitalQuote: 30 })).rejects.toThrow('Not enough DAI in your wallet. This needs 30 DAI (30 for this bot), and the wallet has 10 DAI. Use a smaller amount, or start it in paper mode.');
     chain.setBal('DAI', 1000);
-    await bot.start(id, { mode: 'live', stable: 'DAI', ...base, totalCapitalUsd: 30 });
+    await bot.start(id, { mode: 'live', stable: 'DAI', ...base, totalCapitalQuote: 30 });
     expect(bot.status().grids.find((g) => g.id === id)!.mode).toBe('live');
   });
 });
@@ -123,7 +123,7 @@ describe('MultiBot', () => {
   it('can run a PLS/HEX paper grid alongside DAI', async () => {
     const { chain, bot } = make(new MockChain(P0), undefined, null);
     await bot.add({ mode: 'paper', stable: 'DAI', ...base });
-    await bot.add({ mode: 'paper', stable: 'HEX', ...base, totalCapitalUsd: 20 });
+    await bot.add({ mode: 'paper', stable: 'HEX', ...base, totalCapitalQuote: 20 });
     chain.setPrice(P0 * 0.975);
     await bot.tickAll();
     const hex = bot.status().grids.find((g) => g.stable === 'HEX')!;
