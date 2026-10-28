@@ -787,17 +787,51 @@ describe('LP range gates and compounding (off unless set)', () => {
     expect(lp.status().reranges).toBe(1);
   });
 
-  it('the cost check waits until there is a fee pace, then moves when fees cover the gas', async () => {
+  it('the cost check waits for in-range time, and time outside does not invent a pace', async () => {
     const { lp, m, pool, at } = await open(undefined, { range: { costCheck: true, feeHorizonH: 24 } });
     m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n);
+    await lp.tick(); // starts the in-range clock; this tick itself is not yet earning time
+    at(9 * 60_000);
     await lp.tick();
     m.movePrice(pool, 1.2);
     await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 0, hold: { wait: 'cost' } });
+    at(9 * 60_000 + 60 * 60_000);
+    await lp.tick();
+    expect(lp.state.position!.earningMs).toBe(9 * 60_000);
+    expect(lp.status()).toMatchObject({ reranges: 0, hold: { wait: 'cost' } });
+  });
+
+  it('once the in-range pace covers the cost, waiting outside does not talk the bot out of the move', async () => {
+    const { lp, m, pool, at } = await open(undefined, { range: { costCheck: true, feeHorizonH: 24, dwellMin: 48 * 60 } });
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n);
+    await lp.tick();
+    at(15 * 60_000);
+    await lp.tick();
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 0, hold: { wait: 'dwell' } });
+    expect(lp.state.position!.earningMs).toBe(15 * 60_000);
+    at(15 * 60_000 + 48 * 60 * 60_000 - 1);
+    await lp.tick();
+    expect(lp.state.position!.earningMs).toBe(15 * 60_000);
     expect(lp.status().reranges).toBe(0);
-    expect(lp.status().hold?.wait).toBe('cost');
-    at(60 * 60_000);
+    at(15 * 60_000 + 48 * 60 * 60_000);
     await lp.tick();
     expect(lp.status()).toMatchObject({ reranges: 1, inRange: true });
+  });
+
+  it('compoundNow does not replace a step that started while it was reading the pool', async () => {
+    const { lp, m, pool } = await open();
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n);
+    await lp.tick();
+    const owed = lp['owed'].bind(lp) as (pool: unknown, pos: unknown) => Promise<unknown>;
+    lp['owed'] = async (p: unknown, pos: unknown) => {
+      lp.state.step = { action: 'rerange', stage: 'exit', tries: 0 };
+      return owed(p, pos);
+    };
+    await expect(lp.compoundNow()).rejects.toThrow(/busy moving the range/);
+    expect(lp.state.step).toMatchObject({ action: 'rerange', stage: 'exit' });
   });
 
   it('warns once as the price nears the edge, and not again until it comes back', async () => {

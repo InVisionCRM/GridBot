@@ -176,6 +176,8 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
   };
 
   let gas = 0, swapCost = 0, fees = 0, moves = 0, blocked = 0, inTime = 0, moveLoss = 0;
+  /** In-range time of the open position. Reset on each open. Wall-clock age is not the cost-check denominator. */
+  let earningMs = 0;
   let pos = { tl: 0, tu: 0, L: 0 }, idle: Coins = { base: 0, quote: 0 }, owed: Coins = { base: 0, quote: 0 };
   const feeCoins: Coins = { base: 0, quote: 0 };
   /** The coins the open position went in with */
@@ -198,6 +200,7 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     pos = { tl, tu, L };
     putIn = used;
     idle = { base: Math.max(0, coins.base - used.base), quote: coins.quote - used.quote };
+    earningMs = 0;
   };
 
   // No policy object at all: the original loop. An explicit object, even all defaults, goes through lpPolicy.
@@ -247,6 +250,8 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
       continue;
     }
 
+    earningMs += Math.max(0, (m.t - rows[i - 1].t) * 1000) * r;
+
     if (comp!.enabled) {
       const worth = val(owed, p);
       const gate = decideCompound(worth, o.gasCompound ?? 0, comp!);
@@ -275,7 +280,7 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
       const next0 = rangeTicks(p * (1 - band), p * (1 + band), pool.spacing, pool);
       const s0 = plan(have0, next0.tickLower, next0.tickUpper, m.c, m.liq);
       quotedCost = o.gasMove + s0.cost;
-      quotedPace = feePace(fees - feesAtOpen, (m.t - openedAt) * 1000);
+      quotedPace = feePace(fees - feesAtOpen, earningMs);
     }
     const dec = decideRangeMove({
       tickOut, price: p, lower: price(pos.tl), upper: price(pos.tu),

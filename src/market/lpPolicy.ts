@@ -197,9 +197,14 @@ export function effectiveBand(bandPct: number, atrAbs: number | null, price: num
   return width;
 }
 
-/** Quote per hour, or null when the position is too young for a pace. */
-export function feePace(feesQuote: number, ageMs: number): number | null {
-  const hours = ageMs / 3_600_000;
+/**
+ * Quote per hour of time the position was inside the range.
+ * `earningMs` must leave out time spent outside: that time earns nothing, and dividing
+ * by wall-clock age makes the pace fall the longer a move is postponed.
+ * Null until 10 minutes have been spent in range.
+ */
+export function feePace(feesQuote: number, earningMs: number): number | null {
+  const hours = earningMs / 3_600_000;
   if (!(hours >= COST_MIN_HOURS) || !(feesQuote >= 0) || !Number.isFinite(feesQuote)) return null;
   return feesQuote / hours;
 }

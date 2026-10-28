@@ -139,6 +139,21 @@ describe('effectiveBand and fee pace', () => {
     expect(feePace(10, 9 * 60_000)).toBeNull();
     expect(feePace(10, 10 * 60_000)).toBeCloseTo(10 / (10 / 60), 9);
   });
+
+  it('the cost check keeps the in-range pace while the position sits outside', () => {
+    const policy = { ...DEFAULT_RANGE_POLICY, costCheck: true, feeHorizonH: 24 };
+    const earned = 12;
+    const inRange = 2 * 3_600_000;
+    const pace = feePace(earned, inRange)!;
+    expect(pace).toBeCloseTo(6, 9);
+    const moveCost = pace * 24 * 0.9;
+    const edge = { price: 120, lower: 90, upper: 110, tickOut: true, outSince: 0, now: 0, rerange: true, policy, moveCost };
+    expect(decideRangeMove({ ...edge, feePerHour: pace }).move).toBe(true);
+    const aged = feePace(earned, inRange + 10 * 24 * 3_600_000)!;
+    expect(aged * 24).toBeLessThan(moveCost);
+    expect(decideRangeMove({ ...edge, feePerHour: aged }).move).toBe(false);
+    expect(decideRangeMove({ ...edge, now: 10 * 24 * 3_600_000, feePerHour: pace }).move).toBe(true);
+  });
 });
 
 describe('decideCompound', () => {

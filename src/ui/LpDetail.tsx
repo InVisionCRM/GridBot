@@ -70,7 +70,6 @@ function RangeControls({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: b
       <button type="button" className="btn primary" disabled={busy || !!why} title={why} onClick={move}>
         {same ? 'Move to the price now' : ok ? `Change to ±${+(band * 100).toFixed(2)}%` : 'Change range'}
       </button>
-      <p className="muted small">Moved {b.reranges} time{b.reranges === 1 ? '' : 's'}{b.lastRerangeAt ? `, last ${ago(b.lastRerangeAt)}` : ''}.</p>
     </div>
   );
 }
@@ -85,7 +84,6 @@ function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boo
   const pad = span * 0.25, lo = lower - pad, hi = upper + pad;
   const at = (v: number) => `${Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100))}%`;
   const q = b.quote as string, base = b.base as string;
-  const fees = b.owed && price != null ? b.owed.base * price + b.owed.quote : null;
   const need = b.hold?.compoundNeed as number | null | undefined;
   const compoundOn = !!b.config?.compound?.enabled;
   const dwell = b.config?.range?.dwellMin ?? 0;
@@ -123,18 +121,13 @@ function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boo
       <div className="lp-health-stats">
         <div>
           <span className="k">Fees waiting</span>
-          <b className="pos">{fees != null ? qty(fees, q, 4, false) : '—'}</b>
-          <span className="muted small">{num(b.owed?.base, 4)} {base} + {num(b.owed?.quote, 4)} {q}</span>
+          <b className="pos">{num(b.owed?.base, 4)} {base}</b>
+          <span className="muted small">{num(b.owed?.quote, 4)} {q}</span>
         </div>
         <div>
           <span className="k"><L tip="With compounding on, fees are collected and added back into this range once they are worth the multiple × the estimated gas. Off, they roll in on the next range move or when the bot closes.">Compound at</L></span>
           <b>{compoundOn ? (need != null && Number.isFinite(need) ? qty(need, q, 4, false) : '…') : 'off'}</b>
           <span className="muted small">{compoundOn ? `${b.config.compound.gasMultiple ?? 10}× gas` : 'rolls in on a move'}</span>
-        </div>
-        <div>
-          <span className="k">Moves</span>
-          <b className={b.pnl?.moveLoss ? 'neg' : ''}>{b.reranges} · {b.pnl ? qty(-b.pnl.moveLoss, q, 2) : '—'}</b>
-          <span className="muted small">lost to range moves</span>
         </div>
       </div>
       <div className="lp-actions">
@@ -270,7 +263,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={`Your share of the pool's trading fees, in the coins they were paid in: collected so far plus what's waiting in the position. A trade selling ${base} pays its fee in ${base}; one buying it pays in ${q}. The coins' price doesn't change these amounts.`}>Fees earned</L></span>
           <div className="kpi-v coins2">{pnl ? <><b className={cls(pnl.feeCoins.base)}>{qty(pnl.feeCoins.base, base, 5)}</b><b className={cls(pnl.feeCoins.quote)}>{qty(pnl.feeCoins.quote, q, 5)}</b></> : '—'}</div>
-          <span className="sub">{pnl ? <>waiting in the position: {num(b.owed?.base, 6)} {base} + {num(b.owed?.quote, 6)} {q}<Usd v={pnl.fees} k={k} /></> : 'measuring…'}</span>
+          {!pnl && <span className="sub">measuring…</span>}
         </div>
         <div className="kpi">
           <span><L tip={`Gas for every open, range move, close and fee collect, plus what the swaps to the range's mix lost to the pool fee and price impact. Counted in ${q}.`}>Costs</L></span>
@@ -280,7 +273,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={`While the price is inside the range, the position sells ${base} as it rises and buys it as it falls, so it ends up with more of whichever coin fell. Taking it out (to move the range, or to close) makes that final. This is how much less those coins were worth than the ones put in, at the same price.`}>Lost to range moves</L></span>
           <div className={`kpi-v ${pnl?.moveLoss ? 'neg' : ''}`}>{pnl ? qty(-pnl.moveLoss, q, 4) : '—'}</div>
-          <span className="sub">{b.reranges} range move{b.reranges === 1 ? '' : 's'}<Usd v={pnl ? -pnl.moveLoss : null} k={k} /></span>
+          <span className="sub">{b.reranges} range move{b.reranges === 1 ? '' : 's'}</span>
         </div>
         <div className="kpi">
           <span><L tip={`Fees earned minus costs and what range moves lost, in ${q}. The coins' own price move isn't in it: that happens whether or not the bot runs.`}>Earned after costs</L></span>
@@ -309,7 +302,6 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
               <RangeHealth b={b} act={act} busy={busy} />
               {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
               <p className="small">In the position: <b>{num(b.coins?.base, 6)} {base}</b> + <b>{num(b.coins?.quote, 6)} {q}</b></p>
-              <p className="small">Fees waiting: {num(b.owed?.base, 8)} {base} + {num(b.owed?.quote, 8)} {q}</p>
               <p className="muted small">Opened {ago(pos.openedAt)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>
             </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
             {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}

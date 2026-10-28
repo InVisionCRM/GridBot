@@ -65,6 +65,14 @@ export interface LpPosition {
   feesBefore: Coins;
   /** Paper: the pool's global fee growth and whether the price was in range at the last reading; fees earned (raw, token order) */
   paper?: { g0: string; g1: string; inRange: boolean; owed0: string; owed1: string };
+  /**
+   * Milliseconds this position has spent in range. The cost-check pace divides fees by this,
+   * not by wall-clock age, so sitting outside does not make the pace decay. Absent on older saves.
+   */
+  earningMs?: number;
+  /** When `earningMs` was last rolled forward, and whether that reading was in range. */
+  earnAt?: number;
+  earnWasIn?: boolean;
 }
 
 export type LpAction = 'open' | 'rerange' | 'close' | 'send' | 'compound';
@@ -482,20 +490,32 @@ export class LpEngine {
     if (next.compound) c.compound = checkCompoundPolicy({ ...c.compound, ...next.compound });
     this.save();
   }
+  /** Why a manual compound or move must not start. A tick in flight counts: it may be about to write `step`. */
+  private busyReason(): string | null {
+    if (this.ticking) return 'It is busy with a step. Try again in a minute.';
+    const s = this.state.step;
+    if (!s) return null;
+    const what = s.action === 'rerange' ? 'moving the range' : s.action === 'compound' ? 'compounding fees' : s.action === 'send' ? 'sending fees' : 'closing';
+    return `It is busy ${what}. Try again in a minute.`;
+  }
   /**
    * Collect waiting fees and add them back into this range, now. Ignores the gas multiple.
-   * Refused while a step runs, while paused, while fees are set to be sent out, and when nothing is waiting.
+   * Refused while a step runs or a tick is in flight, while paused, while fees are set to be sent out, and when nothing is waiting.
    */
   async compoundNow() {
     const c = this.state.config;
     if (!c || !this.state.position) throw new Error('No position is open.');
     if (this.state.status !== 'running') throw new Error('Resume it first.');
-    if (this.state.step) throw new Error(`It is busy ${this.state.step.action === 'rerange' ? 'moving the range' : this.state.step.action === 'compound' ? 'compounding fees' : this.state.step.action === 'send' ? 'sending fees' : 'closing'}. Try again in a minute.`);
+    const busy = this.busyReason();
+    if (busy) throw new Error(busy);
     if (this.state.profits.mode !== 'reinvest') throw new Error('Fees are set to be sent out, so they are not added back into the position.');
     const pool = this.lp(), v = await pool.view();
     const owed = await this.owed(pool, this.state.position);
     const fees = pool.coinsFromRaw(owed.raw0, owed.raw1, v);
     if (!(fees.base * v.price + fees.quote > 0)) throw new Error('No fees are waiting.');
+    // The awaits above yield. Re-check immediately before the write so an in-flight step is not replaced.
+    const again = this.busyReason();
+    if (again) throw new Error(again);
     this.state.step = { action: 'compound', stage: 'collect', tries: 0 };
     this.save();
     this.ev('info', `Liquidity ${this.label}: compounding the waiting fees back into the position (asked)`, { level: 'info' });
@@ -508,13 +528,16 @@ export class LpEngine {
     const c = this.state.config;
     if (!c || !this.state.position) throw new Error('No position is open.');
     if (this.state.status !== 'running') throw new Error('Resume it first.');
-    if (this.state.step) throw new Error(`It is busy ${this.state.step.action === 'rerange' ? 'moving the range' : this.state.step.action === 'compound' ? 'compounding fees' : this.state.step.action === 'send' ? 'sending fees' : 'closing'}. Try again in a minute.`);
+    const busy = this.busyReason();
+    if (busy) throw new Error(busy);
     const band = bandPct ?? c.bandPct;
     if (!(band >= LP_BAND.min && band <= LP_BAND.max)) throw new Error(`Range must be ±${LP_BAND.min * 100}% to ±${LP_BAND.max * 100}%.`);
     const pool = this.lp(), v = await pool.view();
     this.blockMemo = null;
     const block = await this.moveBlock(pool, v, band);
     if (block) throw new Error(`Not moved: ${block}.`);
+    const again = this.busyReason();
+    if (again) throw new Error(again);
     const was = c.bandPct;
     c.bandPct = band;
     this.state.step = { action: 'rerange', stage: 'exit', tries: 0, rangeBand: band };
@@ -539,6 +562,10 @@ export class LpEngine {
       const open = this.state.position;
       if (open && !open.putIn) open.putIn = pool.coinsFor(Number(open.liquidity), open.tickLower, open.tickUpper, v);
       if (this.state.position?.paper) this.accruePaper(this.state.position, v);
+      if (this.state.position) {
+        const p = this.state.position;
+        this.rollEarning(v.tick >= p.tickLower && v.tick < p.tickUpper);
+      }
       this.state.seen = { g0: v.global0.toString(), g1: v.global1.toString() };
       this.state.lastPrice = v.price;
       this.state.lastPriceAt = this.now();
@@ -624,10 +651,31 @@ export class LpEngine {
     return effectiveBand(c.bandPct, last, v.price, policy.atrMult);
   }
 
+  /**
+   * Add the time since the previous reading when that reading was inside the range.
+   * The first reading only starts the clock: the gap before it is unknown, and treating
+   * it as earning time is what let the pace drift down while the position sat outside.
+   */
+  private rollEarning(inRange: boolean) {
+    const p = this.state.position;
+    if (!p) return;
+    const now = this.now();
+    if (p.earnAt == null || p.earningMs == null) {
+      p.earningMs = 0;
+      p.earnAt = now;
+      p.earnWasIn = inRange;
+      return;
+    }
+    if (p.earnWasIn && now > p.earnAt) p.earningMs += now - p.earnAt;
+    p.earnAt = now;
+    p.earnWasIn = inRange;
+  }
+
   private feePerHour(v: PoolView): number | null {
     const pf = this.positionFees();
-    if (!pf) return null;
-    return feePace(pf.coins.base * v.price + pf.coins.quote, this.now() - pf.since);
+    const p = this.state.position;
+    if (!pf || !p) return null;
+    return feePace(pf.coins.base * v.price + pf.coins.quote, p.earningMs ?? 0);
   }
 
   /** Gas to exit and re-open, plus the swap back to the mix (pool fee + half the quoted impact). null if the quote fails. */
