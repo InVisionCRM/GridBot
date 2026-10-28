@@ -151,7 +151,8 @@ export function createApp(o: AppOpts) {
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     return {
       mode, stable: b.stable as string | undefined,
-      lowerPrice: Number(b.lowerPrice), upperPrice: Number(b.upperPrice), gridCount: Number(b.gridCount), totalCapitalUsd: Number(b.totalCapitalUsd),
+      lowerPrice: Number(b.lowerPrice), upperPrice: Number(b.upperPrice), gridCount: Number(b.gridCount), // totalCapitalUsd: the old name (it was always quote coin), still accepted
+      totalCapitalQuote: Number(b.totalCapitalQuote ?? b.totalCapitalUsd),
       limits: b.limits as never,
       recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined,
       profits: profitsBody(b.profits),
@@ -188,9 +189,16 @@ export function createApp(o: AppOpts) {
   app.get('/api/bot/econ', wrap(async (req) => {
     const lower = Number(req.query.lower), upper = Number(req.query.upper), n = Number(req.query.grids), cap = Number(req.query.capital);
     if (!(lower > 0) || !(upper > lower) || !(n >= 2) || !(cap > 0)) throw new Error('need lower, upper, grids, capital');
-    return bot.economics(String(req.query.quote ?? net.defaultQuote), { lowerPrice: lower, upperPrice: upper, gridCount: n, totalCapitalUsd: cap });
+    return bot.economics(String(req.query.quote ?? net.defaultQuote), { lowerPrice: lower, upperPrice: upper, gridCount: n, totalCapitalQuote: cap });
   }));
   app.get('/api/bot/status', wrap(async () => bot.status()));
+  // One bot's money figures (BotMetrics, src/metrics/botMetrics.ts); "token-trader" is the token trader.
+  app.get('/api/bot/:id/metrics', wrap(async (req, res) => {
+    const id = String(req.params.id);
+    const m = id === 'token-trader' && o.tokenTrader ? o.tokenTrader.status().metrics : bot.metricsFor(id);
+    if (!m) { res.status(404).json({ error: `No bot ${id}` }); return; }
+    return m;
+  }));
   app.get('/api/bot/prices', wrap(async () => ({ prices: await bot.prices() })));
   app.get('/api/bot/presets', (_req, res) => res.json({ presets: listPresets() }));
   app.get('/api/bot/presets/:id/preview', wrap(async (req) => bot.previewPreset(req.params.id, {

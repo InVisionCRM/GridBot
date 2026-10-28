@@ -66,6 +66,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const ver = useVersion();
   const holdings = useHoldings();
+  // ETH price for dollar totals shown in ETH (net worth): see src/ui/units.tsx
   const ethUsd = useMemo(() => ethUsdOf(s, holdings.data), [s, holdings.data]);
   const [guide, setGuide] = useState(false);
   const closeGuide = useCallback(() => setGuide(false), []);
@@ -94,7 +95,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', k);
   }, [drawer]);
 
-  // Notify on a large move in total profit (realized + unrealized ≈USD across every bot).
+  // Notify on a large move in total profit: realized + unrealized in dollars across LIVE bots (grids, trends and LPs).
   const pnlBase = useRef<number | null>(null);
   useEffect(() => {
     if (!s?.aggregate) return;
@@ -102,7 +103,7 @@ export default function App() {
     if (pnlBase.current == null) { pnlBase.current = total; return; }
     const d = total - pnlBase.current;
     if (Math.abs(d) >= prefs.pnlUsd) {
-      if (prefs.enabled && prefs.pnl) notify('GridBot · profit change', `Total profit moved ${usd(d, true)} → ${usd(total, true)}`, 'pnl');
+      if (prefs.enabled && prefs.pnl) notify('GridBot · profit change', `Live total profit moved ${usd(d, true)} → ${usd(total, true)}`, 'pnl');
       pnlBase.current = total;
     }
   }, [s?.aggregate, prefs]);

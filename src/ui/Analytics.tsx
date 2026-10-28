@@ -79,7 +79,7 @@ function ModeAnalytics({ s, mode }: { s: AnyObj; mode: 'live' | 'paper' }) {
     for (const [k, v] of Object.entries(f)) if (v) p.set(k, k === 'from' ? String(new Date(v).getTime()) : v);
     return p.toString();
   }, [f, mode]);
-  const sig = `${s.aggregate?.roundTrips}:${(s.trends ?? []).map((t: AnyObj) => t.trades.length).join(',')}:${s.grids?.length}:${s.trends?.length}`;
+  const sig = `${(s.grids ?? []).map((g: AnyObj) => g.moveCount ?? 0).join(',')}:${(s.trends ?? []).map((t: AnyObj) => t.trades.length).join(',')}:${s.grids?.length}:${s.trends?.length}`;
   useEffect(() => {
     let dead = false;
     const load = () => http(`/api/analytics/overview?mode=${mode}`).then((o) => !dead && setOv(o)).catch(() => undefined);
@@ -150,7 +150,7 @@ function ModeAnalytics({ s, mode }: { s: AnyObj; mode: 'live' | 'paper' }) {
           <thead><tr><th>Bot</th><th>Status</th><th>Equity ≈$</th><th>Return</th><th>Trades</th><th>Win</th><th>PF</th><th>Avg</th><th>Max DD</th><th>Streak (max)</th><th>In mkt</th><th>Best / worst</th></tr></thead>
           <tbody>{[...(ov?.bots ?? [])].sort((a: AnyObj, b: AnyObj) => Number(b.status === 'running') - Number(a.status === 'running') || (a.kind === b.kind ? 0 : a.kind === 'trend' ? -1 : 1)).map((b: AnyObj) => (
             <tr key={b.id}><td><span className={`kind ${b.kind}`}>{b.kind}</span> {b.chainId !== s.legacyChainId ? <ChainBadge c={chainOf(s, b.chainId)} testnet={false} /> : null}{b.name}</td><td>{b.status}</td><td>{usd(b.equityUsd)}</td>
-              <td className={cls(b.returnPct)}>{pct(b.returnPct, 2, true)}</td>
+              <td className={cls(b.returnPct)} title={b.metrics?.calc}>{pct(b.returnPct, 2, true)}</td>
               <td>{b.stats.count}</td><td>{pct(b.stats.winRate, 0)}</td><td>{num(b.stats.profitFactor, 2)}</td><td className={cls(b.stats.avg)}>{num(b.stats.avg, 5)}</td>
               <td className="neg">{pct(b.stats.maxDrawdown, 1)}</td>
               <td>{b.stats.streak > 0 ? `${b.stats.streak}W` : b.stats.streak < 0 ? `${-b.stats.streak}L` : '—'} ({b.stats.maxWinStreak}W/{b.stats.maxLossStreak}L)</td>

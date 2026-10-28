@@ -7,6 +7,7 @@ import { ago, num, pct } from './fmt';
 import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj } from './model';
 import { haltText } from './haltText';
+import { MoneyDetails } from './MoneyDetails';
 import { ENFORCED_LIQUIDITY_FLOOR_USD, shownMinLiquidityUsd } from '../market/liquidityFloor';
 import { inEth, useEthUsd } from './units';
 
@@ -157,6 +158,13 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         <input placeholder="https://rpc.flashbots.net" value={o.sniper.mevRpc ?? ''} onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, mevRpc: e.target.value || null } } })} onBlur={() => void save({ sniper: o.sniper })} />
       </label>
 
+      {t.metrics && (
+        <p className="small" title={t.metrics.calc}>
+          Generated <b className={(t.metrics.generatedUsd ?? 0) >= 0 ? 'pos' : 'neg'}>{t.metrics.generatedUsd == null ? '—' : `${t.metrics.generatedUsd < 0 ? '−' : '+'}${usd(t.metrics.generatedUsd)}`}</b>
+          <span className="muted"> from closed sells · {t.metrics.fillCount ?? 0} trades</span>
+        </p>
+      )}
+      {t.metrics && <MoneyDetails b={t} />}
       <h3 className="small" style={{ marginTop: 14 }}>Open</h3>
       {!t.positions.length && <p className="muted small">No open positions.</p>}
       <div className="smart-bots">
@@ -164,7 +172,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
           <div key={p.id} className="smart-bot" style={{ cursor: 'default' }}>
             <span className="smart-bot-name"><b>{p.label}</b> <ChainBadge c={chainOf(s, p.chainId)} testnet={false} /> <span className="tag">{p.source}</span></span>
             <span className="small muted" title="Entry = spend per token received, after the pool fee, price impact and buy tax (paper and live alike). Take profit and stops are also net of the exit fee and the sell tax measured at entry.">entry {num(p.entryPrice, 6)} after fees &amp; tax · now {num(p.price, 6)} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''} · {p.exitsBlocked ? <b className="neg" role="alert">{blockedNote(p)}</b> : p.exitPlan}</span>
-            <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.spentUsd ? p.pnlUsd / p.spentUsd : 0, 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
+            <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.pnlPct ?? (p.spentUsd ? p.pnlUsd / p.spentUsd : null), 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
           </div>
         ))}
       </div>

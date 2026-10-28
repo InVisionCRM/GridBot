@@ -10,7 +10,7 @@ const TYPES: [DeskQuery['type'], string][] = [['all', 'All'], ['grid', 'Grid'], 
 const STATUSES: [DeskQuery['status'], string][] = [['all', 'Any status'], ['running', 'Running'], ['paused', 'Paused'], ['stopped', 'Stopped'], ['out', 'Out of range']];
 const MODES: [DeskQuery['mode'], string][] = [['all', 'Live + paper'], ['live', 'Live'], ['paper', 'Paper']];
 const SORTS: [DeskSort, string][] = [
-  ['name', 'Name'], ['value', 'Value'], ['pnl', 'P&L $'], ['pnlPct', 'P&L %'], ['age', 'Age'], ['apr', 'Est. APR'], ['moves', 'Moves'], ['fees', 'Fees earned'],
+  ['name', 'Name'], ['value', 'Value'], ['generated', 'Generated'], ['pnl', 'P&L $'], ['pnlPct', 'P&L %'], ['fees', 'Fees earned'], ['age', 'Age'], ['apr', 'Est. APR'], ['moves', 'Moves'],
 ];
 
 function Chip({ on, children, onClick }: { on: boolean; children: string; onClick: () => void }) {
@@ -75,12 +75,13 @@ export function DeskTable({ s, bots, nav, pause, close }: {
           <span />
           <span>Range</span>
           {head('value', 'Value', true)}
+          {head('generated', 'Generated', true)}
           {head('pnl', 'P&L $', true)}
           {head('pnlPct', 'P&L %', true)}
+          {head('fees', 'Fees earned', true)}
           {head('age', 'Age', true)}
           {head('apr', 'APR', true)}
           {head('moves', 'Moves', true)}
-          {head('fees', 'Fees', true)}
           <span />
         </div>
       )}

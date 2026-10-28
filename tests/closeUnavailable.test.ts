@@ -6,6 +6,7 @@ import { MemoryStore } from '../src/server/bot/store';
 import { MockChain, NET } from './helpers/mockChain';
 
 const P0 = 0.00001;
+// Old field name on purpose: callers using `totalCapitalUsd` keep working (it was always the quote-coin amount).
 const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 };
 
 describe('closing a live grid whose market is unavailable', () => {

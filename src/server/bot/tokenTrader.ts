@@ -6,6 +6,7 @@
  * (impact, fee, tax). Live is opt-in: it needs a signing key and the existing safety classifier, and sends
  * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
  */
+import { tokenMetrics } from '../../metrics/botMetrics';
 import { chainById } from '../../live/chains';
 import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, DEFAULT_MIN_HOLDER_COVERAGE, clampHolderCoverage, clampHolderShare } from '../../market/holders';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
@@ -527,8 +528,13 @@ export class TokenTrader {
     const openUsd = this.openUsd();
     const { plays, ...rest } = this.state;
     void plays;
-    return {
-      ...rest,
+    const positions = rest.positions.map((p) => {
+      const pnlUsd = this.pnl(p);
+      const cost = p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0);
+      return { ...p, pnlUsd, pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p) };
+    });
+    const out = {
+      ...rest, id: 'token-trader', kind: 'token' as const,
       openUsd,
       /** Liquidity floor scan buys and the gate actually use (the setting, raised to $50,000 when that flag is on). */
       effectiveMinLiquidityUsd: this.floorUsd(),
@@ -541,12 +547,13 @@ export class TokenTrader {
       offMode: this.state.offMode ?? 'exits',
       modeLog: this.state.modeLog ?? [],
       pendingChoice: this.state.pendingChoice ?? null,
-      positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p), exitsBlocked: this.blocked(p), generated: this.posGenerated(p) })),
+      positions: positions.map((p) => ({ ...p, exitsBlocked: this.blocked(p), generated: this.posGenerated(p) })),
       /** Live positions whose exits are blocked until the wallet balance can be read (lasting, until reconciled) */
       exitsBlocked: this.state.positions.filter((p) => this.blocked(p)).length,
       /** Generated per mode and spend coin (closed sells, less buy fees and gas paid); see types/generated.ts */
       generated: this.generated(),
     };
+    return { ...out, metrics: tokenMetrics(out, Date.now()) };
   }
 
   /** Passed plays. Not trimmed, and not part of `status()`. */

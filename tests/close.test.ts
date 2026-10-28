@@ -15,7 +15,7 @@ import { NET, MockChain } from './helpers/mockChain';
 import { MultiDexMock, type Tok } from './helpers/multiDex';
 
 const P0 = 0.00001;
-const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 };
+const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 };
 
 function make(chain = new MockChain(P0), store = new MemoryStore<MultiState>(), signer: MockChain | null = chain) {
   const log = new Logger(true);
@@ -103,6 +103,12 @@ describe('close', () => {
     expect(done.closing).toBe(false);
     expect(done.pnl.plsHeld).toBeLessThan(1e-6);
     expect(done.trades.some((t) => t.side === 'sell' && !t.failed)).toBe(true);
+    // The close's sales are cash-outs, not grid round trips (#5): flagged, no round-trip net, not in Generated.
+    const outs = done.trades.filter((t) => t.side === 'sell' && !t.failed);
+    expect(outs.every((t) => t.closeOut === true && t.roundTripNet == null)).toBe(true);
+    expect(done.stats.roundTrips).toBe(0);
+    expect(done.stats.closeOuts).toBe(outs.length);
+    expect(done.metrics!.generated).toEqual({ DAI: 0 });
   });
 
   it('marks every live bot closing before a hung quote returns, and archives paper in the same call', async () => {
