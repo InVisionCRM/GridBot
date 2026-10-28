@@ -1293,6 +1293,7 @@ label.wide input { min-width: 180px; }
 .desk-gen b { display: block; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .desk-gen small { font-size: 11px; color: var(--muted); }
 .desk-pct, .desk-age, .desk-apr, .desk-moves, .desk-fees { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
+.desk-apr .desk-run { display: block; font-size: 10px; color: var(--muted); white-space: nowrap; }
 .desk-expand { padding: 4px 0 12px; }
 .stat-table { margin-top: 8px; }
 .stat-note { color: var(--muted); font-size: 12px; margin: 0 0 8px; }

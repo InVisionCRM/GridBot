@@ -3,6 +3,7 @@ import { chainOf, mk } from './chains';
 import { botFacts, figuresOf, unitsText } from './deskStats';
 import { ago, dur, pct, px, qty } from './fmt';
 import type { AnyObj } from './model';
+import { isShortRun } from './runRate';
 
 function poolText(pool: string | null) {
   if (!pool) return '—';
@@ -29,7 +30,9 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   const range = f.range ? `${px(f.range.lower)} – ${px(f.range.upper)}` : '—';
   const spacing = f.spacingFrac != null ? `${(f.spacingFrac * 100).toFixed(3)}%` : f.bandPct != null ? `±${(f.bandPct * 100).toFixed(2)}%` : '—';
   const calc = f.calc ?? undefined;
-  const rate = (r: Record<string, number> | null | undefined, hint: string | null | undefined) => (r ? unitsText(r) : hint ? `— (${hint})` : '—');
+  // under a day: no Est. rows scaled up from a few hours (runRate.ts, #72); Generated above is the run's figure
+  const short = isShortRun(f.ageMs);
+  const rate = (r: Record<string, number> | null | undefined, hint: string | null | undefined) => (short ? '— (shows after a day)' : r ? unitsText(r) : hint ? `— (${hint})` : '—');
   const gr = f.generatedRate;
   const sym = f.quoteSym ?? '';
   // Est. = Generated ÷ age × the window, per token (the server's generatedRate); a dash and "needs …" until the history is long enough
@@ -66,7 +69,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   });
   return (
     <div className="stat-table" data-testid="stat-table">
-      <p className="stat-note">Generated leads. Est. 24h/7d/30d/365d = Generated ÷ age × the days, per coin, and APR scales it the same way; not a forecast.{calc && <> <abbr className="calc-hint" title={calc}>How it's calculated</abbr></>}</p>
+      <p className="stat-note">Generated leads. Est. 24h/7d/30d/365d = Generated ÷ age × the days, per coin, and APR scales it the same way; not a forecast.{short && ' They show once the bot has run a day.'}{calc && <> <abbr className="calc-hint" title={calc}>How it's calculated</abbr></>}</p>
       <table>
         <tbody>
           {shown.map(([k, v, t]) => (
