@@ -31,7 +31,7 @@ export const sanitizedStatus = {
       owed: { base: 10, quote: 0.002 },
       totals: { fees: 0.01, gas: 0.001, feeCoins: { base: 4, quote: 0.001 }, swapCost: 0.002, moveLoss: 0.003 },
       pnl: {
-        net: 0.02, price: -0.004, fees: 0.026, gas: 0.001, swapCost: 0.002, moveLoss: 0.003, equity: 1.016,
+        net: 0.02, price: -0.004, fees: 0.026, gas: 0.0011, swapCost: 0.002, moveLoss: 0.0029, equity: 1.016,
         feeCoins: { base: 20, quote: 0.004 },
       },
     },

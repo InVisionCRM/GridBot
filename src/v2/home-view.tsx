@@ -2,7 +2,7 @@ import { motion } from 'motion/react';
 import { useState } from 'react';
 import { CoinMark } from './coin-mark';
 import { EquityCurve, Spark } from './equity-curve';
-import { cardReadout, coinScale, coverFigures, displayScale, uniqueTape, type CardReadout } from './figures';
+import { cardReadout, coverFigures, investedShare, uniqueTape, type CardReadout } from './figures';
 import { formatBag, formatQuotePx, formatTokenLine, pct } from './format';
 import type { BotDesk, BotStatus, PortfolioSnapshot, TapePrice, TokenQty } from './metrics';
 import { sheetRows } from './figures';
@@ -90,26 +90,29 @@ export function HomeView({
   const used = new Set<string>();
   const liveInvested = sumBags(live.map((b) => b.metrics.invested));
   const paperInvested = sumBags(paperBots.map((b) => b.metrics.invested));
-  const liveScale = displayScale(live.map((b) => b.metrics));
-  const paperScale = displayScale(paperBots.map((b) => b.metrics));
   coverFigures([
-    formatTokenLine(portfolio.tokens, liveScale),
+    formatTokenLine(portfolio.tokens),
     formatBag(liveInvested),
-    portfolio.generatedPerDay ? formatTokenLine(portfolio.generatedPerDay, liveScale) : '',
+    portfolio.generatedPerDay ? formatTokenLine(portfolio.generatedPerDay) : '',
     uniqueTape(prices).map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' '),
   ].join(' '), used);
+  const shareOf = (botInvested: TokenQty[], total: TokenQty[], scope: 'live' | 'paper') => {
+    const share = investedShare(botInvested, total, used);
+    return {
+      invested: share.kept.length ? formatBag(share.kept) : null,
+      investedNote: share.whole ? `All of the ${scope} total` : null,
+    };
+  };
   const liveCards = live.map((bot) => ({
     bot,
-    readout: cardReadout(bot.metrics, portfolio.tokens, 'live', used, coinScale(bot.metrics), liveScale),
-    invested: formatBag(bot.metrics.invested) === formatBag(liveInvested) ? null : formatBag(bot.metrics.invested),
-    scale: coinScale(bot.metrics),
+    readout: cardReadout(bot.metrics, portfolio.tokens, 'live', used),
+    ...shareOf(bot.metrics.invested, liveInvested, 'live'),
   }));
-  coverFigures(`${formatTokenLine(portfolio.paperTokens, paperScale)} ${formatBag(paperInvested)}`, used);
+  coverFigures(`${formatTokenLine(portfolio.paperTokens)} ${formatBag(paperInvested)}`, used);
   const paperCards = paperBots.map((bot) => ({
     bot,
-    readout: cardReadout(bot.metrics, portfolio.paperTokens, 'paper', used, coinScale(bot.metrics), paperScale),
-    invested: formatBag(bot.metrics.invested) === formatBag(paperInvested) ? null : formatBag(bot.metrics.invested),
-    scale: coinScale(bot.metrics),
+    readout: cardReadout(bot.metrics, portfolio.paperTokens, 'paper', used),
+    ...shareOf(bot.metrics.invested, paperInvested, 'paper'),
   }));
   return (
     <div className="home">
@@ -119,11 +122,11 @@ export function HomeView({
         <p className="eyebrow">Generated</p>
         <div className="hero-top">
           <div className="hero-units">
-            {portfolio.tokens.length ? <TokenHeadline tokens={portfolio.tokens} scale={liveScale} /> : '—'}
+            {portfolio.tokens.length ? <TokenHeadline tokens={portfolio.tokens} /> : '—'}
           </div>
         </div>
         <p className="hero-rate" data-est="">
-          {portfolio.generatedPerDay == null ? '—' : portfolio.generatedPerDay.length ? <TokenLine tokens={portfolio.generatedPerDay} scale={liveScale} /> : '0'}
+          {portfolio.generatedPerDay == null ? '—' : portfolio.generatedPerDay.length ? <TokenLine tokens={portfolio.generatedPerDay} /> : '0'}
           <span>/day</span>
         </p>
         <p className="muted small">Estimate, not a forecast.</p>
@@ -136,33 +139,32 @@ export function HomeView({
         </div>
       </section>
       <ModeSection title="Live" cards={liveCards} onOpen={onOpen} />
-      <ModeSection title="Paper" cards={paperCards} tokens={portfolio.paperTokens} invested={paperInvested} scale={paperScale} onOpen={onOpen} />
+      <ModeSection title="Paper" cards={paperCards} tokens={portfolio.paperTokens} invested={paperInvested} onOpen={onOpen} />
     </div>
   );
 }
 
 function ModeSection({
-  title, cards, tokens = [], invested = [], scale = null, onOpen,
+  title, cards, tokens = [], invested = [], onOpen,
 }: {
   title: string;
-  cards: { bot: BotDesk; readout: CardReadout; invested: string | null; scale: ReadonlyMap<string, number> }[];
+  cards: { bot: BotDesk; readout: CardReadout; invested: string | null; investedNote: string | null }[];
   tokens?: TokenQty[];
   invested?: TokenQty[];
-  scale?: ReadonlyMap<string, number> | null;
   onOpen: (id: string) => void;
 }) {
   const open = cards.filter((c) => c.bot.metrics.status !== 'closed');
   const closed = cards.filter((c) => c.bot.metrics.status === 'closed');
   if (!open.length && !closed.length) return null;
-  const item = ({ bot, readout, invested: bag, scale: botScale }: { bot: BotDesk; readout: CardReadout; invested: string | null; scale: ReadonlyMap<string, number> }) => (
-    <BotCard key={bot.metrics.botId} bot={bot} readout={readout} invested={bag} scale={botScale} onOpen={onOpen} />
+  const item = ({ bot, readout, invested: bag, investedNote }: { bot: BotDesk; readout: CardReadout; invested: string | null; investedNote: string | null }) => (
+    <BotCard key={bot.metrics.botId} bot={bot} readout={readout} invested={bag} investedNote={investedNote} onOpen={onOpen} />
   );
   return (
     <section>
       <h2 className="group-title">
         <span className="section-name">{title}</span>
         {invested.length > 0 && <span className="section-units"><span className="section-name">Invested</span> {formatBag(invested)}</span>}
-        {tokens.length > 0 && <span className="section-units"><span className="section-name">Generated</span> <TokenLine tokens={tokens} scale={scale} /></span>}
+        {tokens.length > 0 && <span className="section-units"><span className="section-name">Generated</span> <TokenLine tokens={tokens} /></span>}
       </h2>
       {open.length > 0 && <ul className="bot-list">{open.map(item)}</ul>}
       {closed.length > 0 && (
@@ -175,20 +177,20 @@ function ModeSection({
   );
 }
 
-function CardMade({ readout, scale }: { readout: CardReadout; scale: ReadonlyMap<string, number> }) {
+function CardMade({ readout }: { readout: CardReadout }) {
   if (readout.kind === 'empty') return <p className="card-made"><span>Generated</span> No fills yet</p>;
   if (readout.kind === 'note') return <p className="card-made"><span>Generated</span> <em className="card-note">{readout.text}</em></p>;
   return (
     <>
       <p className="card-made">
         <span>Generated</span>
-        {readout.tokens.length > 0 && <TokenHeadline tokens={readout.tokens} scale={scale} />}
+        {readout.tokens.length > 0 && <TokenHeadline tokens={readout.tokens} />}
       </p>
     </>
   );
 }
 
-function BotCard({ bot, readout, invested, scale, onOpen }: { bot: BotDesk; readout: CardReadout; invested: string | null; scale: ReadonlyMap<string, number>; onOpen: (id: string) => void }) {
+function BotCard({ bot, readout, invested, investedNote, onOpen }: { bot: BotDesk; readout: CardReadout; invested: string | null; investedNote: string | null; onOpen: (id: string) => void }) {
   const open = () => { press(); onOpen(bot.metrics.botId); };
   return (
     <li>
@@ -218,8 +220,10 @@ function BotCard({ bot, readout, invested, scale, onOpen }: { bot: BotDesk; read
           {bot.spark.length > 1 && <Spark points={bot.spark} />}
           <RangeTrack range={bot.metrics.range} tone={bot.tone} />
         </div>
-        {invested && <p className="card-made"><span>Invested</span> {invested}</p>}
-        <CardMade readout={readout} scale={scale} />
+        {investedNote && !(readout.kind === 'note' && readout.text === investedNote)
+          ? <p className="card-made"><span>Invested</span> <em className="card-note">{investedNote}</em></p>
+          : invested && <p className="card-made"><span>Invested</span> {invested}</p>}
+        <CardMade readout={readout} />
         <details className="card-details" onClick={(e) => e.stopPropagation()}>
           <summary>Details</summary>
           <ul className="break">

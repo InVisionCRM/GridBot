@@ -405,7 +405,7 @@
   border-radius: 18px 18px 0 0;
 }
 @media (max-width: 1079px) {
-  .v2 .sheet { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+  .v2 .sheet { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 }
 .v2 .sheet header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .v2 .sheet-eq { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 13px; line-height: 1.45; }

@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ActivityTape } from '../src/v2/activity-tape';
 import { BotView } from '../src/v2/bot-view';
-import { coinScale, figureAtoms, ledgerLines, normFigure, sheetRows } from '../src/v2/figures';
-import { formatTokenLine } from '../src/v2/format';
+import { figureAtoms, ledgerLines, normFigure, sheetRows } from '../src/v2/figures';
+import { formatAmt, formatTokenLine } from '../src/v2/format';
 import { HoldingsView } from '../src/v2/holdings-view';
 import { HomeView, Ticker } from '../src/v2/home-view';
 import { loadDesk } from '../src/v2/load-owner';
@@ -62,9 +62,20 @@ describe('v2 copy stays in token units', () => {
       const costSymbols = new Set([...coins(paid).keys(), ...coins(move).keys()]);
       if (costSymbols.size) expect(earned?.label, bot.pair).toMatch(/fees earned$/);
       for (const symbol of coins(fee).keys()) expect(costSymbols.has(symbol), `${bot.pair} ${symbol}`).toBe(true);
+      const raw = (tokens: { symbol: string; amount: number }[], symbol: string) => tokens.find((t) => t.symbol === symbol)?.amount ?? 0;
       for (const symbol of costSymbols) {
+        const grossRaw = raw(bot.metrics.grossFees, symbol);
+        const paidRaw = raw(bot.metrics.feesPaid, symbol);
+        const moveRaw = raw(bot.metrics.moveLoss, symbol);
+        const madeRaw = raw(bot.metrics.generated, symbol);
+        expect(grossRaw - Math.abs(paidRaw) - Math.abs(moveRaw), `${bot.pair} ${symbol} raw`).toBeCloseTo(madeRaw, 8);
+        const flat = (line: string) => line.replace(/\s+/g, '');
+        if (grossRaw) expect(flat(fee), bot.pair).toContain(flat(formatAmt(grossRaw)));
+        if (paidRaw) expect(flat(paid), bot.pair).toContain(flat(formatAmt(-Math.abs(paidRaw))));
+        if (moveRaw) expect(flat(move), bot.pair).toContain(flat(formatAmt(-Math.abs(moveRaw))));
+        if (madeRaw) expect(flat(generated), bot.pair).toContain(flat(formatAmt(madeRaw)));
         const parts = (coins(fee).get(symbol) ?? 0) + (coins(paid).get(symbol) ?? 0) + (coins(move).get(symbol) ?? 0);
-        expect(parts, `${bot.pair} ${symbol}`).toBeCloseTo(coins(generated).get(symbol) ?? 0, 8);
+        expect(parts, `${bot.pair} ${symbol}`).toBeCloseTo(coins(generated).get(symbol) ?? 0, 4);
       }
       const free = [...coins(generated).keys()].filter((symbol) => !costSymbols.has(symbol));
       if (free.length) expect(note, bot.pair).toContain('no costs taken out');
@@ -92,8 +103,7 @@ describe('v2 copy stays in token units', () => {
       );
       const botHero = textOf(botHtml.split('data-open="breakdown"')[0]);
       const botAtoms = new Set(figureAtoms(botHero).map(normFigure));
-      const scale = coinScale(bot.metrics);
-      const line = ledgerLines(bot.metrics)?.generated || formatTokenLine(bot.metrics.generated, scale);
+      const line = ledgerLines(bot.metrics)?.generated || formatTokenLine(bot.metrics.generated);
       if (line && line !== '—') expect(botHero, bot.pair).toContain(line);
       const pool = pools.find((p) => p.mode === bot.metrics.mode);
       const check = (botTokens: TokenQty[] | null | undefined, homeTokens: TokenQty[] | null | undefined) => {
@@ -101,11 +111,11 @@ describe('v2 copy stays in token units', () => {
         for (const token of botTokens) {
           const homeToken = homeTokens.find((t) => t.symbol === token.symbol);
           if (!homeToken || !same(homeToken.amount, token.amount)) continue;
-          const atom = figureAtoms(formatTokenLine([token], scale))[0];
+          const atom = figureAtoms(formatTokenLine([token]))[0];
           if (!atom) continue;
           const key = normFigure(atom);
-          expect(botAtoms.has(key), `${bot.pair} bot ${atom}`).toBe(true);
-          expect(homeAtoms.has(key), `${bot.pair} home ${atom}`).toBe(true);
+          expect(botAtoms.has(key), `${bot.pair} ${bot.metrics.mode} bot ${atom}`).toBe(true);
+          expect(homeAtoms.has(key), `${bot.pair} ${bot.metrics.mode} home ${atom}`).toBe(true);
         }
       };
       check(bot.metrics.generated, pool?.tokens);
@@ -116,7 +126,7 @@ describe('v2 copy stays in token units', () => {
         const got = rows.find((r) => r.label === label)?.value;
         const tokens = label === 'Est. 7d' ? bot.metrics.est.d7 : bot.metrics.est.d365;
         if (!got || !tokens?.length) continue;
-        expect(got, `${bot.pair} ${label}`).toBe(formatTokenLine(tokens, scale));
+        expect(got, `${bot.pair} ${bot.metrics.mode} ${label}`).toBe(formatTokenLine(tokens));
       }
     }
   });

@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ReactElement } from 'react';
 import { adaptStatus } from '../src/v2/adapt-status';
+import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
 import { BotView } from '../src/v2/bot-view';
 import { figureAtoms, isLedgerLabel, normFigure, repeatedFigures, sheetRows } from '../src/v2/figures';
 import { deskStatusPill, formatClockEt, formatQuotePx, formatUnitPx } from '../src/v2/format';
@@ -164,6 +165,15 @@ describe('no money or token figure is repeated on a screen', () => {
     const repeats = repeatedFigures('+63.24 USDC + 0.001731 ETH +63.24 USDC + 0.026837 ETH');
     expect(repeats).toContain(normFigure('+63.24 USDC'));
     expect(figureAtoms('+63.24 USDC + 0.001731 ETH').map(normFigure)).toContain(normFigure('+63.24 USDC'));
+    expect(repeatedFigures('Invested 14.00M PLS and the card 14.00M PLS')).toContain(normFigure('14.00M PLS'));
+  });
+
+  it('does not restate a sole invested coin from the built-in desk', () => {
+    const sample = adaptStatus(sanitizedStatus, sanitizedActivity, sanitizedStatus.spotsAt, 'fixture');
+    const text = renderAt(<HomeView portfolio={sample.portfolio} bots={sample.bots} prices={sample.prices} onOpen={() => {}} />, 390);
+    expect(repeatedFigures(text), text).toEqual([]);
+    expect(text.match(/1\.00 ETH/g)).toHaveLength(1);
+    expect(text).toContain('All of the live total');
   });
 
   it('does not repeat a coin amount across breakdown rows', () => {

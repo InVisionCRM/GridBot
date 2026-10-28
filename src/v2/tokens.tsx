@@ -26,17 +26,10 @@ export function headlinePx(
   return null;
 }
 
-export function TokenLine({
-  tokens, usd = null, className = '', scale = null,
-}: {
-  tokens: TokenQty[] | null;
-  usd?: number | null;
-  className?: string;
-  scale?: ReadonlyMap<string, number> | null;
-}) {
+export function TokenLine({ tokens, usd = null, className = '' }: { tokens: TokenQty[] | null; usd?: number | null; className?: string }) {
   if (tokens == null) return <span className={className}>—</span>;
   if (!tokens.length) return <span className={className}>{usd === 0 ? '0' : '—'}</span>;
-  return <span className={className}>{formatTokenLine(tokens, scale)}</span>;
+  return <span className={className}>{formatTokenLine(tokens)}</span>;
 }
 
 function mainToken(tokens: TokenQty[]): TokenQty {
@@ -55,17 +48,11 @@ function measureLine(sample: HTMLElement, text: string, px: number): number {
 }
 
 /** Full token line on one row. Shrink once, then a small pill, only when the measured line does not fit. */
-export function TokenHeadline({
-  tokens, usd = null, scale = null,
-}: {
-  tokens: TokenQty[] | null;
-  usd?: number | null;
-  scale?: ReadonlyMap<string, number> | null;
-}) {
+export function TokenHeadline({ tokens, usd = null }: { tokens: TokenQty[] | null; usd?: number | null }) {
   const host = useRef<HTMLSpanElement>(null);
   const [px, setPx] = useState<number | 'fold' | null>(null);
   const [open, setOpen] = useState(false);
-  const text = tokens?.length ? formatTokenLine(tokens, scale) : '';
+  const text = tokens?.length ? formatTokenLine(tokens) : '';
   useLayoutEffect(() => {
     const el = host.current;
     if (!el) return;
@@ -95,13 +82,13 @@ export function TokenHeadline({
     >
       {folded ? (
         <span className="token-fold">
-          <TokenLine tokens={[mainToken(tokens)]} scale={scale} />
+          <TokenLine tokens={[mainToken(tokens)]} />
           <button type="button" className="chip more" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen(true); }}>
             +{tokens.length - 1} more
           </button>
         </span>
       ) : (
-        <TokenLine tokens={tokens} usd={usd} scale={scale} />
+        <TokenLine tokens={tokens} usd={usd} />
       )}
     </span>
   );

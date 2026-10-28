@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { adaptStatus } from '../src/v2/adapt-status';
-import { deskStatusPill, formatClockEt, formatPx, formatTokenLine, formatUsd, formatWhen, showsNoFills } from '../src/v2/format';
+import { deskStatusPill, formatAmt, formatClockEt, formatPx, formatTokenLine, formatUsd, formatWhen, showsNoFills } from '../src/v2/format';
 import { HEADLINE_FLOOR_PX, headlinePx } from '../src/v2/tokens';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
 
@@ -24,12 +24,12 @@ describe('adaptStatus', () => {
     const usdc = lp?.metrics.generated.find((t) => t.symbol === 'USDC');
     const eth = lp?.metrics.generated.find((t) => t.symbol === 'ETH');
     expect(usdc?.amount).toBe(20);
-    // quote fees 0.004 − gas 0.001 − swap 0.002 − rebalance 0.003
+    // quote fees 0.004 − gas 0.0011 − swap 0.002 − rebalance 0.0029
     expect(eth?.amount).toBeCloseTo(-0.002);
     expect(lp?.metrics.generatedUsd).toBeCloseTo(0.02 * 2000);
     expect(lp?.metrics.aprPct).toBeCloseTo(40 / 2000);
     expect(lp?.metrics.tokenTaxesUsd).toBeNull();
-    expect(lp?.metrics.realizedRebalanceLossUsd).toBeCloseTo(0.003 * 2000);
+    expect(lp?.metrics.realizedRebalanceLossUsd).toBeCloseTo(0.0029 * 2000);
   });
 
   it('leaves a closed bot without a pnl reading as unknown', () => {
@@ -273,6 +273,17 @@ describe('format', () => {
       { symbol: 'WETH', amount: 0.00236 },
     ])).toBe('+15.62 USDC + 0.00236 WETH');
     expect(formatTokenLine([{ symbol: 'PLS', amount: 98300 }])).toBe('+98.3k PLS');
+    expect(formatAmt(0.001730655)).toBe('+0.001731');
+    expect(formatAmt(0.015310296)).toBe('+0.01531');
+    expect(formatAmt(0.062282897)).toBe('+0.06228');
+    expect(formatAmt(-0.000004966)).toBe('−0.000005');
+    expect(formatAmt(66290.99388961491)).toBe('+66.3k');
+    expect(formatAmt(9260.24)).toBe('+9,260.24');
+    expect(formatAmt(9503.41)).toBe('+9,503.41');
+    expect(formatTokenLine([
+      { symbol: 'USDC', amount: 9260.24 },
+      { symbol: 'USDG', amount: 9503.41 },
+    ])).toBe('+9,260.24 USDC + 9,503.41 USDG');
   });
 
   it('treats a zero book with no fills as empty, and a real zero with fills as a number', () => {

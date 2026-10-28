@@ -40,57 +40,33 @@ export function formatUsd(x: number | null | undefined, sign = false): string {
   return usd(x, sign);
 }
 
-/** Round half away from zero so displayed ledger lines use one scale. */
-export function roundAmt(n: number, decimals: number): number {
-  const f = 10 ** decimals;
-  const x = Math.round((Math.abs(n) + Number.EPSILON) * f) / f;
-  return n < 0 ? -x : x;
-}
-
-function minDecimals(n: number): number {
-  const a = Math.abs(n);
-  if (!(a > 0)) return 0;
-  if (a >= 100) return 1;
-  if (a >= 1) return 2;
-  return Math.max(0, Math.ceil(-Math.log10(a)) + 2);
+function trimFraction(text: string): string {
+  if (!text.includes('.')) return text;
+  const trimmed = text.replace(/0+$/, '').replace(/\.$/, '');
+  return trimmed === '' ? '0' : trimmed;
 }
 
 /**
- * Decimal scale at which the shown gross, costs, and generated add up,
- * without collapsing a coin down to a coarser figure than its size needs.
- * Costs are passed as positive magnitudes.
+ * One token-amount rule for every bot.
+ * Under 1: at most 6 decimals, about 4 significant digits.
+ * At least 1: 2 decimals, with thousands commas.
+ * At least 10,000: compact k/M.
  */
-export function ledgerDecimals(gross: number, paid: number, move: number): number {
-  const generated = gross - paid - move;
-  const start = Math.max(minDecimals(gross), minDecimals(paid), minDecimals(move), minDecimals(generated));
-  for (let d = start; d <= 12; d++) {
-    const g = roundAmt(gross, d);
-    const p = roundAmt(-Math.abs(paid), d);
-    const m = roundAmt(-Math.abs(move), d);
-    const gen = roundAmt(generated, d);
-    if (roundAmt(g + p + m, d) === gen) return d;
-  }
-  return 12;
-}
-
-/** Fixed decimals, with a sign. Trailing zeros stay so the ledger still adds up. */
-export function formatFixedAmt(n: number, decimals: number): string {
-  const r = roundAmt(n, decimals);
-  const sign = r < 0 ? '−' : r > 0 ? '+' : '';
-  return `${sign}${Math.abs(r).toFixed(decimals)}`;
-}
-
 export function formatAmt(n: number): string {
   if (!Number.isFinite(n)) return '—';
   const sign = n < 0 ? '−' : n > 0 ? '+' : '';
   const a = Math.abs(n);
   if (a === 0) return '0';
-  if (a >= 1e9) return `${sign}${(a / 1e9).toFixed(2)}B`;
-  if (a >= 1e6) return `${sign}${(a / 1e6).toFixed(2)}M`;
-  if (a >= 1e4) return `${sign}${(a / 1e3).toFixed(a >= 1e5 ? 0 : 1)}k`;
-  if (a >= 100) return `${sign}${a.toLocaleString(undefined, { maximumFractionDigits: 1 })}`;
-  if (a >= 1) return `${sign}${a.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const body = Number(a.toPrecision(3)).toString();
+  let body: string;
+  if (a >= 1e9) body = `${(a / 1e9).toFixed(2)}B`;
+  else if (a >= 1e6) body = `${(a / 1e6).toFixed(2)}M`;
+  else if (a >= 1e4) body = `${(a / 1e3).toFixed(a >= 1e5 ? 0 : 1)}k`;
+  else if (a >= 1) body = a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  else {
+    const places = Math.min(6, Math.max(0, 3 - Math.floor(Math.log10(a))));
+    body = trimFraction(a.toFixed(places));
+    if (body === '0') return '0';
+  }
   return `${sign}${body}`;
 }
 
@@ -114,14 +90,7 @@ export function formatRangePx(lower: number, upper: number, quote: string, base:
 
 function plainAmt(n: number): string {
   if (!Number.isFinite(n)) return '—';
-  const a = Math.abs(n);
-  if (a === 0) return '0';
-  if (a >= 1e9) return `${(a / 1e9).toFixed(2)}B`;
-  if (a >= 1e6) return `${(a / 1e6).toFixed(2)}M`;
-  if (a >= 1e4) return `${(a / 1e3).toFixed(a >= 1e5 ? 0 : 1)}k`;
-  if (a >= 100) return a.toLocaleString(undefined, { maximumFractionDigits: 1 });
-  if (a >= 1) return a.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return Number(a.toPrecision(3)).toString();
+  return formatAmt(Math.abs(n)).replace(/^[+−]/, '');
 }
 
 /** Deposited coins, without a gain sign. `3.50 ETH + 1,000 USDC`. */
@@ -130,19 +99,11 @@ export function formatBag(tokens: { symbol: string; amount: number }[] | null | 
   return tokens.map((t) => `${plainAmt(t.amount)} ${t.symbol}`).join(' + ');
 }
 
-function amountText(amount: number, symbol: string, scale?: ReadonlyMap<string, number> | null): string {
-  const decimals = scale?.get(symbol);
-  return decimals == null ? formatAmt(amount) : formatFixedAmt(amount, decimals);
-}
-
-/** One line of signed token amounts. `scale` fixes the decimals for a coin so every screen matches. */
-export function formatTokenLine(
-  tokens: { symbol: string; amount: number }[] | null | undefined,
-  scale?: ReadonlyMap<string, number> | null,
-): string {
+/** One line of signed token amounts. Every caller uses formatAmt. */
+export function formatTokenLine(tokens: { symbol: string; amount: number }[] | null | undefined): string {
   if (!tokens?.length) return '—';
   return tokens.map((t, i) => {
-    const amt = amountText(t.amount, t.symbol, scale);
+    const amt = formatAmt(t.amount);
     if (i === 0) return `${amt} ${t.symbol}`;
     if (t.amount < 0) return `${amt} ${t.symbol}`;
     return `+ ${amt.replace(/^\+/, '')} ${t.symbol}`;

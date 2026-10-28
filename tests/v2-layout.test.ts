@@ -13,7 +13,7 @@ describe('v2 layout', () => {
   it('lifts an open breakdown sheet above the tab bar and paints it solid', () => {
     expect(css).toMatch(/\.v2-body:has\(\.sheet-back\)\s*\{[^}]*z-index:\s*30/);
     expect(css).toMatch(/\.v2 \.sheet\.glass\s*\{[^}]*rgba\(22,\s*26,\s*30,\s*1\)/);
-    expect(css).toContain('padding-bottom: calc(96px + env(safe-area-inset-bottom))');
+    expect(css).toContain('padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px))');
   });
 
   it('keeps four tab labels on one line', () => {
