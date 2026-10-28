@@ -5,7 +5,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Interface, keccak256, toQuantity } from 'ethers';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { requestHalt } from '../src/server/bot/audit';
 import type { SentTx } from '../src/server/bot/chain';
 import { MemoryStore } from '../src/server/bot/store';
@@ -13,7 +13,7 @@ import { SharedNonce, TxGate } from '../src/server/bot/txGate';
 import { FallbackReader } from '../src/server/chains/fallback';
 import { Router, type RouterFile } from '../src/server/router/router';
 import { DEFAULT_MAX_GAS_PRICE_WEI, DEFAULT_MAX_PRIORITY_FEE_WEI } from '../src/server/router/settings';
-import { routerSendHalted, sendSafe, type ExactTx, type GasSender, type SafeReader } from '../src/server/router/sendSafe';
+import { GATE_SLACK_MS, RECEIPT_TIMEOUT_CAP_MS, routerSendHalted, sendSafe, type ExactTx, type GasSender, type SafeReader } from '../src/server/router/sendSafe';
 
 const FROM = '0x1234567890123456789012345678901234567890';
 const TO = '0x2222222222222222222222222222222222222222';
@@ -141,6 +141,21 @@ function harness(rpc = new Rpc(), signer = new Signer()) {
 }
 
 const hashOf = (signer: Signer, i = 0) => keccak256(signer.raws[i] as `0x${string}`);
+
+/** Receipt waits use the gate budget (capped timeout + 60s). Advance a fake clock instead of sleeping it. */
+async function withClock<T>(run: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    let settled = false;
+    const pending = run().finally(() => { settled = true; });
+    const budget = RECEIPT_TIMEOUT_CAP_MS + GATE_SLACK_MS + 1_000;
+    // Step so a fast RPC rejection is seen before its budget timer.
+    for (let left = budget; left > 0 && !settled; left -= 20) await vi.advanceTimersByTimeAsync(Math.min(20, left));
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
 
 describe('sendSafe', () => {
   it('aborts a revert with the decoded reason and does not send', async () => {
@@ -432,12 +447,12 @@ describe('sendSafe', () => {
   it('a timeout is pending source_sent with the locally computed hash and is not resent', async () => {
     const h = harness();
     h.rpc.receipt = null;
-    const first = await h.go();
+    const first = await withClock(() => h.go());
     expect(first.status).toBe('pending');
     expect(first.state).toBe('source_sent');
     expect(first.hash).toBe(hashOf(h.signer));
     expect(h.rpc.broadcasts).toHaveLength(1);
-    const second = await h.go();
+    const second = await withClock(() => h.go());
     expect(second.nonce).toBe(first.nonce + 1);
     expect(second.state).toBe('source_sent');
     expect(second.hash).toBe(hashOf(h.signer, 1));
@@ -446,18 +461,18 @@ describe('sendSafe', () => {
 
     const thrown = harness();
     thrown.rpc.receipt = 'throw';
-    const pending = await thrown.go();
+    const pending = await withClock(() => thrown.go());
     expect(pending).toMatchObject({ status: 'pending', state: 'source_sent' });
     expect(pending.hash).toBe(hashOf(thrown.signer));
     expect(thrown.rpc.broadcasts).toHaveLength(1);
-  });
+  }, 5_000);
 
   it('already known and a send timeout still return the hash of the signed bytes', async () => {
     const secret = 'SECRETKEYVALUE123';
     const known = harness();
     known.rpc.broadcastError = new Error(`already known https://rpc.example/${secret}`);
     known.rpc.receipt = null;
-    const pending = await known.go();
+    const pending = await withClock(() => known.go());
     expect(pending).toMatchObject({ status: 'pending', state: 'source_sent' });
     expect(pending.hash).toBe(hashOf(known.signer));
     expect(known.rpc.broadcasts).toHaveLength(1);
@@ -472,7 +487,7 @@ describe('sendSafe', () => {
     const timed = harness();
     timed.rpc.broadcastError = Object.assign(new Error(`request timed out https://rpc.example/${secret}`), { code: 'TIMEOUT' });
     timed.rpc.receipt = null;
-    const out = await timed.go();
+    const out = await withClock(() => timed.go());
     expect(out).toMatchObject({ status: 'pending', state: 'source_sent' });
     expect(out.hash).toBe(hashOf(timed.signer));
     expect(timed.rpc.broadcasts).toHaveLength(1);
@@ -555,7 +570,7 @@ describe('sendSafe', () => {
     unseen.rpc.mined = 5;
     unseen.rpc.blockNumber = 20;
     unseen.rpc.blockTxs = [{ hash: other, from: '0x' + '33'.repeat(20), to: TO, nonce: '0x4', value: '0x1', input: '0xab' }];
-    const gone = await unseen.go();
+    const gone = await withClock(() => unseen.go());
     expect(gone.status).toBe('pending');
     expect(gone.state).toBe('source_sent');
     expect(gone.replacementHash).toBeUndefined();
@@ -575,7 +590,7 @@ describe('sendSafe', () => {
       if (method === 'eth_getBlockByNumber' && params[1] === true) throw new Error('block read failed');
       return orig(method, params);
     };
-    const pending = await unread.go();
+    const pending = await withClock(() => unread.go());
     expect(pending.status).toBe('pending');
     expect(pending.state).toBe('source_sent');
     expect(pending.hash).toBe(hashOf(unread.signer));
@@ -742,7 +757,7 @@ describe('sendSafe', () => {
       { from: FROM, to: TO, nonce: '0x4', value: '0x1', input: '0xab' },
       { hash: '0xdead', from: FROM, to: TO, nonce: '0x4', value: '0x1', input: '0xab' },
     ];
-    const unseen = await bad.go();
+    const unseen = await withClock(() => bad.go());
     expect(unseen.status).toBe('pending');
     expect(unseen.state).toBe('source_sent');
     expect(unseen.replacementHash).toBeUndefined();
@@ -756,7 +771,7 @@ describe('sendSafe', () => {
     tipOnly.rpc.blockTxsAt = (n) => (n === 20
       ? [{ hash: other, from: FROM, to: TO, nonce: '0x4', value: '0x1', input: '0xabcdef' }]
       : []);
-    const tip = await tipOnly.go();
+    const tip = await withClock(() => tipOnly.go());
     expect(tip.status).toBe('pending');
     expect(tip.replacementHash).toBeUndefined();
 
@@ -880,13 +895,13 @@ describe('sendSafe', () => {
     );
     const missSigner = new Signer();
     const missNonce = new SharedNonce();
-    const lost = await sendSafe({ ...sendOpts, reader: missReader, signer: missSigner, gate: new TxGate(), nonce: missNonce });
+    const lost = await withClock(() => sendSafe({ ...sendOpts, reader: missReader, signer: missSigner, gate: new TxGate(), nonce: missNonce }));
     expect(lost.status).toBe('pending');
     expect(lost.nonce).toBe(chainPending);
     expect(missed[0]).toHaveLength(1);
     expect(missed[1]).toEqual(missed[0]);
     expect(lost.hash).toBe(keccak256(missed[0][0] as `0x${string}`));
-    const retry = await sendSafe({ ...sendOpts, reader: missReader, signer: missSigner, gate: new TxGate(), nonce: missNonce });
+    const retry = await withClock(() => sendSafe({ ...sendOpts, reader: missReader, signer: missSigner, gate: new TxGate(), nonce: missNonce }));
     expect(retry.nonce).toBe(chainPending);
     expect(pendingReads).toBe(2);
   });
@@ -919,7 +934,7 @@ describe('sendSafe', () => {
     tip.rpc.blockNumber = 20;
     tip.rpc.pending = 4;
     tip.rpc.mined = 4;
-    const atTip = await tip.go();
+    const atTip = await withClock(() => tip.go());
     expect(atTip.status).toBe('pending');
     expect(atTip.state).toBe('source_sent');
     expect(atTip.replacementHash).toBeUndefined();
@@ -930,7 +945,7 @@ describe('sendSafe', () => {
     missing.rpc.blockNumber = 20;
     missing.rpc.pending = 4;
     missing.rpc.mined = 4;
-    const bare = await missing.go();
+    const bare = await withClock(() => missing.go());
     expect(bare.status).toBe('pending');
     expect(bare.replacementHash).toBeUndefined();
 
@@ -981,7 +996,7 @@ describe('sendSafe', () => {
     };
     await expect(sendSafe(opts)).rejects.toMatchObject({ code: 'stale_nonce', message: 'nonce already used; not resent' });
     expect(nextSends).toBe(1);
-    const followed = await sendSafe({
+    const followed = await withClock(() => sendSafe({
       ...opts,
       reader: {
         ...reader,
@@ -989,7 +1004,7 @@ describe('sendSafe', () => {
         async broadcastNext() { throw new Error('should not rebroadcast'); },
       },
       signer: new Signer(),
-    });
+    }));
     expect(followed.nonce).toBe(chainPending);
     expect(pendingReads).toBe(2);
   });
@@ -1029,12 +1044,12 @@ describe('sendSafe', () => {
       gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
       receiptTimeoutMs: 30, halted: () => false,
     };
-    const lost = await sendSafe(opts);
+    const lost = await withClock(() => sendSafe(opts));
     expect(lost.status).toBe('pending');
     expect(lost.nonce).toBe(chainPending);
     expect(raws).toHaveLength(2);
     expect(raws[1]).toBe(raws[0]);
-    const retry = await sendSafe({ ...opts, signer: new Signer() });
+    const retry = await withClock(() => sendSafe({ ...opts, signer: new Signer() }));
     expect(retry.nonce).toBe(chainPending + 1);
     expect(pendingReads).toBe(1);
   });
@@ -1056,15 +1071,15 @@ describe('sendSafe', () => {
       async broadcastNext() { sends++; throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); },
       async hasTx() { return false; },
     };
-    const out = await sendSafe({
+    const out = await withClock(() => sendSafe({
       tx: { from: FROM, to: TO, data: '0x1234', value: 0n }, kind: 'bridge', chainId: 1, reader,
       signer: new Signer(), gate: new TxGate(), nonce: new SharedNonce(),
       gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
       receiptTimeoutMs: 20, halted: () => false,
-    });
+    }));
     expect(out.status).toBe('pending');
     expect(sends).toBe(9);
-  });
+  }, 5_000);
 
   it('broadcastNext does not follow the read cursor or resend a timed-out endpoint', async () => {
     const timeout = () => Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
@@ -1117,6 +1132,88 @@ describe('sendSafe', () => {
     await drain(forward.r);
     expect(forward.hits).toEqual([1, 1, 1]);
   });
+
+  it('releases the gate and returns pending when every in-gate RPC hangs', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000_000_000);
+    try {
+      let held = false;
+      const inner = new TxGate();
+      const gate = {
+        get busy() { return inner.busy; },
+        run<T>(fn: () => Promise<T>) { return inner.run(() => { held = true; return fn(); }); },
+      } as TxGate;
+      const hang = () => new Promise(() => undefined);
+      const reader: SafeReader = {
+        async send(method: string) {
+          if (held) return hang();
+          if (method === 'eth_call') return '0x';
+          if (method === 'eth_estimateGas') return toQuantity(100_000n);
+          if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+          if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+          return hang();
+        },
+        async getFeeData() { return held ? hang() : { gasPrice: 100n, maxFeePerGas: 100n }; },
+        async getTransactionCount() { return held ? hang() : 4; },
+        async broadcastRaw() { return hang(); },
+        async broadcastNext() { return hang(); },
+        async hasTx() { return hang(); },
+      };
+      const opts = {
+        tx: { from: FROM, to: TO, data: '0x1234', value: 0n }, kind: 'bridge' as const, chainId: 1, reader,
+        signer: new Signer(), gate, nonce: new SharedNonce(),
+        gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+        receiptTimeoutMs: 1_000_000, halted: () => false,
+      };
+      const budget = RECEIPT_TIMEOUT_CAP_MS + GATE_SLACK_MS;
+      let done = false;
+      const first = sendSafe(opts).then((r) => { done = true; return r; });
+      await vi.advanceTimersByTimeAsync(budget - 1);
+      expect(done).toBe(false);
+      expect(gate.busy).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      const pending = await first;
+      expect(pending.status).toBe('pending');
+      expect(pending.state).toBe('source_sent');
+      expect(pending.reason).toMatch(/time budget/);
+      expect(pending.reason).toMatch(/mempool/);
+      expect(gate.busy).toBe(false);
+
+      let started = false;
+      held = false;
+      const again = sendSafe({
+        ...opts,
+        signer: new Signer(),
+        nonce: new SharedNonce(),
+        reader: {
+          async send(method: string) {
+            started = true;
+            if (!held) {
+              if (method === 'eth_call') return '0x';
+              if (method === 'eth_estimateGas') return toQuantity(100_000n);
+              if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+              if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+            }
+            return hang();
+          },
+          async getFeeData() { return held ? hang() : { gasPrice: 100n, maxFeePerGas: 100n }; },
+          async getTransactionCount() { return held ? hang() : 4; },
+          async broadcastRaw() { return hang(); },
+          async broadcastNext() { return hang(); },
+          async hasTx() { return hang(); },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(started).toBe(true);
+      expect(gate.busy).toBe(true);
+      await vi.advanceTimersByTimeAsync(budget);
+      const next = await again;
+      expect(next.status).toBe('pending');
+      expect(gate.busy).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 5_000);
 
   it('no bot calls sendSafe or broadcastNext', () => {
     const root = join(__dirname, '..', 'src');
