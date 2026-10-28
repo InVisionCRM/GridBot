@@ -247,25 +247,35 @@ export class FallbackReader implements ChainReader, LogReader {
   /**
    * One eth_sendRawTransaction on the current endpoint. No rotation inside this call.
    * sendSafe rebroadcasts the same bytes itself, after hasTx, when this one times out.
+   * The start index is captured here. Later reads move `this.i` and must not change which
+   * endpoints this send still has to try, or how many.
    */
-  private sentFrom = -1;
+  private broadcastOrigin = -1;
+  /** How many endpoints this send has already been given, including broadcastRaw. */
+  private broadcastTried = 0;
 
   broadcastRaw(raw: string): Promise<unknown> {
-    this.sentFrom = this.i;
-    return this.limiter.run(() => this.providers[this.i].send('eth_sendRawTransaction', [raw]));
+    const at = this.i;
+    this.broadcastOrigin = at;
+    this.broadcastTried = 1;
+    return this.limiter.run(() => this.providers[at].send('eth_sendRawTransaction', [raw]));
   }
 
   /**
-   * The same signed bytes on the next endpoint. Same hash, not a new transaction.
-   * Rejects with code NO_ENDPOINT once every endpoint has been tried.
+   * The same signed bytes on the next endpoint that this send has not already tried.
+   * Same hash, not a new transaction. An endpoint that timed out is not tried again.
+   * Stops after one attempt per endpoint (code NO_ENDPOINT), so a broadcast cannot hold
+   * the chain gate open by following the read cursor around the list.
    */
   broadcastNext(raw: string): Promise<unknown> {
     const n = this.providers.length;
-    if (this.sentFrom < 0) this.sentFrom = this.i;
-    const next = this.sentFrom + 1;
-    if (next >= this.i + n) return Promise.reject(Object.assign(new Error('no further endpoint'), { code: 'NO_ENDPOINT' }));
-    const j = next % n;
-    this.sentFrom = next;
+    if (this.broadcastOrigin < 0) {
+      this.broadcastOrigin = this.i;
+      this.broadcastTried = 1;
+    }
+    if (this.broadcastTried >= n) return Promise.reject(Object.assign(new Error('no further endpoint'), { code: 'NO_ENDPOINT' }));
+    const j = (this.broadcastOrigin + this.broadcastTried) % n;
+    this.broadcastTried += 1;
     return this.limiter.run(() => this.providers[j].send('eth_sendRawTransaction', [raw]));
   }
 

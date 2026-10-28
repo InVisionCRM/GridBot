@@ -5,14 +5,19 @@ export interface LogEntry { t: number; level: 'info' | 'warn' | 'error'; msg: st
 
 const secrets: string[] = [];
 /**
+ * Shorter than this is never a redaction needle. A 1-character quote key would blank that
+ * character on every log line. Quote keys use this floor; private keys keep the default of 16.
+ */
+export const REDACT_FLOOR = 6;
+/**
  * Register a string that must never appear in a log line.
  * The default minimum is 16 so a short accidental value cannot blank every log.
- * Quote keys pass 1: a configured key is redacted at any length.
  * The 0x twin is only added for long values (a private key logged with or without 0x).
  */
 export function registerSecret(s: string, minLength = 16) {
   const v = s.trim();
-  if (v.length < minLength || secrets.includes(v)) return;
+  const need = Math.max(REDACT_FLOOR, minLength);
+  if (v.length < need || secrets.includes(v)) return;
   secrets.push(v);
   if (v.length < 16) return;
   const alt = v.startsWith('0x') ? v.slice(2) : `0x${v}`;

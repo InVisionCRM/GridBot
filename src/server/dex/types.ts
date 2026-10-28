@@ -22,6 +22,12 @@ export interface QuoteOut {
   /** fraction 0..1, excluding the LP fee */
   impact: number;
   gasEstimate?: bigint;
+  /** V4: LP fee in hundredths of a bip, read from StateView at quote time (dynamic-fee pools included). */
+  lpFee?: number;
+  /** V4: PoolKey.fee is the dynamic-fee flag, so lpFee is the live fee rather than a static tier. */
+  dynamicFee?: boolean;
+  /** V4: hook decision. allowed is false for an unknown or unsafe hook that is not on the allowlist. */
+  hook?: { address: string; allowed: boolean; unsafe: boolean; unknown: boolean; reason: string | null; flags: readonly string[] };
 }
 
 export interface SwapRequest {
@@ -54,9 +60,14 @@ export interface DexAdapter {
   /** All pools for an unordered token pair (V2: getPair; V3: getPool per fee tier). Empty = none. */
   findPools(a: string, b: string): Promise<PoolRef[]>;
   state(pool: PoolRef, a: string, b: string): Promise<PoolState>;
-  /** Exact-in quote at the real size (V2 getAmountsOut, V3 QuoterV2) + impact vs mid. ERC-20 addresses. */
+  /** Exact-in quote at the real size (V2 getAmountsOut, V3 QuoterV2, V4 Quoter) + impact vs mid. ERC-20 addresses. */
   quote(pool: PoolRef, tokenIn: string, tokenOut: string, amountIn: bigint): Promise<QuoteOut>;
   buildSwap(r: SwapRequest): BuiltSwap;
+  /**
+   * V4 only: Permit2 allowance (owner, token, router). Absent on V2/V3, which approve the router directly.
+   * Null when the read itself fails.
+   */
+  permit2Allowance?(owner: string, token: string, spender: string): Promise<{ amount: bigint; expiration: bigint } | null>;
 }
 
 export async function readCall<T = unknown[]>(reader: Pick<ChainReader, 'call'>, to: string, iface: import('ethers').Interface, fn: string, args: unknown[] = []): Promise<T> {

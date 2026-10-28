@@ -6,7 +6,7 @@ import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
 import { DurableJsonStore } from './bot/durableStore';
 import { ActivityBus } from './bot/activity';
-import { createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
+import { createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, shortQuoteKeyWarnings, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
 import { Router, type RouterFile } from './router/router';
 import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
@@ -17,6 +17,7 @@ import { DailyScanner, localScan, scanDepsFromHub, type ScanFile } from './marke
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
+import { swapForHost } from './swap/wire';
 import { fetchJson } from './fetchJson';
 import { PoolSearch } from './market/poolSearch';
 import { TFS } from '../market/candles';
@@ -35,6 +36,7 @@ const bridgeKeyStatus = takeBridgeKeys();
 const cfg = readSettings();
 const isProd = process.env.NODE_ENV === 'production';
 const log = new Logger();
+for (const msg of shortQuoteKeyWarnings()) log.warn(msg);
 // A friend's copy (started by the host app, friends/copies.ts) shares the host's candles budget and daily scan.
 const copy = readCopy();
 
@@ -135,9 +137,19 @@ const router = new Router({
   log,
 });
 bot.routerHalt = (halt) => router.halt(halt);
+// Quotes and, in live mode, calldata only. A friend's copy does not construct this. Nothing here broadcasts.
+const swap = swapForHost(!!copy, {
+  hub,
+  allocations: () => bot.allocations().rows,
+  reservations: () => [
+    ...(tokenTrader?.reservations() ?? []),
+    ...convert.reservations(),
+    ...bot.routerReservations(),
+  ],
+});
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
-  lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
+  lpReplay: (q) => lpReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
   friends, autopilot, tokenTrader, router, copy: !!copy,
 });

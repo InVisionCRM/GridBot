@@ -26,5 +26,7 @@ export async function readV3FeeBps(reader: Pick<ChainReader, 'call'>, pool: stri
 /** Fee for a pool on a known DEX: V2 = the DEX's fee; V3 = fee() read from the pool. null = unknown (don't trade it). */
 export async function poolFeeBps(reader: Pick<ChainReader, 'call'>, pool: string, dex: Pick<DexConfig, 'kind' | 'feeBps'> | null | undefined): Promise<number | null> {
   if (dex?.kind === 'v2') return dex.feeBps ?? null;
+  // V4 has no per-pool fee() and is not swapped by this path.
+  if (dex?.kind === 'v4') return null;
   try { return await readV3FeeBps(reader, pool); } catch { return null; }
 }
