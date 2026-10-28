@@ -63,16 +63,18 @@ export function takeHostAuth(): OwnerConfig | null {
 export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boolean }
 
 /**
- * Quote keys for the capital router. Like PRIVATE_KEY they are removed from process.env at once and registered
- * for redaction when they are at least REDACT_FLOOR characters. A shorter key is kept for the configured
- * flag and is not a redaction needle; shortQuoteKeyWarnings() names it and never includes the value.
- * A friend's copy never sees them (they are not on the copy's environment allow-list).
+ * Quote keys for the capital router. Like PRIVATE_KEY they are removed from process.env at once.
+ * A key shorter than REDACT_FLOOR is refused: it is not stored, not configured, and not given to a provider.
+ * shortQuoteKeyWarnings() names the variable only, never the value and never its length.
+ * A longer key is registered for redaction. The strings stay in this module except on a quote request
+ * for a provider that was actually configured. A friend's copy never sees them.
  */
-let bridgeKeys: { across: string | null; relay: string | null; lifi: string | null } = { across: null, relay: null, lifi: null };
-/** Names only. A short quote key is not a redaction needle, and the value is never in this list. */
+type BridgeName = 'across' | 'relay' | 'lifi';
+let bridgeKeys: Record<BridgeName, string | null> = { across: null, relay: null, lifi: null };
+/** Names only. A refused key is not stored here, and the value is never in this list. */
 let shortQuoteWarnings: string[] = [];
 
-/** Warnings from the last takeBridgeKeys(). Each line names the variable, never the value. */
+/** Warnings from the last takeBridgeKeys(). Each line names the variable, never the value or its length. */
 export function shortQuoteKeyWarnings(): readonly string[] {
   return shortQuoteWarnings;
 }
@@ -83,11 +85,28 @@ function takeOne(name: 'ACROSS_API_KEY' | 'RELAY_API_KEY' | 'LIFI_API_KEY'): str
   if (!raw || !raw.trim()) return null;
   const v = raw.trim();
   if (v.length < REDACT_FLOOR) {
-    shortQuoteWarnings.push(`${name} is shorter than ${REDACT_FLOOR} characters, so it is not redacted from logs`);
-    return v;
+    shortQuoteWarnings.push(`${name} was refused`);
+    return null;
   }
   registerSecret(v, REDACT_FLOOR);
   return v;
+}
+
+/** What a quote provider may be constructed with. Null means keyless: nothing to put on a request. */
+export function bridgeProviderConfig(): Record<BridgeName, { apiKey: string } | null> {
+  const slot = (k: string | null) => (k == null ? null : { apiKey: k });
+  return { across: slot(bridgeKeys.across), relay: slot(bridgeKeys.relay), lifi: slot(bridgeKeys.lifi) };
+}
+
+/**
+ * A quote request for one provider. A keyless provider gets no Authorization header, and the key is
+ * never written into the url or the body.
+ */
+export function bridgeQuoteRequest(provider: BridgeName, url: string, init: { headers?: Record<string, string>; body?: string } = {}): { url: string; headers: Record<string, string>; body?: string } {
+  const headers = { ...(init.headers ?? {}) };
+  const key = bridgeKeys[provider];
+  if (key) headers.Authorization = `Bearer ${key}`;
+  return { url, headers, body: init.body };
 }
 
 export function takeBridgeKeys(): BridgeConfigured {
@@ -96,7 +115,7 @@ export function takeBridgeKeys(): BridgeConfigured {
   return bridgeConfigured();
 }
 
-/** Whether a quote key was set. The key itself never leaves this file. */
+/** Whether a quote key was accepted. A refused key is false. The value is not in this object. */
 export function bridgeConfigured(): BridgeConfigured {
   return { across: bridgeKeys.across != null, relay: bridgeKeys.relay != null, lifi: bridgeKeys.lifi != null };
 }
