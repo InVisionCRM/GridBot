@@ -55,6 +55,8 @@ export interface BtResult {
   equity: { t: number; v: number }[];
   trades: BtTrade[];
   notes: string[];
+  /** Set when markOpen leaves the last position unsold. Absent on a normal run. */
+  open?: { pls: number; cost: number; price: number } | null;
 }
 
 export function maxDrawdown(v: number[]): number {
@@ -99,7 +101,13 @@ function metrics(eq: { t: number; v: number }[], trades: BtTrade[], tf: TF, capi
   };
 }
 
-export interface TrendBtOpts { capital: number; costs: CostModel; htf?: Candle[] }
+export interface TrendBtOpts {
+  capital: number; costs: CostModel; htf?: Candle[];
+  /** Leave a position open at the last close instead of booking it as a trade. The harness uses this so a mark is not counted as tokens generated. */
+  markOpen?: boolean;
+  /** Defaults to the live signal function. The harness injects this so a backtest cannot drift onto a copy of the rules. */
+  signalAt?: typeof signalAt;
+}
 
 export function runTrendBacktest(k: Candle[], cfg: TrendConfig, tf: TF, o: TrendBtOpts): BtResult {
   const errs = validateTrendConfig(cfg);
@@ -165,7 +173,7 @@ export function runTrendBacktest(k: Candle[], cfg: TrendConfig, tf: TF, o: Trend
 
     // 3) Decide on this bar's close (executes next open)
     if (i < k.length - 1) {
-      const sig = signalAt(ind, k, i, cfg);
+      const sig = (o.signalAt ?? signalAt)(ind, k, i, cfg);
       if (pos) {
         pos.bars++;
         if (sig.exit) pending = { kind: 'exit', reason: 'signal' };
@@ -177,13 +185,17 @@ export function runTrendBacktest(k: Candle[], cfg: TrendConfig, tf: TF, o: Trend
     if (pos) inPos++;
     eq.push({ t: bar.t, v: cash + (pos ? pos.pls * bar.c : 0) });
   }
+  let open: { pls: number; cost: number; price: number } | null = null;
   if (pos) {
     const last = k[k.length - 1];
-    exit(last.t, last.c, 'end', k.length - 1);
-    eq[eq.length - 1].v = cash;
+    if (o.markOpen) open = { pls: pos.pls, cost: pos.cost, price: last.c };
+    else {
+      exit(last.t, last.c, 'end', k.length - 1);
+      eq[eq.length - 1].v = cash;
+    }
   }
   return {
-    kind: 'trend', tf, metrics: metrics(eq, trades, tf, o.capital, inPos, blocked, spent, { trade: o.capital, impact: simBuy(o.capital, k[start].o, o.costs).impactPct, pool: o.costs.pool?.quoteReserve ?? null }), equity: eq, trades,
+    kind: 'trend', tf, metrics: metrics(eq, trades, tf, o.capital, inPos, blocked, spent, { trade: o.capital, impact: simBuy(o.capital, k[start].o, o.costs).impactPct, pool: o.costs.pool?.quoteReserve ?? null }), equity: eq, trades, open,
     notes: [
       'Signals on candle close, filled at the next open; stops/TP intrabar (stop first if both hit in one candle).',
       'Price impact uses CURRENT pool reserves re-centred at each historical price (approximation).',
