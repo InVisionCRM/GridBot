@@ -12,7 +12,8 @@
  * follow that table's relation `same-asset`. Ethereum USDC and Robinhood USDG are not the same
  * coin. Canonical slow routes are not a provider here and must not be added as one.
  */
-import { redact, registerSecret } from '../bot/logger';
+import { REDACT_FLOOR, redact, registerSecret } from '../bot/logger';
+import { BridgeError } from './errors';
 import { QuoteCache, QUOTE_CACHE_TTL_MS } from './cache';
 import type { BridgeDeps } from './deps';
 import { AcrossClient } from './across';
@@ -39,6 +40,8 @@ export interface BridgeClientOptions {
   cache?: QuoteCache;
   limits?: { across: RateRule; relay: RateRule; lifi: RateRule };
   log?: BridgeLog;
+  /** 2-byte Across integrator id: 4 hex characters, with or without a 0x prefix. */
+  integratorId?: string;
 }
 
 export interface BridgeClients {
@@ -58,19 +61,39 @@ export function createBridgeProviders(o: BridgeClientOptions = {}): BridgeClient
     lifi: optionalKey(o.keys?.lifi, 'lifi'),
   };
   const secrets = [keys.across, keys.relay, keys.lifi].filter((s): s is string => !!s);
-  for (const secret of secrets) registerSecret(secret);
+  for (const secret of secrets) registerSecret(secret, REDACT_FLOOR);
+  const integratorId = normalizeIntegratorId(o.integratorId);
   const sleep = o.sleep ?? delay;
   const log = o.log ? (level: 'info' | 'warn' | 'error', msg: string) => o.log!(level, redact(msg)) : undefined;
   const common = { http, cache, now, sleep, secrets, log };
   return {
-    across: new AcrossClient(deps(common, new RateLimiter(limits.across, now), keys.across)),
+    across: new AcrossClient(deps(common, new RateLimiter(limits.across, now), keys.across, integratorId)),
     relay: new RelayClient(deps(common, new RateLimiter(limits.relay, now), keys.relay)),
     lifi: new LifiClient(deps(common, new RateLimiter(limits.lifi, now), keys.lifi)),
   };
 }
 
-function deps(common: Omit<BridgeDeps, 'limiter' | 'key'>, limiter: RateLimiter, key: string | undefined): BridgeDeps {
-  return { ...common, limiter, ...(key ? { key } : {}) };
+function normalizeIntegratorId(raw: string | undefined): string | undefined {
+  if (raw == null || !raw.trim()) return undefined;
+  const hex = raw.trim().replace(/^0x/i, '');
+  if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+    throw new BridgeError('across', 'invalid', 'across: integrator id was rejected');
+  }
+  return hex.toLowerCase();
+}
+
+function deps(common: Omit<BridgeDeps, 'limiter' | 'key' | 'integratorId'>, limiter: RateLimiter, key: string | undefined, integratorId?: string): BridgeDeps {
+  return { ...common, limiter, ...(key ? { key } : {}), ...(integratorId ? { integratorId } : {}) };
+}
+
+/** Build the quote clients. A bad key or integrator id does not escape this function. */
+export function bootBridgeClients(o: BridgeClientOptions = {}): BridgeClients {
+  try {
+    return createBridgeProviders(o);
+  } catch {
+    o.log?.('warn', 'bridge quote clients were not started');
+    return createBridgeProviders({ http: o.http, fetch: o.fetch, now: o.now, sleep: o.sleep, timeoutMs: o.timeoutMs, cache: o.cache, limits: o.limits, log: o.log });
+  }
 }
 
 export function bridgeQuote(clients: BridgeClients, provider: BridgeId, req: BridgeQuoteRequest) {
