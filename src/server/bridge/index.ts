@@ -2,7 +2,7 @@
  * Keyless quote and status clients for Across, Relay, and Li.Fi.
  *
  * Nothing here signs, approves on-chain, or broadcasts. `quote` returns an approve transaction
- * and a deposit transaction. A later caller can hand the deposit to sendSafe (PR #52) as
+ * and a deposit transaction. A later caller can hand the deposit to the sendSafe wrapper from PR #52 as
  * `{ from, to, data, value }`. This module does not read the environment. Optional quote keys
  * are constructor arguments, sent only as headers. Once PR #52 lands, the host passes the three
  * keys already taken out of the environment. Do not construct this from a friend's copy.
