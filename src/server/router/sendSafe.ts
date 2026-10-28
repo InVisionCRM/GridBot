@@ -100,11 +100,18 @@ export interface SendSafeOpts {
 }
 
 /**
- * The halted predicate a router send must use. Stop all sets the halt; `on` is false by default
- * and is not itself a halt, so a check of the on flag would refuse every send before Stop all.
+ * The halted predicate a router send must use. True unless this process has the router on, in live
+ * mode, and not panic-halted. Off (the default) and paper both block a send. Stop all sets the panic halt.
  */
-export function routerSendHalted(router: { isHalted(): boolean }): () => boolean {
-  return () => router.isHalted();
+export function routerSendHalted(router: {
+  isHalted(): boolean;
+  status(): { on: boolean; mode: 'paper' | 'live' };
+}): () => boolean {
+  return () => {
+    if (router.isHalted()) return true;
+    const s = router.status();
+    return s.on !== true || s.mode !== 'live';
+  };
 }
 
 export type SendSafeStatus = 'confirmed' | 'pending' | 'reverted' | 'replaced' | 'cancelled';
@@ -357,15 +364,15 @@ function localHash(raw: string): string {
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
-function parseReceipt(v: unknown, expectHash: string): { status: number; hash: string } | null {
+function parseReceipt(v: unknown, expectHash: string): { status: number; hash: string; blockNumber: bigint | null } | null {
   if (!v || typeof v !== 'object') return null;
-  const r = v as { status?: string | number | null; transactionHash?: string };
+  const r = v as { status?: string | number | null; transactionHash?: string; blockNumber?: unknown };
   let status: number | null = null;
   if (r.status === 1 || r.status === '0x1' || r.status === '0x01') status = 1;
   else if (r.status === 0 || r.status === '0x0' || r.status === '0x00') status = 0;
   if (status == null) return null;
   const hash = typeof r.transactionHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(r.transactionHash) ? r.transactionHash : expectHash;
-  return { status, hash };
+  return { status, hash, blockNumber: qtyOrNull(r.blockNumber) };
 }
 
 interface MinedTx { hash?: string; from?: string; to?: string | null; nonce?: string | number; value?: string; input?: string; data?: string }
@@ -428,15 +435,19 @@ async function detectReplacement(o: SendSafeOpts, from: string, nonce: number, o
 async function waitOutcome(o: SendSafeOpts, from: string, hash: string, nonce: number): Promise<Outcome> {
   const deadline = Date.now() + (o.receiptTimeoutMs ?? 120_000);
   for (;;) {
-    let receipt: { status: number; hash: string } | null = null;
+    let receipt: { status: number; hash: string; blockNumber: bigint | null } | null = null;
     try { receipt = parseReceipt(await o.reader.send('eth_getTransactionReceipt', [hash]), hash); }
     catch { receipt = null; }
     if (receipt) {
       if (receipt.hash.toLowerCase() !== hash.toLowerCase()) {
-        return { status: 'replaced', state: 'source_replaced', hash, replacementHash: receipt.hash };
+        // Same depth as the block scan: the tip can still reorg, so one confirmation is required.
+        if (await replacementConfirmed(o, receipt.blockNumber)) {
+          return { status: 'replaced', state: 'source_replaced', hash, replacementHash: receipt.hash };
+        }
+      } else {
+        if (receipt.status !== 1) return { status: 'reverted', state: 'source_confirmed', hash };
+        return { status: 'confirmed', state: 'source_confirmed', hash };
       }
-      if (receipt.status !== 1) return { status: 'reverted', state: 'source_confirmed', hash };
-      return { status: 'confirmed', state: 'source_confirmed', hash };
     }
     try {
       const replaced = await detectReplacement(o, from, nonce, hash);
@@ -447,9 +458,23 @@ async function waitOutcome(o: SendSafeOpts, from: string, hash: string, nonce: n
   }
 }
 
+/** One confirmation deeper than the replacement's block. Missing depth stays unconfirmed. */
+async function replacementConfirmed(o: SendSafeOpts, blockNumber: bigint | null): Promise<boolean> {
+  if (blockNumber == null) return false;
+  try {
+    const latest = blockNum(await o.reader.send('eth_getBlockByNumber', ['latest', false]));
+    return latest != null && latest > blockNumber;
+  } catch {
+    return false;
+  }
+}
+
 function noMoreEndpoints(e: unknown): boolean {
   return (e as { code?: string } | null)?.code === 'NO_ENDPOINT';
 }
+
+/** Rebroadcasts cannot spin. Each endpoint is one attempt; this caps a reader that never says it is done. */
+const MAX_REBROADCASTS = 8;
 
 async function submitRaw(o: SendSafeOpts, raw: string): Promise<void> {
   if (o.reader.broadcastRaw) await o.reader.broadcastRaw(raw);
@@ -459,7 +484,7 @@ async function submitRaw(o: SendSafeOpts, raw: string): Promise<void> {
 /** Same signed bytes on each remaining endpoint. True once one accepts them or already has the hash. */
 async function rebroadcast(o: SendSafeOpts, raw: string, hash: string): Promise<boolean> {
   if (!o.reader.broadcastNext) return false;
-  for (;;) {
+  for (let n = 0; n < MAX_REBROADCASTS; n++) {
     try {
       await o.reader.broadcastNext(raw);
       return true;
@@ -478,6 +503,7 @@ async function rebroadcast(o: SendSafeOpts, raw: string, hash: string): Promise<
       throw e;
     }
   }
+  return ourTxIsKnown(o, hash);
 }
 
 /** The signed hash is already on an endpoint, so "nonce too low" is this tx, not a lost nonce. */
