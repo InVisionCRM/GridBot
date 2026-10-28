@@ -71,18 +71,21 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
   const shownWorth = worth ?? (holdings?.hasSigner === false ? book : null);
   const ethUsd = useEthUsd();
   const tokens = useMemo(() => (holdings?.hasSigner ? holdingsByToken(holdings, chain).slice(0, 6) : botsByToken(bots)), [holdings, chain, bots]);
+  // The Net worth card is the wallet, so its chart and chip follow live bots' equity only: a paper loss changes nothing
+  // the wallet holds. A desk without a signer has only paper bots, and its book value is what the card shows.
+  const seriesBots = useMemo(() => (holdings?.hasSigner === false ? bots : bots.filter((b) => b.mode === 'live')), [bots, holdings?.hasSigner]);
   const series = useMemo(() => {
-    const hist = portfolioSeries(bots, range);
+    const hist = portfolioSeries(seriesBots, range);
     if (hist.length > 2 && hist.some((p) => p !== hist[0])) return hist;
     if (range === '1H' || range === '1D') {
-      const day = todaySeries(bots, holdings?.hasSigner === false);
+      const day = todaySeries(seriesBots, holdings?.hasSigner === false);
       if (day.length > 1 && day.some((p) => p !== 0)) return day;
     }
     return hist;
-  }, [bots, range, holdings?.hasSigner]);
+  }, [seriesBots, range, holdings?.hasSigner]);
   const chg = seriesChange(series);
-  const span = equitySpan(bots);
-  const month = useMemo(() => portfolioSeries(bots, '1M'), [bots]);
+  const span = equitySpan(seriesBots);
+  const month = useMemo(() => portfolioSeries(seriesBots, '1M'), [seriesBots]);
   // Live and paper are never mixed: the headline is live bots only, in units per coin; paper is a separate small line
   const gen = generatedByMode(bots);
   const paperGen = sharedUnits(bots.filter((b) => b.mode !== 'live').map((b) => metricsOf(b)?.generated));
@@ -141,7 +144,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
               <p className="home-sub">
                 {holdings == null && 'Reading…'}
                 {paper && 'Paper'}
-                {holdings && (
+                {shownWorth != null && (
                   <span className={`chip ${cls(chg.delta)}`}>{inEth(chg.delta, ethUsd, true, 3)} {chg.pct == null ? '' : pct(chg.pct, 2, true)}</span>
                 )}
               </p>
