@@ -235,7 +235,7 @@ export class FallbackReader implements ChainReader, LogReader {
   call(tx: { to: string; data: string; from?: string }) { return this.run((p) => p.call(tx)); }
   getBalance(a: string) { return this.run((p) => p.getBalance(a)); }
   getFeeData() { return this.run((p) => p.getFeeData()); }
-  getTransactionCount(a: string, tag: 'pending') { return this.run((p) => p.getTransactionCount(a, tag)); }
+  getTransactionCount(a: string, tag: 'pending' | 'latest') { return this.run((p) => p.getTransactionCount(a, tag)); }
   getTransactionReceipt(h: string) { return this.run((p) => p.getTransactionReceipt(h)) as Promise<ReceiptLike | null>; }
   getBlockNumber() { return this.run((p) => p.getBlockNumber()); }
   getBlock(n: number) { return this.run((p) => p.getBlock(n)); }
@@ -243,6 +243,47 @@ export class FallbackReader implements ChainReader, LogReader {
   getCode(a: string) { return this.run((p) => p.getCode(a)); }
   getStorage(a: string, slot: string) { return this.run((p) => p.getStorage(a, slot)); }
   send(method: string, params: unknown[]) { return this.run((p) => p.send(method, params)); }
+
+  /**
+   * One eth_sendRawTransaction on the current endpoint. No rotation inside this call.
+   * sendSafe rebroadcasts the same bytes itself, after hasTx, when this one times out.
+   */
+  private sentFrom = -1;
+
+  broadcastRaw(raw: string): Promise<unknown> {
+    this.sentFrom = this.i;
+    return this.limiter.run(() => this.providers[this.i].send('eth_sendRawTransaction', [raw]));
+  }
+
+  /**
+   * The same signed bytes on the next endpoint. Same hash, not a new transaction.
+   * Rejects with code NO_ENDPOINT once every endpoint has been tried.
+   */
+  broadcastNext(raw: string): Promise<unknown> {
+    const n = this.providers.length;
+    if (this.sentFrom < 0) this.sentFrom = this.i;
+    const next = this.sentFrom + 1;
+    if (next >= this.i + n) return Promise.reject(Object.assign(new Error('no further endpoint'), { code: 'NO_ENDPOINT' }));
+    const j = next % n;
+    this.sentFrom = next;
+    return this.limiter.run(() => this.providers[j].send('eth_sendRawTransaction', [raw]));
+  }
+
+  /** True when any endpoint already has this hash (tx or receipt). Used after "nonce too low". */
+  hasTx(hash: string): Promise<boolean> {
+    return this.limiter.run(async () => {
+      for (let n = 0; n < this.providers.length; n++) {
+        const p = this.providers[(this.i + n) % this.providers.length];
+        try {
+          if (await p.send('eth_getTransactionByHash', [hash])) return true;
+        } catch { /* this endpoint has no answer; try the next */ }
+        try {
+          if (await p.send('eth_getTransactionReceipt', [hash])) return true;
+        } catch { /* this endpoint has no answer; try the next */ }
+      }
+      return false;
+    });
+  }
 
   /** Try every endpoint in order (from the current one) until one answers; for capability-dependent calls. */
   sendEach(method: string, params: unknown[]): Promise<unknown> {
