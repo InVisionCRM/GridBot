@@ -41,6 +41,7 @@ export { TAX_TOLERANCE, MAX_TAX };
 export interface Hop { kind: number; router: string; quoter: string; fee: number; tokenIn: string; tokenOut: string }
 
 export function hopFor(ad: DexAdapter, pool: MarketDef['pool'], tokenIn: string, tokenOut: string): Hop {
+  if (ad.kind === 'v4' || pool.kind === 'v4') throw new Error('V4 pools are simulated by SafetyProbeV4, not the V2/V3 probe');
   return { kind: ad.kind === 'v2' ? 0 : 1, router: ad.cfg.router, quoter: ad.cfg.quoter ?? ad.cfg.router, fee: pool.feeTier ?? 0, tokenIn, tokenOut };
 }
 
@@ -56,8 +57,8 @@ export interface SafetyInputs {
   depth: SafetyReport['depth'];
   liquidityUsd: number | null;
   now?: number;
-  /** Pool kind of the market (taxed tokens: V2 → fee-on-transfer methods; V3 → only if proven) */
-  poolKind?: 'v2' | 'v3';
+  /** Pool kind of the market (taxed tokens: V2 → fee-on-transfer methods; V3 and V4 → only if that pool's round trip was proven) */
+  poolKind?: 'v2' | 'v3' | 'v4';
   flags?: TokenFlags | null;
   decimals?: number;
   /** Per-side live cap (fraction); default MAX_TAX */
@@ -102,6 +103,10 @@ export function classify(i: SafetyInputs): SafetyReport {
         // The probe swapped through this V3 pool and router successfully (buy, transfer and sell) — proven.
         bump('high'); taxMode = 'v3-proven';
         reasons.push(`Tax token on a V3 pool (${list}). Allowed live only because the simulated buy → transfer → sell through this exact pool succeeded; V3 routers have no fee-on-transfer mode, so the router minimum is set on the pre-tax output and the received amount is checked from the balance change. Prefer a V2 pool.`);
+      } else if (i.poolKind === 'v4') {
+        // SafetyProbeV4 swapped through this PoolKey and its hooks (buy, transfer and sell) — proven.
+        bump('high'); taxMode = 'v4-proven';
+        reasons.push(`Tax token on a V4 pool (${list}). Allowed live only because the simulated buy → transfer → sell through this exact pool and its hooks succeeded. The router minimum is set on the pre-tax output and the received amount is checked from the balance change.`);
       } else {
         const worst = Math.max(...taxed.map(([, t]) => t!));
         bump(worst >= 0.05 ? 'high' : 'medium'); taxMode = 'v2-fot';

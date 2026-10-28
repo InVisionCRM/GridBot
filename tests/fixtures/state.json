@@ -1,0 +1,671 @@
+{
+  "version": 4,
+  "defaults": {
+    "maxPriceImpact": 0.03,
+    "slippageBps": 100,
+    "deadlineMinutes": 10
+  },
+  "grids": [
+    {
+      "id": "g-mvowdsys-i5iq",
+      "mode": "live",
+      "network": "mainnet",
+      "stable": "HEX~",
+      "status": "running",
+      "config": {
+        "lowerPrice": 167.02,
+        "upperPrice": 278.37,
+        "gridCount": 20,
+        "totalCapitalUsd": 14000000
+      },
+      "limits": {
+        "maxPriceImpact": 0.03,
+        "slippageBps": 100,
+        "deadlineMinutes": 10,
+        "gasReservePct": 0.02,
+        "gasReserveNative": 0
+      },
+      "profits": {
+        "mode": "reinvest"
+      },
+      "recenter": {
+        "enabled": true,
+        "aboveSince": null,
+        "lastAt": null,
+        "count": 0
+      },
+      "startedAt": 1792997442851,
+      "startPrice": 222.9909854988149,
+      "lastPrice": 220.772615439998,
+      "lastPriceAt": 1793135232787,
+      "econ": {
+        "ok": true,
+        "reasons": [],
+        "levelSize": 700000,
+        "buyLevels": 11,
+        "roundTripFeePct": 0.005791590000000069,
+        "gasPlsPerRoundTrip": 0.8842948294143576,
+        "spacingPct": 0.02040853731179148,
+        "impactPct": 3.1872834612922674e-05,
+        "gasQuote": 243.6994959326925,
+        "feeQuote": 4095.389388441691,
+        "taxQuote": 0,
+        "buyTaxPct": 0,
+        "sellTaxPct": 0,
+        "netPerRoundTrip": 9882.790820649452,
+        "netPct": 0.01411827260092779,
+        "quote": "PLS",
+        "spot": 222.9909854988149,
+        "poolQuote": 39739359033.18838,
+        "poolPls": 177693792.47192523,
+        "bestNetPct": 0.027093192763072007,
+        "worstInterval": 19
+      },
+      "trades": [
+        {
+          "side": "buy",
+          "plsAmount": 28084.197551,
+          "stableAmount": 6300000,
+          "price": 224.3254409729672,
+          "execPrice": 224.3254409729672,
+          "feeQuote": 18270,
+          "feeBps": 29,
+          "dex": "pulsex-v2",
+          "timestamp": 1792997457503,
+          "paper": false,
+          "levelPrice": 222.9909854988149,
+          "stable": "HEX~"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 3125.21113473,
+          "stableAmount": 700000,
+          "price": 223.98486688499395,
+          "execPrice": 223.98486688499395,
+          "feeQuote": 2029.9999999999998,
+          "feeBps": 29,
+          "dex": "pulsex-v2",
+          "timestamp": 1793034748027,
+          "paper": false,
+          "levelPrice": 222.695,
+          "stable": "HEX~"
+        }
+      ]
+    },
+    {
+      "id": "g-mvnlyq6p-76zc",
+      "mode": "paper",
+      "network": "mainnet",
+      "stable": "ethereum:ETH/USDC",
+      "status": "stopped",
+      "config": {
+        "lowerPrice": 2213.3,
+        "upperPrice": 2446.3,
+        "gridCount": 20,
+        "totalCapitalUsd": 9000
+      },
+      "limits": {
+        "maxPriceImpact": 0.03,
+        "slippageBps": 100,
+        "deadlineMinutes": 10
+      },
+      "profits": {
+        "mode": "reinvest"
+      },
+      "recenter": {
+        "enabled": true,
+        "aboveSince": null,
+        "lastAt": null,
+        "count": 0
+      },
+      "startedAt": 1792919476948,
+      "startPrice": 2329.8024,
+      "lastPrice": 2333.9777999999997,
+      "lastPriceAt": 1793029454082,
+      "econ": {
+        "ok": true,
+        "reasons": [],
+        "levelSize": 450,
+        "buyLevels": 11,
+        "roundTripFeePct": 0.000999749999999855,
+        "gasPlsPerRoundTrip": 1.605096234e-05,
+        "spacingPct": 0.004785082044647112,
+        "impactPct": 9.604339017310615e-06,
+        "gasQuote": 0.039171972316711504,
+        "feeQuote": 0.4509625210438219,
+        "taxQuote": 0,
+        "buyTaxPct": 0,
+        "sellTaxPct": 0,
+        "netPerRoundTrip": 1.657736417685254,
+        "netPct": 0.003683858705967231,
+        "quote": "USDC",
+        "spot": 2329.8024,
+        "poolQuote": 91707725.845056,
+        "poolPls": 39343.18435648521,
+        "bestNetPct": 0.004169350402215848,
+        "worstInterval": 19
+      },
+      "trades": [
+        {
+          "side": "buy",
+          "plsAmount": 1.7365297830562096,
+          "stableAmount": 4050,
+          "price": 2332.2375691548423,
+          "execPrice": 2332.2375691548423,
+          "feeQuote": 2.025,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792919477704,
+          "paper": true,
+          "levelPrice": 2329.8024,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.19295572264718788,
+          "stableAmount": 450,
+          "price": 2332.1412489165077,
+          "execPrice": 2332.1412489165077,
+          "feeQuote": 0.225,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792919525855,
+          "paper": true,
+          "levelPrice": 2329.8,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.19410536718798516,
+          "stableAmount": 450,
+          "price": 2318.328475503661,
+          "execPrice": 2318.328475503661,
+          "feeQuote": 0.225,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792919979052,
+          "paper": true,
+          "levelPrice": 2318.15,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "sell",
+          "plsAmount": 0.194105367187985,
+          "stableAmount": 453.121918,
+          "price": 2334.412100831635,
+          "execPrice": 2334.412100831635,
+          "feeQuote": 0.22667429614807402,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792928892076,
+          "paper": true,
+          "levelPrice": 2329.8,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "sell",
+          "plsAmount": 0.192955722647187,
+          "stableAmount": 451.89037,
+          "price": 2341.938159700328,
+          "execPrice": 2341.938159700328,
+          "feeQuote": 0.22605821410705354,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792941018630,
+          "paper": true,
+          "levelPrice": 2341.45,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "sell",
+          "plsAmount": 0.192947753672912,
+          "stableAmount": 454.1887,
+          "price": 2353.946554723553,
+          "execPrice": 2353.946554723553,
+          "feeQuote": 0.22720795397698848,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792947358990,
+          "paper": true,
+          "levelPrice": 2353.1,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.19378177928499227,
+          "stableAmount": 454.130678,
+          "price": 2343.515885113822,
+          "execPrice": 2343.515885113822,
+          "feeQuote": 0.227065339,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792962746032,
+          "paper": true,
+          "levelPrice": 2341.45,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.19373626266905258,
+          "stableAmount": 451.798859,
+          "price": 2332.0304251547345,
+          "execPrice": 2332.0304251547345,
+          "feeQuote": 0.2258994295,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792965446337,
+          "paper": true,
+          "levelPrice": 2329.8,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "sell",
+          "plsAmount": 0.193736262669052,
+          "stableAmount": 453.87451,
+          "price": 2342.7442222075197,
+          "execPrice": 2342.7442222075197,
+          "feeQuote": 0.22705078039019508,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792965771038,
+          "paper": true,
+          "levelPrice": 2341.45,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.1947288571895693,
+          "stableAmount": 453.784535,
+          "price": 2330.340461856863,
+          "execPrice": 2330.340461856863,
+          "feeQuote": 0.2268922675,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792970818017,
+          "paper": true,
+          "levelPrice": 2329.8,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.19539191038691217,
+          "stableAmount": 452.997106,
+          "price": 2318.4025638675716,
+          "execPrice": 2318.4025638675716,
+          "feeQuote": 0.226498553,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792972299785,
+          "paper": true,
+          "levelPrice": 2318.15,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.1950237755859285,
+          "stableAmount": 450,
+          "price": 2307.410974113398,
+          "execPrice": 2307.410974113398,
+          "feeQuote": 0.225,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792979072405,
+          "paper": true,
+          "levelPrice": 2306.5,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "sell",
+          "plsAmount": 0.195023775585928,
+          "stableAmount": 452.128538,
+          "price": 2318.325222868998,
+          "execPrice": 2318.325222868998,
+          "feeQuote": 0.22617735767883942,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1792990440229,
+          "paper": true,
+          "levelPrice": 2318.15,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.19581731064505328,
+          "stableAmount": 451.937504,
+          "price": 2307.954810079079,
+          "execPrice": 2307.954810079079,
+          "feeQuote": 0.225968752,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1793001855594,
+          "paper": true,
+          "levelPrice": 2306.5,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "sell",
+          "plsAmount": 0.195817310645053,
+          "stableAmount": 453.990449,
+          "price": 2318.438791261529,
+          "execPrice": 2318.438791261529,
+          "feeQuote": 0.22710877888944472,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1793003245783,
+          "paper": true,
+          "levelPrice": 2318.15,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "sell",
+          "plsAmount": 0.195391910386912,
+          "stableAmount": 455.266669,
+          "price": 2330.018003808285,
+          "execPrice": 2330.018003808285,
+          "feeQuote": 0.22774720810405202,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1793007838073,
+          "paper": true,
+          "levelPrice": 2329.8,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.19625332456528738,
+          "stableAmount": 455.177557,
+          "price": 2319.3367959918382,
+          "execPrice": 2319.3367959918382,
+          "feeQuote": 0.2275887785,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1793019708941,
+          "paper": true,
+          "levelPrice": 2318.15,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.19661985830149423,
+          "stableAmount": 453.885628,
+          "price": 2308.4424529694143,
+          "execPrice": 2308.4424529694143,
+          "feeQuote": 0.226942814,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1793021281013,
+          "paper": true,
+          "levelPrice": 2306.5,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "buy",
+          "plsAmount": 0.19592022171646198,
+          "stableAmount": 450,
+          "price": 2296.853260258378,
+          "execPrice": 2296.853260258378,
+          "feeQuote": 0.225,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1793023033251,
+          "paper": true,
+          "levelPrice": 2294.85,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "sell",
+          "plsAmount": 0.19592022171646098,
+          "stableAmount": 452.565542,
+          "price": 2309.9480902740115,
+          "execPrice": 2309.9480902740115,
+          "feeQuote": 0.22639596898449224,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1793023890943,
+          "paper": true,
+          "levelPrice": 2306.5,
+          "stable": "ethereum:ETH/USDC"
+        },
+        {
+          "side": "sell",
+          "plsAmount": 0.196619858301494,
+          "stableAmount": 456.03416,
+          "price": 2319.36979275371,
+          "execPrice": 2319.36979275371,
+          "feeQuote": 0.22813114557278638,
+          "feeBps": 5,
+          "feeTier": 500,
+          "dex": "uniswap-v3",
+          "timestamp": 1793024386250,
+          "paper": true,
+          "levelPrice": 2318.15,
+          "stable": "ethereum:ETH/USDC"
+        }
+      ]
+    },
+    {
+      "id": "g-mvpdla8b-fmkg",
+      "mode": "paper",
+      "network": "mainnet",
+      "stable": "DAI",
+      "status": "running",
+      "config": {
+        "lowerPrice": 3.99003543287929e-06,
+        "upperPrice": 6.6500590547988164e-06,
+        "gridCount": 10,
+        "totalCapitalUsd": 2350
+      },
+      "limits": {
+        "maxPriceImpact": 0.03,
+        "slippageBps": 100,
+        "deadlineMinutes": 10
+      },
+      "profits": {
+        "mode": "reinvest"
+      },
+      "recenter": {
+        "enabled": true,
+        "aboveSince": null,
+        "lastAt": null,
+        "count": 0
+      },
+      "startedAt": 1793026345986,
+      "startPrice": 5.320047243839053e-06,
+      "lastPrice": 5.0938348336569646e-06,
+      "lastPriceAt": 1793135233128,
+      "econ": {
+        "ok": true,
+        "reasons": [],
+        "levelSize": 235,
+        "buyLevels": 5,
+        "roundTripFeePct": 0.005791590000000069,
+        "gasPlsPerRoundTrip": 193.5939347992815,
+        "spacingPct": 0.04166666666634034,
+        "impactPct": 0.0013613503547111883,
+        "gasQuote": 0.0012616628770851898,
+        "feeQuote": 1.3888593801873679,
+        "taxQuote": 0,
+        "buyTaxPct": 0,
+        "sellTaxPct": 0,
+        "netPerRoundTrip": 8.041467595715146,
+        "netPct": 0.03421901104559637,
+        "quote": "DAI",
+        "spot": 5.320047243839053e-06,
+        "poolQuote": 316701.8694925219,
+        "poolPls": 59357260244.647514,
+        "bestNetPct": 0.05864974453099304,
+        "worstInterval": 9
+      },
+      "trades": [
+        {
+          "side": "buy",
+          "plsAmount": 218774226.97467336,
+          "stableAmount": 1175,
+          "price": 5.370833741471865e-06,
+          "execPrice": 5.370833741471865e-06,
+          "feeQuote": 3.4074999999999998,
+          "feeBps": 29,
+          "dex": "pulsex-v1",
+          "timestamp": 1793026347604,
+          "paper": true,
+          "levelPrice": 5.320047243839053e-06,
+          "stable": "DAI"
+        }
+      ]
+    }
+  ],
+  "trends": [],
+  "lps": [
+    {
+      "id": "lp-mvnm73sx-hghe",
+      "kind": "lp",
+      "mode": "live",
+      "network": "mainnet",
+      "market": "ethereum:ETH/USDC~",
+      "status": "running",
+      "config": {
+        "bandPct": 0.01,
+        "capital": 3.5,
+        "baseAmount": 0,
+        "rerange": true
+      },
+      "limits": {
+        "maxPriceImpact": 0.03,
+        "slippageBps": 100,
+        "deadlineMinutes": 10,
+        "gasReservePct": 0.02,
+        "gasReserveNative": 0
+      },
+      "profits": {
+        "mode": "reinvest"
+      },
+      "reranges": 3,
+      "totals": {
+        "fees": 0.03762501072342108,
+        "gas": 0.0006807057687194715,
+        "sent": 0,
+        "feeCoins": {
+          "base": 43.77938200000039,
+          "quote": 0.01882215975197599
+        },
+        "swapCost": 0.001952698134734282,
+        "moveLoss": 0.022472881717407633
+      },
+      "startedAt": 1792919867798,
+      "startPrice": 0.00043028272476345876,
+      "lastPrice": 0.00042695303365252607,
+      "lastPriceAt": 1793135233008,
+      "position": {
+        "id": "1390514",
+        "tickLower": 198670,
+        "tickUpper": 198880,
+        "liquidity": "15828295174012657",
+        "lower": 0.00042432350943558686,
+        "upper": 0.0004333280698994637,
+        "openedAt": 1793105045818,
+        "owed": {
+          "base": 19.46021799999961,
+          "quote": 0.00801484024802401
+        }
+      }
+    },
+    {
+      "id": "lp-mvkbewe0-ldou",
+      "kind": "lp",
+      "mode": "paper",
+      "network": "mainnet",
+      "market": "pulsechain:HEX/WPLS",
+      "status": "closed",
+      "config": {
+        "bandPct": 0.3,
+        "capital": 5000000,
+        "baseAmount": 0,
+        "rerange": true
+      },
+      "limits": {
+        "maxPriceImpact": 0.03,
+        "slippageBps": 100,
+        "deadlineMinutes": 10,
+        "gasReservePct": 0.02,
+        "gasReserveNative": 0
+      },
+      "profits": {
+        "mode": "reinvest"
+      },
+      "reranges": 0,
+      "totals": {
+        "fees": 5338.372003443624,
+        "gas": 524.7892382603378,
+        "sent": 0,
+        "feeCoins": {
+          "base": 0,
+          "quote": 5338.372003443624
+        },
+        "swapCost": 0,
+        "moveLoss": 0
+      },
+      "startedAt": 1792720357170,
+      "startPrice": 228.4660361586548,
+      "lastPrice": 221.67429485851684,
+      "lastPriceAt": 1792822628603
+    },
+    {
+      "id": "lp-mvfv3g7g-to6l",
+      "kind": "lp",
+      "mode": "live",
+      "network": "mainnet",
+      "market": "robinhood:ETH/USDG",
+      "status": "closed",
+      "config": {
+        "bandPct": 0.01,
+        "capital": 1000,
+        "baseAmount": 0.5,
+        "rerange": true
+      },
+      "limits": {
+        "maxPriceImpact": 0.03,
+        "slippageBps": 100,
+        "deadlineMinutes": 10
+      },
+      "profits": {
+        "mode": "reinvest"
+      },
+      "reranges": 12,
+      "totals": {
+        "fees": 90.32713036846832,
+        "gas": 0.8165948417122956,
+        "sent": 0,
+        "feeCoins": {
+          "base": 0,
+          "quote": 90.32713036846832
+        },
+        "swapCost": 0,
+        "moveLoss": 0
+      },
+      "startedAt": 1792451084356,
+      "startPrice": 2406.506829374283,
+      "lastPrice": 2332.745368296711,
+      "lastPriceAt": 1792918370261
+    }
+  ]
+}

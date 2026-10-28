@@ -25,6 +25,7 @@ import type { ChainReader, MarketSnapshot, Quoter, TxSender } from './chain';
 export interface PresetPool { dex: string; kind: 'v2' | 'v3'; address: string; feeBps: number; feeTier?: number; dexName: string; switchTo: boolean }
 import { getPreset, legKey, listPresets, resolvePreset, type ResolvedLeg } from '../../live/presets';
 import { sameAddr } from '../dex/types';
+import type { ReservedBalance } from '../swap/holds';
 import { costModelOf, gridEconomics, type EconCfg, type EconSummary } from './econ';
 import { capGridEntry } from '../../market/poolSize';
 import { ActivityBus } from './activity';
@@ -859,6 +860,35 @@ export class MultiBot {
     return { rows: out, ok: out.every((r) => r.ok !== false), note: 'Each chain\'s native coin also needs headroom for gas on every swap.' };
   }
 
+  /**
+   * Input of a live swap the router has already been asked to do (grid, trend, or an LP move) and that has not
+   * settled. Separate from allocations(), which is the bot's capital rather than this one in-flight transfer.
+   */
+  routerReservations(): ReservedBalance[] {
+    const out: ReservedBalance[] = [];
+    const push = (d: MarketDef, side: 'base' | 'quote', amount: number) => {
+      if (!(amount > 0)) return;
+      const tk = d[side];
+      out.push({ chainId: d.chainId, address: tk.address, native: !!tk.native, amount, source: 'in-flight' });
+    };
+    for (const e of this.engines.values()) {
+      const inf = e.state.inFlight, d = e.def;
+      if (!inf || !d || e.state.mode !== 'live') continue;
+      push(d, inf.job.side === 'buy' ? 'quote' : 'base', inf.job.amount);
+    }
+    for (const e of this.trendEngines.values()) {
+      const inf = e.state.inFlight, d = e.def;
+      if (!inf || !d || e.state.mode !== 'live') continue;
+      push(d, inf.job.side === 'buy' ? 'quote' : 'base', inf.job.amount);
+    }
+    for (const e of this.lpEngines.values()) {
+      const sw = e.state.step?.swap, d = e.def;
+      if (!sw || !d || e.state.mode !== 'live') continue;
+      push(d, sw.side === 'buy' ? 'quote' : 'base', sw.amountIn);
+    }
+    return out;
+  }
+
   /** Markets whose tokens are tracked in wallets: legacy + chain defaults + custom + anything a bot/alert uses. */
   private walletTokens(chainId: number) {
     const m = new Map<string, { symbol: string; decimals: number }>();
@@ -1508,7 +1538,7 @@ export class MultiBot {
       if (cur.poolMode === 'manual') continue;
       try {
         const b = (await this.hub.poolOptions(key)).best;
-        if (!b || b.mid == null) continue;
+        if (!b || b.mid == null || (b.kind !== 'v2' && b.kind !== 'v3')) continue;
         const same = b.dex === cur.pool.dex && (b.kind === 'v2' || sameAddr(b.address, cur.pool.address));
         const pool = { dex: b.dex, kind: b.kind, address: b.address, feeBps: b.feeBps, ...(b.feeTier != null ? { feeTier: b.feeTier } : {}) };
         const quoter = same ? this.hub.quoter(key) : this.hub.quoterOnPool(key, pool);

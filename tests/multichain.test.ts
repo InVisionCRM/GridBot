@@ -52,6 +52,13 @@ describe('Chain registry', () => {
         expect(d.source, `${c.key}/${d.id}`).toMatch(/^https:\/\//);
         for (const a of [d.router, d.factory, d.quoter].filter(Boolean) as string[]) expect(getAddress(a)).toBe(a);
         if (d.kind === 'v3') { expect(d.quoter).toBeTruthy(); expect(d.feeTiers!.length).toBeGreaterThan(0); }
+        else if (d.kind === 'v4') {
+          expect(d.quoter, `${c.key}/${d.id} quoter`).toBeTruthy();
+          expect(d.stateView, `${c.key}/${d.id} stateView`).toBeTruthy();
+          expect(d.permit2, `${c.key}/${d.id} permit2`).toBeTruthy();
+          expect(d.v4StartBlock, `${c.key}/${d.id} start`).toBeGreaterThan(0);
+          for (const a of [d.stateView, d.permit2]) expect(getAddress(a!)).toBe(a);
+        }
         else expect(d.feeBps).toBeGreaterThan(0);
       }
     }
@@ -298,7 +305,7 @@ describe('GeckoTerminal DEX ids (daily scan reads only these pools)', () => {
     const ids = Object.fromEntries(CHAINS.map((c) => [c.key, c.dexes.map((d) => `${d.id}=${d.gecko}`)]));
     expect(ids).toEqual({
       pulsechain: ['pulsex-v2=pulsex-v2', 'pulsex-v1=pulsex', '9mm-v2=9mm-v2', '9mm-v3=9mm-v3'],
-      robinhood: ['uniswap-v3=uniswap-v3-robinhood', 'uniswap-v2=uniswap-v2-robinhood', 'pancakeswap-v3=pancakeswap-v3-robinhood'],
+      robinhood: ['uniswap-v3=uniswap-v3-robinhood', 'uniswap-v2=uniswap-v2-robinhood', 'pancakeswap-v3=pancakeswap-v3-robinhood', 'uniswap-v4=uniswap-v4-robinhood'],
       ethereum: ['uniswap-v3=uniswap_v3', 'uniswap-v2=uniswap_v2'],
     });
   });

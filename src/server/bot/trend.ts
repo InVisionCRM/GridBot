@@ -218,7 +218,7 @@ export class TrendEngine {
 
   private log(level: 'info' | 'warn' | 'error', msg: string) { this.d.log[level](`[${this.state.id}] ${msg}`); }
   private emit(type: Parameters<Emit>[0]['type'], msg: string, extra: Partial<Parameters<Emit>[0]> = {}) {
-    this.d.emit?.({ type, msg, botId: this.state.id, kind: 'trend', pair: this.state.quote, chainId: this.chainId, ...extra });
+    this.d.emit?.({ type, msg, botId: this.state.id, kind: 'trend', pair: this.state.quote, chainId: this.chainId, ...extra, mode: this.state.mode });
   }
   private save() { this.d.store.save(this.state); }
 
