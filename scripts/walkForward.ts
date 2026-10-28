@@ -78,6 +78,7 @@ async function topPools(c: ChainConfig, perChain: number): Promise<{ pools: Pool
   let nativeUsd: number | null = null;
   for (const dex of c.dexes) {
     if (!dex.gecko) continue;
+    if (dex.kind !== 'v2' && dex.kind !== 'v3') continue;
     for (let page = 1; page <= 3; page++) {
       const rows: any[] = (await gecko(`https://api.geckoterminal.com/api/v2/networks/${c.geckoSlug}/dexes/${dex.gecko}/pools?sort=h24_volume_usd_desc&page=${page}`)).data ?? []; // eslint-disable-line @typescript-eslint/no-explicit-any
       for (const p of rows) {
@@ -146,6 +147,8 @@ async function collect(file: string, perChain: number) {
         const k = trimSpikes(fillGaps((await ohlcv(c, p.address, p.stack, p.feeBps)).filter((x) => x.t <= lastClosed), '1h', lastClosed));
         const weeks = Math.min(4, Math.floor(k.length / WEEK));
         if (weeks < 2) { log(`${p.name}: ${k.length} hours of history, skipped`); continue; }
+        if (p.dex.kind !== 'v2' && p.dex.kind !== 'v3') continue;
+        const kind: 'v2' | 'v3' = p.dex.kind === 'v3' ? 'v3' : 'v2';
         const depth = p.dex.kind === 'v3' ? await v3Depth(c, p.address, p.stack) : { spend: p.liqUsd / 2 / p.usdSpend, stack: p.liqUsd / 2 / p.usdStack };
         const costs: CostModel = {
           feeBps: p.feeBps, approval: 'exact', slippageBps: 10, pool: { quoteReserve: depth.spend, plsReserve: depth.stack },
@@ -154,8 +157,8 @@ async function collect(file: string, perChain: number) {
         const lpShare = p.dex.lpShare ?? (p.dex.kind === 'v3' ? V3_LP_SHARE[p.dex.protocolFee ?? 'uniswap'] : 1);
         const ws = Array.from({ length: weeks }, (_, w) => k.slice(k.length - (weeks - w) * WEEK, k.length - (weeks - w - 1) * WEEK));
         out.push({
-          chain: c.name, dex: p.dex.id, kind: p.dex.kind, name: p.name, pool: p.address, feeBps: p.feeBps, liqUsd: p.liqUsd,
-          depthUsd: depth.spend * p.usdSpend * 2, lpShare, weeks: ws.map((x) => week(x, costs, TEST_USD / p.usdSpend, p.dex.kind, lpShare, p.usdSpend)),
+          chain: c.name, dex: p.dex.id, kind, name: p.name, pool: p.address, feeBps: p.feeBps, liqUsd: p.liqUsd,
+          depthUsd: depth.spend * p.usdSpend * 2, lpShare, weeks: ws.map((x) => week(x, costs, TEST_USD / p.usdSpend, kind, lpShare, p.usdSpend)),
         });
         log(`${c.name} ${i + 1}/${pools.length} ${p.name}: ${weeks} weeks`);
       } catch (e) { log(`${p.name}: ${(e as Error).message}`); }

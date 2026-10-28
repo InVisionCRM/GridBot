@@ -6,6 +6,8 @@
  * (impact, fee, tax). Live is opt-in: it needs a signing key and the existing safety classifier, and sends
  * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
  */
+import { chainById } from '../../live/chains';
+import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, DEFAULT_MIN_HOLDER_COVERAGE, clampHolderCoverage, clampHolderShare } from '../../market/holders';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
 import {
@@ -18,6 +20,8 @@ import type { Emit } from './activity';
 import type { Store } from './store';
 import type { PoolSniper, SnipeHit } from '../market/sniper';
 import { requestHalt, type Halt } from './audit';
+import type { ReservedBalance } from '../swap/holds';
+import { NATIVE } from '../../live/swapMath';
 
 export interface SniperOptions {
   on: boolean;
@@ -42,6 +46,27 @@ export interface TraderOptions {
   risk: 'safe' | 'medium' | 'any';
   maxImpact: number;
   maxPoolShare: number;
+  /**
+   * Read Uniswap V3 position NFTs and attach the lock/burn report to the gate.
+   * Off unless set: the gate then behaves exactly as it does without the field.
+   */
+  v3LpLockCheck: boolean;
+  /**
+   * Fill lpUnlocked from the pool (V2 burn share, or the V3 position-NFT check).
+   * Off unless set: assess leaves lpUnlocked null and the gate output is unchanged.
+   */
+  lpUnlockCheck: boolean;
+  /**
+   * Read holder concentration and let the gate use it. Default off: assess still passes unknown concentration,
+   * and the gate output matches a build that does not know about this flag.
+   */
+  enforceHolderCheck: boolean;
+  /** Largest holder, as a share of circulating supply. Used only when `enforceHolderCheck` is on. Default 10%. */
+  maxHolderShare: number;
+  /** Top 10 holders, as a share of circulating supply. Used only when `enforceHolderCheck` is on. Default 40%. */
+  maxTop10Share: number;
+  /** Explained balances must cover at least this fraction of totalSupply. Default 90%. Used only when the check is on. */
+  minHolderCoverage: number;
   /**
    * After sizing, quote that exact size and skip the buy when the impact is over `sizeImpactCap`.
    * Default off: nothing is quoted for this check, and the 3% sizing cap is the one that applies.
@@ -129,6 +154,10 @@ const TRADE_MAX = 200;
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
+  v3LpLockCheck: false,
+  lpUnlockCheck: false,
+  enforceHolderCheck: false, maxHolderShare: DEFAULT_MAX_HOLDER_SHARE, maxTop10Share: DEFAULT_MAX_TOP10_SHARE,
+  minHolderCoverage: DEFAULT_MIN_HOLDER_COVERAGE,
   enforceSizeImpact: false, sizeImpactCap: DEFAULT_SIZE_IMPACT_CAP,
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
@@ -137,7 +166,12 @@ const fresh = (): TraderState => ({ version: 1, on: false, options: structuredCl
 
 export class TokenTrader {
   private state: TraderState;
-  private busy = false;
+  /** Held only while exits run, so a buy-path LP check cannot block the next stop. */
+  private exitBusy = false;
+  /** In-flight buy path (snipes and the entry scan). The next tick still runs exits. */
+  private entryTask: Promise<void> | null = null;
+  /** Spend coin of a live buy that has started and not yet landed or failed. Not persisted. */
+  private pendingBuy: { chainId: number; address: string; amount: number } | null = null;
   lastError: string | null = null;
 
   constructor(private readonly d: {
@@ -148,6 +182,17 @@ export class TokenTrader {
     discover?: () => Promise<FreshPool[]>;
     /** Safety inputs for a pool. Required before any buy. */
     assess?: (pool: FreshPool, mode: 'paper' | 'live', risk: TraderOptions['risk']) => Promise<GateInput>;
+    /**
+     * Largest holder and top 10, excluding pools, burn addresses and lockers.
+     * Called only when `enforceHolderCheck` is on. A throw is a failed read.
+     */
+    holders?: (pool: FreshPool) => Promise<{
+      largest: number | null; top10: number | null; unverified: boolean;
+      unavailable?: 'no-source' | 'read-failed'; chainName?: string;
+      unseen?: number | null; top10Exact?: boolean;
+      coverage?: number | null; thin?: boolean; holders?: string;
+      windowFrom?: number | null; creationBlock?: number | null;
+    }>;
     /**
      * Impact of spending `spend` (human units of the pool's spend token) on this pool.
      * V3 must be a QuoterV2 (or equivalent tick-walk) quote. Called only when `enforceSizeImpact` is on.
@@ -198,8 +243,26 @@ export class TokenTrader {
 
   private now() { return (this.d.now ?? Date.now)(); }
   private save() { this.d.store.save(this.state); }
-  private say(msg: string, level: 'info' | 'warn' | 'success' = 'info') {
-    this.d.emit?.({ type: 'info', kind: 'system', level, msg });
+  private say(msg: string, level: 'info' | 'warn' | 'success' = 'info', extra?: { notify?: boolean; data?: Record<string, unknown>; mode?: 'paper' | 'live' }) {
+    const { mode, ...rest } = extra ?? {};
+    this.d.emit?.({ type: 'info', kind: 'system', level, msg, ...rest, ...(mode ? { mode } : {}) });
+  }
+
+  /**
+   * Live positions sit in the wallet: the token they hold, and the spend coin that bought it.
+   * A live buy that has not landed yet reserves its spend coin the same way. Paper positions move no coins.
+   */
+  reservations(): ReservedBalance[] {
+    const out: ReservedBalance[] = [];
+    const native = (addr: string) => addr.toLowerCase() === NATIVE;
+    for (const p of this.state.positions) {
+      if (p.mode !== 'live') continue;
+      if (p.tokens > 0) out.push({ chainId: p.chainId, address: p.token, native: native(p.token), amount: p.tokens, source: 'token-trader' });
+      if (p.spent > 0) out.push({ chainId: p.chainId, address: p.spend, native: native(p.spend), amount: p.spent, source: 'token-trader' });
+    }
+    const pend = this.pendingBuy;
+    if (pend && pend.amount > 0) out.push({ chainId: pend.chainId, address: pend.address, native: native(pend.address), amount: pend.amount, source: 'token-trader' });
+    return out;
   }
 
   status() {
@@ -218,12 +281,17 @@ export class TokenTrader {
 
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
     const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
+    if ('v3LpLockCheck' in o) n.v3LpLockCheck = o.v3LpLockCheck === true;
+    if ('lpUnlockCheck' in o) n.lpUnlockCheck = o.lpUnlockCheck === true;
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
     if (!(n.maxImpact > 0) || n.maxImpact > HARD_CAPS.maxPriceImpact) throw new Error('Price-impact cap must be between 0% and 5%.');
     if (!(n.sizeImpactCap > 0) || n.sizeImpactCap > HARD_CAPS.maxPriceImpact) throw new Error('Trade-size impact cap must be between 0% and 5%.');
     if (!(n.maxPoolShare > 0) || n.maxPoolShare > 0.5) throw new Error('Max pool share must be between 0% and 50%.');
+    n.maxHolderShare = clampHolderShare(n.maxHolderShare, DEFAULT_MAX_HOLDER_SHARE);
+    n.maxTop10Share = clampHolderShare(n.maxTop10Share, DEFAULT_MAX_TOP10_SHARE);
+    n.minHolderCoverage = clampHolderCoverage(n.minHolderCoverage);
     if (n.sniper.mevRpc && !/^https:\/\//.test(n.sniper.mevRpc)) throw new Error('MEV URL must be an https RPC.');
     this.state.options = n;
     this.save();
@@ -290,18 +358,37 @@ export class TokenTrader {
   }
 
   async tick() {
-    if (this.busy || !this.state.on) return;
-    this.busy = true;
+    if (!this.state.on || this.exitBusy) return;
+    this.exitBusy = true;
+    let exitsOk = true;
+    try {
+      await this.exits();
+      this.lastError = null;
+    } catch (e) {
+      this.lastError = (e as Error).message;
+      exitsOk = false;
+    } finally {
+      this.save();
+      this.exitBusy = false;
+    }
+    // Buys, including LP checks, never share this lock. A tick that arrives while they run still exits.
+    if (!exitsOk || this.entryTask) return;
+    let task!: Promise<void>;
+    task = this.runEntries().finally(() => { if (this.entryTask === task) this.entryTask = null; });
+    this.entryTask = task;
+    await task;
+  }
+
+  /** Snipes and the entry scan. LP reads happen in here, on the buy path only. */
+  private async runEntries() {
     try {
       await this.takeSnipes();
-      await this.exits();
       await this.scanEntries();
       this.lastError = null;
     } catch (e) {
       this.lastError = (e as Error).message;
     } finally {
       this.save();
-      this.busy = false;
     }
   }
 
@@ -339,15 +426,43 @@ export class TokenTrader {
     if (this.state.feed.length > FEED_MAX) this.state.feed.length = FEED_MAX;
   }
 
-  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null }> {
-    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null };
+  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null }> {
+    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null, warn: null };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
-    const gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
+    let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
+    if (this.state.options.enforceHolderCheck) {
+      const chainName = chainById(pool.chainId)?.name ?? `chain ${pool.chainId}`;
+      let h: { largest: number | null; top10: number | null; unverified: boolean; unavailable?: 'no-source' | 'read-failed'; chainName?: string; unseen?: number | null; top10Exact?: boolean; coverage?: number | null; thin?: boolean; windowFrom?: number | null; creationBlock?: number | null } = {
+        largest: null, top10: null, unverified: true, unavailable: 'read-failed', chainName, coverage: null,
+      };
+      if (this.d.holders) {
+        try { h = await this.d.holders(pool); } catch { /* the read failed; the reason names the chain */ }
+      }
+      const thin = h.thin === true;
+      const unverified = !thin && (h.unverified || h.largest == null || h.top10 == null);
+      gate = {
+        ...gate,
+        enforceHolderCheck: true,
+        holdersUnverified: unverified,
+        holderUnavailable: unverified ? (h.unavailable ?? 'read-failed') : undefined,
+        holderChain: h.chainName?.trim() || chainName,
+        holderConcentration: unverified || thin ? null : h.largest,
+        top10Concentration: unverified || thin ? null : h.top10,
+        holderUnseen: unverified || thin ? null : h.unseen ?? 0,
+        top10Exact: unverified || thin ? false : h.top10Exact,
+        holderCoverage: h.coverage ?? null,
+        holderThin: thin,
+        holderWindowFrom: h.windowFrom ?? null,
+        holderCreationBlock: h.creationBlock ?? null,
+        maxHolderShare: this.state.options.maxHolderShare,
+        maxTop10Share: this.state.options.maxTop10Share,
+      };
+    }
     const r = gateToken(gate);
-    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate };
+    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate, warn: r.warn ?? null };
   }
 
-  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput) {
+  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput, warn: string | null) {
     const o = this.state.options;
     if (this.state.positions.some((p) => p.pool.toLowerCase() === pool.pool.toLowerCase() && p.chainId === pool.chainId)) return;
     // Checked again after the safety check's awaits: a Stop all that landed meanwhile wins.
@@ -377,8 +492,13 @@ export class TokenTrader {
     let tokens = sized.tokens, spent = sized.spend, spentUsd = sized.usd;
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('live broker missing');
-      const fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
-      tokens = fill.tokens; spent = fill.spent; spentUsd = fill.spentUsd;
+      this.pendingBuy = { chainId: pool.chainId, address: pool.spend, amount: sized.spend };
+      try {
+        const fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
+        tokens = fill.tokens; spent = fill.spent; spentUsd = fill.spentUsd;
+      } finally {
+        this.pendingBuy = null;
+      }
     }
     // One formula for paper and live: what was spent over what arrived (fee, impact, slippage and buy tax in).
     // A fill that reports no tokens (shouldn't happen) still gets booked, at the mid, never dropped.
@@ -395,10 +515,10 @@ export class TokenTrader {
       tokenReserve: pool.tokenReserve, usdPerSpend: pool.usdPerSpend, buyTax, tp1Done: false, tp2Done: false, source, exitPlan: 'hold',
     };
     this.state.positions.push(pos);
-    const why = `buy ${sized.why}`;
+    const why = warn ? `buy ${sized.why}; ${warn}` : `buy ${sized.why}`;
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
-    this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success');
+    this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode: o.mode } : { mode: o.mode });
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
   }
 
@@ -409,7 +529,7 @@ export class TokenTrader {
     if (this.entriesStopped(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); return; }
     const a = await this.assess(pool);
     if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
-    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate);
+    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate, a.warn);
   }
 
   private async scanEntries() {
@@ -418,7 +538,21 @@ export class TokenTrader {
     const pools = await this.d.discover();
     const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: 0 });
     for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
-    for (const p of keep) await this.consider(p, 'scan');
+    const eligible: FreshPool[] = [];
+    for (const p of keep) {
+      const label = `${p.tokenSymbol}/${p.spendSymbol}`;
+      if (!this.wantChain(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'chain is off' }); continue; }
+      if (p.kind === 'v4') { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); continue; }
+      if (this.entriesStopped(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); continue; }
+      eligible.push(p);
+    }
+    // Safety reads, including LP checks, overlap. Each check has its own timeout, so one pool cannot stall the rest.
+    const checked = await Promise.all(eligible.map(async (p) => ({ p, a: await this.assess(p) })));
+    for (const { p, a } of checked) {
+      const label = `${p.tokenSymbol}/${p.spendSymbol}`;
+      if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); continue; }
+      await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn);
+    }
   }
 
   private hourRoom() {
@@ -490,7 +624,7 @@ export class TokenTrader {
       const usd = quote * p.usdPerSpend;
       const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
       this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why: d.why, pnlUsd: usd - cost });
-      this.say(`sold ${p.label}: ${d.why}`, usd - cost >= 0 ? 'success' : 'warn');
+      this.say(`sold ${p.label}: ${d.why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
       if (d.why.startsWith('take profit') && !p.tp1Done) p.tp1Done = true;
       else if (d.why.startsWith('take profit')) p.tp2Done = true;
       if (p.tokens > p.entryTokens * 1e-8) left.push(p);

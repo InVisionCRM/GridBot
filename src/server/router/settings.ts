@@ -118,10 +118,13 @@ export interface RouterSettings {
 
 export const HOST_ONLY = 'The capital router runs on the host app only.';
 
-export function liveEnableError(s: Pick<RouterSettings, 'mode' | 'maxPerMoveUsd' | 'maxPerDayUsd' | 'allowedChains' | 'allowedBridges'>): string | null {
+export function liveEnableError(s: Pick<RouterSettings, 'mode' | 'maxPerMoveUsd' | 'maxPerDayUsd' | 'allowedChains' | 'allowedBridges' | 'minNetGainPct' | 'minNetGainTok'>): string | null {
   if (s.mode !== 'live') return null;
   if (!(s.maxPerMoveUsd > 0) || !(s.maxPerDayUsd > 0)) return 'Live mode needs maxPerMoveUsd and maxPerDayUsd above 0. Zero blocks live.';
   if (s.allowedChains.length === 0 || s.allowedBridges.length === 0) return 'Live mode needs at least one allowed chain and one allowed bridge.';
+  if (!(s.minNetGainPct > 0)) return 'Live mode needs minNetGainPct above 0.';
+  const gains = Object.values(s.minNetGainTok);
+  if (gains.length === 0 || gains.some((n) => !(n > 0))) return 'Live mode needs a positive minNetGainTok for every allowed coin.';
   return null;
 }
 
@@ -533,8 +536,11 @@ export function patchSettings(current: RouterSettings, body: unknown, chainIds: 
   return finish(next, chainIds);
 }
 
-/** A saved `on: true` that live rules or a friend's copy cannot keep. */
+/**
+ * A restart never re-arms. A file left `on` (paper or live) boots off until this process turns it on.
+ * A friend's copy, and a live file that fails the live rules, stay off too.
+ */
 export function guardOn(s: RouterSettings, host: boolean): RouterSettings {
-  if (s.on && (!host || liveEnableError(s))) return { ...s, on: false };
+  if (s.on || !host || liveEnableError(s)) return { ...s, on: false };
   return s;
 }

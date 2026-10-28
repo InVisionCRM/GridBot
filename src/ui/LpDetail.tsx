@@ -18,6 +18,7 @@ import { showHalt } from './haltText';
 import { isShortRun, runSpan } from './runRate';
 import { estimates } from '../shared/generated';
 import { type StatKey } from './StatTable';
+import { historyEnd } from './deskStats';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -120,7 +121,8 @@ function openedWhen(b: AnyObj, at: number, words: [start: string, move: string],
  */
 function BotPace({ b }: { b: AnyObj }) {
   const gen = generatedOf({ ...b, kind: 'lp' });
-  const runMs = typeof b.startedAt === 'number' ? Date.now() - b.startedAt : null;
+  // run length to where its history ends (a closed bot's estimates don't shrink as time passes after the close: #50)
+  const runMs = typeof b.startedAt === 'number' ? historyEnd(b, Date.now()) - b.startedAt : null;
   if (!gen || runMs == null || !(runMs > 0)) return null;
   const est = estimates(gen.tokens, runMs / 1000);
   if (!est.h24 || !est.d7 || !est.d365) return null;
@@ -187,8 +189,9 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const pos = b.position, step = b.step;
   const running = b.status === 'running', closed = b.status === 'closed';
   const closing = !!b.closing || step?.action === 'close';
-  // a daily rate only once it has run a full day; under a day, the net over the run (runRate.ts)
-  const runMs = b.startedAt ? Date.now() - b.startedAt : null;
+  // the run's length, ending where its history ends (a closed bot stops counting at its close: #50, historyEnd); a daily
+  // rate only once it has run a full day, under a day the net over the run (runRate.ts)
+  const runMs = b.startedAt ? historyEnd(b, Date.now()) - b.startedAt : null;
   // Each figure once per screen: the cards above have Invested and Generated, Details the fees, costs and moves, the range
   // card the range and width.
   // the pace card has the estimates (24h, 7d, 365d): not again in the table
