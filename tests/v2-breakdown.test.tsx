@@ -5,6 +5,7 @@ import { sheetRows } from '../src/v2/figures';
 import { formatTokenLine } from '../src/v2/format';
 import { lpMetrics } from '../src/metrics/botMetrics';
 import { HomeView } from '../src/v2/home-view';
+import { BotView } from '../src/v2/bot-view';
 
 type Obj = Record<string, unknown>;
 const DAY = 86_400_000;
@@ -134,5 +135,63 @@ describe('breakdown rows come from botMetrics', () => {
     expect(rows.find((r) => r.label === 'Est. 7d')).toBeUndefined();
     expect(rows.find((r) => r.label === 'Generated')?.value).toBe(generated);
     expect(rows.some((r) => r.label.startsWith('Est.') && r.value === generated)).toBe(false);
+  });
+
+  it('closed cards show their own figures and never All paper or All live', () => {
+    const now = 1_700_000_000_000;
+    const desk = adaptStatus({
+      spotsAt: now,
+      lps: [
+        {
+          id: 'open', mode: 'paper', status: 'running', base: 'ETH', quote: 'USDG',
+          usdPerQuote: 1, price: 0.0005, startedAt: now - 3 * DAY, startValue: 10_000,
+          pnl: { feeCoins: { base: 1, quote: 0.01 }, fees: 1, gas: 0, swapCost: 0, moveLoss: 0, net: 1, price: 0, equity: 1 },
+          totals: { gas: 0, swapCost: 0, moveLoss: 0 },
+        },
+        {
+          id: 'stonk', mode: 'paper', status: 'closed', base: 'STONKD', quote: 'USDG',
+          usdPerQuote: 1, price: 0.01, startedAt: now - 3 * DAY, startValue: 10_000,
+          pnl: null, position: null,
+          totals: { feeCoins: { base: 216_000, quote: -916.42 }, fees: 0, gas: 0, swapCost: 0, moveLoss: 0 },
+        },
+      ],
+    }, [], now);
+    const html = renderToStaticMarkup(<HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />);
+    const card = textOf(html.split('data-bot="stonk"')[1]?.split('data-bot=')[0] ?? '');
+    expect(card).toContain('10.0k USDG');
+    expect(card).not.toMatch(/All (live|paper)/);
+    expect(card).toContain('STONKD');
+    expect(card).not.toContain('Est. 7d');
+  });
+
+  it('drops a zero coin from a multi-coin line and keeps a line that is only zero', () => {
+    expect(formatTokenLine([{ symbol: 'ETH', amount: 0 }, { symbol: 'USDG', amount: -16.31 }])).toBe('−16.31 USDG');
+    expect(formatTokenLine([{ symbol: 'USDC', amount: 0 }, { symbol: 'ETH', amount: 0.001858 }])).toBe('+0.001858 ETH');
+    expect(formatTokenLine([{ symbol: 'HEX', amount: 0 }, { symbol: 'PLS', amount: 4813.58 }])).toBe('+4,813.58 PLS');
+    expect(formatTokenLine([{ symbol: 'PLS', amount: 0 }])).toBe('0 PLS');
+    expect(formatTokenLine([{ symbol: 'PLS', amount: 0 }, { symbol: 'DAI', amount: 0 }])).toBe('0 PLS 0 DAI');
+  });
+
+  it('hides range controls on a closed LP and keeps them for an open one', () => {
+    const now = 1_700_000_000_000;
+    const lp = (id: string, status: string) => ({
+      id, mode: 'live' as const, status, base: 'USDC', quote: 'ETH',
+      usdPerQuote: 2000, price: 0.0005, startedAt: now - 3 * DAY, startValue: 1,
+      inRange: true, position: { lower: 0.0004, upper: 0.0006 },
+      pnl: { feeCoins: { base: 1, quote: 0.001 }, fees: 1, gas: 0, swapCost: 0, moveLoss: 0, net: 1, price: 0, equity: 1 },
+      totals: { gas: 0, swapCost: 0, moveLoss: 0 },
+    });
+    const desk = adaptStatus({ spotsAt: now, lps: [lp('open', 'running'), lp('shut', 'closed')] }, [], now);
+    const page = (id: string) => textOf(renderToStaticMarkup(
+      <BotView bot={desk.bots.find((b) => b.metrics.botId === id)!} activity={[]} prices={[]} onBack={() => {}} onActivity={() => {}} breakdown />,
+    ));
+    const open = page('open');
+    const shut = page('shut');
+    expect(open).toContain('Range and compounding');
+    expect(open).toContain('Auto-move');
+    expect(shut).toContain('Range and compounding');
+    expect(shut).toContain('Bot is closed');
+    expect(shut).not.toContain('Auto-move');
+    expect(shut).not.toContain('±1%');
   });
 });

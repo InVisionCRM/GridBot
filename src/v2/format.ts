@@ -175,18 +175,29 @@ function plainAmt(n: number): string {
   return formatAmt(Math.abs(n)).replace(/^[+−]/, '');
 }
 
+function isShownZero(amount: number): boolean {
+  return amount === 0 || formatAmt(amount) === '0';
+}
+
+/** Drop zero coins when another coin is non-zero. Keep `0 X` only when every part is zero. */
+function coinsToShow<T extends { amount: number }>(tokens: T[]): T[] {
+  const finite = tokens.filter((t) => Number.isFinite(t.amount));
+  const nonzero = finite.filter((t) => !isShownZero(t.amount));
+  return nonzero.length ? nonzero : finite;
+}
+
 /** Deposited coins, without a gain sign. `3.50 ETH + 1,000 USDC`. */
 export function formatBag(tokens: { symbol: string; amount: number }[] | null | undefined): string {
   if (!tokens?.length) return '—';
-  return tokens.map((t) => `${plainAmt(t.amount)} ${t.symbol}`).join(' + ');
+  return coinsToShow(tokens).map((t) => `${plainAmt(t.amount)} ${t.symbol}`).join(' + ');
 }
 
 /** Pieces of a generated line. The first keeps its sign; later positives read `+ 1.00 ETH`. */
 export function tokenLineParts(tokens: { symbol: string; amount: number }[]): string[] {
-  return tokens.map((t, i) => {
+  return coinsToShow(tokens).map((t, i) => {
     const amt = formatAmt(t.amount);
     if (i === 0) return `${amt} ${t.symbol}`;
-    if (t.amount < 0) return `${amt} ${t.symbol}`;
+    if (t.amount < 0 || isShownZero(t.amount)) return `${amt} ${t.symbol}`;
     return `+ ${amt.replace(/^\+/, '')} ${t.symbol}`;
   });
 }
