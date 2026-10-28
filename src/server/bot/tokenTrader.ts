@@ -63,6 +63,15 @@ export interface TraderOptions {
    */
   v3LpLockCheck: boolean;
   /**
+   * Reuse a V3 lock result for the same chain, pool, and scanned block window.
+   * Off unless set: the check does not consult that cache.
+   */
+  v3LpLockCacheEnabled: boolean;
+  /** TTL for `v3LpLockCacheEnabled`. Default 10 minutes. */
+  v3LpLockCacheTtlMs: number;
+  /** Max public RPC calls for one V3 lock check. 0 means no cap. */
+  v3LpLockCallBudget: number;
+  /**
    * Fill lpUnlocked from the pool (V2 burn share, or the V3 position-NFT check).
    * Off unless set: assess leaves lpUnlocked null and the gate output is unchanged.
    */
@@ -261,6 +270,9 @@ export const DEFAULT_TRADER: TraderOptions = {
   minLiquidityUsd: DEFAULT_MIN_LIQUIDITY_USD, enforceLiquidityFloor: false,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
   v3LpLockCheck: false,
+  v3LpLockCacheEnabled: false,
+  v3LpLockCacheTtlMs: 10 * 60_000,
+  v3LpLockCallBudget: 0,
   lpUnlockCheck: false,
   enforceHolderCheck: false, maxHolderShare: DEFAULT_MAX_HOLDER_SHARE, maxTop10Share: DEFAULT_MAX_TOP10_SHARE,
   minHolderCoverage: DEFAULT_MIN_HOLDER_COVERAGE,
@@ -613,6 +625,15 @@ export class TokenTrader {
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
     const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
     if ('v3LpLockCheck' in o) n.v3LpLockCheck = o.v3LpLockCheck === true;
+    if ('v3LpLockCacheEnabled' in o) n.v3LpLockCacheEnabled = o.v3LpLockCacheEnabled === true;
+    if ('v3LpLockCallBudget' in o) {
+      const b = Number(o.v3LpLockCallBudget);
+      n.v3LpLockCallBudget = Number.isFinite(b) && b > 0 ? Math.floor(b) : 0;
+    }
+    if ('v3LpLockCacheTtlMs' in o) {
+      const t = Number(o.v3LpLockCacheTtlMs);
+      n.v3LpLockCacheTtlMs = Number.isFinite(t) && t > 0 ? Math.floor(t) : 10 * 60_000;
+    }
     if ('lpUnlockCheck' in o) n.lpUnlockCheck = o.lpUnlockCheck === true;
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');

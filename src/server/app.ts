@@ -423,6 +423,9 @@ export function createApp(o: AppOpts) {
     if (typeof b.enforceSizeImpact === 'boolean') patch.enforceSizeImpact = b.enforceSizeImpact;
     if (b.risk === 'safe' || b.risk === 'medium' || b.risk === 'any') patch.risk = b.risk;
     if (typeof b.v3LpLockCheck === 'boolean') patch.v3LpLockCheck = b.v3LpLockCheck;
+    if (typeof b.v3LpLockCacheEnabled === 'boolean') patch.v3LpLockCacheEnabled = b.v3LpLockCacheEnabled;
+    if (b.v3LpLockCacheTtlMs != null) patch.v3LpLockCacheTtlMs = Number(b.v3LpLockCacheTtlMs);
+    if (b.v3LpLockCallBudget != null) patch.v3LpLockCallBudget = Number(b.v3LpLockCallBudget);
     if (typeof b.lpUnlockCheck === 'boolean') patch.lpUnlockCheck = b.lpUnlockCheck;
     if (typeof b.enforceHolderCheck === 'boolean') patch.enforceHolderCheck = b.enforceHolderCheck;
     if (Array.isArray(b.chains)) patch.chains = b.chains.map(Number);
