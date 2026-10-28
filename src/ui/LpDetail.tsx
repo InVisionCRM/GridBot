@@ -16,6 +16,7 @@ import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { Usd } from './money';
 import { showHalt } from './haltText';
+import { historyEnd } from './deskStats';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -222,7 +223,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const running = b.status === 'running', closed = b.status === 'closed';
   const closing = !!b.closing || step?.action === 'close';
   // a daily rate only once it has run a full day: the first minutes' costs scaled to a day say nothing
-  const days = b.startedAt ? (Date.now() - b.startedAt) / 86_400_000 : null;
+  const days = b.startedAt ? (historyEnd(b, Date.now()) - b.startedAt) / 86_400_000 : null;
   const close = () => {
     if (b.mode === 'live' && !confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
     act(() => botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close'));
