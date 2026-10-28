@@ -42,6 +42,22 @@ export function v4PoolMatches(
   return want[0] === have[0] && want[1] === have[1];
 }
 
+/**
+ * Quote view for an exact match against this pool. Add-token passes the wrapped address for both
+ * currencies; a pool that actually uses address(0) is a native market, and a pool that uses the
+ * wrapped address stays a wrapped market.
+ */
+export function v4QuoteForPool<T extends { address: string; native?: boolean }>(
+  pool: { v4?: { currency0: string; currency1: string } },
+  quote: T,
+  wrapped: string,
+): T {
+  const v = pool.v4;
+  if (!v || quote.native || !sameAddr(quote.address, wrapped)) return quote;
+  if ([v.currency0, v.currency1].some((c) => isZero(c))) return { ...quote, native: true };
+  return quote;
+}
+
 /** getLogs or the head read failed. `pools` are the chunks that completed; the scan is incomplete. */
 export class V4ScanError extends Error {
   readonly partial = true;

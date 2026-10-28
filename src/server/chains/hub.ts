@@ -10,11 +10,11 @@ import { Quoter, type ChainReader, type TxSender } from '../bot/chain';
 import type { Store } from '../bot/store';
 import type { SharedNonce, TxGate } from '../bot/txGate';
 import { ChainRuntime } from './runtime';
-import { discoverPools, type DiscoveredPool } from '../dex/discovery';
+import { discoverPools, rankPools, type DiscoveredPool } from '../dex/discovery';
 import { readTokenMeta, type TokenMeta } from '../dex/tokens';
 import { classify, depthAt, hopFor, simulateRoundTrip, type ProbeResult } from '../dex/safety';
 import { assessHook } from '../dex/v4Hooks';
-import { V4_CURRENCY_MISMATCH, v4PoolMatches } from '../dex/v4';
+import { V4_CURRENCY_MISMATCH, v4PoolMatches, v4QuoteForPool } from '../dex/v4';
 import { simulateV4RoundTrip, v4Leg } from '../dex/v4Safety';
 import { isInconclusive } from '../bot/taxWatch';
 import { sameAddr } from '../dex/types';
@@ -295,7 +295,21 @@ export class Hub {
     let best: { q: (typeof quoteOptions)[number]; pools: DiscoveredPool[]; usd: number | null } | null = null;
     for (const q of candidates) {
       const usd = await this.quoteTokenUsd(rt.cfg.id, q);
-      const pools = await discoverPools(rt, base, { address: q.address, symbol: q.symbol, decimals: await this.decimalsOf(rt, q.address) }, { refQuote: usd ? 1000 / usd : 1000, quoteUsd: usd });
+      const quoteTok = { address: q.address, symbol: q.symbol, decimals: await this.decimalsOf(rt, q.address) };
+      const disc = { refQuote: usd ? 1000 / usd : 1000, quoteUsd: usd };
+      const pools = await discoverPools(rt, base, quoteTok, disc);
+      // A wrapped quote is either currency on V4. Search address(0) as well, and keep a pool's quoting row.
+      if (sameAddr(q.address, rt.cfg.wrappedNative.address)) {
+        const nativeHits = await discoverPools(rt, base, { ...quoteTok, native: true }, { ...disc, onlyKind: 'v4' });
+        for (const p of nativeHits) {
+          if (p.kind !== 'v4') continue;
+          const id = `${p.dex}:${p.address.toLowerCase()}`;
+          const prev = pools.findIndex((x) => `${x.dex}:${x.address.toLowerCase()}` === id);
+          if (prev >= 0) { if (pools[prev].refOut == null && p.refOut != null) pools[prev] = p; }
+          else pools.push(p);
+        }
+        pools.splice(0, pools.length, ...rankPools(pools));
+      }
       const top = pools[0]?.tvlUsd ?? pools[0]?.tvlQuote ?? -1;
       const cur = best ? best.pools[0]?.tvlUsd ?? best.pools[0]?.tvlQuote ?? -1 : -2;
       if (!best || (pools.length && top > cur)) best = { q, pools, usd };
@@ -307,7 +321,7 @@ export class Hub {
     if (req.pool && !chosen) throw new Error(`Pool ${req.pool} not found for ${token.symbol}/${q.symbol}`);
     const result: InspectResult = { chainId: rt.cfg.id, token, quoteOptions, quote, pools, chosen, draft: null, safety: null, probe: null, existing };
     if (!chosen || chosen.mid == null) return result;
-    if (chosen.kind === 'v4' && !v4PoolMatches(chosen, base, { address: quote.address })) {
+    if (chosen.kind === 'v4' && !v4PoolMatches(chosen, base, v4QuoteForPool(chosen, { address: quote.address }, rt.cfg.wrappedNative.address))) {
       if (req.pool) throw new Error(`Pool ${req.pool} ${V4_CURRENCY_MISMATCH}`);
       return result;
     }
@@ -326,10 +340,9 @@ export class Hub {
     result.safety = report;
     result.probe = pr ? { stage: pr.stage, err: pr.err, quoteIn: pr.quoteIn.toString(), expectedBuy: pr.expectedBuy.toString(), gotBuy: pr.gotBuy.toString(), transferSent: pr.transferSent.toString(), transferGot: pr.transferGot.toString(), sellIn: pr.sellIn.toString(), expectedSell: pr.expectedSell.toString(), gotSell: pr.gotSell.toString(), gasBuy: Number(pr.gasBuy), gasSell: Number(pr.gasSell) } : null;
     draft.safety = report;
-    // TOKEN/WPLS (or /WETH): buys spend the native coin the wallet holds, wrapped inside the swap, like the flipped
-    // HEX/PLS market. Set after the safety probe, which measures the token itself.
-    // A V4 pool whose currency is the wrapped token does not wrap: the market stays a WETH market.
-    // address(0) is a different pool and is not selected for a WETH quote.
+    // TOKEN/WPLS (or /WETH): V2/V3 wrap the native coin inside the router, like the flipped HEX/PLS market.
+    // Set after the safety probe, which measures the token itself.
+    // V4 is exact. The market currency is the pool's: address(0) becomes native, the wrapped address stays WETH.
     if (sameAddr(draft.quote.address, rt.cfg.wrappedNative.address)) {
       const v4 = draft.pool.v4;
       const v4Wrapped = draft.pool.kind === 'v4' && !!v4 && [v4.currency0, v4.currency1].some((c) => sameAddr(c, rt.cfg.wrappedNative.address));

@@ -27,10 +27,12 @@ export interface DiscoveredPool extends PoolRef {
 }
 
 export async function discoverPools(
-  rt: ChainRuntime, base: MarketToken, quote: MarketToken, o: { refQuote: number; quoteUsd: number | null },
+  rt: ChainRuntime, base: MarketToken, quote: MarketToken,
+  o: { refQuote: number; quoteUsd: number | null; onlyKind?: 'v4' },
 ): Promise<DiscoveredPool[]> {
   const out: DiscoveredPool[] = [];
   await Promise.all([...rt.adapters.values()].map(async (ad) => {
+    if (o.onlyKind && ad.kind !== o.onlyKind) return;
     let pools: PoolRef[] = [];
     let scanError: string | null = null;
     try {
