@@ -11,7 +11,7 @@ import { Q128, rangeBaseShare } from '../src/live/v3Liquidity';
 import { LpPool } from '../src/server/lp/lpPool';
 import { MultiDexMock, type Tok } from './helpers/multiDex';
 import { ERC20, V3_NPM } from '../src/server/dex/abis';
-import type { ReceiptLike } from '../src/server/bot/chain';
+import { ExecError, type ReceiptLike } from '../src/server/bot/chain';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/server/app';
@@ -438,6 +438,77 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     await b.tick();
     expect(b.status().position).toMatchObject({ id: '777', liquidity: (10n ** 20n).toString() });
     expect(b.status().step).toBeNull();
+  });
+
+  describe('a swap settled by hash after a restart: gas in base units, or marked unknown with a warning', () => {
+    type Rec = { ok: boolean; amountOutHuman: number; gasPls: number; gasNative: number; gasUnknown?: true };
+    type Exec = { recover: (...a: unknown[]) => Promise<Rec | null>; quote: (...a: unknown[]) => Promise<Record<string, unknown>>; execute: (...a: unknown[]) => Promise<unknown> };
+    const GAS_NATIVE = 0.1;
+    /** A live bot restarted with a broadcast swap still to settle (`close`: the close-to-cash sale, else the range swap). */
+    async function pending(close: boolean, rec: Rec, basePerNative?: number) {
+      const w = live();
+      const a = w.make();
+      await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      const ex = (w.make() as unknown as { executor: Exec }).executor;
+      (a as unknown as { executor: unknown }).executor = ex;
+      const args: unknown[][] = [];
+      ex.recover = async (...x: unknown[]) => { args.push(x); return rec; };
+      a.state.idle = close ? { base: 0, quote: 1000 } : a.state.idle;
+      a.state.step = {
+        action: close ? 'close' : 'open', stage: 'swap', tries: 0, ...(close ? { toCash: true } : {}),
+        swap: { hash: '0xfeed', tokenOut: close ? DAI.address : WPLS.address, decimalsOut: 18, side: close ? 'sell' : 'buy', amountIn: 100, price: PRICE, ...(basePerNative != null ? { basePerNative } : {}) },
+      };
+      const gas0 = a.state.totals.gas;
+      const log = (a as unknown as { d: { log: Logger } }).d.log;
+      await a.tick();
+      const warns = log.entries.filter((e) => e.level === 'warn' && e.msg.includes('0xfeed'));
+      return { a, args, gas: a.state.totals.gas - gas0, warns };
+    }
+    for (const close of [false, true]) {
+      const what = close ? 'close-to-cash sale' : 'range swap';
+      it(`${what}, rate unreadable: gas 0, its native gas kept in gasUnknownNative, and a warning with the native amount`, async () => {
+        const r = await pending(close, { ok: true, amountOutHuman: close ? 0.003 : 3_000_000, gasPls: 0, gasNative: GAS_NATIVE, gasUnknown: true });
+        expect(r.args[0][0]).toBe('0xfeed');
+        expect(r.a.state.step?.swap).toBeUndefined(); // settled, not retried
+        expect(r.a.state.totals.gasUnknownNative).toBeCloseTo(GAS_NATIVE, 12);
+        expect(r.warns).toHaveLength(1);
+        expect(r.warns[0].msg).toContain(`gas ${GAS_NATIVE.toPrecision(4)} PLS not booked`);
+        expect(r.warns[0].msg).toContain('the base/native rate was not saved with the swap and could not be read after the restart');
+        if (close) expect(r.gas).toBe(0);
+      });
+      it(`${what}, rate readable: gas booked at today's price as before, no flag and no warning`, async () => {
+        const r = await pending(close, { ok: true, amountOutHuman: close ? 0.003 : 3_000_000, gasPls: GAS_NATIVE, gasNative: GAS_NATIVE });
+        expect(r.a.state.totals.gasUnknownNative).toBeUndefined();
+        expect(r.warns).toHaveLength(0);
+        if (close) expect(r.gas).toBeCloseTo(GAS_NATIVE * PRICE, 15);
+        else expect(r.gas).toBeGreaterThanOrEqual(GAS_NATIVE * PRICE * (1 - 1e-12));
+      });
+    }
+    it('range swap: the readable and unknown cases differ by exactly the swap gas (nothing else changes)', async () => {
+      const known = await pending(false, { ok: true, amountOutHuman: 3_000_000, gasPls: GAS_NATIVE, gasNative: GAS_NATIVE });
+      const unknown = await pending(false, { ok: true, amountOutHuman: 3_000_000, gasPls: 0, gasNative: GAS_NATIVE, gasUnknown: true });
+      expect(known.gas - unknown.gas).toBeCloseTo(GAS_NATIVE * PRICE, 15);
+    });
+    it('the rate saved with the swap goes to recover(); an old save without it passes none (recover reads it now)', async () => {
+      const saved = await pending(true, { ok: true, amountOutHuman: 0.003, gasPls: GAS_NATIVE, gasNative: GAS_NATIVE }, 0.008);
+      expect(saved.args[0][3]).toBe(0.008);
+      const old = await pending(true, { ok: true, amountOutHuman: 0.003, gasPls: GAS_NATIVE, gasNative: GAS_NATIVE });
+      expect(old.args[0][3]).toBeUndefined();
+    });
+    it("a swap left pending saves the quote's basePerNative in the step", async () => {
+      const w = live();
+      const a = w.make();
+      await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      const ex = (w.make() as unknown as { executor: Exec }).executor;
+      (a as unknown as { executor: unknown }).executor = ex;
+      const quote = ex.quote;
+      ex.quote = async (...x: unknown[]) => ({ ...(await quote(...x)), basePerNative: 0.008 });
+      ex.execute = async () => { throw new ExecError('not confirmed yet', { pending: true, swapTxHash: '0xpend' }); };
+      a.state.idle = { base: 0, quote: 1000 };
+      a.state.step = { action: 'open', stage: 'swap', tries: 0 };
+      await a.tick();
+      expect(a.state.step?.swap).toMatchObject({ hash: '0xpend', basePerNative: 0.008 });
+    });
   });
 
   it("live fees are the position manager's own collect quote, asked once as the position's owner (not rebuilt from several reads)", async () => {

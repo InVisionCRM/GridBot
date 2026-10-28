@@ -40,10 +40,10 @@ import { readCall, sameAddr } from '../dex/types';
 import { LpPool, type Coins, type PoolView } from '../lp/lpPool';
 import { collectAllData, collectData, exitData, increaseTx, mintTx } from '../lp/npmCalls';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type Quote, type ReceiptLike, type TxSender } from './chain';
-import { checkProfitMode, type Mode, type ProfitMode } from './engine';
+import { checkProfitMode, GAS_UNKNOWN_NOTE, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
-import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
+import { requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import { noKey } from '../words';
@@ -90,7 +90,11 @@ export interface LpStep {
   hash?: string;
   sentAt?: number;
   /** A swap that was broadcast but not confirmed when the executor gave up waiting */
-  swap?: { hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number };
+  swap?: {
+    hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number;
+    /** Base per native coin from the quote at send time (gas in base units on settle). Old saves omit it: read again. */
+    basePerNative?: number;
+  };
   tries: number;
   /** close: after taking the position out, sell the base coin back to the quote coin ("close to cash") */
   toCash?: boolean;
@@ -138,7 +142,14 @@ export interface LpState {
    * the swaps to the range's mix cost (pool fee + impact, at the mid price) and what taking positions out locked in
    * (lost to moves: see exited), all quote
    */
-  totals: { fees: number; gas: number; sent: number; feeCoins: Coins; swapCost: number; moveLoss: number };
+  totals: {
+    fees: number; gas: number; sent: number; feeCoins: Coins; swapCost: number; moveLoss: number;
+    /**
+     * Native gas of swaps settled by hash after a restart whose base/native rate could be read neither from the save
+     * nor now: not in `gas` (booked as 0, never at the starting rate 1). Old saves omit it.
+     */
+    gasUnknownNative?: number;
+  };
   startedAt: number | null;
   /** Price when the bot started */
   startPrice: number | null;
@@ -152,6 +163,8 @@ export interface LpState {
   archivedAt?: number | null;
   /** Why this bot last stopped or closed. Absent on state saved before this field existed. */
   halt?: Halt | null;
+  /** This run was started LIVE with Start anyway (no completed safety check): who pressed it and why. Null otherwise. */
+  startOverride?: StartOverride | null;
 }
 
 export interface LpStartParams {
@@ -170,6 +183,8 @@ export interface LpStartParams {
   limits?: Partial<SafetyLimits>;
   /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
   guard?: () => Halt | null;
+  /** LIVE only: go ahead when the safety check couldn't complete (never when it completed and failed). Audited. */
+  startAnyway?: boolean;
 }
 
 export interface LpDeps {
@@ -355,7 +370,15 @@ export class LpEngine {
     this.executor = this.makeExecutor();
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
     const v = await this.lp().view(); // fails fast on a pool that can't hold a position
-    if (p.mode === 'live' && this.def?.safety && !(await this.hub.recheck(p.market)).liveAllowed) throw new Error(`LIVE blocked — ${this.label} failed the safety check`);
+    // LIVE needs a fresh, completed safety check (Hub.liveCheck, 3 tries); Start anyway only when it couldn't complete.
+    let override: StartOverride | null = null;
+    if (p.mode === 'live' && this.def?.safety) {
+      const info = (await this.hub.liveCheck(p.market, { startAnyway: !!p.startAnyway })).override;
+      if (info) {
+        override = startOverride(info, this.now());
+        this.ev('info', `Liquidity ${this.label}: Start anyway — LIVE without a completed safety check (${info.blockedBy})`, { level: 'warn', notify: true, data: { startOverride: override } });
+      }
+    }
     if (profits.mode === 'send' && this.signer && sameAddr(await this.signer.getAddress(), profits.to)) throw new Error('That is the bot\'s own wallet: fees already stay there when reinvested.');
     const range = p.range ? checkRangePolicy(p.range) : undefined;
     const compound = p.compound ? checkCompoundPolicy(p.compound) : undefined;
@@ -374,7 +397,7 @@ export class LpEngine {
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },
       step: { action: 'open', stage: 'swap', tries: 0 }, outSince: null, lastRerangeAt: null, reranges: 0, seen: null,
       totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: this.now(), startPrice: v.price, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital + baseAmount * v.price]],
-      closing: false, archivedAt: null, halt: null,
+      closing: false, archivedAt: null, halt: null, startOverride: override,
     };
     this.lastError = null;
     this.save();
@@ -394,13 +417,25 @@ export class LpEngine {
     const note = typeof why === 'string' ? `paused — ${why}` : `stopped — ${halt.detail}`;
     this.ev('stopped', `Liquidity ${this.label} ${note}${this.state.position ? '; the position stays open' : ''}`, { level: 'warn', notify: true, data: { halt } });
   }
-  resume() {
+  /** Record that this live run goes on without a completed safety check (MultiBot's boot check). Saved. */
+  setStartOverride(o: StartOverride) {
+    this.state.startOverride = o;
+    this.save();
+  }
+
+  /**
+   * `override`: MultiBot ran the fresh safety check (Hub.liveCheck) for a LIVE resume. A Halt-like record when it
+   * couldn't complete and the bot resumes on the last passing report (audited); null when it passed; undefined when
+   * called directly (no check: tests, paper).
+   */
+  resume(override?: StartOverride | null) {
     if (this.state.status !== 'stopped') return;
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
     this.state.status = 'running';
     this.state.closing = false;
     this.state.archivedAt = null;
     this.state.halt = null;
+    if (override !== undefined) this.state.startOverride = override;
     this.save();
     this.ev('started', `Liquidity ${this.label} resumed`);
   }
@@ -893,6 +928,20 @@ export class LpEngine {
   private async receiptGas(r: ReceiptLike, v: PoolView) {
     return fromUnits(r.gasUsed * (r.gasPrice ?? 0n), 18) * (await this.hub.quoter(this.state.market).basePerNative()) * v.price;
   }
+  /**
+   * Gas of a swap settled by hash (restart reconcile), in quote at today's price. When no base/native rate could be
+   * read (gasUnknown: gasPls is 0), its native gas is kept apart in totals.gasUnknownNative and a warning is logged,
+   * as the grid and trend bots do.
+   */
+  private bookRecoveredGas(hash: string, r: { gasPls: number; gasNative: number; gasUnknown?: true }, v: PoolView) {
+    this.state.totals.gas += r.gasPls * v.price;
+    if (!r.gasUnknown) return;
+    this.state.totals.gasUnknownNative = (this.state.totals.gasUnknownNative ?? 0) + r.gasNative;
+    const nat = this.def ? this.hub.rt(this.def.chainId).cfg.nativeSymbol : 'native';
+    const msg = `swap ${hash}: gas ${r.gasNative.toPrecision(4)} ${nat} not booked — ${GAS_UNKNOWN_NOTE}`;
+    this.log('warn', msg);
+    this.ev('info', `Liquidity ${this.label}: ${msg}`, { level: 'warn' });
+  }
   private addIdle(c: Coins) { this.state.idle = { base: this.state.idle.base + c.base, quote: this.state.idle.quote + c.quote }; }
 
   private noteOnce(msg: string) {
@@ -1026,9 +1075,9 @@ export class LpEngine {
   /** Swap the idle coins to the range's mix at today's price. */
   private async swap(pool: LpPool, v: PoolView, s: LpStep) {
     if (s.swap) {
-      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut);
+      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut, s.swap.basePerNative);
       if (!r) return;
-      this.state.totals.gas += r.gasPls * v.price;
+      this.bookRecoveredGas(s.swap.hash, r, v);
       if (r.ok) this.applySwap(s.swap.side, s.swap.amountIn, r.amountOutHuman, v.price);
       s.swap = undefined;
       s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
@@ -1073,7 +1122,7 @@ export class LpEngine {
         const o = e instanceof ExecError ? e.opts : {};
         if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
         if (o.aborted) return;
-        if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price }; return; }
+        if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
         throw e;
       }
     }
@@ -1099,9 +1148,9 @@ export class LpEngine {
    */
   private async sellToCash(v: PoolView, s: LpStep) {
     if (s.swap) {
-      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut);
+      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut, s.swap.basePerNative);
       if (!r) return;
-      this.state.totals.gas += r.gasPls * v.price;
+      this.bookRecoveredGas(s.swap.hash, r, v);
       if (r.ok) this.applySwap('sell', s.swap.amountIn, r.amountOutHuman, v.price);
       s.swap = undefined;
       return;
@@ -1139,7 +1188,7 @@ export class LpEngine {
       const o = e instanceof ExecError ? e.opts : {};
       if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
       if (o.aborted) return;
-      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price }; return; }
+      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
       throw e;
     }
   }
@@ -1369,7 +1418,7 @@ export class LpEngine {
     return {
       kind: 'lp' as const, id: s.id, mode: s.mode, market: s.market, label: this.label, chainId: this.chainId, base: this.baseSym, quote: this.quoteSym,
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
-      status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
+      status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
       outSince: s.outSince, move: this.moveStatus(), hold: this.hold, positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),

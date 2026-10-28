@@ -316,7 +316,7 @@ describe('gateway: forwarded headers cannot fake a trusted source', () => {
     const otherKey = signDevice(subKey(randomBytes(32), 'session'), Date.now(), 1);
     const friendSession = signSession(sessionKey, { f: 'some-friend-id', s: 1, e: Date.now() + 1e6 });
     for (const cookie of [
-      `${DEVICE_COOKIE}=${genuine.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'))}`, // tampered signature
+      `${DEVICE_COOKIE}=${genuine.replace(/\.([A-Za-z0-9_-]+)$/, (_, sig: string) => `.${sig[0] === 'A' ? 'B' : 'A'}${sig.slice(1)}`)}`, // tampered signature (first character; the last can be unused base64 bits)
       `${DEVICE_COOKIE}=${otherKey}`,                                             // another server's key
       `${DEVICE_COOKIE}=d2.1.${Date.now()}.`,                                     // no signature
       `${DEVICE_COOKIE}=${signDevice(sessionKey, Date.now(), 0)}`,                // genuine, but for another password

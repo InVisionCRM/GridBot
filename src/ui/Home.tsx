@@ -11,6 +11,7 @@ import type { Opportunity } from '../market/scan';
 import { isSafe, tryIt, useOpportunities, wayOf } from './Opportunities';
 import { bookUsd, equitySpan, feeSeries, portfolioSeries, seriesChange, type DeskRange } from './series';
 import type { AnyObj, Nav } from './model';
+import { SafetyChecking } from './SafetyChecking';
 
 const RANGES: DeskRange[] = ['1H', '1D', '1W', '1M', 'ALL'];
 
@@ -40,7 +41,7 @@ function HeroWorth({ value }: { value: number | null }) {
 
 export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings: HoldingsSnapshot | null; act: (fn: () => Promise<unknown>) => void }) {
   const { chain } = useChainFilter();
-  const { err, pause, close } = useRowActions();
+  const { err, pause, close, checking } = useRowActions();
   const [range, setRange] = useState<DeskRange>('1D');
   const bots = listBots(s, chain).sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
   const running = bots.filter((b) => b.status === 'running').length;
@@ -153,6 +154,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
         </div>
       </section>
 
+      {checking && <SafetyChecking what="Checking safety before resuming…" />}
       {err && <p className="note bad">{err}</p>}
       <section className="desk" aria-label="Bots">
         {!!bots.length && (

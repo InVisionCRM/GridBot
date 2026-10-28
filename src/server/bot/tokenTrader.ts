@@ -15,13 +15,14 @@ import {
   type FreshPool, type GateInput,
   effectiveEntry, sellSidePrice,
 } from '../../market/tokenTrader';
+import { DEFAULT_MIN_LIQUIDITY_USD, effectiveMinLiquidityUsd, gateMinLiquidityUsd } from '../../market/liquidityFloor';
 import { blankPlay, feeTierFromBps, playLeaderboard, type PlayRecord } from '../../metrics/playScore';
 import { MemoryRejects, rejectKey, type RejectSink } from './playRejects';
 import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
 import type { Emit } from './activity';
 import type { Store } from './store';
 import type { PoolSniper, SnipeHit } from '../market/sniper';
-import { requestHalt, type Halt } from './audit';
+import { requestHalt, systemHalt, type Halt } from './audit';
 import type { ReservedBalance } from '../swap/holds';
 import { NATIVE } from '../../live/swapMath';
 
@@ -43,6 +44,13 @@ export interface TraderOptions {
   totalUsd: number;
   /** Scan discovery only. Snipes ignore it. */
   minPoolAgeSec: number;
+  /**
+   * Minimum pool liquidity (USD) for a scan buy and the safety gate. 0 matches the old hardcoded floor,
+   * so existing installs do not start skipping pools. Snipes also still have to clear `sniper.minLiquidityUsd`.
+   */
+  minLiquidityUsd: number;
+  /** When on, the floor in force is at least $50,000. Off by default. Never lowers a higher minimum. */
+  enforceLiquidityFloor: boolean;
   /** Empty = every chain the app trades */
   chains: number[];
   risk: 'safe' | 'medium' | 'any';
@@ -122,6 +130,27 @@ export interface Position {
   tp2Done: boolean;
   source: 'scan' | 'snipe';
   exitPlan: string;
+  /**
+   * Live only: a split sell stopped partway (a part failed, reverted, or Off completely landed between parts). The
+   * token amount is re-read from the wallet before this position may sell again; the remaining parts are never
+   * assumed sold.
+   */
+  reconcile?: boolean;
+  /**
+   * Live only, set with `reconcile`: the wallet's balance of this token and this position's tokens right before the
+   * split sell began. Reconcile then books only what left the wallet during this sell (before − after), so tokens of
+   * the same coin the bot didn't buy (manual buys, airdrops) are never counted as the position's. null = the read
+   * before the sell failed (the wallet balance is then only an upper bound).
+   */
+  reconcileBase?: { bal: number; tokens: number } | null;
+  /** When the position became blocked on reconcile and why (lasting warning; cleared when reconciled). Saved. */
+  blockedSince?: number | null;
+  blockedWhy?: string | null;
+  /**
+   * A take-profit tranche that stopped partway: which one, its size (tokens, fixed when it first fired) and what was
+   * sold toward it. The next time that take profit fires it sells only the rest, then counts as done.
+   */
+  tpPending?: { tp: 1 | 2; target: number; sold: number } | null;
 }
 
 export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null }
@@ -150,17 +179,37 @@ export interface TraderState {
   entriesHalt?: { halt: Halt; chains: number[] | null } | null;
   /** The last stop of the token trader itself (turned off, or new buys stopped), for the stop audit */
   lastHalt?: Halt | null;
+  /**
+   * What "off" means (only read while on is false). 'exits': no discovery, buys or snipes, but stop-loss / take-profit
+   * exits keep running on open positions (live sells included). 'full': nothing runs. Missing (files written before
+   * this field) = 'exits': the old off message promised "open positions stay until their exit rules fire".
+   */
+  offMode?: OffMode;
+  /** Mode changes (on, off for new buys, off completely), newest first, for the stop audit */
+  modeLog?: { mode: RunMode; halt: Halt }[];
+  /**
+   * Set when a file from before off modes (on: false, no offMode) held LIVE positions: it loads off completely and the
+   * owner must choose "run exits" or "keep fully off" (no real sell goes out before that). Cleared by any mode change.
+   */
+  pendingChoice?: { livePositions: number; at: number } | null;
 }
+
+export type OffMode = 'exits' | 'full';
+/** on: everything runs. exits: off for new buys, exits running. full: off completely, nothing runs. */
+export type RunMode = 'on' | OffMode;
+const MODE_LOG_MAX = 50;
 
 export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
 export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
 
 const HOUR = 3600_000;
+const num = (n: number) => +n.toPrecision(6);
 const FEED_MAX = 80;
 const TRADE_MAX = 200;
 
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
+  minLiquidityUsd: DEFAULT_MIN_LIQUIDITY_USD, enforceLiquidityFloor: false,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
   v3LpLockCheck: false,
   lpUnlockCheck: false,
@@ -236,6 +285,11 @@ export class TokenTrader {
     };
     signerReady?: (chainId: number) => boolean;
     sniper?: PoolSniper;
+    /**
+     * The wallet's on-chain balance of a live position's token (human units), for reconciling after a partial,
+     * failed or halted split sell. null = unknown (no key, read failed).
+     */
+    balanceOf?: (p: Position) => Promise<number | null>;
     /** A dynamic-fee pool's fee() right now, in bps (read before every sizing and sell; never cached). */
     feeNow?: (p: { chainId: number; pool: string }) => Promise<number>;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
@@ -248,6 +302,7 @@ export class TokenTrader {
     this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } }, plays: Array.isArray(loaded.plays) ? loaded.plays : [] } : fresh();
     this.spillRejects();
     this.migrateEntries();
+    this.migrateOffMode(loaded);
   }
 
   /** Older state files kept rejects next to passed plays. Move them out so the hot file stays small. */
@@ -287,6 +342,26 @@ export class TokenTrader {
     }
   }
 
+  /**
+   * A file written before off modes has on: false and no offMode. Only paper positions (or none): exits-only, which is
+   * what the old off message promised. Any LIVE position: off completely until the owner chooses, so no real sell goes
+   * out on the first boot after the update.
+   */
+  private migrateOffMode(loaded: TraderState | null | undefined) {
+    // Only a file that is explicitly on skips the check: a missing `on` is not "on".
+    if (!loaded || loaded.version !== 1 || loaded.on === true || loaded.offMode != null) return;
+    const live = this.state.positions.filter((p) => p.mode === 'live').length;
+    if (live > 0) {
+      this.state.offMode = 'full';
+      this.state.pendingChoice = { livePositions: live, at: this.now() };
+      this.logMode('full', systemHalt('token-trader-migrate', `Update: off with ${live} live position(s) loads off completely until you choose`, this.now()));
+      this.d.emit?.({ type: 'alert', kind: 'system', level: 'warn', notify: true, msg: `Token trader has ${live} live position(s) unwatched — choose: run exits / keep fully off` });
+    } else {
+      this.state.offMode = 'exits';
+    }
+    this.save();
+  }
+
   private now() { return (this.d.now ?? Date.now)(); }
   private save() { this.d.store.save(this.state); }
   private say(msg: string, level: 'info' | 'warn' | 'success' = 'info', extra?: { notify?: boolean; data?: Record<string, unknown>; mode?: 'paper' | 'live' }) {
@@ -294,6 +369,18 @@ export class TokenTrader {
     this.d.emit?.({ type: 'info', kind: 'system', level, msg, ...rest, ...(mode ? { mode } : {}) });
   }
 
+  /** on / exits (off for new buys, exits running) / full (off completely). */
+  runMode(): RunMode {
+    return this.state.on ? 'on' : this.state.offMode === 'full' ? 'full' : 'exits';
+  }
+  /** A sell (an exit) may run and be sent: anything but "off completely". Never allows a buy. */
+  canSell(): boolean {
+    return this.runMode() !== 'full';
+  }
+  /** Open positions whose exits actually run: all of them unless off completely. */
+  private watched(): Position[] {
+    return this.canSell() ? this.state.positions : [];
+  }
   /**
    * Live positions sit in the wallet: the token they hold, and the spend coin that bought it.
    * A live buy that has not landed yet reserves its spend coin the same way. Paper positions move no coins.
@@ -318,12 +405,20 @@ export class TokenTrader {
     return {
       ...rest,
       openUsd,
+      /** Liquidity floor scan buys and the gate actually use (the setting, raised to $50,000 when that flag is on). */
+      effectiveMinLiquidityUsd: this.floorUsd(),
       lastError: this.lastError,
       entriesHalt: this.state.entriesHalt ?? null,
       lastHalt: this.state.lastHalt ?? null,
       /** Open positions whose exits (stops, take-profits) are still managed, also while new buys are stopped */
-      exitsManaged: this.state.on ? rest.positions.length : 0,
-      positions: rest.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p) })),
+      exitsManaged: this.watched().length,
+      runMode: this.runMode(),
+      offMode: this.state.offMode ?? 'exits',
+      modeLog: this.state.modeLog ?? [],
+      pendingChoice: this.state.pendingChoice ?? null,
+      positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p), exitsBlocked: this.blocked(p) })),
+      /** Live positions whose exits are blocked until the wallet balance can be read (lasting, until reconciled) */
+      exitsBlocked: this.state.positions.filter((p) => this.blocked(p)).length,
     };
   }
 
@@ -343,6 +438,8 @@ export class TokenTrader {
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
+    if (!(n.minLiquidityUsd >= 0)) throw new Error('Minimum liquidity must be 0 or more USD.');
+    if (typeof n.enforceLiquidityFloor !== 'boolean') throw new Error('Liquidity floor flag must be on or off.');
     if (!(n.maxImpact > 0) || n.maxImpact > HARD_CAPS.maxPriceImpact) throw new Error('Price-impact cap must be between 0% and 5%.');
     if (!(n.sizeImpactCap > 0) || n.sizeImpactCap > HARD_CAPS.maxPriceImpact) throw new Error('Trade-size impact cap must be between 0% and 5%.');
     if (!(n.maxPoolShare > 0) || n.maxPoolShare > 0.5) throw new Error('Max pool share must be between 0% and 50%.');
@@ -361,16 +458,38 @@ export class TokenTrader {
       if (this.d.signerReady && o.chains.length && o.chains.some((id) => !this.d.signerReady!(id))) throw new Error('Live needs a signing key on every chain you turned on.');
     }
     this.state.on = true;
+    this.state.pendingChoice = null;
+    this.logMode('on', requestHalt('token-trader-on', 'POST /api/token-trader/on', this.now()));
     this.say(`token trader on (${o.mode}): up to ${o.perTradeUsd} USD a trade, ${o.totalUsd} USD open, pools at least ${Math.round(o.minPoolAgeSec / 3600)}h old unless the sniper is on`);
     this.save();
   }
 
-  turnOff() {
+  /**
+   * mode 'exits' (default, and what "Off" always did on paper): no discovery, buys or snipes; exits keep running.
+   * mode 'full' ("Off completely, no exits"): nothing runs, open positions are left alone.
+   */
+  turnOff(mode: OffMode = 'exits') {
+    if (mode !== 'exits' && mode !== 'full') throw new Error('Off mode must be "exits" or "full".');
+    const choice = this.state.pendingChoice;
     this.state.on = false;
-    const halt = requestHalt('token-trader-off', 'POST /api/token-trader/off', this.now());
+    this.state.offMode = mode;
+    this.state.pendingChoice = null;
+    const what = mode === 'full' ? 'off completely' : 'off for new buys';
+    const halt = requestHalt('token-trader-off', choice ? `POST /api/token-trader/off (update choice: ${mode === 'full' ? 'keep fully off' : 'run exits'} for ${choice.livePositions} live position(s))` : `POST /api/token-trader/off (${what})`, this.now());
     this.state.lastHalt = halt;
-    this.d.emit?.({ type: 'stopped', kind: 'system', level: 'warn', notify: true, msg: 'token trader off; open positions stay until their exit rules fire', data: { halt } });
+    this.logMode(mode, halt);
+    const n = this.state.positions.length, w = this.watched().length;
+    const msg = mode === 'full'
+      ? `token trader off completely: no buys, no snipes and no exits${n ? `; the stops and take-profits of its ${n} open position(s) are not watched` : ''}`
+      : `token trader off for new buys: no discovery, buys or snipes; exits running on ${w} open position(s)`;
+    this.d.emit?.({ type: 'stopped', kind: 'system', level: 'warn', notify: true, msg, data: { halt, mode } });
     this.save();
+  }
+
+  private logMode(mode: RunMode, halt: Halt) {
+    const l = this.state.modeLog ??= [];
+    l.unshift({ mode, halt });
+    if (l.length > MODE_LOG_MAX) l.length = MODE_LOG_MAX;
   }
 
   /** New buys and snipes are stopped on this chain (Stop all or STOP chain). Exits still run. */
@@ -393,7 +512,7 @@ export class TokenTrader {
     const where = chains == null ? '' : ` on chain ${chains.join(', ')}`;
     this.d.emit?.({
       type: 'stopped', kind: 'system', level: 'warn', notify: true, data: { halt },
-      msg: `token trader: new buys and snipes stopped${where} (${halt.detail}).${this.state.on ? ` Exits still managed: ${n}` : n ? ` It is off, so the exits of its ${n} position(s) are not watched until it is turned on` : ''}`,
+      msg: `token trader: new buys and snipes stopped${where} (${halt.detail}).${this.canSell() ? ` Exits still managed: ${this.watched().length}` : n ? ` It is off completely, so the exits of its ${n} position(s) are not watched` : ''}`,
     });
     this.save();
   }
@@ -415,13 +534,18 @@ export class TokenTrader {
     if (Object.prototype.hasOwnProperty.call(m, 'feeBps')) this.noteFeeReread(id);
   }
 
+  /**
+   * on: snipes, exits, discovery. Off for new buys: exits only. Off completely: nothing. Every step re-reads the mode,
+   * so an off (either kind) that lands while a tick is awaiting wins for the rest of that tick.
+   */
   async tick() {
-    if (!this.state.on || this.exitBusy) return;
+    if (!this.canSell() || this.exitBusy) return;
     this.exitBusy = true;
     let exitsOk = true;
     try {
-      await this.exits();
+      // cleared first: a sell that stopped partway sets it inside exits() and must stay visible
       this.lastError = null;
+      await this.exits();
     } catch (e) {
       this.lastError = (e as Error).message;
       exitsOk = false;
@@ -430,7 +554,8 @@ export class TokenTrader {
       this.exitBusy = false;
     }
     // Buys, including LP checks, never share this lock. A tick that arrives while they run still exits.
-    if (!exitsOk || this.entryTask) return;
+    // Off (either kind), or turned off while the exits were awaited: no snipes or new entries this tick.
+    if (!exitsOk || this.entryTask || !this.state.on) return;
     let task!: Promise<void>;
     task = this.runEntries().finally(() => { if (this.entryTask === task) this.entryTask = null; });
     this.entryTask = task;
@@ -440,9 +565,9 @@ export class TokenTrader {
   /** Snipes and the entry scan. LP reads happen in here, on the buy path only. */
   private async runEntries() {
     try {
-      await this.takeSnipes();
-      await this.scanEntries();
-      this.lastError = null;
+      if (this.state.on) await this.takeSnipes();
+      // Turned off while the snipes were awaited: no new entries this tick.
+      if (this.state.on) await this.scanEntries();
     } catch (e) {
       this.lastError = (e as Error).message;
     } finally {
@@ -459,8 +584,16 @@ export class TokenTrader {
   }
 
   private plan(p: Position) {
+    const b = this.blocked(p);
+    if (b) return b;
     const d = decideExit(this.exitOf(p));
     return d.action === 'hold' ? 'hold' : d.why;
+  }
+
+  /** A live position stuck on reconcile: its exits don't run until the wallet balance is read. null = not blocked. */
+  private blocked(p: Position): string | null {
+    if (p.mode !== 'live' || !p.reconcile) return null;
+    return `exits blocked: can't read the wallet balance${p.blockedWhy ? ` (${p.blockedWhy})` : ''}`;
   }
 
   private model(p: Pick<Position, 'feeBps' | 'quoteReserve' | 'tokenReserve' | 'buyTax' | 'sellTax'>): CostModel {
@@ -472,6 +605,17 @@ export class TokenTrader {
 
   private limits(): SafetyLimits {
     return { maxPriceImpact: Math.min(this.state.options.maxImpact, HARD_CAPS.maxPriceImpact), slippageBps: 100, deadlineMinutes: 10 };
+  }
+
+  /** Configured minimum, or $50,000 when that flag is on. Does not include the sniper's own minimum. */
+  private floorUsd() { return effectiveMinLiquidityUsd(this.state.options); }
+
+  /** Gate floor for this pool: the floor in force, the sniper minimum on a snipe, and any higher floor assess reported. A reported 0 does not win. */
+  private gateFloor(pool: FreshPool, reported: number | null | undefined) {
+    const o = this.state.options;
+    return gateMinLiquidityUsd(pool, reported, {
+      minLiquidityUsd: o.minLiquidityUsd, enforceLiquidityFloor: o.enforceLiquidityFloor, sniperMinLiquidityUsd: o.sniper.minLiquidityUsd,
+    });
   }
 
   private wantChain(id: number) {
@@ -487,7 +631,7 @@ export class TokenTrader {
   private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null }> {
     if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null, warn: null };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
-    let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
+    let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: this.gateFloor(pool, g.minLiquidityUsd) };
     if (this.state.options.enforceHolderCheck) {
       const chainName = chainById(pool.chainId)?.name ?? `chain ${pool.chainId}`;
       let h: { largest: number | null; top10: number | null; unverified: boolean; unavailable?: 'no-source' | 'read-failed'; chainName?: string; unseen?: number | null; top10Exact?: boolean; coverage?: number | null; thin?: boolean; windowFrom?: number | null; creationBlock?: number | null } = {
@@ -683,6 +827,9 @@ export class TokenTrader {
 
   private async consider(pool: FreshPool, source: 'scan' | 'snipe') {
     const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
+    // Turned off since this tick started (POST /on runs a tick at once; discovery can take minutes): stop here,
+    // before the safety check's reads. buy() checks canBuy() again after them.
+    if (!this.state.on) return;
     const skip = (why: string) => {
       this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why });
       this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: signalOf(pool.source), source: pool.dex, reason: why, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol });
@@ -699,21 +846,34 @@ export class TokenTrader {
     if (!this.d.discover) return;
     if (this.state.entriesHalt?.chains === null) return; // stopped everywhere: don't even look
     const pools = await this.d.discover();
-    const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: 0 });
+    if (!this.state.on) return; // turned off while discovery was pending (2026-10-27: 4 paper buys ~3 min after off)
+    const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: this.floorUsd() });
     for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
     const eligible: FreshPool[] = [];
     for (const p of keep) {
+      if (!this.state.on) break;
       const label = `${p.tokenSymbol}/${p.spendSymbol}`;
-      if (!this.wantChain(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'chain is off' }); continue; }
-      if (p.kind === 'v4') { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); continue; }
-      if (this.entriesStopped(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); continue; }
+      const skip = (why: string) => {
+        this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why });
+        this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
+      };
+      if (!this.wantChain(p.chainId)) { skip('chain is off'); continue; }
+      if (p.kind === 'v4') { skip("this app doesn't swap V4"); continue; }
+      if (this.entriesStopped(p.chainId)) { skip('new buys are stopped (Stop all)'); continue; }
       eligible.push(p);
     }
     // Safety reads, including LP checks, overlap. Each check has its own timeout, so one pool cannot stall the rest.
     const checked = await Promise.all(eligible.map(async (p) => ({ p, a: await this.assess(p) })));
     for (const { p, a } of checked) {
+      if (!this.state.on) break; // turned off while the safety reads were pending
       const label = `${p.tokenSymbol}/${p.spendSymbol}`;
-      if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); continue; }
+      if (!a.ok || !a.gate) {
+        const why = a.reason ?? 'safety';
+        this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why });
+        this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
+        this.say(`skipped ${label}: ${a.reason}`, 'warn');
+        continue;
+      }
       await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn);
     }
   }
@@ -732,6 +892,7 @@ export class TokenTrader {
     for (const n of notes) this.say(n.msg, n.level);
     let room = this.hourRoom();
     for (const hit of hits) {
+      if (!this.state.on) break; // turned off while the sniper's log read was pending
       const rejectHit = (reason: string, label: string, token = hit.token0) => {
         this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label, verdict: 'skipped', why: reason });
         this.reject({ chainId: hit.chainId, pool: hit.pool, token, signal: 'snipe', source: hit.dex, reason, price: null, feeBps: hit.fee != null ? hit.fee / 100 : null });
@@ -741,7 +902,8 @@ export class TokenTrader {
       if (hit.kind === 'v4') { this.reject({ chainId: hit.chainId, pool: hit.pool, token: hit.token0, signal: 'snipe', source: hit.dex, reason: "this app doesn't swap V4", price: null, feeBps: hit.fee != null ? hit.fee / 100 : null }); continue; }
       const pool = await this.d.resolve?.(hit) ?? null;
       if (!pool) { rejectHit('could not price the new pool', hit.pool.slice(0, 8)); continue; }
-      if (pool.liquidityUsd < sn.minLiquidityUsd) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
+      const minLiq = Math.max(sn.minLiquidityUsd, this.floorUsd());
+      if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${minLiq.toLocaleString('en-US')}` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `liquidity under $${minLiq.toLocaleString('en-US')}`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `${sn.maxPerHour} snipes an hour already`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       const before = this.state.positions.length;
       await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');
@@ -759,17 +921,59 @@ export class TokenTrader {
     };
   }
 
+  /**
+   * Set a live position's tokens from the wallet after a sell that stopped partway. Only what left the wallet during
+   * that sell is booked (balance before − balance now, from `reconcileBase`), never more than the booked fills left,
+   * and never more than the wallet holds beyond the other live positions in the same token: tokens the bot didn't buy
+   * are never counted as this position's. The position's tokens only ever go down here.
+   * true = reconciled (flag cleared); false = balance unknown, so it must not sell this tick (lasting warning).
+   */
+  private async reconcile(p: Position): Promise<boolean> {
+    let err: string | null = null;
+    const bal = this.d.balanceOf ? await this.d.balanceOf(p).catch((e: Error) => { err = e.message; return null; }) : null;
+    if (bal == null || !Number.isFinite(bal)) {
+      p.blockedSince ??= this.now();
+      p.blockedWhy = (err ?? (this.d.balanceOf ? 'balance read failed' : 'no wallet reader')).slice(0, 160);
+      return false;
+    }
+    const others = this.state.positions.filter((x) => x !== p && x.mode === 'live' && x.chainId === p.chainId && x.token.toLowerCase() === p.token.toLowerCase())
+      .reduce((s, x) => s + x.tokens, 0);
+    const before = p.tokens;
+    const base = p.reconcileBase;
+    const fromSell = base ? base.tokens - Math.max(0, base.bal - bal) : Infinity;
+    p.tokens = Math.max(0, Math.min(before, fromSell, bal - others));
+    const gone = before - p.tokens;
+    // a take-profit tranche in progress: what the wallet shows also left counts toward it
+    if (gone > 0 && p.tpPending) p.tpPending.sold += gone;
+    p.reconcile = false;
+    p.reconcileBase = null;
+    p.blockedSince = null;
+    p.blockedWhy = null;
+    if (Math.abs(gone) > p.entryTokens * 1e-6) this.say(`${p.label}: tokens set from the wallet, ${num(before)} → ${num(p.tokens)}`, 'warn', { mode: p.mode });
+    return true;
+  }
+
   private async exits() {
     const left: Position[] = [];
     for (const p of this.state.positions) {
+      // Turned off completely while this loop was awaiting: leave the rest alone.
+      if (!this.canSell()) { left.push(p); continue; }
       if (this.d.mark) {
         const m = await this.d.mark(p);
         if (m) {
           Object.assign(p, m);
           if (Object.prototype.hasOwnProperty.call(m, 'feeBps')) this.noteFeeReread(p.id);
         }
+        // Off completely landed while the mark was read: don't sell (a live send is refused by canSell too).
+        if (!this.canSell()) { left.push(p); continue; }
       }
+      // the peak follows the price even while the position is blocked on reconcile (its trailing stop stays right)
       if (p.price > p.peak) p.peak = p.price;
+      if (p.mode === 'live' && p.reconcile) {
+        // the last split sell stopped partway: take the wallet's balance before deciding anything
+        if (!(await this.reconcile(p))) { p.exitPlan = this.blocked(p) ?? p.exitPlan; left.push(p); continue; }
+        if (!(p.tokens > p.entryTokens * 1e-8)) continue;
+      }
       const d = decideExit(this.exitOf(p));
       p.exitPlan = d.action === 'hold' ? 'hold' : d.why;
       if (d.action === 'hold') { left.push(p); continue; }
@@ -778,15 +982,31 @@ export class TokenTrader {
         const fee = await this.d.feeNow(p).catch(() => null);
         if (fee != null) { p.feeBps = fee; this.noteFeeReread(p.id); }
       }
-      const qty = Math.min(p.tokens, p.entryTokens * d.frac);
+      // Take profit 1 / 2 each sell one tranche of the entry (d.frac of entryTokens). One that stopped partway sells
+      // only the rest of that tranche the next time it fires.
+      const tp: 0 | 1 | 2 = d.why.startsWith('take profit') ? (p.tp1Done ? 2 : 1) : 0;
+      const pend = tp && p.tpPending?.tp === tp ? p.tpPending : null;
+      const target = pend ? pend.target : p.entryTokens * d.frac;
+      const qty = Math.min(p.tokens, pend ? Math.max(0, pend.target - pend.sold) : p.entryTokens * d.frac);
       const parts = splitSell(qty, Math.max(p.tokenReserve, 1e-12), p.feeBps, this.state.options.maxImpact);
-      let quote = 0, sold = 0;
+      let quote = 0, sold = 0, stopped: string | null = null;
       let impactW = 0, impactN = 0, impactGap = false;
       const exitTxs: string[] = [];
       let gasNative = 0, gasUsed = 0, gasPrice: number | null = null, gasLegs = 0, gasMixed = false, gasGap = !(p.mode === 'live' && this.d.live);
+      if (p.mode === 'live' && this.d.live && parts.length) {
+        // what the wallet holds right before this sell: a stop partway books only what left during it
+        const bal = this.d.balanceOf ? await this.d.balanceOf(p).catch(() => null) : null;
+        p.reconcileBase = bal != null && Number.isFinite(bal) ? { bal, tokens: p.tokens } : null;
+      }
       if (p.mode === 'live' && this.d.live) {
+        // Each part's fill is booked as it lands. A part that fails, or Off completely between parts, stops the rest;
+        // what really left the wallet is then read back (reconcile), never assumed.
         for (const part of parts) {
-          const s = await this.d.live.sell(p, part, this.limits());
+          if (!this.canSell()) { stopped = 'turned off completely'; break; }
+          let s: LiveSell;
+          try {
+            s = await this.d.live.sell(p, part, this.limits());
+          } catch (e) { stopped = (e as Error).message; break; }
           quote += s.quoteOut; sold += s.tokensIn;
           if (Number.isFinite(s.impact)) { impactW += s.impact * s.tokensIn; impactN += s.tokensIn; } else impactGap = true;
           if (s.tx) exitTxs.push(s.tx);
@@ -809,14 +1029,30 @@ export class TokenTrader {
           if (Number.isFinite(sim.impactPct)) { impactW += sim.impactPct * part; impactN += part; } else impactGap = true;
         }
       }
-      p.tokens -= sold;
-      const usd = quote * p.usdPerSpend;
-      const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
-      this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why: d.why, pnlUsd: usd - cost });
-      this.say(`sold ${p.label}: ${d.why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
-      if (d.why.startsWith('take profit') && !p.tp1Done) p.tp1Done = true;
-      else if (d.why.startsWith('take profit')) p.tp2Done = true;
-      const flat = !(p.tokens > p.entryTokens * 1e-8);
+      p.tokens = Math.max(0, p.tokens - sold);
+      if (sold > 0) {
+        const usd = quote * p.usdPerSpend;
+        const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
+        const why = stopped ? `${d.why} (partial: ${num(sold)} of ${num(qty)})` : d.why;
+        this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost });
+        this.say(`sold ${p.label}: ${why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
+      }
+      if (tp && (sold > 0 || pend || stopped)) {
+        // Done only when the whole tranche went out with nothing interrupting it; a stop partway leaves the rest pending.
+        const total = (pend?.sold ?? 0) + sold;
+        if (!stopped && parts.length) {
+          if (tp === 1) p.tp1Done = true; else p.tp2Done = true;
+          p.tpPending = null;
+        } else p.tpPending = { tp, target, sold: total };
+      }
+      if (stopped) {
+        this.lastError = `${p.label}: sell stopped after ${num(sold)} of ${num(qty)} — ${stopped}`;
+        this.say(`${p.label}: sell stopped partway (${stopped}); reading the wallet balance before it sells again`, 'warn', { mode: p.mode });
+        p.reconcile = true;
+        await this.reconcile(p);
+      } else p.reconcileBase = null;
+      // Generated ledger: the parts that landed, booked even when a later part stopped. Flat only once reconciled.
+      const flat = !(p.tokens > p.entryTokens * 1e-8) && !p.reconcile;
       this.noteSell(p, {
         quote, sold, price: p.price, impact: impactGap || impactN <= 0 ? null : impactW / impactN, txs: exitTxs, flat,
         gas: gasGap || gasLegs === 0 ? null : { native: gasNative, used: gasUsed, price: gasPrice, mixed: gasMixed },
