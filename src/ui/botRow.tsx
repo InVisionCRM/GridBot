@@ -40,6 +40,9 @@ function pairOf(b: AnyObj): { base: string; quote: string; title: string } {
   return { base: base || name.split('/')[0] || name, quote, title: name || `${base}/${quote}` };
 }
 
+/** A pair name may wrap after its slash on a narrow phone ("ETH/" then "USDG"), never inside a coin's name. */
+const wrappable = (title: string) => title.replace('/', '/\u200B');
+
 function kindWord(b: AnyObj) {
   if (b.kind === 'sniper') return 'Sniper';
   if (b.kind === 'trader') return 'Token trader';
@@ -341,7 +344,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
               {chain && <span className="chain-coin"><ChainMark short={chain.short} color={chain.color} size={14} /></span>}
             </span>
             <span className="desk-id">
-              <span className="bot-title">{pair.title}</span>
+              <span className="bot-title">{wrappable(pair.title)}</span>
               <span className="bot-meta">
                 <i className={`status-dot${on ? ' on' : ''}${bad ? ' bad' : ''}`} />
                 {[chain?.short, kindWord(b), statusWord(b), b.mode === 'paper' ? 'paper' : ''].filter(Boolean).join(' · ')}
@@ -388,7 +391,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
             <TokenMark symbol={pair.quote} size={22} />
           </span>
           <span className="bot-mid">
-            <span className="bot-title">{pair.title}</span>
+            <span className="bot-title">{wrappable(pair.title)}</span>
             <span className="bot-meta">
               <i className={`status-dot${on ? ' on' : ''}${bad ? ' bad' : ''}`} />
               {statusWord(b)} · {kindWord(b)}{chain ? ` · ${chain.short}` : ''}

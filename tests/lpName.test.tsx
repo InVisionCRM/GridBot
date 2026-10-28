@@ -17,7 +17,7 @@ describe('liquidity bot name', () => {
     const lp = { id: 'lp-1', kind: 'lp', mode: 'paper', status: 'running', chainId: 4663, label: 'ETH/USDG·HOOD', base: 'ETH', quote: 'USDG', usdPerQuote: 1, pnl: null, position: null };
     const s = { chains: [{ id: 4663, short: 'HOOD', name: 'Robinhood Chain', color: '#0f0' }], grids: [], trends: [], lps: [lp] };
     const html = renderToStaticMarkup(createElement(ShowUsdCtx.Provider, { value: { on: false, set: noop } }, createElement(BotRow, { s, b: lp, nav: noop, pause: noop, close: noop })));
-    expect(html).toContain('ETH/USDG');
+    expect(html.replace(/\u200B/g, '')).toContain('ETH/USDG'); // the soft break after the slash is the only break in the name
     expect(html).not.toContain('·HOOD');
   });
 });

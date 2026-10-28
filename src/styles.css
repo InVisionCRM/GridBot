@@ -1196,9 +1196,10 @@ label.wide input { min-width: 180px; }
   /* phones: the meta line (chain · kind · status · mode) wraps instead of being cut off */
   .desk-id .bot-meta { white-space: normal; flex-wrap: wrap; overflow: visible; row-gap: 0; }
   /* a long per-coin figure wraps in its column instead of squeezing the bot's name to a sliver */
-  .desk-row .desk-pnl, .desk-row .desk-gen { min-width: 0; max-width: 45vw; overflow-wrap: anywhere; }
+  .desk-row .desk-pnl, .desk-row .desk-gen { min-width: 0; max-width: 40vw; overflow-wrap: anywhere; }
   .desk-row .desk-gen b { white-space: normal; overflow: visible; }
-  .desk-id .bot-title { white-space: normal; overflow-wrap: anywhere; }
+  /* the name wraps only after its slash (a soft break in the markup), never inside a coin's name */
+  .desk-id .bot-title { white-space: normal; overflow-wrap: normal; }
   .desk-pnl { grid-area: pnl; }
   .desk-row .row-menu { grid-area: menu; }
   .desk-range { grid-area: range; }
