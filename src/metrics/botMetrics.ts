@@ -15,7 +15,7 @@
  *
  * Quote-coin figures are converted once with usdPerQuote (grid capital is in the quote coin despite its legacy name
  * `totalCapitalQuote`). No rate → the dollar fields are null, never quote-as-dollars. Estimates (Kyle's rule): Generated
- * per token ÷ age in days × 1 / 7 / 30 / 365, all of them null with "needs 1 day" until the bot is a day old; no other
+ * per token ÷ age in days × 1 / 7 / 30 / 365, all of them null with "shows after a day" until the bot is a day old; no other
  * cap or minimum history. Age is historyEnd-aware (a stopped bot's age ends at its stop).
  */
 
@@ -25,6 +25,8 @@ import { keySymbols, unitOf } from '../lib/marketKey';
 export const DAY_MS = 86_400_000;
 /** Kyle's rule: every estimate (day, 7d, 30d, 365d, APR) needs one day of history, and nothing else. */
 export const MIN_AGE_MS = DAY_MS;
+/** The one hint every screen shows for an estimate that isn't there yet (StatTable, LP pace, desk APR title). */
+export const EST_HINT = 'shows after a day';
 
 export type MetricsKind = 'grid' | 'trend' | 'lp' | 'token';
 export type Headline = 'generated';
@@ -141,10 +143,10 @@ export function estNeedMs(windowMs: number): number {
   return MIN_AGE_MS;
 }
 
-/** "needs 1 day" while the bot is under a day old; null from then on (every window alike). */
+/** "shows after a day" (the wording every screen uses) while the bot is under a day old; null from then on (every window alike). */
 export function estHint(age: number | null, windowMs: number): string | null {
   if (age != null && age >= estNeedMs(windowMs)) return null;
-  return 'needs 1 day';
+  return EST_HINT;
 }
 
 /** Milliseconds since start. Null when the start time is missing or in the future. */
@@ -175,7 +177,7 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
   return now - startedAt;
 }
 
-const RATES = 'The day/7d/30d/365d estimates are Generated ÷ age in days × 1, 7, 30 or 365, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; all of them start once the bot is a day old.';
+const RATES = 'The day, 7d and 365d estimates are Generated ÷ age in days × 1, 7 or 365, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; all of them show after a day.';
 const GENERATED_CALC: Record<MetricsKind, string> = {
   lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin), swap fees (in the coin swapped in) and range-move losses (in the coin the move sold, locked in at each move).',
   grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown under Open positions. A close / stop cash-out sale is not a round trip; its result is in Price change.',
