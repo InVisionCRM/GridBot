@@ -39,7 +39,8 @@ function sectionRepeats(html: string): string[] {
     problems.push(...repeatedFigures(textOf(html.slice(heroAt, groupAt === -1 ? undefined : groupAt))));
   }
   for (const [index, part] of html.split('class="group-title"').slice(1).entries()) {
-    const cards = part.split(/class="bot-card/);
+    const [openHtml, closedHtml = ''] = part.split('class="closed-group"');
+    const cards = openHtml.split(/class="bot-card/);
     const scope = new Set(figureAtoms(textOf(index === 0 && heroAt >= 0 ? html.slice(heroAt, groupAt) : cards[0])).map(normFigure));
     for (const card of cards.slice(1)) {
       const cardText = textOf(card);
@@ -47,6 +48,9 @@ function sectionRepeats(html: string): string[] {
       for (const fig of figureAtoms(cardText).map(normFigure)) {
         if (scope.has(fig)) problems.push(fig);
       }
+    }
+    for (const card of closedHtml.split(/class="bot-card/).slice(1)) {
+      problems.push(...repeatedFigures(textOf(card)));
     }
   }
   return [...new Set(problems)];

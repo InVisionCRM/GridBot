@@ -100,12 +100,15 @@ export function HomeView({
   const series = span === 'ALL' ? portfolio.madeSeries : [];
   const liveInvested = sumBags(live.filter(countsInTotal).map((b) => b.metrics.invested));
   const paperInvested = sumBags(paperBots.filter(countsInTotal).map((b) => b.metrics.invested));
-  const cardOf = (bot: BotDesk, tokens: TokenQty[], invested: TokenQty[], scope: 'live' | 'paper'): CardModel => ({
-    bot,
-    readout: cardReadout(bot.metrics, tokens, scope),
-    invested: investedLine(bot.metrics.invested, invested, scope),
-    covered: `${formatTokenLine(tokens)} ${formatBag(invested)} ${uniqueTape(prices).map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' ')}`,
-  });
+  const cardOf = (bot: BotDesk, tokens: TokenQty[], invested: TokenQty[], scope: 'live' | 'paper'): CardModel => {
+    const ownFigures = bot.archived || bot.metrics.status === 'closed';
+    return {
+      bot,
+      readout: cardReadout(bot.metrics, ownFigures ? [] : tokens, scope),
+      invested: investedLine(bot.metrics.invested, ownFigures ? [] : invested, scope),
+      covered: `${formatTokenLine(tokens)} ${formatBag(invested)} ${uniqueTape(prices).map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' ')}`,
+    };
+  };
   const liveCards = live.map((bot) => cardOf(bot, portfolio.tokens, liveInvested, 'live'));
   const paperCards = paperBots.map((bot) => cardOf(bot, portfolio.paperTokens, paperInvested, 'paper'));
   return (

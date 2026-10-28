@@ -4,12 +4,14 @@
  */
 const WIDTHS = [1, 2, 5, 8, 12];
 
-export function LpRangeSlot({ pair }: { pair: string }) {
+export function LpRangeSlot({ pair, closed = false }: { pair: string; closed?: boolean }) {
   return (
     <section className="slot" aria-label="Range and compounding">
       <header>
         <h3>Range and compounding</h3>
       </header>
+      {closed ? <p className="muted small">Bot is closed</p> : (
+      <>
       <p className="muted small">Not wired up yet. Tapping these does nothing. Kept here for {pair}.</p>
       <div className="slot-row">
         <span>Auto-move</span>
@@ -31,6 +33,8 @@ export function LpRangeSlot({ pair }: { pair: string }) {
           {WIDTHS.map((w) => <button key={w} type="button" disabled>±{w}%</button>)}
         </div>
       </div>
+      </>
+      )}
     </section>
   );
 }

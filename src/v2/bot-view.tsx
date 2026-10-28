@@ -133,7 +133,7 @@ export function BotView({
               <p className="sheet-notes">{rows.filter((row) => row.label === 'Note').map((row) => <span key={row.value}>{row.value}</span>)}</p>
             )}
             {showEst && <p className="muted small">Estimate, not a forecast.</p>}
-            {shot.kind === 'lp' && <LpRangeSlot pair={bot.pair} />}
+            {shot.kind === 'lp' && <LpRangeSlot pair={bot.pair} closed={m.status === 'closed' || m.status === 'stopped'} />}
             <button type="button" className="text-btn" onClick={() => openClassic(classicView(shot))}>Open the classic page</button>
           </motion.aside>
         </div>
