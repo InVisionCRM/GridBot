@@ -171,10 +171,12 @@ describe('owner gateway', () => {
     expect(page.text + api.text).not.toContain(secret.toString('hex'));
   });
 
-  it('locks the owner name after repeated wrong passwords', async () => {
+  it('locks the owner name after repeated wrong passwords (from a device shared with a friend)', async () => {
     const { gw } = await setup();
+    // tailscale serve forwarding a shared device: tailnet address, the friend's own Tailscale login
     const post = (password: string) => raw(gw, '/login', {
-      host: `127.0.0.1`, origin: `https://${PUBLIC}`, 'content-type': 'application/x-www-form-urlencoded',
+      host: PUBLIC, origin: `https://${PUBLIC}`, 'content-type': 'application/x-www-form-urlencoded',
+      'x-forwarded-for': '100.70.1.2', 'tailscale-user-login': 'friend@example.com',
     }, `name=owner&password=${encodeURIComponent(password)}`);
     for (let i = 0; i < LOCK_AFTER; i++) {
       const r = await post('wrong-password');
@@ -186,6 +188,23 @@ describe('owner gateway', () => {
     const locked = await post(PASS);
     expect(locked.status).toBe(400);
     expect(locked.text).toMatch(/Too many wrong passwords for this name/);
+  });
+
+  it('refuses push routes for a friend session', async () => {
+    const { gw, friendSeen, hostSeen, friendCookie, ownerCookie } = await setup();
+    const denied = await raw(gw, '/api/push/status', { host: PUBLIC, cookie: friendCookie });
+    expect(denied.status).toBe(403);
+    expect(denied.text).toMatch(/owner login/);
+    expect(friendSeen).toHaveLength(0);
+    const posted = await raw(gw, '/api/push/test', {
+      host: PUBLIC, cookie: friendCookie, origin: `https://${PUBLIC}`, 'content-type': 'application/json',
+    }, '{"endpoint":"https://web.push.apple.com/x"}');
+    expect(posted.status).toBe(403);
+    expect(friendSeen).toHaveLength(0);
+    const owner = await raw(gw, '/api/push/status', { host: PUBLIC, cookie: ownerCookie });
+    expect(owner.status).not.toBe(403);
+    expect(hostSeen.length).toBeGreaterThan(0);
+    expect(hostSeen[0]['x-gridbot-via']).toBe('owner');
   });
 
   it('a friend cookie reaches the friend copy and never the host app', async () => {

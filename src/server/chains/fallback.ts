@@ -8,6 +8,7 @@
  * Activity log (see checkHealth).
  */
 import { FetchRequest, JsonRpcProvider } from 'ethers';
+import { redact } from '../bot/logger';
 import type { ChainReader, ReceiptLike } from '../bot/chain';
 import type { LogReader } from '../market/onchain';
 
@@ -78,8 +79,10 @@ export function isTransportError(e: unknown): boolean {
 /** One-line reason for logs and the UI: the RPC's own error when ethers wrapped it as "missing revert data". */
 export function rpcErrorText(e: unknown): string {
   const inner = (e as CallErr)?.info?.error;
-  if ((e as CallErr)?.code === 'CALL_EXCEPTION' && inner?.message) return `RPC error ${inner.code ?? ''} ${inner.message}`.replace(/\s+/g, ' ').trim().slice(0, 160);
-  return String((e as Error)?.message ?? e).slice(0, 160);
+  // Redacted before it is cut: ethers puts the request URL (which can hold an API key) in its messages, and a cut in
+  // the middle of a key would leave a piece no redaction matches.
+  if ((e as CallErr)?.code === 'CALL_EXCEPTION' && inner?.message) return redact(`RPC error ${inner.code ?? ''} ${inner.message}`).replace(/\s+/g, ' ').trim().slice(0, 160);
+  return redact(String((e as Error)?.message ?? e)).slice(0, 160);
 }
 
 /** Cooldown after an endpoint fails: 30 s, doubling per failure in a row, at most 10 min. */
@@ -247,25 +250,35 @@ export class FallbackReader implements ChainReader, LogReader {
   /**
    * One eth_sendRawTransaction on the current endpoint. No rotation inside this call.
    * sendSafe rebroadcasts the same bytes itself, after hasTx, when this one times out.
+   * The start index is captured here. Later reads move `this.i` and must not change which
+   * endpoints this send still has to try, or how many.
    */
-  private sentFrom = -1;
+  private broadcastOrigin = -1;
+  /** How many endpoints this send has already been given, including broadcastRaw. */
+  private broadcastTried = 0;
 
   broadcastRaw(raw: string): Promise<unknown> {
-    this.sentFrom = this.i;
-    return this.limiter.run(() => this.providers[this.i].send('eth_sendRawTransaction', [raw]));
+    const at = this.i;
+    this.broadcastOrigin = at;
+    this.broadcastTried = 1;
+    return this.limiter.run(() => this.providers[at].send('eth_sendRawTransaction', [raw]));
   }
 
   /**
-   * The same signed bytes on the next endpoint. Same hash, not a new transaction.
-   * Rejects with code NO_ENDPOINT once every endpoint has been tried.
+   * The same signed bytes on the next endpoint that this send has not already tried.
+   * Same hash, not a new transaction. An endpoint that timed out is not tried again.
+   * Stops after one attempt per endpoint (code NO_ENDPOINT), so a broadcast cannot hold
+   * the chain gate open by following the read cursor around the list.
    */
   broadcastNext(raw: string): Promise<unknown> {
     const n = this.providers.length;
-    if (this.sentFrom < 0) this.sentFrom = this.i;
-    const next = this.sentFrom + 1;
-    if (next >= this.i + n) return Promise.reject(Object.assign(new Error('no further endpoint'), { code: 'NO_ENDPOINT' }));
-    const j = next % n;
-    this.sentFrom = next;
+    if (this.broadcastOrigin < 0) {
+      this.broadcastOrigin = this.i;
+      this.broadcastTried = 1;
+    }
+    if (this.broadcastTried >= n) return Promise.reject(Object.assign(new Error('no further endpoint'), { code: 'NO_ENDPOINT' }));
+    const j = (this.broadcastOrigin + this.broadcastTried) % n;
+    this.broadcastTried += 1;
     return this.limiter.run(() => this.providers[j].send('eth_sendRawTransaction', [raw]));
   }
 

@@ -64,6 +64,8 @@ export const ROUTER_HARD_CAPS = {
   maxMovesPerDay: 24,
   minConfidence: 1,
   gasUnits: 1_500_000,
+  /** A receipt wait longer than this is clamped. The send gate adds 60s of slack on top. */
+  receiptTimeoutMs: 180_000,
 } as const;
 
 /** p90, not p50. Equal to the cap is allowed; over it is not. */
@@ -112,16 +114,24 @@ export interface RouterSettings {
   maxGasPriceWei: Record<string, string>;
   /** chain id → max priority fee (tip) in wei, decimal string. A suggestion above this aborts. */
   maxPriorityFeeWei: Record<string, string>;
+  /**
+   * How long sendSafe may wait for a receipt, in ms. Hard cap 180s.
+   * The per-chain gate budget is this (capped) plus 60s, computed once when the gate is taken.
+   */
+  receiptTimeoutMs: number;
   autoClaim: boolean;
   halt: RouterHalt | null;
 }
 
 export const HOST_ONLY = 'The capital router runs on the host app only.';
 
-export function liveEnableError(s: Pick<RouterSettings, 'mode' | 'maxPerMoveUsd' | 'maxPerDayUsd' | 'allowedChains' | 'allowedBridges'>): string | null {
+export function liveEnableError(s: Pick<RouterSettings, 'mode' | 'maxPerMoveUsd' | 'maxPerDayUsd' | 'allowedChains' | 'allowedBridges' | 'minNetGainPct' | 'minNetGainTok'>): string | null {
   if (s.mode !== 'live') return null;
   if (!(s.maxPerMoveUsd > 0) || !(s.maxPerDayUsd > 0)) return 'Live mode needs maxPerMoveUsd and maxPerDayUsd above 0. Zero blocks live.';
   if (s.allowedChains.length === 0 || s.allowedBridges.length === 0) return 'Live mode needs at least one allowed chain and one allowed bridge.';
+  if (!(s.minNetGainPct > 0)) return 'Live mode needs minNetGainPct above 0.';
+  const gains = Object.values(s.minNetGainTok);
+  if (gains.length === 0 || gains.some((n) => !(n > 0))) return 'Live mode needs a positive minNetGainTok for every allowed coin.';
   return null;
 }
 
@@ -145,6 +155,7 @@ export function defaultSettings(chainIds: readonly number[]): RouterSettings {
     gasCaps: gasDefaults(chainIds),
     maxGasPriceWei: gasPriceDefaults(chainIds),
     maxPriorityFeeWei: priorityDefaults(chainIds),
+    receiptTimeoutMs: 120_000,
     autoClaim: false,
     halt: null,
   };
@@ -241,7 +252,7 @@ function strictNum(v: unknown, name: string, min: number, max: number, integer =
 
 function usdMap(v: unknown, known: ReadonlySet<number>, ceiling: number, strict: boolean): Record<string, number> {
   if (v == null) return {};
-  if (!isObj(v)) { if (strict) throw new Error('Per-chain USD caps must be an object of chain id → amount.'); return {}; }
+  if (!isObj(v)) { if (strict) throw new Error('Per-chain caps must be an object of chain id → amount.'); return {}; }
   const out: Record<string, number> = {};
   for (const [k, raw] of entries(v)) {
     const id = Number(k);
@@ -389,6 +400,7 @@ function finish(s: RouterSettings, chainIds: readonly number[]): RouterSettings 
     gasCaps: fillGas(s.gasCaps, known),
     maxGasPriceWei: fillGasPrice(s.maxGasPriceWei, known),
     maxPriorityFeeWei: fillPriority(s.maxPriorityFeeWei, fillGasPrice(s.maxGasPriceWei, known), known),
+    receiptTimeoutMs: clamp(Math.round(s.receiptTimeoutMs), 1, ROUTER_HARD_CAPS.receiptTimeoutMs),
     autoClaim: s.autoClaim === true,
   };
 }
@@ -431,6 +443,7 @@ export function settingsFromFile(raw: unknown, chainIds: readonly number[]): Rou
     gasCaps,
     maxGasPriceWei,
     maxPriorityFeeWei,
+    receiptTimeoutMs: num(raw.receiptTimeoutMs, base.receiptTimeoutMs, 1, ROUTER_HARD_CAPS.receiptTimeoutMs, true),
     autoClaim: raw.autoClaim === true,
     halt: readHalt(raw.halt),
   }, chainIds);
@@ -522,6 +535,9 @@ export function patchSettings(current: RouterSettings, body: unknown, chainIds: 
           (id) => defaultMaxPriorityFee(id, parseWei(next.maxGasPriceWei[String(id)], defaultGasPrice(id))),
         );
         break;
+      case 'receiptTimeoutMs':
+        next.receiptTimeoutMs = strictNum(body.receiptTimeoutMs, 'receiptTimeoutMs', 1, ROUTER_HARD_CAPS.receiptTimeoutMs, true);
+        break;
       case 'autoClaim':
         if (typeof body.autoClaim !== 'boolean') throw new Error('autoClaim must be true or false.');
         next.autoClaim = body.autoClaim;
@@ -533,8 +549,11 @@ export function patchSettings(current: RouterSettings, body: unknown, chainIds: 
   return finish(next, chainIds);
 }
 
-/** A saved `on: true` that live rules or a friend's copy cannot keep. */
+/**
+ * A restart never re-arms. A file left `on` (paper or live) boots off until this process turns it on.
+ * A friend's copy, and a live file that fails the live rules, stay off too.
+ */
 export function guardOn(s: RouterSettings, host: boolean): RouterSettings {
-  if (s.on && (!host || liveEnableError(s))) return { ...s, on: false };
+  if (s.on || !host || liveEnableError(s)) return { ...s, on: false };
   return s;
 }

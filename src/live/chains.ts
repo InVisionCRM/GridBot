@@ -10,17 +10,28 @@
  */
 import { NETWORKS, type LiveNetwork } from './networks';
 
-export type DexKind = 'v2' | 'v3';
+export type DexKind = 'v2' | 'v3' | 'v4';
 
 export interface DexConfig {
   id: string;
   name: string;
   kind: DexKind;
   factory: string;
-  /** V2: Router02. V3: SwapRouter02-compatible router (exactInputSingle without deadline + multicall(deadline, bytes[])). */
+  /** V2: Router02. V3: SwapRouter02-compatible router (exactInputSingle without deadline + multicall(deadline, bytes[])). V4: Universal Router. */
   router: string;
-  /** V3 only: QuoterV2 */
+  /** V3: QuoterV2. V4: the V4 Quoter. */
   quoter?: string;
+  /** V4 only: StateView (getSlot0 / getLiquidity). The live LP fee is getSlot0().lpFee. */
+  stateView?: string;
+  /** V4 only: Permit2. ERC-20 input is approved here, then Permit2 approves the Universal Router. */
+  permit2?: string;
+  /** V4 only: PoolManager deployment block. Initialize scans start here. */
+  v4StartBlock?: number;
+  /**
+   * V4 only: hook addresses that may trade. Empty / absent rejects every non-zero hook.
+   * address(0) (no hook) is always allowed. Listing a hook is an explicit override, including a hook with delta flags.
+   */
+  hookAllowlist?: string[];
   /** V2 only: LP fee in bps (verified against getAmountsOut). */
   feeBps?: number;
   /** V3 only: fee tiers in hundredths of a bip (100 = 0.01 %). Used to find pools; a pool's own fee() is its fee. */
@@ -206,13 +217,27 @@ export const CHAINS: ChainConfig[] = [
       }),
       { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap-v2-robinhood', screener: 'uniswap:v2', factory: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f', router: '0x89e5DB8B5aA49aA85AC63f691524311AEB649eba', feeBps: 30, lpShare: UNI_V2_LP_SHARE, source: 'https://github.com/Uniswap/contracts/blob/main/deployments/4663.md' },
       { id: 'pancakeswap-v3', name: 'PancakeSwap V3', kind: 'v3', gecko: 'pancakeswap-v3-robinhood', screener: 'pancakeswap:v3', factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865', router: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4', quoter: '0x8553AA1615549A86882151784b329B017aA7c832', feeTiers: TIERS_CAKE, protocolFee: 'pancake', source: 'https://developer.pancakeswap.finance/contracts/v3/addresses', note: 'Thin liquidity on WETH/USDG (Oct 2026); auto-pick prefers Uniswap.' },
+      {
+        id: 'uniswap-v4', name: 'Uniswap V4', kind: 'v4', gecko: 'uniswap-v4-robinhood',
+        // No factory: this is the PoolManager. Pools are Initialize logs from v4StartBlock, keyed by PoolKey.
+        factory: '0x8366a39CC670B4001A1121B8F6A443A643e40951',
+        // Universal Router 2.1.2 (current "Universal Router" in deployments/4663.md). 2.1.1 shares this calldata.
+        router: '0x204FAca1764B154221e35c0d20aBb3c525710498',
+        quoter: '0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94',
+        stateView: '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b',
+        permit2: '0x000000000022D473030F116dDEE9F6B43aC78BA3',
+        v4StartBlock: 9070,
+        source: 'https://developers.uniswap.org/docs/protocols/v4/deployments',
+        note: 'Singleton PoolManager. Swaps use Universal Router 2.1.2 and Permit2. The previous router 0x8876789976dEcBfCbBbe364623C63652db8C0904 accepts the same calldata. A non-zero hook is rejected unless it is listed in hookAllowlist; none are listed.',
+      },
     ],
     stack: 'arbitrum', gasUnits: { approve: 60_000, swap: 220_000 }, lowGasNative: 0.0005, blockTimeSec: 0.25, logChunk: 20_000,
     sources: [
       { label: 'Robinhood Chain — connecting (chain ID, RPC, explorer)', url: 'https://docs.robinhood.com/chain/connecting' },
       { label: 'Robinhood Chain — contracts (WETH, USDG)', url: 'https://docs.robinhood.com/chain/contracts' },
       { label: 'Uniswap v3 Robinhood deployments', url: 'https://developers.uniswap.org/docs/protocols/v3/deployments/v3-robinhood-deployments' },
-      { label: 'Uniswap/contracts deployments/4663.md (v2 + v3)', url: 'https://github.com/Uniswap/contracts/blob/main/deployments/4663.md' },
+      { label: 'Uniswap/contracts deployments/4663.md (v2, v3, v4)', url: 'https://github.com/Uniswap/contracts/blob/main/deployments/4663.md' },
+      { label: 'Uniswap v4 deployments (Robinhood Chain 4663)', url: 'https://developers.uniswap.org/docs/protocols/v4/deployments' },
       { label: 'PancakeSwap v3 addresses (Robinhood column)', url: 'https://developer.pancakeswap.finance/contracts/v3/addresses' },
     ],
     note: 'Arbitrum Orbit L2, mainnet since 2026-07-01, ETH gas. An Alchemy endpoint (needs your API key) can be added via RPC_URL_ROBINHOOD.',

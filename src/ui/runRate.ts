@@ -2,7 +2,7 @@
  * Per-day figures only for bots that have run at least a day.
  *
  * A rate from a short run says little: STONKD LP #2 showed about −2,361 USDG a day from an 8.8-hour paper run. Under a
- * day, the page shows the net for the run with its length instead ("−866 USDG over 8.8h"). Display only: the numbers
+ * day, the pages show no per-day or yearly figure (Generated for the run stands alone). Display only: the numbers
  * behind it (API fields, estimates) are unchanged; the APR sort follows what the APR column shows (`aprShown`).
  *
  * "Ran" is the bot's age since its current run started: `startedAt` (`openedAt` for token-trader positions), which a
@@ -55,14 +55,4 @@ export function rateOrRun(net: number | null | undefined, runMs: number | null |
 export function aprShown(runMs: number | null | undefined, yearPct: number | null | undefined): number | null {
   if (isShortRun(runMs)) return null;
   return typeof yearPct === 'number' && Number.isFinite(yearPct) ? yearPct : null;
-}
-
-/**
- * The tail of a sub-line under a headline net: the per-day rate once the bot has run a day, otherwise only the run
- * length ("over 8.8h"), because the net itself is the headline right above it.
- */
-export function rateOrSpan(net: number | null | undefined, runMs: number | null | undefined, rate: (perDay: number) => string): string {
-  if (isShortRun(runMs)) return runSpan(runMs);
-  if (typeof net !== 'number' || !Number.isFinite(net)) return '—';
-  return rate(net / ((runMs as number) / DAY_MS));
 }

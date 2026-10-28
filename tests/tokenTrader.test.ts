@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { TAX_TOLERANCE } from '../src/live/tax';
+import { readFileSync } from 'node:fs';
 import {
   decideExit, filterFresh, fromDexPair, fromTopPool, gateToken, replay, sizeBuy, splitSell,
   type ExitPos, type FreshPool, type GateInput,
 } from '../src/market/tokenTrader';
+import { effectiveMinLiquidityUsd, ENFORCED_LIQUIDITY_FLOOR_USD, gateMinLiquidityUsd, shownMinLiquidityUsd } from '../src/market/liquidityFloor';
+import { ethUsdOf, inEth } from '../src/ui/units';
 
 const clean = (o: Partial<GateInput> = {}): GateInput => ({
   mode: 'paper', risk: 'safe', honeypot: false, sellSimOk: true, paused: false, decimals: 18,
@@ -66,6 +69,42 @@ describe('safety gate', () => {
     expect(gateToken(clean({ holderConcentration: 0.6 })).reason).toMatch(/one holder/);
     expect(gateToken(clean({ holderConcentration: null })).ok).toBe(true);
     expect(gateToken(clean({ lpUnlocked: null, canPause: null })).ok).toBe(true);
+  });
+
+  it('ignores holder-check fields unless the check is on, then fails closed for safe and medium only', () => {
+    const unknown = clean({ holderConcentration: null });
+    const off = gateToken(unknown);
+    expect(gateToken({ ...unknown, holdersUnverified: true, top10Concentration: 0.99, holderUnavailable: 'no-source', holderChain: 'Ethereum', enforceHolderCheck: false })).toEqual(off);
+    expect(gateToken({ ...unknown, holderConcentration: 0.2, top10Concentration: 0.9, maxHolderShare: 0.1, maxTop10Share: 0.4 }).ok).toBe(true);
+    expect(gateToken({ ...unknown, enforceHolderCheck: true, holdersUnverified: true, holderUnavailable: 'read-failed', holderChain: 'Ethereum' }).reason).toBe('holder concentration unavailable: holder read failed for Ethereum');
+    expect(gateToken({ ...unknown, enforceHolderCheck: true, holdersUnverified: true, holderUnavailable: 'no-source', holderChain: 'PulseChain' }).reason).toBe('holder concentration unavailable: no holder data source for PulseChain');
+    expect(gateToken({ ...unknown, risk: 'medium', enforceHolderCheck: true, holdersUnverified: true, holderUnavailable: 'no-source', holderChain: 'PulseChain' }).ok).toBe(false);
+    expect(gateToken({ ...unknown, risk: 'any', enforceHolderCheck: true, holdersUnverified: true, holderUnavailable: 'no-source', holderChain: 'PulseChain' }).ok).toBe(true);
+    // Defaults when the check is on: 10% for one holder, 40% for the top 10. The safe-only 50% rule still speaks first.
+    const under = { enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.09, top10Concentration: 0.39 };
+    expect(gateToken({ ...unknown, risk: 'medium', ...under }).ok).toBe(true);
+    expect(gateToken({ ...unknown, risk: 'safe', ...under }).ok).toBe(true);
+    expect(gateToken({ ...unknown, risk: 'medium', ...under, holderConcentration: 0.11 }).reason).toBe('one holder has 11% (maximum 10%)');
+    expect(gateToken({ ...unknown, risk: 'medium', ...under, top10Concentration: 0.41 }).reason).toBe('top 10 holders have 41% (maximum 40%)');
+    expect(gateToken({ ...unknown, risk: 'medium', ...under, holderConcentration: 0.2, top10Concentration: 0.5, maxHolderShare: 0.25, maxTop10Share: 0.6 }).ok).toBe(true);
+    expect(gateToken({ ...unknown, risk: 'medium', ...under, holderConcentration: 0.3, maxHolderShare: 0.25, maxTop10Share: 0.6 }).reason).toBe('one holder has 30% (maximum 25%)');
+    expect(gateToken({ ...unknown, risk: 'any', enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.9, top10Concentration: 0.95 }).ok).toBe(true);
+    expect(gateToken(clean({ holderConcentration: 0.6, enforceHolderCheck: true, holdersUnverified: false, top10Concentration: 0.6 })).reason).toMatch(/one holder has 60%/);
+    const sample = { enforceHolderCheck: true, holdersUnverified: false, holderChain: 'Robinhood Chain' };
+    expect(gateToken(clean({ ...sample, holderConcentration: 0.23, top10Concentration: 0.27, holderUnseen: 0.71 })).reason).toBe('one holder has 23% (maximum 10%)');
+    expect(gateToken(clean({ ...sample, risk: 'medium', holderConcentration: 0.05, top10Concentration: 0.2, holderUnseen: 0.5 })).reason).toBe('holder concentration unavailable: holder read failed for Robinhood Chain');
+    expect(gateToken(clean({ ...sample, holderConcentration: 0.04, top10Concentration: 0.2, holderUnseen: 0.05 })).ok).toBe(true);
+    expect(gateToken(clean({ holderConcentration: 0.05, top10Concentration: 0.9, holderUnseen: 0.5 })).ok).toBe(true);
+    const thin = { enforceHolderCheck: true, holderThin: true, holderCoverage: 0.30286, holderWindowFrom: 99645000, holderCreationBlock: 99640000 };
+    expect(gateToken(clean(thin)).reason).toBe('holder concentration unknown: coverage thin (30.3% of supply, window from block 99645000, creation block 99640000)');
+    expect(gateToken(clean({ ...thin, risk: 'medium' })).ok).toBe(false);
+    const warned = gateToken(clean({ ...thin, risk: 'any' }));
+    expect(warned.ok).toBe(true);
+    expect(warned.warn).toMatch(/coverage thin \(30\.3%/);
+    expect(gateToken(clean({ holderThin: true, holderCoverage: 0.1 })).ok).toBe(true);
+    expect(gateToken(clean({ enforceHolderCheck: true, holderThin: false, holdersUnverified: false, holderConcentration: 0.11, top10Concentration: 0.2, holderCoverage: 0.95, holderUnseen: 0 })).reason).toBe('one holder has 11% (maximum 10%)');
+    expect(gateToken(clean({ risk: 'medium', enforceHolderCheck: true, holderThin: false, holdersUnverified: false, holderConcentration: 0.05, top10Concentration: 0.41, holderCoverage: 0.96, holderUnseen: 0 })).reason).toMatch(/top 10 holders have 41%/);
+    expect(gateToken(clean({ risk: 'medium', holderConcentration: 0.6, enforceHolderCheck: true, holdersUnverified: false, top10Concentration: 0.6, maxHolderShare: 0.8, maxTop10Share: 0.9 })).ok).toBe(true);
   });
 
   it('ignores a trade-size impact unless that check is on, then caps it and fails closed when the quote is missing', () => {
@@ -192,5 +231,52 @@ describe('replay and discovery rows', () => {
       chainId: 'ethereum', dexId: 'uni', pairAddress: '0x' + 'ef'.repeat(20),
       baseToken: { address: TOKEN, symbol: 'NEW' }, quoteToken: { address: WETH, symbol: 'WETH' },
     }, { id: 369, dexId: 'pulsechain', spend: new Set([WETH]), wrapped: WETH })).toBeNull();
+  });
+});
+
+describe('liquidity floor', () => {
+  it('defaults to the old floor of 0, so the $50,000 flag does nothing while it is off', () => {
+    expect(effectiveMinLiquidityUsd({})).toBe(0);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 0, enforceLiquidityFloor: false })).toBe(0);
+    expect(gateMinLiquidityUsd({ source: 'new' }, 0, {})).toBe(0);
+    expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 0 })).toBe(0);
+  });
+
+  it('honors a custom floor, and a reported 0 does not replace it', () => {
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 10_000, enforceLiquidityFloor: false })).toBe(10_000);
+    expect(gateMinLiquidityUsd({ source: 'new' }, 0, { minLiquidityUsd: 10_000 })).toBe(10_000);
+    expect(gateMinLiquidityUsd({ source: 'trending' }, 25_000, { minLiquidityUsd: 10_000 })).toBe(25_000);
+  });
+
+  it('the $50,000 flag raises a lower floor and does not lower a higher one', () => {
+    expect(ENFORCED_LIQUIDITY_FLOOR_USD).toBe(50_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 0, enforceLiquidityFloor: true })).toBe(50_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 10_000, enforceLiquidityFloor: true })).toBe(50_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 80_000, enforceLiquidityFloor: true })).toBe(80_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 80_000, enforceLiquidityFloor: false })).toBe(80_000);
+    expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { sniperMinLiquidityUsd: 5_000 })).toBe(5_000);
+    expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { enforceLiquidityFloor: true, sniperMinLiquidityUsd: 5_000 })).toBe(50_000);
+    expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { enforceLiquidityFloor: true, sniperMinLiquidityUsd: 80_000 })).toBe(80_000);
+  });
+
+  it('the desk shows the floor in force, in ETH at the snapshot price', () => {
+    expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 50_000 })).toBe(50_000);
+    expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 12_000 })).toBe(12_000);
+    const panel = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
+    expect(panel.match(/shownMinLiquidityUsd\(t\)/g)).toEqual(['shownMinLiquidityUsd(t)']);
+    expect(panel).toContain('Min liquidity (≈');
+    expect(panel).toContain('Enforce liquidity floor (≈');
+    expect(panel).toContain('In force ${liqEth(shownMinLiquidityUsd(t))}');
+    expect(panel).not.toContain('Min liquidity USD');
+    expect(panel).not.toContain('Enforce $');
+    expect(panel).not.toContain('.toLocaleString');
+    const price = ethUsdOf({ chains: [{ id: 1, nativeSymbol: 'ETH', nativeUsd: 2_500 }] });
+    expect(price).toBe(2_500);
+    expect(inEth(ENFORCED_LIQUIDITY_FLOOR_USD, price)).toBe('20 ETH');
+    expect(inEth(12_000, price)).toBe('4.8 ETH');
+    expect(inEth(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 50_000 }), null)).toBe('—');
+    expect(ethUsdOf({ chains: [{ id: 4663, nativeSymbol: 'ETH', nativeUsd: 1_800 }] }, {
+      wallet: [{ coin: { symbol: 'WETH', usdEach: 2_000 } }],
+    } as never)).toBe(2_000);
   });
 });

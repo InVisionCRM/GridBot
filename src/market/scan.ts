@@ -11,6 +11,7 @@
  *  3. Ranking (gridRank, lpRank), from that walk-forward: grids by how much the price swings, liquidity by what the
  *     position earned after costs.
  */
+import { usdAsEth } from '../lib/ethUnits';
 import { runGridBacktest } from './backtest';
 import type { Candle } from './candles';
 import type { CostModel } from './costs';
@@ -28,7 +29,7 @@ export const MAX_TEST_USD = 10_000_000;
 export function checkTestUsd(v: unknown): number {
   const n = Number(v);
   if (!Number.isFinite(n) || n < MIN_TEST_USD || n > MAX_TEST_USD) {
-    throw new Error(`Test size must be a dollar amount from $${MIN_TEST_USD} to $${MAX_TEST_USD.toLocaleString('en-US')}.`);
+    throw new Error(`Test size must be a number from ${usdAsEth(MIN_TEST_USD)} to ${usdAsEth(MAX_TEST_USD)}.`);
   }
   return n;
 }
@@ -133,7 +134,7 @@ export function pickTokens(pools: TopPool[], spendable: string[], wrapped: strin
     const wash = p.liquidityUsd > 0 && p.volume24Usd / p.liquidityUsd > rules.maxVolumeToLiquidity;
     const why = b && q ? 'both sides are the native coin or stablecoins'
       : !b && !q ? 'neither side is the native coin or a stablecoin'
-        : p.liquidityUsd < rules.minLiquidityUsd ? `liquidity $${Math.round(p.liquidityUsd).toLocaleString('en-US')} is below $${rules.minLiquidityUsd.toLocaleString('en-US')}`
+        : p.liquidityUsd < rules.minLiquidityUsd ? `liquidity ${usdAsEth(p.liquidityUsd)} is below ${usdAsEth(rules.minLiquidityUsd)}`
           : p.tx24 < rules.minTx24 ? `only ${p.tx24} trades in 24h`
             : ageMs != null && rules.minPoolAgeMs > 0 && ageMs < rules.minPoolAgeMs ? `pool is ${Math.max(0, Math.round(ageMs / 3600_000))}h old (minimum ${Math.round(rules.minPoolAgeMs / 3600_000)}h)`
               : null;
@@ -160,7 +161,7 @@ export interface Opportunity {
   spend: string;
   stack: string;
   dex: string;
-  kind: 'v2' | 'v3';
+  kind: 'v2' | 'v3' | 'v4';
   feeBps: number;
   risk: SafetyReport['risk'] | null;
   /** Why the safety check gave that risk */

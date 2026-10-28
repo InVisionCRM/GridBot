@@ -1,86 +1,121 @@
-import { createElement } from 'react';
+/**
+ * PR #72 review (pr-72.md) MEDs 1-3, after main's server metrics (#48 onward): under a day, no figure is shown twice
+ * on one screen, and the APR sort follows the APR cell.
+ */
+import { createElement, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { BotRow } from '../src/ui/botRow';
-import { ShowUsdCtx } from '../src/ui/money';
 import { LpDetail } from '../src/ui/LpDetail';
-import { deskItems, sortItems } from '../src/ui/deskTableModel';
-import { aprShown, DAY_MS, rateOrSpan } from '../src/ui/runRate';
+import { StatTable } from '../src/ui/StatTable';
+import { ShowUsdCtx } from '../src/ui/money';
+import { sortItems, type DeskItem } from '../src/ui/deskTableModel';
+import { botFacts } from '../src/ui/deskStats';
+import { gridMetrics, lpMetrics } from '../src/metrics/botMetrics';
+import { aprShown, DAY_MS } from '../src/ui/runRate';
+import { S } from './helpers/unitsScreens';
 
-// PR #72 review (pr-72.md) findings 1-3: under a day, no figure is shown twice on one screen.
-
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Obj = Record<string, any>;
 const H = 3_600_000;
-const grid = (id: string, ageMs: number, realized: number) => ({
-  kind: 'grid', id, label: id, mode: 'paper', status: 'running', startedAt: Date.now() - ageMs, usdPerQuote: 1,
-  base: 'NVDA', quoteSym: 'USDG',
-  config: { totalCapitalUsd: 100, lowerPrice: 10, upperPrice: 20, gridCount: 10 },
-  pnl: { realized, unrealized: 0 },
-  stats: { roundTrips: 1, wins: 1, totalFees: 0, totalGas: 0 },
-  moveCount: 1, recenter: { count: 0 },
-});
 const noop = () => undefined;
-const render = (el: ReturnType<typeof createElement>) => renderToStaticMarkup(createElement(ShowUsdCtx.Provider, { value: { on: false, set: noop } }, el));
-const cell = (html: string, c: string) => { const i = html.indexOf(`class="${c}"`); if (i < 0) return ''; const j = html.indexOf('<span class="desk-', i + 1); return html.slice(html.indexOf('>', i) + 1, j < 0 ? undefined : j); };
+const render = (el: ReactElement) => renderToStaticMarkup(createElement(ShowUsdCtx.Provider, { value: { on: false, set: noop } }, el));
 const text = (h: string) => h.replace(/<[^>]+>/g, '');
+/** The inner markup of a desk cell, up to the next desk cell. */
+const cell = (html: string, c: string) => { const i = html.indexOf(`class="${c}"`); if (i < 0) return ''; const j = html.indexOf('<span class="desk-', i + 1); return html.slice(html.indexOf('>', i) + 1, j < 0 ? undefined : j); };
 
-describe('aprShown / rateOrSpan', () => {
-  it('no APR under a day, the yearly estimate from a day on', () => {
+/** A real sanitized grid from the status payload (tests/helpers/unitsScreens.ts), with its run length set. */
+const GRID: Obj = S.grids.find((g: Obj) => g.id === 'g-mvpdl7h8-px5w');
+const grid = (id: string, ageMs: number): Obj => {
+  const now = Date.now();
+  const b: Obj = { ...GRID, id, label: id, startedAt: now - ageMs };
+  b.metrics = gridMetrics(b, now);
+  return b;
+};
+const row = (b: Obj) => render(createElement(BotRow, { s: { chains: [] }, b, nav: noop, pause: noop, close: noop, columns: true, metrics: true } as never));
+
+describe('aprShown', () => {
+  it('no APR under a day, the yearly figure from a day on', () => {
     expect(aprShown(8.8 * H, 0.5)).toBeNull();
     expect(aprShown(DAY_MS - 1, 0.5)).toBeNull();
     expect(aprShown(null, 0.5)).toBeNull();
     expect(aprShown(DAY_MS, 0.5)).toBe(0.5);
     expect(aprShown(3 * DAY_MS, null)).toBeNull();
   });
-  it('under a day only the run length follows a headline net, never the net again', () => {
-    const rate = (d: number) => `${d.toFixed(0)} USDG a day`;
-    expect(rateOrSpan(-866, 8.8 * H, rate)).toBe('over 8.8h');
-    expect(rateOrSpan(-866, 0, rate)).toBe('so far');
-    expect(rateOrSpan(300, 3 * DAY_MS, rate)).toBe('100 USDG a day');
-  });
 });
 
-describe('finding 1: Bots row APR cell does not repeat P&L %', () => {
-  it('a short run shows only "—" and the run length in the APR cell', () => {
-    const b = grid('short', 8.8 * H, 7);
-    const html = render(createElement(BotRow, { s: { chains: [] }, b, nav: noop, pause: noop, close: noop, columns: true, metrics: true } as never));
+describe('MED 1: the Bots row APR cell does not repeat the % column', () => {
+  it('a run under a day shows a dash only in the APR cell, with the % in its own column', () => {
+    const html = row(grid('short', 8.8 * H));
     const pctCell = text(cell(html, 'desk-pct'));
-    const apr = text(cell(html, 'desk-apr'));
-    expect(pctCell).toMatch(/7\.0%/);
-    expect(apr).toBe('—over 8.8h');
-    expect(apr).not.toContain(pctCell);
+    expect(pctCell).toMatch(/\d\.\d%/);
+    expect(text(cell(html, 'desk-apr'))).toBe('—');
   });
-  it('a run of a day or more still shows the yearly estimate', () => {
-    const html = render(createElement(BotRow, { s: { chains: [] }, b: grid('long', 2 * DAY_MS, 4), nav: noop, pause: noop, close: noop, columns: true, metrics: true } as never));
-    expect(text(cell(html, 'desk-apr'))).toMatch(/730\.0%/);
+  it('a stale yearly figure on a run under a day still is not shown', () => {
+    const b = grid('short-stale', 8.8 * H);
+    b.metrics = { ...b.metrics, aprPct: 12.34 };
+    expect(text(cell(row(b), 'desk-apr'))).toBe('—');
   });
-});
-
-describe('finding 2: the APR sort uses the value the APR cell shows', () => {
-  it('short runs (no APR shown) sort after every bot with an APR, in either direction', () => {
-    const items = deskItems([grid('a-short-big', 2 * H, 50), grid('b-long', 2 * DAY_MS, 4), grid('c-long-small', 3 * DAY_MS, 1)], () => 'PulseChain');
-    expect(sortItems(items, 'apr', 'desc').map((i) => i.name)).toEqual(['b-long', 'c-long-small', 'a-short-big']);
-    expect(sortItems(items, 'apr', 'asc').map((i) => i.name)).toEqual(['c-long-small', 'b-long', 'a-short-big']);
+  it('a run with enough history still shows its APR', () => {
+    const html = row(grid('long', 10 * DAY_MS));
+    expect(text(cell(html, 'desk-apr'))).toMatch(/%$/);
   });
 });
 
-describe('finding 3: LP "Earned after costs" sub-line does not repeat the net', () => {
-  const lp = (ageMs: number) => ({
-    id: 'lp1', label: 'STONKD LP #2', kind: 'lp', mode: 'paper', status: 'running', chainId: 369, base: 'STONKD', quote: 'USDG',
-    startedAt: Date.now() - ageMs, startValue: 5000, reranges: 0, usdPerQuote: 1, idle: { base: 0, quote: 0 }, config: { bandPct: 0.1 }, profits: { mode: 'keep' }, totals: { sent: 0 },
-    pnl: { net: -866.12345, fees: 1, gas: 0, swapCost: 0, moveLoss: 0, feeCoins: { base: 0, quote: 1 } },
-  });
-  const sub = (ageMs: number) => {
-    const html = render(createElement(LpDetail, { s: { lps: [lp(ageMs)], chains: [] }, id: 'lp1', events: [], ticks: [], nav: noop, act: noop, busy: false } as never));
-    const i = html.indexOf('Earned after costs');
-    const k = html.indexOf('<span class="sub">', i);
-    return text(html.slice(k, html.indexOf('<div class="kpi">', k)));
+describe('MED 2: the APR sort uses the value the APR cell shows', () => {
+  const item = (name: string, ageMs: number, aprPct: number | null): DeskItem => {
+    const b = grid(name, ageMs);
+    b.metrics = { ...b.metrics, aprPct, est: { ...b.metrics.est, d365: aprPct == null ? null : 1 } };
+    return { b, name, chain: 'Robinhood', chainId: null, group: 'Grid', facts: botFacts(b) };
   };
-  it('under a day: % of what you put in and the run length only', () => {
-    const s = sub(8.8 * H);
-    expect(s).toMatch(/of what you put in · over 8\.8h/);
-    expect(s).not.toMatch(/866/);
+  it('a run under a day (APR cell "—") sorts after every bot with an APR, both ways, even with a stale APR', () => {
+    const items = [item('a-short-stale', 2 * H, 99), item('b-long', 10 * DAY_MS, 0.5), item('c-long-small', 10 * DAY_MS, 0.1)];
+    for (const it of items) expect(text(cell(row(it.b), 'desk-apr')) === '—').toBe(it.name.includes('short'));
+    expect(sortItems(items, 'apr', 'desc').map((i) => i.name)).toEqual(['b-long', 'c-long-small', 'a-short-stale']);
+    expect(sortItems(items, 'apr', 'asc').map((i) => i.name)).toEqual(['c-long-small', 'b-long', 'a-short-stale']);
   });
-  it('a day or more: the per-day rate', () => {
-    expect(sub(2 * DAY_MS)).toMatch(/433.* a day/);
+});
+
+describe('MED 3: the LP page does not restate its headline under a day', () => {
+  const lp = (ageMs: number) => {
+    const now = Date.now();
+    const b: Obj = { ...S.lps.find((l: Obj) => l.status === 'running') ?? S.lps[1], startedAt: now - ageMs };
+    b.metrics = lpMetrics(b, now);
+    return b;
+  };
+  const page = (b: Obj) => render(createElement(LpDetail, { s: { ...S, lps: [b] }, id: b.id, events: [], ticks: null, nav: noop, act: noop, busy: false } as never));
+  const strip = (html: string) => { const i = html.indexOf('data-testid="top-strip"'); return html.slice(i, html.indexOf('data-testid="generated-pace"', i) > 0 ? html.indexOf('data-testid="generated-pace"', i) : undefined); };
+  /** The Pace card's text only. */
+  const pace = (html: string) => { const t = text(html.slice(html.indexOf('data-testid="generated-pace"'))); return t.slice(0, t.indexOf('not a forecast')); };
+  it('under a day: Generated shows once in the top strip, with no "net over the run" sub-line, and no pace scaled up', () => {
+    const b = lp(8.8 * H);
+    const html = page(b);
+    const top = text(strip(html));
+    expect(top).not.toMatch(/Earned after costs/);
+    expect(top).not.toMatch(/over 8\.8h/);
+    expect(top).not.toMatch(/of what you put in/);
+    // each coin of Generated is printed once in the strip's Generated tile
+    const tile = text(top.slice(0, top.indexOf('Liquidity provided')));
+    for (const [sym, u] of Object.entries(b.metrics.generated as Record<string, number>)) {
+      expect(tile.split(` ${sym}`).length - 1, `${u} ${sym}`).toBe(1);
+    }
+    expect(pace(html)).toMatch(/A day—shows after a dayA week—shows after a dayA month—shows after a day/);
+  });
+  it('from a day on, the pace rows are back', () => {
+    const html = page(lp(2 * DAY_MS));
+    expect(pace(html)).not.toMatch(/shows after a day/);
+    expect(pace(html)).toMatch(/A day[−+-]?\d/);
+  });
+});
+
+describe('kept from #72 through the merge: no Est. rows scaled up from under a day', () => {
+  const table = (ageMs: number) => text(render(createElement(StatTable, { b: grid('t', ageMs), s: S })));
+  it('under a day the Est. rows are dashes until a day', () => {
+    const t = table(8.8 * H);
+    for (const k of ['Est. 24h', 'Est. 7d', 'Est. 30d', 'Est. 365d']) expect(t).toContain(`${k}— (shows after a day)`);
+  });
+  it('from a day on the Est. 24h row has a figure', () => {
+    expect(table(2 * DAY_MS)).not.toContain('Est. 24h— (shows after a day)');
+    expect(table(2 * DAY_MS)).toMatch(/Est\. 24h[−+-]?\d/);
   });
 });

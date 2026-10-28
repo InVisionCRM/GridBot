@@ -1,0 +1,319 @@
+{
+  "crossSwapType": "bridgeableToBridgeable",
+  "amountType": "exactInput",
+  "checks": {
+    "allowance": {
+      "token": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "spender": "0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5",
+      "actual": "0",
+      "expected": "10000000000000000"
+    },
+    "balance": {
+      "token": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "actual": "100000000000",
+      "expected": "10000000000000000"
+    }
+  },
+  "approvalTxns": [
+    {
+      "chainId": 1,
+      "to": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "data": "0x095ea7b30000000000000000000000005c7bcd6e7de5423a257d81b442095a1a6ced35c5ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "steps": {
+    "bridge": {
+      "inputAmount": "10000000000000000",
+      "outputAmount": "9993819510862758",
+      "tokenIn": {
+        "decimals": 18,
+        "symbol": "WETH",
+        "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "name": "Wrapped Ether",
+        "chainId": 1
+      },
+      "tokenOut": {
+        "decimals": 18,
+        "symbol": "WETH",
+        "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+        "name": "Wrapped Ether",
+        "chainId": 4663
+      },
+      "fees": {
+        "amount": "6180489137242",
+        "pct": "618048913724200",
+        "token": {
+          "decimals": 18,
+          "symbol": "WETH",
+          "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+          "name": "Wrapped Ether",
+          "chainId": 1
+        },
+        "details": {
+          "type": "across",
+          "relayerCapital": {
+            "amount": "697083333334",
+            "pct": "69708333333400",
+            "token": {
+              "decimals": 18,
+              "symbol": "WETH",
+              "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+              "name": "Wrapped Ether",
+              "chainId": 1
+            }
+          },
+          "destinationGas": {
+            "amount": "5483405803908",
+            "pct": "548340580390800",
+            "token": {
+              "decimals": 18,
+              "symbol": "WETH",
+              "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+              "name": "Wrapped Ether",
+              "chainId": 1
+            }
+          },
+          "lp": {
+            "amount": "0",
+            "pct": "0",
+            "token": {
+              "decimals": 18,
+              "symbol": "WETH",
+              "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+              "name": "Wrapped Ether",
+              "chainId": 1
+            }
+          }
+        }
+      },
+      "provider": "across"
+    }
+  },
+  "inputToken": {
+    "decimals": 18,
+    "symbol": "WETH",
+    "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "name": "Wrapped Ether",
+    "chainId": 1
+  },
+  "outputToken": {
+    "decimals": 18,
+    "symbol": "WETH",
+    "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+    "name": "Wrapped Ether",
+    "chainId": 4663
+  },
+  "refundToken": {
+    "decimals": 18,
+    "symbol": "WETH",
+    "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "name": "Wrapped Ether",
+    "chainId": 1
+  },
+  "fees": {
+    "total": {
+      "amount": "6184397405112",
+      "amountUsd": "0.014500000000000001",
+      "token": {
+        "decimals": 18,
+        "symbol": "WETH",
+        "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "name": "Wrapped Ether",
+        "chainId": 1
+      },
+      "pct": "618439740511215",
+      "details": {
+        "type": "total-breakdown",
+        "swapImpact": {
+          "amount": "3908267870",
+          "amountUsd": "0.000009163363931034",
+          "token": {
+            "decimals": 18,
+            "symbol": "WETH",
+            "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "name": "Wrapped Ether",
+            "chainId": 1
+          },
+          "pct": "390826787015"
+        },
+        "app": {
+          "amount": "0",
+          "amountUsd": "0.0",
+          "token": {
+            "decimals": 18,
+            "symbol": "WETH",
+            "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+            "name": "Wrapped Ether",
+            "chainId": 4663
+          },
+          "pct": "0"
+        },
+        "bridge": {
+          "amount": "6180489137242",
+          "amountUsd": "0.014490836636068967",
+          "token": {
+            "decimals": 18,
+            "symbol": "WETH",
+            "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "name": "Wrapped Ether",
+            "chainId": 1
+          },
+          "pct": "618048913724200",
+          "details": {
+            "type": "across",
+            "lp": {
+              "amount": "0",
+              "amountUsd": "0.0",
+              "token": {
+                "decimals": 18,
+                "symbol": "WETH",
+                "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "name": "Wrapped Ether",
+                "chainId": 1
+              },
+              "pct": "0"
+            },
+            "relayerCapital": {
+              "amount": "697083333334",
+              "amountUsd": "0.00163438855416823",
+              "token": {
+                "decimals": 18,
+                "symbol": "WETH",
+                "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "name": "Wrapped Ether",
+                "chainId": 1
+              },
+              "pct": "69708333333400"
+            },
+            "destinationGas": {
+              "amount": "5482867949157",
+              "amountUsd": "0.012856448081900736",
+              "token": {
+                "chainId": 4663,
+                "address": "0x0000000000000000000000000000000000000000",
+                "decimals": 18,
+                "symbol": "ETH"
+              },
+              "pct": "548340580390800"
+            }
+          }
+        }
+      }
+    },
+    "totalMax": {
+      "amount": "6184397405112",
+      "amountUsd": "0.014500000000000001",
+      "token": {
+        "decimals": 18,
+        "symbol": "WETH",
+        "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "name": "Wrapped Ether",
+        "chainId": 1
+      },
+      "pct": "618439740511215",
+      "details": {
+        "type": "max-total-breakdown",
+        "maxSwapImpact": {
+          "amount": "3908267870",
+          "amountUsd": "0.000009163363931034",
+          "token": {
+            "decimals": 18,
+            "symbol": "WETH",
+            "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "name": "Wrapped Ether",
+            "chainId": 1
+          },
+          "pct": "390826787015"
+        },
+        "app": {
+          "amount": "0",
+          "amountUsd": "0.0",
+          "token": {
+            "decimals": 18,
+            "symbol": "WETH",
+            "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+            "name": "Wrapped Ether",
+            "chainId": 4663
+          },
+          "pct": "0"
+        },
+        "bridge": {
+          "amount": "6180489137242",
+          "amountUsd": "0.014490836636068967",
+          "token": {
+            "decimals": 18,
+            "symbol": "WETH",
+            "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "name": "Wrapped Ether",
+            "chainId": 1
+          },
+          "pct": "618048913724200",
+          "details": {
+            "type": "across",
+            "lp": {
+              "amount": "0",
+              "amountUsd": "0.0",
+              "token": {
+                "decimals": 18,
+                "symbol": "WETH",
+                "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "name": "Wrapped Ether",
+                "chainId": 1
+              },
+              "pct": "0"
+            },
+            "relayerCapital": {
+              "amount": "697083333334",
+              "amountUsd": "0.00163438855416823",
+              "token": {
+                "decimals": 18,
+                "symbol": "WETH",
+                "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "name": "Wrapped Ether",
+                "chainId": 1
+              },
+              "pct": "69708333333400"
+            },
+            "destinationGas": {
+              "amount": "5482867949157",
+              "amountUsd": "0.012856448081900736",
+              "token": {
+                "chainId": 4663,
+                "address": "0x0000000000000000000000000000000000000000",
+                "decimals": 18,
+                "symbol": "ETH"
+              },
+              "pct": "548340580390800"
+            }
+          }
+        }
+      }
+    },
+    "originGas": {
+      "amount": "0",
+      "amountUsd": "0.0",
+      "token": {
+        "chainId": 1,
+        "address": "0x0000000000000000000000000000000000000000",
+        "decimals": 18,
+        "symbol": "ETH"
+      }
+    },
+    "submission": null
+  },
+  "inputAmount": "10000000000000000",
+  "maxInputAmount": "10000000000000000",
+  "expectedOutputAmount": "9993819510862758",
+  "minOutputAmount": "9993819510862758",
+  "expectedFillTime": 2,
+  "swapTx": {
+    "ecosystem": "evm",
+    "simulationSuccess": false,
+    "chainId": 1,
+    "to": "0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5",
+    "data": "0xad5425c60000000000000000000000001111111111111111111111111111111111111111000000000000000000000000a8ad2e87e2043711d8bec77e8bc3e2683c0ab6bd000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000000bd7d308f8e1639fab988df18a8011f41eacad73000000000000000000000000000000000000000000000000002386f26fc10000000000000000000000000000000000000000000000000000002381536de4f3a60000000000000000000000000000000000000000000000000000000000001237000000000000000000000000fd03abcadaf3f930fa4e37eb2f6ea3a44a41b7f0000000000000000000000000000000000000000000000000000000006ae13c2b000000000000000000000000000000000000000000000000000000006ae1584b000000000000000000000000000000000000000000000000000000006ae13d13000000000000000000000000000000000000000000000000000000000000018000000000000000000000000000000000000000000000000000000000000005600000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000001400000000000000000000000000000000000000000000000000000000000000220000000000000000000000000a8ad2e87e2043711d8bec77e8bc3e2683c0ab6bd000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044ef8738d30000000000000000000000000bd7d308f8e1639fab988df18a8011f41eacad73000000000000000000000000111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000000000000000000000000a8ad2e87e2043711d8bec77e8bc3e2683c0ab6bd000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044ef8738d30000000000000000000000000bd7d308f8e1639fab988df18a8011f41eacad73000000000000000000000000111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000000000000000000000000bf75133b48b0a42ab9374027902e83c5e2949034000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000224d836083e000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000bd7d308f8e1639fab988df18a8011f41eacad73000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001111111111111111111111111111111111111111000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000046e6f6e65000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000073c0de",
+    "gas": "0"
+  },
+  "quoteExpiryTimestamp": 1793149499,
+  "id": "c6mlh-1793146122845-f50f6fce1832"
+}

@@ -2,6 +2,7 @@
  * Capital router settings service. Persists data/router.json through JsonStore (atomic, no secrets).
  * This module does not move funds. sendSafe.ts is the only broadcaster, and nothing calls it yet.
  * Host only: `host` must be passed true (the process is not a friend's copy). Otherwise the router stays off.
+ * A restart does not re-arm: a file left on boots off until this process turns it on.
  */
 import { requestHalt, type Halt } from '../bot/audit';
 import { redact } from '../bot/logger';
@@ -76,6 +77,7 @@ export class Router {
       gasCaps: copyCaps(s.gasCaps),
       maxGasPriceWei: { ...s.maxGasPriceWei },
       maxPriorityFeeWei: { ...s.maxPriorityFeeWei },
+      receiptTimeoutMs: s.receiptTimeoutMs,
       autoClaim: s.autoClaim,
       halt: s.halt ? { subject: 'router', halt: { ...s.halt.halt } } : null,
       configured: { ...this.configured },
@@ -176,6 +178,7 @@ export class Router {
       gasCaps: s.gasCaps,
       maxGasPriceWei: s.maxGasPriceWei,
       maxPriorityFeeWei: s.maxPriorityFeeWei,
+      receiptTimeoutMs: s.receiptTimeoutMs,
       autoClaim: s.autoClaim,
       halt: s.halt,
     });

@@ -4,6 +4,7 @@
  * never raise the score. Severe red flags block. Any other flag lowers the score.
  * Status `rejected` and V4 pools are skipped. Limits come from the plays config and are not widened.
  */
+import { usdAsEth } from '../lib/ethUnits';
 import { playsChain, quoteTokens } from './chainConfig';
 import { roundTripFromTiers, roundTripTooCostly } from './netMath';
 import {
@@ -237,7 +238,7 @@ export function reviewPlay(req: IntakeRequest): IntakeDecision {
   }
   const floor = liquidityFloor(req.candidate, req.options, venue != null);
   if (floor != null && req.candidate.liqUsd < floor) {
-    return no('liquidity', `liquidity $${Math.round(req.candidate.liqUsd).toLocaleString('en-US')} is under the $${Math.round(floor).toLocaleString('en-US')} minimum`);
+    return no('liquidity', `liquidity ${usdAsEth(req.candidate.liqUsd)} is under the ${usdAsEth(floor)} minimum`);
   }
 
   const { buy, sell } = vetted.taxes;
@@ -255,7 +256,7 @@ export function reviewPlay(req: IntakeRequest): IntakeDecision {
   const sizeEth = book === 'launchpad' ? launchpadPaperEth(req.options, paperOnly) : null;
 
   if (req.options.mode === 'live' && !req.options.liveLimits) {
-    return no('live_limits', 'live dollar limits are not set', { paperOnly });
+    return no('live_limits', 'live spending limits are not set', { paperOnly });
   }
 
   if (book !== 'launchpad' && req.history.bookUsd != null) {

@@ -1047,6 +1047,11 @@ label.wide input { min-width: 180px; }
 .join b { grid-column: 1; grid-row: 2; font-family: var(--mono); font-size: 26px; line-height: 1.15; font-weight: 500; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .join .sparkline, .join .segs { grid-column: 2; grid-row: 1 / span 2; justify-self: end; align-self: center; }
 .join .sparkline { width: 88px; height: 36px; max-width: none; }
+.join .fees-sub { grid-column: 1; grid-row: 3; font-size: 11px; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* units per coin ("+63.24 USDC · +0.00173 ETH"): wrap at the separators instead of cutting the figure off */
+.join b.units { font-size: 20px; white-space: normal; overflow-wrap: anywhere; }
+.join .fees-sub.units { white-space: normal; overflow: visible; }
+.join .fees-sub.units + .fees-sub.units { grid-row: 4; }
 .segs { display: flex; flex-wrap: wrap; gap: 3px; width: 72px; height: auto; margin: 0; justify-content: flex-end; }
 .segs i { flex: 1; background: var(--raised); border-radius: 1px; max-width: 18px; }
 .segs i.on { background: var(--profit); }
@@ -1195,6 +1200,7 @@ label.wide input { min-width: 180px; }
   .join > div:nth-child(2n) { border-right: 0; }
   .join > div:nth-last-child(-n+2) { border-bottom: 0; }
   .join b { font-size: 24px; white-space: normal; }
+  .join b.units { font-size: 16px; }
   .join .sparkline { width: 52px; height: 28px; }
   .segs { width: 52px; }
   .home-num { font-size: 36px; }
@@ -1236,7 +1242,7 @@ label.wide input { min-width: 180px; }
 .bot-menu-empty { margin: 8px; color: var(--muted); font-size: 13px; }
 .desk.desk-book { min-width: 0; }
 .desk.desk-book .desk-head, .desk.desk-book .desk-row {
-  grid-template-columns: minmax(0, 1.5fr) 80px minmax(0, 0.8fr) 84px 92px 64px 56px 72px 48px 64px 36px;
+  grid-template-columns: minmax(0, 1.4fr) 80px minmax(0, 0.7fr) 84px minmax(0, 1.1fr) 92px 64px 84px 56px 72px 48px 36px;
 }
 .desk.desk-book .desk-head > *, .desk.desk-book .desk-row > * { min-width: 0; }
 .desk.desk-book .desk-spark .sparkline { width: 72px; height: 28px; }
@@ -1267,6 +1273,10 @@ label.wide input { min-width: 180px; }
 .desk-group b { font-weight: 500; }
 .desk-group .mono, .desk-group .pos, .desk-group .neg { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .desk-chev { color: var(--muted); width: 12px; }
+/* Generated (the headline): units per token, dollars under it */
+.desk-gen { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 0; }
+.desk-gen b { display: block; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-gen small { font-size: 11px; color: var(--muted); }
 .desk-pct, .desk-age, .desk-apr, .desk-moves, .desk-fees { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
 .desk-apr .desk-run { display: block; font-size: 10px; color: var(--muted); white-space: nowrap; }
 .desk-expand { padding: 4px 0 12px; }
@@ -1292,6 +1302,108 @@ label.wide input { min-width: 180px; }
   .desk.desk-book .desk-row .desk-age,
   .desk.desk-book .desk-row .desk-apr,
   .desk.desk-book .desk-row .desk-moves,
-  .desk.desk-book .desk-row .desk-fees { display: none; }
+  .desk.desk-book .desk-row .desk-fees,
+  .desk.desk-book .desk-row .desk-pnl { display: none; }
+  .desk.desk-book .desk-row .desk-gen { grid-area: pnl; }
   .desk-group { width: calc(100% + 24px); margin-inline: -12px; padding-inline: 12px; }
+}
+
+/* Liquidity range health (LP bot page). The bar is the position; the mark is the price. */
+.lp-health { display: flex; flex-direction: column; gap: 8px; }
+.lp-health-top, .lp-health-scale { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.lp-health-scale { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+.lp-edge { font-family: var(--mono); font-size: 0.82rem; color: var(--accent); }
+.lp-edge.out { color: var(--loss); }
+.lp-health-bar { position: relative; height: 36px; margin-top: 4px; }
+.lp-health-track { position: absolute; left: 0; right: 0; top: 18px; height: 8px; border-radius: 99px; background: var(--line); }
+.lp-health-fill { position: absolute; top: 18px; height: 8px; border-radius: 99px; background: linear-gradient(90deg, #1f6b45, #8a9a2e 55%, #F0B90B); }
+.lp-health-fill.out { background: linear-gradient(90deg, #6b2a32, #F6465D); }
+.lp-health-mark { position: absolute; top: 8px; width: 2px; height: 22px; background: var(--text); transform: translateX(-1px); }
+.lp-health-mark i { position: absolute; top: -2px; left: 8px; font-style: normal; font-family: var(--mono); font-size: 11px; color: var(--accent); white-space: nowrap; }
+.lp-health-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.lp-health-stats .k { display: block; color: var(--muted); font-size: 0.75rem; }
+.lp-health-stats b { display: block; font-family: var(--mono); font-weight: 500; font-size: 0.95rem; }
+.lp-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.lp-policy { display: flex; flex-direction: column; gap: 10px; }
+@media (max-width: 640px) {
+  .lp-health-stats { grid-template-columns: 1fr 1fr; }
+  .lp-health-mark i { left: auto; right: 8px; }
+}
+
+/* Checking safety… (SafetyChecking.tsx) */
+.banner.checking { align-items: center; }
+.spinner { width: 14px; height: 14px; flex: none; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: currentColor; animation: spin 0.8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+
+/* Lock-screen alerts. Accent is the existing gold; type stays IBM Plex. */
+.alerts-page { display: flex; flex-direction: column; gap: 14px; padding-top: 8px; }
+.alerts-h { display: none; margin: 0; font-size: 22px; font-weight: 500; }
+.push-banner {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;
+  border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; padding: 12px 14px;
+}
+.push-banner b { color: var(--accent); font-weight: 500; }
+.push-banner p { margin: 0; min-width: 0; }
+.push-banner .actions { margin: 0; }
+.quiet-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.quiet-row label { display: flex; align-items: center; gap: 8px; color: var(--secondary); font-size: 13px; }
+.quiet-row input { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; height: 32px; padding: 0 8px; }
+.home-hint { margin: 0; }
+.alerts-desk { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr); gap: 16px; align-items: start; }
+.alerts-desk .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.rule { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.rule-head { border-top: 0; padding-bottom: 0; color: var(--muted); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+.rule strong { font-weight: 500; }
+.rule p { margin: 2px 0 0; }
+.rule-tog { display: flex; gap: 14px; align-items: center; }
+.rule-tog > span { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.rule-mark {
+  width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center;
+  font-style: normal; font-size: 11px; font-weight: 600; background: var(--raised); color: var(--secondary);
+}
+.rule-mark.fill { color: var(--profit); }
+.rule-mark.lp { color: var(--accent); }
+.rule-mark.halt { color: var(--loss); }
+.rule-mark.fail { color: var(--loss); }
+.rule-mark.gas { color: var(--accent-2); }
+.rule-mark.snipe { color: var(--profit); }
+.rule-mark.day { color: var(--secondary); }
+.switch {
+  appearance: none; width: 40px; height: 24px; border-radius: 999px; border: 0; padding: 2px;
+  background: var(--line-2); position: relative; cursor: pointer; flex: none;
+}
+.switch i { display: block; width: 20px; height: 20px; border-radius: 50%; background: var(--text); transition: transform 160ms ease; }
+.switch.on { background: var(--accent); }
+.switch.on i { transform: translateX(16px); background: var(--on-accent); }
+.switch:disabled { opacity: 0.45; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .switch i { transition: none; } }
+.g-mark {
+  width: 28px; height: 28px; border-radius: 6px; display: grid; place-items: center; flex: none;
+  background: var(--accent); color: var(--on-accent); font-style: normal; font-weight: 600; font-size: 14px;
+}
+.lp-health .lp-row { padding: 12px 0; border-top: 1px solid var(--line); }
+.lp-health .lp-row:first-of-type { border-top: 0; }
+.lp-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.lp-top p { margin: 2px 0 0; }
+.lp-edge { text-align: right; font-size: 12px; }
+.lp-edge b { display: block; font-family: var(--mono); font-size: 16px; font-weight: 500; }
+.lp-edge.near, .lp-edge.near b { color: var(--accent); }
+.lp-edge.out, .lp-edge.out b { color: var(--loss); }
+.lp-bounds { display: flex; justify-content: space-between; margin-top: 2px; }
+.lp-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.lp-stats span { display: block; color: var(--muted); font-size: 11px; }
+.lp-stats b { font-weight: 500; font-size: 13px; }
+.recent-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px 0; border-top: 1px solid var(--line); }
+.recent-row p { margin: 2px 0 0; }
+.recent-row time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+@media (max-width: 900px) {
+  .alerts-desk { grid-template-columns: 1fr; }
+  .recent-card { order: -1; }
+}
+@media (max-width: 860px) {
+  .alerts-h { display: block; }
+  .tabbar button { font-size: 10px; gap: 1px; }
+  .rule { grid-template-columns: 22px minmax(0, 1fr); }
+  .rule-tog { grid-column: 2; flex-direction: row; justify-content: flex-end; }
+  .rule-head { display: none; }
 }

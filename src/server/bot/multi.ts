@@ -4,18 +4,21 @@
  * state file (v3; legacy PulseChain state loads unchanged as chain 369). Also owns the candle store feed, market panels, alerts, analytics and
  * the activity bus.
  */
+import { gridMetrics, lpMetrics, trendMetrics, type BotMetrics } from '../../metrics/botMetrics';
+import { feesToday } from '../../metrics/feesToday';
 import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { LiveNetwork } from '../../live/networks';
-import { Hub } from '../chains/hub';
+import { Hub, SafetyBlocked, SafetyIncomplete, type StartAnywayInfo } from '../chains/hub';
 import { isFlipKey, unflipKey, type MarketDef } from '../../live/markets';
 import { checkGasReserve, reserveCfg } from '../../live/gasReserve';
 import { humanAmount } from '../../live/amount';
-import { totals, type LiveTrade } from '../../live/ledger';
+import { totals, upgradeConfigNames, upgradeQuoteNames, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
 import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
 import { LpEngine, freshLp, upgradeLp, type LpStartParams, type LpState } from './lpEngine';
-import { TaxWatch } from './taxWatch';
+import type { LpCompoundPolicy, LpRangePolicy } from '../../market/lpPolicy';
+import { MANUAL_CHECK, TaxWatch } from './taxWatch';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import { SharedNonce, TxGate } from './txGate';
@@ -25,10 +28,11 @@ import type { ChainReader, MarketSnapshot, Quoter, TxSender } from './chain';
 export interface PresetPool { dex: string; kind: 'v2' | 'v3'; address: string; feeBps: number; feeTier?: number; dexName: string; switchTo: boolean }
 import { getPreset, legKey, listPresets, resolvePreset, type ResolvedLeg } from '../../live/presets';
 import { sameAddr } from '../dex/types';
+import type { ReservedBalance } from '../swap/holds';
 import { costModelOf, gridEconomics, type EconCfg, type EconSummary } from './econ';
 import { capGridEntry } from '../../market/poolSize';
 import { ActivityBus } from './activity';
-import { requestHalt, systemHalt, type Halt } from './audit';
+import { requestHalt, startOverride, systemHalt, type Halt, type StartOverride } from './audit';
 import { CandleStore } from '../market/candleStore';
 import { closedOnly, fillGaps, isTF, replayCandles, sliceRange, type Candle, type TF } from '../../market/candles';
 import { atr, ema, efficiencyRatio, rsi } from '../../market/indicators';
@@ -36,6 +40,10 @@ import { simBuy, simSell, type CostModel, DEFAULT_COSTS } from '../../market/cos
 import { DEFAULT_TREND, type DrawnLine, type TrendConfig } from '../../market/strategy';
 import { runGridBacktest, runTrendBacktest, sweepTrend, SWEEP_AXES, type BtResult, type SweepKey } from '../../market/backtest';
 import { drawdown, pushCapped, tradeStats } from '../../market/stats';
+import { rpcHost, safeRpcHealth, safeRpcStatus } from '../chains/rpcUrl';
+
+/** A LIVE resume whose safety check was still running when Stop all / STOP chain / Stop landed: the stop won. */
+export class ResumeCancelled extends Error { readonly code = 'RESUME_CANCELLED'; }
 
 export type AlertType = 'price_above' | 'price_below' | 'rsi_above' | 'rsi_below' | 'grid_range';
 export interface Alert {
@@ -101,7 +109,12 @@ export interface MultiDeps {
   copy?: { friend: string; host: string } | null;
   /** A chain whose RPCs keep failing this long raises a banner + Activity entry (RPC_ALERT_MINUTES; default 3 min). */
   rpcAlertAfterMs?: number;
+  /** Boot: how long the safety re-check of live bots that were running may take in all, per market (default 45 s). */
+  bootCheckMs?: number;
 }
+
+/** Boot safety re-check of live bots that were running: all tries of one market together stop after this long. */
+export const BOOT_CHECK_MS = 45_000;
 
 export interface ChainWallet {
   chainId: number;
@@ -122,8 +135,9 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
       version: 4,
       defaults: { ...DEFAULT_LIMITS, ...((o.defaults as SafetyLimits) ?? {}) },
       // `opening` (the coins after setup, for "vs holding") is no longer kept
-      grids: (o.grids as (BotState & { opening?: unknown })[]).map(({ opening: _, ...g }) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
-      trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
+      // *Usd → *Quote names (always quote-coin amounts); the state file keeps the old names until the next save
+      grids: (o.grids as (BotState & { opening?: unknown })[]).map(upgradeQuoteNames).map(({ opening: _, ...g }) => ({ ...freshState(net, g.id), ...g, id: g.id || freshState(net).id })),
+      trends: Array.isArray(o.trends) ? (o.trends as TrendState[]).map(upgradeQuoteNames).map((t) => ({ ...freshTrend(net, t.id), ...t })) : [],
       // config.baseAmount arrived with funding from wallet coins: earlier bots put in none
       lps: Array.isArray(o.lps) ? (o.lps as LpState[]).map((t) => upgradeLp({ ...freshLp(net, t.id), ...t, config: t.config ? { ...t.config, baseAmount: t.config.baseAmount ?? 0 } : null })) : [],
       alerts: Array.isArray(o.alerts) ? (o.alerts as Alert[]) : [],
@@ -131,13 +145,39 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
       portfolio: o.version === 4 ? (o.portfolio as MultiState['portfolio']) : { live: [], paper: [] },
     };
   }
-  const g = o as unknown as BotState; // v1 single grid
+  const g = upgradeQuoteNames(o) as unknown as BotState; // v1 single grid
   if (g && (g.config != null || g.status || g.trades)) {
     const id = g.id || 'g1';
     return { ...empty(), defaults: { ...DEFAULT_LIMITS, ...(g.limits ?? {}) }, grids: [{ ...freshState(net, id), ...g, id, version: 1 }] };
   }
   return empty();
 }
+
+/**
+ * Live bots only (paper is simulated), every kind including LPs, in dollars. Feeds the "Total profit moved" push alert:
+ * realized + unrealized = each live bot's Total P&L (LP: net after costs and range moves + its price side). Everything
+ * comes from the bot's BotMetrics, so it matches the bot pages. A bot with no dollar rate is counted in `unpriced`.
+ */
+export function liveAggregate(grids: AnyBot[], trends: AnyBot[], lps: AnyBot[]) {
+  const a = { mode: 'live' as const, bots: 0, realized: 0, unrealized: 0, generatedUsd: 0, lpFeesEarnedUsd: 0, gasUsd: 0, feesUsd: 0, roundTrips: 0, plsHeld: 0, unpriced: 0 };
+  const add = (b: AnyBot, held: number, trips: number) => {
+    if (b.mode !== 'live') return;
+    a.bots++;
+    a.plsHeld += held;
+    a.roundTrips += trips;
+    const m = b.metrics;
+    if (!m || m.realizedUsd == null) { a.unpriced++; return; }
+    a.realized += m.realizedUsd; a.unrealized += m.unrealizedUsd ?? 0; a.generatedUsd += m.generatedUsd ?? 0;
+    a.gasUsd += m.gasUsd ?? 0; a.feesUsd += m.swapCostUsd ?? 0;
+    if (m.kind === 'lp') a.lpFeesEarnedUsd += m.feesEarnedUsd ?? 0;
+  };
+  for (const g of grids) add(g, g.pnl?.plsHeld ?? 0, g.stats?.roundTrips ?? 0);
+  for (const t of trends) add(t, t.position?.pls ?? 0, t.stats?.count ?? 0);
+  for (const l of lps) add(l, 0, 0);
+  return a;
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyBot = Record<string, any> & { mode?: string; metrics?: BotMetrics | null };
 
 /** Store that reads/writes one bot slice inside MultiState. */
 class SliceStore<T extends { id: string }> implements Store<T> {
@@ -225,7 +265,7 @@ export class MultiBot {
       now: () => this.now(),
       markets: () => this.watchedSafetyKeys(),
       current: (k) => this.hub.def(k).safety,
-      recheck: (k, why) => this.hub.recheck(k, { keepMeasured: why === 'scheduled' }),
+      recheck: (k, why) => this.hub.recheck(k, { keepMeasured: why === 'scheduled' || why === MANUAL_CHECK }),
       pause: (k, why) => this.pauseMarket(k, why),
       alert: (k, level, msg, notify) => this.activity.emitEvent({ type: 'alert', kind: 'system', level, notify, pair: k, chainId: this.hub.def(k).chainId, msg }),
       label: (k) => this.hub.label(k),
@@ -241,6 +281,117 @@ export class MultiBot {
       this.activity.emit('status');
     };
     this.resumeClosing();
+    this.bootSafety = this.checkAtBoot();
+  }
+
+  /**
+   * Live bots restored as running (state.json) on a market with a safety report are held until a fresh check of their
+   * market answers, like a Resume. Held grid and trend bots keep ticking for exits only: stop-loss, take-profit, exit
+   * signals and grid sells of what is held still fire and execute; no entry, grid buy, follow-the-price reseed or payout.
+   * A held liquidity bot (no stop / take-profit exits) only settles a tx already sent; no open, re-range or send.
+   * - passes → released to normal ticking;
+   * - completes and fails → an exit already queued or in flight settles, nothing new fires, then the bot is stopped
+   *   (safety pause) with the reasons; never resumed. Liquidity bots stop at once (a sent tx still settles);
+   * - can't complete (3 tries, at most bootCheckMs in all) → released on the last passing report, which is marked stale,
+   *   with a warning and an audit record on the bot (kind 'boot'); no passing report → stopped.
+   * Closing bots are not held (they only unwind). A tx already sent before the restart always settles.
+   */
+  readonly bootSafety: Promise<void>;
+  private readonly held = new Set<string>();
+  private isHeld(id: string) { return this.held.has(id); }
+
+  private async checkAtBoot(): Promise<void> {
+    type Bot = {
+      id: string; state: { mode: string; status: string; closing?: boolean; archivedAt?: number | null };
+      hold: () => void; release: () => void; failStop: (why: Halt) => void; setStartOverride: (o: StartOverride) => void;
+    };
+    const byKey = new Map<string, { bot: Bot; persist: () => void; label: string }[]>();
+    const add = (key: string, bot: Bot, persist: () => void, label: string) => {
+      const s = bot.state;
+      if (s.mode !== 'live' || s.status !== 'running' || s.closing || s.archivedAt) return;
+      if (!this.hub.has(key) || !this.hub.def(key).safety) return;
+      const k = unflipKey(key);
+      byKey.set(k, [...(byKey.get(k) ?? []), { bot, persist, label }]);
+      this.held.add(bot.id);
+      bot.hold();
+    };
+    const exitsOnly = (e: GridEngine | TrendEngine) => ({
+      id: e.state.id, state: e.state, hold: () => e.holdForSafety(), release: () => e.releaseSafetyHold(),
+      failStop: (h: Halt) => e.settleThenStop(h), setStartOverride: (o: StartOverride) => e.setStartOverride(o),
+    });
+    for (const e of this.engines.values()) add(e.state.stable, exitsOnly(e), () => this.persist(), `Grid ${this.hub.label(e.state.stable)}`);
+    for (const e of this.trendEngines.values()) add(e.state.quote, exitsOnly(e), () => this.persist(), e.state.name || this.hub.label(e.state.quote));
+    // Liquidity: no stop / take-profit exits; held = not ticked except to settle a tx already sent (tickAll).
+    for (const e of this.lpEngines.values()) add(e.state.market, { id: e.state.id, state: e.state, hold: () => undefined, release: () => undefined, failStop: (h) => e.stop(h), setStartOverride: (o) => e.setStartOverride(o) }, () => this.persist(), `Liquidity ${this.hub.label(e.state.market)}`);
+    if (!byKey.size) return;
+    await Promise.all([...byKey].map(async ([key, bots]) => {
+      const label = this.hub.label(key), chainId = this.hub.def(key).chainId;
+      const say = (level: 'info' | 'warn' | 'error', msg: string, notify: boolean, data?: Record<string, unknown>) =>
+        this.activity.emitEvent({ type: level === 'info' ? 'info' : 'alert', kind: 'system', level, notify, pair: key, chainId, msg, data });
+      try {
+        let info: StartAnywayInfo | null = null;
+        try {
+          info = (await this.hub.liveCheck(key, { startAnyway: true, deadlineMs: this.d.bootCheckMs ?? BOOT_CHECK_MS })).override;
+        } catch (e) {
+          // Completed and failed, or couldn't complete with no passing report to fall back on: never resumed.
+          const why = e instanceof SafetyBlocked || e instanceof SafetyIncomplete ? e.message : `safety check error: ${(e as Error).message}`;
+          const halt = systemHalt('safety-pause', `safety check after restart: ${why}`.slice(0, 300), this.now());
+          for (const b of bots) b.bot.failStop(halt);
+          say('error', `${label}: safety check after restart — ${why}. ${bots.length} live bot(s) stopped (an exit already triggered settles first); review, then resume.`, true);
+          return;
+        }
+        for (const b of bots) b.bot.release();
+        if (!info) { say('info', `${label}: safety re-checked after restart — passes; ${bots.length} live bot(s) carry on`, false); return; }
+        for (const b of bots) {
+          const audit = startOverride(info, this.now(), 'boot');
+          b.bot.setStartOverride(audit);
+          say('warn', `${b.label}: safety check after restart couldn't complete (${info.blockedBy}); kept running on the last passing report from ${new Date(info.lastKnownAt).toISOString()} (now stale)`, true, { botId: b.bot.id, startOverride: audit });
+        }
+      } finally {
+        for (const b of bots) this.held.delete(b.bot.id);
+        this.activity.emit('status');
+      }
+    }));
+  }
+
+  /**
+   * A LIVE resume runs the same fresh check as a start (3 tries). Completed and failing → refused with the reasons
+   * (SafetyBlocked). Couldn't complete → resumes on the last passing report (stale), audited as kind 'resume', with a
+   * warning; no Start anyway needed, the bot was already vetted and running. No passing report → refused.
+   * Returns undefined for paper / a running bot / a market without a safety report (resume as before).
+   */
+  private needsResumeCheck(mode: string, status: string, key: string) {
+    return mode === 'live' && status !== 'running' && this.hub.has(key) && !!this.hub.def(key).safety;
+  }
+  /**
+   * The fresh check for a LIVE resume, then `go` (the engine's resume) — unless a stop landed while the check ran.
+   * The bot is still `stopped` during the check, so Stop all / STOP chain / Stop (this bot) can't reach it through the
+   * engine; the start guard (Stop all / STOP chain, same as add()) and this bot's stop epoch are read again right
+   * before `go`. A stop that landed wins: the bot stays stopped, the cancelled resume is recorded (activity + log), and
+   * the caller gets ResumeCancelled.
+   */
+  private async resumeSafety(id: string, key: string, label: string, go: (o: StartOverride | null) => void): Promise<void> {
+    const guard = this.startGuard(() => this.hub.def(key).chainId);
+    const epoch = this.botStops.get(id)?.seq ?? 0;
+    const info = (await this.hub.liveCheck(key, { startAnyway: true })).override;
+    const mine = this.botStops.get(id);
+    const halt = guard() ?? (mine && mine.seq !== epoch ? mine.halt : null);
+    if (halt) {
+      const msg = `${label}: resume cancelled — ${halt.what === 'stop-all' ? 'Stop all' : halt.what === 'chain-stop' ? 'STOP chain' : 'Stop'} was pressed while the safety check ran; the bot stays stopped`;
+      this.d.log.warn(msg);
+      this.activity.emitEvent({ type: 'alert', kind: 'system', level: 'warn', notify: true, pair: key, chainId: this.hub.def(key).chainId, botId: id, msg, data: { halt, resumeCancelled: true } });
+      throw new ResumeCancelled(msg);
+    }
+    if (!info) { go(null); return; }
+    const audit = startOverride(info, this.now(), 'resume');
+    go(audit);
+    this.activity.emitEvent({ type: 'alert', kind: 'system', level: 'warn', notify: true, pair: key, chainId: this.hub.def(key).chainId, botId: id,
+      msg: `${label}: resumed on the last passing safety report from ${new Date(info.lastKnownAt).toISOString()} (now stale) — the fresh check couldn't complete (${info.blockedBy})`, data: { startOverride: audit } });
+  }
+  /** Per-bot Stop presses (stop / stopTrend / stopLp / stopById), so a resume waiting on its safety check can see one landed. */
+  private botStops = new Map<string, { seq: number; halt: Halt }>();
+  private noteBotStop(id: string, halt: Halt) {
+    this.botStops.set(id, { seq: (this.botStops.get(id)?.seq ?? 0) + 1, halt });
   }
 
   /** On-chain unwinds started by Close. They run beside the poll loop and don't wait for each other. */
@@ -351,6 +502,7 @@ export class MultiBot {
     eng = new LpEngine({
       net: this.d.net, store: new SliceStore(() => this.multi.lps, () => this.persist(), id), log: this.d.log, hub: this.hub,
       emit: (e) => this.activity.emitEvent(e), approval: this.d.approval, receiptTimeoutMs: this.d.receiptTimeoutMs, now: this.d.now, id,
+      candles: (market) => this.candles.get(market, '1h'),
     });
     this.lpEngines.set(id, eng);
     return eng;
@@ -371,8 +523,9 @@ export class MultiBot {
 
   // ── Grids ──────────────────────────────────────────────────────────────
   async add(p: StartParams): Promise<string> {
+    p = upgradeConfigNames(p); // `totalCapitalUsd` (old name, same quote-coin amount) still accepted
     const guard = this.startGuard(() => this.hub.def(p.stable ?? this.d.net.defaultQuote).chainId);
-    if (p.mode === 'live') await this.assertCovers(p.stable ?? this.d.net.defaultQuote, p.totalCapitalUsd, p.limits);
+    if (p.mode === 'live') await this.assertCovers(p.stable ?? this.d.net.defaultQuote, p.totalCapitalQuote, p.limits);
     const slot = freshState(this.d.net);
     slot.limits = { ...this.multi.defaults, ...(p.limits ?? {}) };
     this.multi.grids.push(slot);
@@ -382,15 +535,25 @@ export class MultiBot {
     return slot.id;
   }
   async start(id: string, p: StartParams) {
+    p = upgradeConfigNames(p);
     const eng = this.engine(id);
     const guard = p.guard ?? this.startGuard(() => this.hub.def(p.stable ?? eng.state.stable).chainId);
     p = { ...p, guard };
     // A running grid is refused by eng.start; checking coverage first would report a misleading shortfall.
-    if (p.mode === 'live' && eng.state.status !== 'running') await this.assertCovers(p.stable ?? eng.state.stable, p.totalCapitalUsd, p.limits);
+    if (p.mode === 'live' && eng.state.status !== 'running') await this.assertCovers(p.stable ?? eng.state.stable, p.totalCapitalQuote, p.limits);
     await eng.start(p);
   }
-  resume(id: string) { this.engine(id).resume(); }
-  stop(id: string, why?: Halt) { this.engine(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/grids/:id/stop', this.now())); }
+  /** Paper, or no safety report: resumes at once (as before). LIVE on a market with a report: fresh check first. */
+  resume(id: string): Promise<void> {
+    const e = this.engine(id);
+    if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.stable)) { e.resume(); return Promise.resolve(); }
+    return this.resumeSafety(id, e.state.stable, `Grid ${this.hub.label(e.state.stable)}`, (o) => e.resume(o));
+  }
+  stop(id: string, why?: Halt) {
+    const halt = why ?? requestHalt('bot-stop', 'POST /api/bot/grids/:id/stop', this.now());
+    this.engine(id).stop(halt);
+    this.noteBotStop(id, halt);
+  }
   setLimits(id: string, l: Partial<SafetyLimits>) { this.engine(id).setLimits(l); }
   setRecenter(id: string, enabled: boolean) { this.engine(id).setRecenter(enabled); }
   setProfits(id: string, p: ProfitMode) { return this.engine(id).setProfits(p); }
@@ -482,8 +645,17 @@ export class MultiBot {
     try { await eng.start({ ...p, limits: slot.limits, guard }); } catch (e) { this.removeTrend(slot.id, true); throw e; }
     return slot.id;
   }
-  resumeTrend(id: string) { this.trend(id).resume(); }
-  stopTrend(id: string, why?: Halt) { this.trend(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/trends/:id/stop', this.now())); }
+  /** Paper, or no safety report: resumes at once (as before). LIVE on a market with a report: fresh check first. */
+  resumeTrend(id: string): Promise<void> {
+    const e = this.trend(id);
+    if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.quote)) { e.resume(); return Promise.resolve(); }
+    return this.resumeSafety(id, e.state.quote, e.state.name || this.hub.label(e.state.quote), (o) => e.resume(o));
+  }
+  stopTrend(id: string, why?: Halt) {
+    const halt = why ?? requestHalt('bot-stop', 'POST /api/bot/trends/:id/stop', this.now());
+    this.trend(id).stop(halt);
+    this.noteBotStop(id, halt);
+  }
   /** Sell the open trend position and keep watching for the next signal. */
   sellTrend(id: string) {
     const e = this.trend(id);
@@ -526,8 +698,17 @@ export class MultiBot {
     try { await eng.start({ ...p, guard }); } catch (e) { this.removeLp(slot.id, true); throw e; }
     return slot.id;
   }
-  stopLp(id: string, why?: Halt) { this.lp(id).stop(why ?? requestHalt('bot-stop', 'POST /api/bot/lps/:id/stop', this.now())); }
-  resumeLp(id: string) { this.lp(id).resume(); }
+  stopLp(id: string, why?: Halt) {
+    const halt = why ?? requestHalt('bot-stop', 'POST /api/bot/lps/:id/stop', this.now());
+    this.lp(id).stop(halt);
+    this.noteBotStop(id, halt);
+  }
+  /** Paper, or no safety report: resumes at once (as before). LIVE on a market with a report: fresh check first. */
+  resumeLp(id: string): Promise<void> {
+    const e = this.lp(id);
+    if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.market)) { e.resume(); return Promise.resolve(); }
+    return this.resumeSafety(id, e.state.market, `Liquidity ${this.hub.label(e.state.market)}`, (o) => e.resume(o));
+  }
   closeLp(id: string, why?: Halt) {
     const e = this.lp(id);
     const live = e.close(why ?? requestHalt('close', 'POST /api/bot/lps/:id/close', this.now()));
@@ -536,6 +717,8 @@ export class MultiBot {
     return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
   }
   setLpRerange(id: string, enabled: boolean) { this.lp(id).setRerange(enabled); }
+  setLpPolicy(id: string, p: { range?: Partial<LpRangePolicy>; compound?: Partial<LpCompoundPolicy>; bandPct?: number }) { this.lp(id).setPolicy(p); }
+  compoundLp(id: string) { return this.lp(id).compoundNow(); }
   /** Move a liquidity bot's range to the price now, at a new width or the same one; it starts on the next tick. */
   moveLp(id: string, bandPct?: number) { return this.lp(id).move(bandPct); }
   setLpProfits(id: string, p: ProfitMode) { return this.lp(id).setProfits(p); }
@@ -563,7 +746,7 @@ export class MultiBot {
       const e = this.engine(id), s = e.state, c = s.config;
       if (!c || s.lastPrice == null) return null;
       const t = totals(e.modeTrades(), s.lastPrice);
-      return c.totalCapitalUsd + t.realized + t.unrealized - sentProfit(s);
+      return c.totalCapitalQuote + t.realized + t.unrealized - sentProfit(s);
     }
     const e = this.lp(id), s = e.state;
     // A closed one holds only its idle coins (and is never read again, so after a restart it has no reading)
@@ -690,7 +873,7 @@ export class MultiBot {
       const s = e.state, d = e.def;
       if (!d || s.mode !== 'live' || !s.config || (s.status !== 'running' && !s.inFlight)) continue;
       const t = totals(e.modeTrades(), s.lastPrice);
-      add(d, 'quote', s.id, 'grid', Math.max(0, s.config.totalCapitalUsd + t.realized - t.pos.costUsd - sentProfit(s)));
+      add(d, 'quote', s.id, 'grid', Math.max(0, s.config.totalCapitalQuote + t.realized - t.pos.costQuote - sentProfit(s)));
       add(d, 'base', s.id, 'grid', t.pos.plsHeld);
     }
     for (const e of this.trendEngines.values()) {
@@ -711,6 +894,35 @@ export class MultiBot {
       return { ...r, wallet, ok: wallet == null ? null : wallet + 1e-9 >= r.allocated };
     });
     return { rows: out, ok: out.every((r) => r.ok !== false), note: 'Each chain\'s native coin also needs headroom for gas on every swap.' };
+  }
+
+  /**
+   * Input of a live swap the router has already been asked to do (grid, trend, or an LP move) and that has not
+   * settled. Separate from allocations(), which is the bot's capital rather than this one in-flight transfer.
+   */
+  routerReservations(): ReservedBalance[] {
+    const out: ReservedBalance[] = [];
+    const push = (d: MarketDef, side: 'base' | 'quote', amount: number) => {
+      if (!(amount > 0)) return;
+      const tk = d[side];
+      out.push({ chainId: d.chainId, address: tk.address, native: !!tk.native, amount, source: 'in-flight' });
+    };
+    for (const e of this.engines.values()) {
+      const inf = e.state.inFlight, d = e.def;
+      if (!inf || !d || e.state.mode !== 'live') continue;
+      push(d, inf.job.side === 'buy' ? 'quote' : 'base', inf.job.amount);
+    }
+    for (const e of this.trendEngines.values()) {
+      const inf = e.state.inFlight, d = e.def;
+      if (!inf || !d || e.state.mode !== 'live') continue;
+      push(d, inf.job.side === 'buy' ? 'quote' : 'base', inf.job.amount);
+    }
+    for (const e of this.lpEngines.values()) {
+      const sw = e.state.step?.swap, d = e.def;
+      if (!sw || !d || e.state.mode !== 'live') continue;
+      push(d, sw.side === 'buy' ? 'quote' : 'base', sw.amountIn);
+    }
+    return out;
   }
 
   /** Markets whose tokens are tracked in wallets: legacy + chain defaults + custom + anything a bot/alert uses. */
@@ -876,6 +1088,7 @@ export class MultiBot {
       for (const e of this.lpEngines.values()) {
         if (e.state.archivedAt || e.state.status === 'idle' || e.state.status === 'closed') continue;
         const sent = !!(e.state.step?.hash || e.state.step?.swap);
+        if (this.isHeld(e.state.id) && !sent) continue; // boot safety check pending (grid / trend tick exits-only instead)
         if (e.state.status === 'running' || e.state.closing || sent || (e.state.status === 'stopped' && n % STOPPED_LP_EVERY === 0)) push(e.chainId, () => e.tick());
       }
       await Promise.all([...byChain.values()].map(async (jobs) => { for (const j of jobs) await j(); }));
@@ -1043,13 +1256,13 @@ export class MultiBot {
       if (!s.config || s.mode !== mode) continue;
       const tr = e.modeTrades();
       const t = totals(tr, s.lastPrice);
-      const capital = s.config.totalCapitalUsd;
+      const capital = s.config.totalCapitalQuote;
       const eqHist = s.equity ?? [];
       rows.push({
         id: s.id, kind: 'grid', name: `Grid ${e.label}`, pair: s.stable, chainId: e.chainId, mode: s.mode, status: s.archivedAt ? 'closed' : s.status, usdPerQuote: this.usdPerQuote(s.stable),
         capital, equity: capital + t.realized + t.unrealized, realized: t.realized, unrealized: t.unrealized,
-        fees: tr.reduce((a, x) => a + (x.feeQuote ?? 0), 0), gas: t.gasUsd,
-        plsHeld: t.pos.plsHeld, quoteFree: Math.max(0, capital + t.realized - t.pos.costUsd), startedAt: s.startedAt ?? tr[0]?.timestamp ?? null,
+        fees: tr.reduce((a, x) => a + (x.feeQuote ?? 0), 0), gas: t.gasQuote,
+        plsHeld: t.pos.plsHeld, quoteFree: Math.max(0, capital + t.realized - t.pos.costQuote), startedAt: s.startedAt ?? tr[0]?.timestamp ?? null,
         equityHist: eqHist,
         closed: tr.filter((x) => x.side === 'sell' && !x.failed && x.roundTripNet != null).map((x) => ({ pnl: x.roundTripNet!, t: x.timestamp })),
         trades: tr,
@@ -1063,7 +1276,7 @@ export class MultiBot {
         id: st.id, kind: 'trend', name: st.name, pair: st.quote, chainId: e.chainId, mode: st.mode, status: e.state.archivedAt ? 'closed' : st.status, usdPerQuote: this.usdPerQuote(st.quote),
         capital: st.capital, equity: st.pnl.equity, realized: st.pnl.realized, unrealized: st.pnl.unrealized, fees: st.pnl.fees, gas: st.pnl.gas,
         plsHeld: st.position?.pls ?? 0, quoteFree: st.cash, startedAt: st.startedAt, equityHist: e.state.equity,
-        closed: e.modeTrades().filter((x) => x.side === 'sell' && !x.failed).map((x) => ({ pnl: x.realizedPnlUsd, t: x.timestamp, holdMs: (x as TrendTrade).holdMs })),
+        closed: e.modeTrades().filter((x) => x.side === 'sell' && !x.failed).map((x) => ({ pnl: x.realizedPnlQuote, t: x.timestamp, holdMs: (x as TrendTrade).holdMs })),
         trades: e.modeTrades(), inMarket: st.stats.timeInMarket,
       });
     }
@@ -1104,7 +1317,7 @@ export class MultiBot {
     const day = new Date(now); day.setHours(0, 0, 0, 0);
     const periods = { today: day.getTime(), d7: now - 7 * 86_400_000, all: 0 };
     const usd = (r: (typeof rows)[number], v: number) => (r.usdPerQuote ? v * r.usdPerQuote : 0);
-    const realizedSince = (from: number) => rows.reduce((a, r) => a + usd(r, r.trades.filter((t) => t.timestamp >= from).reduce((s, t) => s + t.realizedPnlUsd, 0)), 0);
+    const realizedSince = (from: number) => rows.reduce((a, r) => a + usd(r, r.trades.filter((t) => t.timestamp >= from).reduce((s, t) => s + t.realizedPnlQuote, 0)), 0);
     // Only snapshots that carry the allocated capital can be compared: PnL = equity − capital, so starting,
     // adding or removing a bot is not counted as a gain or loss.
     const ph = this.multi.portfolio[mode];
@@ -1121,14 +1334,19 @@ export class MultiBot {
     }));
     // Portfolio curve at today's capital: capNow + PnL(t) (flows removed), so drawdown reflects trading only.
     const curve = ph.map(([t, v, , c]) => [t, capNow + (v - c)] as [number, number]);
+    // Per-bot return comes from the same metrics as /api/bot/status (src/metrics/botMetrics.ts).
+    const stNow = this.status();
+    const mOf = new Map([...stNow.grids, ...stNow.trends, ...stNow.lps].map((b) => [b.id, b.metrics] as const));
     const bots = rows.map((r) => {
       const st = tradeStats(r.closed);
+      const m = mOf.get(r.id) ?? null;
       return {
         id: r.id, kind: r.kind, name: r.name, pair: r.pair, chainId: r.chainId, mode: r.mode, status: r.status, usdPerQuote: r.usdPerQuote,
         capital: r.capital, equity: r.equity, equityUsd: usd(r, r.equity), capitalUsd: usd(r, r.capital),
         realized: r.realized, unrealized: r.unrealized, realizedUsd: usd(r, r.realized), unrealizedUsd: usd(r, r.unrealized),
-        feesUsd: usd(r, r.fees), gasUsd: usd(r, r.gas),
-        returnPct: r.capital ? r.equity / r.capital - 1 : 0,
+        feesUsd: usd(r, r.fees), gasUsd: usd(r, r.gas), fees: r.fees, gas: r.gas,
+        returnPct: m?.totalPnlPct ?? (r.capital ? r.equity / r.capital - 1 : 0),
+        metrics: m,
         plsHeld: r.plsHeld, quoteFree: r.quoteFree, startedAt: r.startedAt,
         stats: { ...st, profitFactor: st.profitFactor === Infinity ? null : st.profitFactor, maxDrawdown: drawdown(r.equityHist).max, timeInMarket: r.inMarket },
         equity_hist: r.equityHist.map(([t, v]) => [t, usd(r, v)] as [number, number]),
@@ -1146,7 +1364,7 @@ export class MultiBot {
       const d = this.hub.has(r.pair) ? this.hub.def(r.pair) : null;
       if (!d) continue;
       if (r.plsHeld > 0) addA(this.tokLabel(d.chainId, d.base.symbol), d.chainId, r.plsHeld * (this.hub.baseUsd(r.pair) ?? 0), r.plsHeld);
-      addA(this.tokLabel(d.chainId, d.quote.symbol), d.chainId, usd(r, r.quoteFree), null);
+      addA(this.tokLabel(d.chainId, d.quote.symbol), d.chainId, usd(r, r.quoteFree), r.quoteFree);
     }
     // Per-chain breakdown (aggregated ≈USD); live also shows each chain's gas wallet (paper spends no real gas).
     const chains = this.hub.runtimes().map((rt) => {
@@ -1173,7 +1391,7 @@ export class MultiBot {
       bots,
       portfolio: curve,
       portfolioDrawdown: drawdown(curve).max,
-      notes: ['≈USD: each bot\'s quote token is converted at today\'s rate — stables = $1, other tokens through the chain\'s native/stable market (PulseChain: PLS/DAI); historical equity points use today\'s rate. Bots whose quote has no USD route are excluded.', 'Period change = change in PnL (equity − allocated capital) from portfolio snapshots taken every minute while the server runs, so starting or removing a bot is not counted. "partial" = history starts after the period start.', 'The portfolio curve is drawn at today\'s allocated capital (capital + PnL at each time).'],
+      notes: ['Cross-coin totals ≈ETH: each bot\'s quote coin is converted at today\'s rate through the chain\'s native/stable market (PulseChain: PLS/DAI), then to ETH at Ethereum\'s; historical equity points use today\'s rate. Bots whose quote coin has no price route are left out.', 'Period change = change in PnL (equity − allocated capital) from portfolio snapshots taken every minute while the server runs, so starting or removing a bot is not counted. "partial" = history starts after the period start.', 'The portfolio curve is drawn at today\'s allocated capital (capital + PnL at each time).'],
     };
   }
 
@@ -1181,11 +1399,11 @@ export class MultiBot {
     const rows: JournalRow[] = [];
     const push = (botId: string, kind: 'grid' | 'trend', bot: string, t: LiveTrade & { reason?: string }) => {
       const k = this.usdPerQuote(t.stable);
-      const pnl = t.side === 'sell' || t.failed ? (t.roundTripNet ?? t.realizedPnlUsd) : null;
+      const pnl = t.side === 'sell' || t.failed ? (t.roundTripNet ?? t.realizedPnlQuote) : null;
       rows.push({
         t: t.timestamp, botId, kind, bot, pair: t.stable, mode: t.paper ? 'paper' : 'live', side: t.side,
         reason: t.reason ?? (t.manual ? 'manual' : t.closeSale ? 'close' : t.levelPrice != null ? `level ${t.levelPrice.toPrecision(5)}` : t.failed ? 'failed' : 'grid'),
-        pls: t.plsAmount, quote: t.stableAmount, price: t.price, fee: t.feeQuote ?? 0, gas: t.gasUsd, pnl, pnlUsd: pnl != null && k ? pnl * k : null,
+        pls: t.plsAmount, quote: t.stableAmount, price: t.price, fee: t.feeQuote ?? 0, gas: t.gasQuote, pnl, pnlUsd: pnl != null && k ? pnl * k : null,
         slippagePct: t.slippagePct ?? null, tx: t.txHash, failed: !!t.failed,
       });
     };
@@ -1336,7 +1554,7 @@ export class MultiBot {
     const { summary } = await gridEconomics(this.hub.quoter(quote), cfg, this.d.approval ?? 'exact');
     this.hub.setSpot(quote, summary.spot);
     try { await this.hub.nativeUsdAsync(def.chainId); } catch { /* optional */ }
-    const entry = capGridEntry({ capital: cfg.totalCapitalUsd, quoteReserve: summary.poolQuote, feeBps: def.pool.feeBps, maxImpact: 0.03, gridCount: cfg.gridCount });
+    const entry = capGridEntry({ capital: cfg.totalCapitalQuote, quoteReserve: summary.poolQuote, feeBps: def.pool.feeBps, maxImpact: 0.03, gridCount: cfg.gridCount });
     return { ...summary, entry: { amount: entry.amount, why: entry.why }, usdPerQuote: this.hub.usdPerQuote(quote), feeBps: def.pool.feeBps, chainId: def.chainId, label: this.hub.label(quote) };
   }
 
@@ -1361,7 +1579,7 @@ export class MultiBot {
       if (cur.poolMode === 'manual') continue;
       try {
         const b = (await this.hub.poolOptions(key)).best;
-        if (!b || b.mid == null) continue;
+        if (!b || b.mid == null || (b.kind !== 'v2' && b.kind !== 'v3')) continue;
         const same = b.dex === cur.pool.dex && (b.kind === 'v2' || sameAddr(b.address, cur.pool.address));
         const pool = { dex: b.dex, kind: b.kind, address: b.address, feeBps: b.feeBps, ...(b.feeTier != null ? { feeTier: b.feeTier } : {}) };
         const quoter = same ? this.hub.quoter(key) : this.hub.quoterOnPool(key, pool);
@@ -1374,7 +1592,7 @@ export class MultiBot {
     for (const leg of resolved) {
       const b = best[leg.quote];
       const econ = leg.capital == null ? null
-        : (await gridEconomics(b?.quoter ?? this.hub.quoter(leg.quote), { ...leg, totalCapitalUsd: leg.capital }, this.d.approval ?? 'exact')).summary;
+        : (await gridEconomics(b?.quoter ?? this.hub.quoter(leg.quote), { ...leg, totalCapitalQuote: leg.capital }, this.d.approval ?? 'exact')).summary;
       legs.push({ ...leg, econ, label: this.hub.label(leg.quote), ...(b ? { pool: b.pool } : {}) });
     }
     return { preset: { id: preset.id, name: preset.name, blurb: preset.blurb }, spots, legs };
@@ -1382,7 +1600,7 @@ export class MultiBot {
 
   async startPreset(
     id: string,
-    opts: { mode: Mode; quote?: string; amounts: Record<string, number>; limits?: Parameters<GridEngine['start']>[0]['limits']; recenter?: boolean; profits?: ProfitMode },
+    opts: { mode: Mode; quote?: string; amounts: Record<string, number>; limits?: Parameters<GridEngine['start']>[0]['limits']; recenter?: boolean; profits?: ProfitMode; startAnyway?: boolean },
   ): Promise<{ ids: string[]; legs: ResolvedLeg[] }> {
     const { legs } = await this.previewPreset(id, opts);
     const missing = legs.filter((l) => l.capital == null).map((l) => l.label);
@@ -1393,7 +1611,7 @@ export class MultiBot {
       for (const leg of legs) {
         ids.push(await this.add({
           mode: opts.mode, stable: leg.quote, lowerPrice: leg.lowerPrice, upperPrice: leg.upperPrice, gridCount: leg.gridCount,
-          totalCapitalUsd: leg.capital!, limits: opts.limits, recenter: opts.recenter, profits: opts.profits,
+          totalCapitalQuote: leg.capital!, limits: opts.limits, recenter: opts.recenter, profits: opts.profits, startAnyway: opts.startAnyway,
         }));
       }
     } catch (e) {
@@ -1472,7 +1690,8 @@ export class MultiBot {
   }
   async recheckMarket(key: string) {
     // Route through TaxWatch so a rising tax / honeypot on a live market pauses bots the same way a scheduled check would.
-    const c = await this.taxWatch.check(key, 'manual');
+    const c = await this.taxWatch.check(key, MANUAL_CHECK);
+    // An RPC hiccup on this check warns, marks the market stale and returns the last known report: no pause.
     if (c?.report) return c.report;
     const r = await this.hub.recheck(key);
     this.activity.emitEvent({ type: 'info', kind: 'system', level: r.liveAllowed ? 'info' : 'warn', pair: key, chainId: this.hub.def(key).chainId, msg: `Safety re-check ${this.hub.label(key)}: ${r.risk}${r.liveAllowed ? '' : ' — live trading blocked'}` });
@@ -1528,8 +1747,9 @@ export class MultiBot {
         dexes: c.dexes.map((x) => ({ id: x.id, name: x.name, kind: x.kind })),
         hasSigner: !!rt.signer, address: w?.address ?? rt.gas.address, gasNative: w?.native ?? rt.gas.native, lowGas: rt.gas.low,
         lowGasNative: c.lowGasNative, nativeUsd: this.hub.nativeUsd(c.id), walletError: w?.error ?? rt.gas.error ?? null,
-        txBusy: rt.gate.busy, rpc: rt.reader.currentUrl ?? null, rpcStatus: rt.reader.status ?? null,
-        rpcHealth: rt.reader.health?.() ?? null, bots,
+        // RPC URLs can hold an API key: the status shows scheme://host[:port] only (chains/rpcUrl.ts).
+        txBusy: rt.gate.busy, rpc: rpcHost(rt.reader.currentUrl ?? null), rpcStatus: safeRpcStatus(rt.reader.status),
+        rpcHealth: safeRpcHealth(rt.reader.health?.()), bots,
       };
     });
   }
@@ -1557,28 +1777,35 @@ export class MultiBot {
     }));
   }
 
+  /** One bot's money figures (the same object /api/bot/status carries as `metrics`). Null for an unknown id. */
+  metricsFor(id: string): BotMetrics | null {
+    const st = this.status();
+    const b = [...st.grids, ...st.trends, ...st.lps].find((x) => x.id === id);
+    return b ? b.metrics : null;
+  }
+
   status() {
+    // The injected clock, the same one that stamps each engine's lastPriceAt (a mocked startedAt never meets a wall-clock asOf)
+    const now = this.now();
+    // Metrics are as of the bot's last price reading, not the wall clock: status() then only changes when a bot
+    // actually ticks (the v2 stream sends no patch for a clock that moved), and a stopped bot's rates stop at its
+    // last reading. A bot with no reading yet uses the current minute.
+    const asOf = (b: { priceAt?: number | null }) => (typeof b.priceAt === 'number' && b.priceAt > 0 && b.priceAt <= now ? b.priceAt : Math.floor(now / 60_000) * 60_000);
     const grids = this.multi.grids.map((g) => {
       const st = (this.engines.get(g.id) ?? this.attach(g.id)).status();
-      return { ...st, kind: 'grid' as const, usdPerQuote: this.usdPerQuote(st.stable) };
+      const out = { ...st, kind: 'grid' as const, usdPerQuote: this.usdPerQuote(st.stable) };
+      return { ...out, metrics: gridMetrics(out, asOf(st)) };
     });
     const trends = this.multi.trends.map((t) => {
       const st = (this.trendEngines.get(t.id) ?? this.attachTrend(t.id)).status();
-      return { ...st, usdPerQuote: this.usdPerQuote(st.quote) };
+      const out = { ...st, usdPerQuote: this.usdPerQuote(st.quote) };
+      return { ...out, metrics: trendMetrics(out, asOf(st)) };
     });
-    const lps = this.multi.lps.map((t) => (this.lpEngines.get(t.id) ?? this.attachLp(t.id)).status());
-    const z = { realized: 0, unrealized: 0, gasUsd: 0, feesUsd: 0, roundTrips: 0, plsHeld: 0, unpriced: 0 };
-    const aggregate = grids.reduce((a, g) => {
-      const k = g.usdPerQuote;
-      if (k == null) return { ...a, unpriced: a.unpriced + 1, plsHeld: a.plsHeld + g.pnl.plsHeld };
-      return { ...a, realized: a.realized + g.pnl.realized * k, unrealized: a.unrealized + g.pnl.unrealized * k, gasUsd: a.gasUsd + g.pnl.gasUsd * k, feesUsd: a.feesUsd + g.stats.totalFees * k, roundTrips: a.roundTrips + g.stats.roundTrips, plsHeld: a.plsHeld + g.pnl.plsHeld };
-    }, z);
-    for (const t of trends) {
-      const k = t.usdPerQuote;
-      aggregate.plsHeld += t.position?.pls ?? 0;
-      if (k == null) { aggregate.unpriced++; continue; }
-      aggregate.realized += t.pnl.realized * k; aggregate.unrealized += t.pnl.unrealized * k; aggregate.gasUsd += t.pnl.gas * k; aggregate.feesUsd += t.pnl.fees * k; aggregate.roundTrips += t.stats.count;
-    }
+    const lps = this.multi.lps.map((t) => {
+      const st = (this.lpEngines.get(t.id) ?? this.attachLp(t.id)).status();
+      return { ...st, metrics: lpMetrics(st, asOf(st)) };
+    });
+    const aggregate = liveAggregate(grids, trends, lps);
     return {
       network: this.d.net.key, chainId: this.d.net.chainId, explorer: this.d.net.explorer,
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol),
@@ -1588,8 +1815,11 @@ export class MultiBot {
       legacyChainId: this.hub.legacyChainId,
       chains: this.chainsStatus(),
       marketList: this.marketList(),
+      /** Live bots held after a restart until their market's safety check answers (ids). The page shows "checking safety…". */
+      safetyChecking: [...this.held],
       safetyStale: this.hub.list().filter((d) => d.safety?.stale).map((d) => ({ key: d.key, label: this.hub.label(d.key), at: d.safety!.at, ...d.safety!.stale! })),
       grids, trends, lps, aggregate, allocations: this.allocations(), alerts: this.multi.alerts,
+      feesToday: feesToday([...grids, ...trends, ...lps], now),
       candleSync: this.candleSyncStatus?.() ?? null,
       log: this.d.log.entries.slice(-80).reverse(),
     };

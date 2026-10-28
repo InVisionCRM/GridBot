@@ -88,6 +88,10 @@ export interface SendSafeOpts {
   maxPriorityFeeWei: bigint;
   /** Extra wei (Orbit L1 component) added to the fee check. Omit on an L1. */
   l1FeeWei?: bigint;
+  /**
+   * Receipt wait, ms. Clamped to 180s. The gate budget, fixed when the gate is taken, is that plus 60s.
+   * Omit for 120s.
+   */
   receiptTimeoutMs?: number;
   /**
    * Required. Read inside the gate, immediately before the nonce is taken.
@@ -100,14 +104,50 @@ export interface SendSafeOpts {
 }
 
 /**
- * The halted predicate a router send must use. Stop all sets the halt; `on` is false by default
- * and is not itself a halt, so a check of the on flag would refuse every send before Stop all.
+ * The halted predicate a router send must use. True unless this process has the router on, in live
+ * mode, and not panic-halted. Off (the default) and paper both block a send. Stop all sets the panic halt.
  */
-export function routerSendHalted(router: { isHalted(): boolean }): () => boolean {
-  return () => router.isHalted();
+export function routerSendHalted(router: {
+  isHalted(): boolean;
+  status(): { on: boolean; mode: 'paper' | 'live' };
+}): () => boolean {
+  return () => {
+    if (router.isHalted()) return true;
+    const s = router.status();
+    return s.on !== true || s.mode !== 'live';
+  };
 }
 
 export type SendSafeStatus = 'confirmed' | 'pending' | 'reverted' | 'replaced' | 'cancelled';
+
+/** Receipt wait is never longer than this. Settings validation uses the same cap. */
+export const RECEIPT_TIMEOUT_CAP_MS = 180_000;
+/** Slack after the capped receipt wait. One deadline for the whole time the chain gate is held. */
+export const GATE_SLACK_MS = 60_000;
+const DEFAULT_RECEIPT_TIMEOUT_MS = 120_000;
+
+export function clampedReceiptTimeoutMs(ms: number | undefined): number {
+  const n = typeof ms === 'number' && Number.isFinite(ms) ? ms : DEFAULT_RECEIPT_TIMEOUT_MS;
+  if (n < 1) return 1;
+  return Math.min(RECEIPT_TIMEOUT_CAP_MS, n);
+}
+
+/**
+ * Two marks, both fixed when the gate is taken.
+ * The receipt wait stops at the capped receipt timeout.
+ * The next 60s is only for the known-tx check, so a slow RPC can still say the broadcast is unknown.
+ */
+export function sendDeadlines(receiptTimeoutMs: number | undefined, now = Date.now()): { receipt: number; gate: number } {
+  const receipt = now + clampedReceiptTimeoutMs(receiptTimeoutMs);
+  return { receipt, gate: receipt + GATE_SLACK_MS };
+}
+
+/** Absolute time when a send that already holds the chain gate must stop. */
+export function gateDeadlineAt(receiptTimeoutMs: number | undefined, now = Date.now()): number {
+  return sendDeadlines(receiptTimeoutMs, now).gate;
+}
+
+export const GATE_BUDGET_REASON = 'time budget elapsed while this chain\'s gate was held; the transaction may still be in the mempool';
 
 export interface SendSafeResult {
   status: SendSafeStatus;
@@ -117,6 +157,8 @@ export interface SendSafeResult {
   gasLimit: bigint;
   nonce: number;
   replacementHash?: string;
+  /** Set when the gate budget expired. The tx may still be pending. */
+  reason?: string;
 }
 
 interface Plan {
@@ -132,6 +174,42 @@ interface Outcome {
   state: SendSafeResult['state'];
   hash: string;
   replacementHash?: string;
+  reason?: string;
+}
+
+class GateBudget extends Error {
+  constructor() {
+    super(GATE_BUDGET_REASON);
+    this.name = 'GateBudget';
+  }
+}
+
+function budgetPending(hash: string): Outcome {
+  return { status: 'pending', state: 'source_sent', hash, reason: GATE_BUDGET_REASON };
+}
+
+/** Stop waiting on one RPC when the gate deadline is reached, and drop the timer either way. */
+async function withinBudget<T>(deadline: number, work: Promise<T>): Promise<T> {
+  const left = deadline - Date.now();
+  void work.catch(() => undefined);
+  // A call that has already missed its deadline must not wait. Callers that still need an answer
+  // use a later deadline (the gate mark) so a slow known-tx check can finish.
+  if (left <= 0) throw new GateBudget();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new GateBudget()), left);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function rpc(o: SendSafeOpts, deadline: number | undefined, method: string, params: unknown[]): Promise<unknown> {
+  const work = o.reader.send(method, params);
+  if (deadline == null) return work;
+  return withinBudget(deadline, work);
 }
 
 /** gasLimit = min(estimate × 1.2, cap). estimate above the cap throws. */
@@ -179,6 +257,7 @@ function failureCode(e: unknown): 'revert' | 'rpc' {
 }
 
 function abortFromRpc(o: SendSafeOpts, e: unknown): never {
+  if (e instanceof GateBudget) throw e;
   if (e instanceof SendSafeAbort) fail(o, e.code, e.message);
   if (failureCode(e) === 'revert') fail(o, 'revert', decodeRevertReason(e));
   const detail = sanitizeBroadcastError(e);
@@ -238,9 +317,9 @@ function qtyOrNull(v: unknown): bigint | null {
   return null;
 }
 
-async function tryQty(o: SendSafeOpts, method: string, params: unknown[]): Promise<bigint | null> {
-  try { return qtyOrNull(await o.reader.send(method, params)); }
-  catch { return null; }
+async function tryQty(o: SendSafeOpts, method: string, params: unknown[], deadline?: number): Promise<bigint | null> {
+  try { return qtyOrNull(await rpc(o, deadline, method, params)); }
+  catch (e) { if (e instanceof GateBudget) throw e; return null; }
 }
 
 /** Pay the suggestion, or abort. A lower tip would sit unmined and hold this chain's nonce. */
@@ -258,11 +337,11 @@ function percentile10(sortedAsc: bigint[]): bigint {
 }
 
 /** eth_maxPriorityFeePerGas, else the 10th-percentile tip from eth_feeHistory. Never a guessed tip below the network. */
-async function priorityFee(o: SendSafeOpts): Promise<bigint> {
-  const direct = await tryQty(o, 'eth_maxPriorityFeePerGas', []);
+async function priorityFee(o: SendSafeOpts, deadline?: number): Promise<bigint> {
+  const direct = await tryQty(o, 'eth_maxPriorityFeePerGas', [], deadline);
   if (direct != null) return payTip(o, direct);
   try {
-    const hist = await o.reader.send('eth_feeHistory', ['0xa', 'latest', [10]]) as { reward?: unknown };
+    const hist = await rpc(o, deadline, 'eth_feeHistory', ['0xa', 'latest', [10]]) as { reward?: unknown };
     const tips: bigint[] = [];
     if (Array.isArray(hist?.reward)) {
       for (const row of hist.reward) {
@@ -273,47 +352,48 @@ async function priorityFee(o: SendSafeOpts): Promise<bigint> {
     }
     tips.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     if (tips.length) return payTip(o, percentile10(tips));
-  } catch { /* no history: do not invent a tip */ }
+  } catch (e) { if (e instanceof GateBudget) throw e; /* no history: do not invent a tip */ }
   fail(o, 'fee', 'no priority fee from the chain');
 }
 
-async function resolveFee(o: SendSafeOpts): Promise<Pick<Plan, 'unit' | 'gasPrice' | 'maxFeePerGas' | 'maxPriorityFeePerGas'>> {
+async function resolveFee(o: SendSafeOpts, deadline?: number): Promise<Pick<Plan, 'unit' | 'gasPrice' | 'maxFeePerGas' | 'maxPriorityFeePerGas'>> {
   let block: unknown;
-  try { block = await o.reader.send('eth_getBlockByNumber', ['latest', false]); }
+  try { block = await rpc(o, deadline, 'eth_getBlockByNumber', ['latest', false]); }
   catch (e) { abortFromRpc(o, e); }
   if (!block || typeof block !== 'object') fail(o, 'rpc', 'RPC request failed: no latest block');
   const baseRaw = (block as { baseFeePerGas?: unknown }).baseFeePerGas;
   const base = qtyOrNull(baseRaw);
   if (base == null) {
-    let gasPrice = await tryQty(o, 'eth_gasPrice', []);
+    let gasPrice = await tryQty(o, 'eth_gasPrice', [], deadline);
     if (gasPrice == null) {
       try {
-        const fee = await o.reader.getFeeData();
+        const fee = deadline == null ? await o.reader.getFeeData() : await withinBudget(deadline, o.reader.getFeeData());
         gasPrice = fee.gasPrice ?? fee.maxFeePerGas;
       } catch (e) { abortFromRpc(o, e); }
     }
     if (gasPrice == null || gasPrice <= 0n) fail(o, 'fee', 'no gas price from the chain');
     return { gasPrice, unit: gasPrice };
   }
-  const priority = await priorityFee(o);
+  const priority = await priorityFee(o, deadline);
   const maxFee = base * 2n + priority;
   return { maxFeePerGas: maxFee, maxPriorityFeePerGas: priority, unit: maxFee };
 }
 
-async function assess(o: SendSafeOpts): Promise<Plan> {
+async function assess(o: SendSafeOpts, deadline?: number): Promise<Plan> {
   const tx = o.tx;
   try {
-    const out = await o.reader.send('eth_call', [rpcTx(tx), 'pending']);
+    const out = await rpc(o, deadline, 'eth_call', [rpcTx(tx), 'pending']);
     if (typeof out !== 'string') fail(o, 'sim', 'eth_call returned no result');
   } catch (e) {
-    if (e instanceof SendSafeAbort) throw e;
+    if (e instanceof SendSafeAbort || e instanceof GateBudget) throw e;
     abortFromRpc(o, e);
   }
 
   let estimate: bigint;
-  try { estimate = asQuantity(await o.reader.send('eth_estimateGas', [rpcTx(tx), 'pending'])); }
+  try { estimate = asQuantity(await rpc(o, deadline, 'eth_estimateGas', [rpcTx(tx), 'pending'])); }
   catch (e) {
     if (e instanceof SendSafeAbort) fail(o, e.code, e.message);
+    if (e instanceof GateBudget) throw e;
     abortFromRpc(o, e);
   }
 
@@ -321,7 +401,7 @@ async function assess(o: SendSafeOpts): Promise<Plan> {
   try { gasLimit = explicitGasLimit(estimate, o.gasCap, o.kind); }
   catch (e) { if (e instanceof SendSafeAbort) fail(o, e.code, e.message); throw e; }
 
-  const fee = await resolveFee(o);
+  const fee = await resolveFee(o, deadline);
   if (fee.unit > o.maxGasPriceWei) fail(o, 'fee', `gas price ${fee.unit} wei exceeds the ${o.maxGasPriceWei} wei cap`);
   const l1 = o.l1FeeWei ?? 0n;
   if (l1 < 0n) fail(o, 'fee', 'L1 fee is negative');
@@ -357,15 +437,15 @@ function localHash(raw: string): string {
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
-function parseReceipt(v: unknown, expectHash: string): { status: number; hash: string } | null {
+function parseReceipt(v: unknown, expectHash: string): { status: number; hash: string; blockNumber: bigint | null } | null {
   if (!v || typeof v !== 'object') return null;
-  const r = v as { status?: string | number | null; transactionHash?: string };
+  const r = v as { status?: string | number | null; transactionHash?: string; blockNumber?: unknown };
   let status: number | null = null;
   if (r.status === 1 || r.status === '0x1' || r.status === '0x01') status = 1;
   else if (r.status === 0 || r.status === '0x0' || r.status === '0x00') status = 0;
   if (status == null) return null;
   const hash = typeof r.transactionHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(r.transactionHash) ? r.transactionHash : expectHash;
-  return { status, hash };
+  return { status, hash, blockNumber: qtyOrNull(r.blockNumber) };
 }
 
 interface MinedTx { hash?: string; from?: string; to?: string | null; nonce?: string | number; value?: string; input?: string; data?: string }
@@ -398,10 +478,11 @@ function blockNum(block: unknown): bigint | null {
 }
 
 /** The nonce was mined under a different hash: cancelled (0-value self-send) or replaced. Never our confirmation. */
-async function detectReplacement(o: SendSafeOpts, from: string, nonce: number, ourHash: string): Promise<Outcome | null> {
-  const mined = await o.reader.getTransactionCount(from, 'latest');
+async function detectReplacement(o: SendSafeOpts, from: string, nonce: number, ourHash: string, deadline: number): Promise<Outcome | null> {
+  const mined = await withinBudget(deadline, o.reader.getTransactionCount(from, 'latest'));
   if (mined <= nonce) return null;
-  let block = await o.reader.send('eth_getBlockByNumber', ['latest', true]);
+  if (Date.now() >= deadline) throw new GateBudget();
+  let block = await withinBudget(deadline, o.reader.send('eth_getBlockByNumber', ['latest', true]));
   let latest: bigint | null = null;
   for (let i = 0; i < BLOCK_SCAN && block; i++) {
     const n = blockNum(block);
@@ -419,31 +500,59 @@ async function detectReplacement(o: SendSafeOpts, from: string, nonce: number, o
     }
     if (i + 1 >= BLOCK_SCAN) break;
     if (n == null || n <= 0n) break;
-    block = await o.reader.send('eth_getBlockByNumber', [toQuantity(n - 1n), true]);
+    if (Date.now() >= deadline) throw new GateBudget();
+    block = await withinBudget(deadline, o.reader.send('eth_getBlockByNumber', [toQuantity(n - 1n), true]));
   }
   // Not in the recent window, only in the tip, or the reads did not name a different hash.
   return null;
 }
 
-async function waitOutcome(o: SendSafeOpts, from: string, hash: string, nonce: number): Promise<Outcome> {
-  const deadline = Date.now() + (o.receiptTimeoutMs ?? 120_000);
+async function waitOutcome(o: SendSafeOpts, from: string, hash: string, nonce: number, receiptDeadline: number): Promise<Outcome> {
   for (;;) {
-    let receipt: { status: number; hash: string } | null = null;
-    try { receipt = parseReceipt(await o.reader.send('eth_getTransactionReceipt', [hash]), hash); }
-    catch { receipt = null; }
+    // Receipt wait stops here. The 60s after this mark is reserved for the known-tx check.
+    if (Date.now() >= receiptDeadline) return budgetPending(hash);
+    let receipt: { status: number; hash: string; blockNumber: bigint | null } | null = null;
+    try { receipt = parseReceipt(await withinBudget(receiptDeadline, o.reader.send('eth_getTransactionReceipt', [hash])), hash); }
+    catch (e) {
+      if (e instanceof GateBudget) return budgetPending(hash);
+      receipt = null;
+    }
     if (receipt) {
       if (receipt.hash.toLowerCase() !== hash.toLowerCase()) {
-        return { status: 'replaced', state: 'source_replaced', hash, replacementHash: receipt.hash };
+        // Same depth as the block scan: the tip can still reorg, so one confirmation is required.
+        try {
+          if (await replacementConfirmed(o, receipt.blockNumber, receiptDeadline)) {
+            return { status: 'replaced', state: 'source_replaced', hash, replacementHash: receipt.hash };
+          }
+        } catch (e) {
+          if (e instanceof GateBudget) return budgetPending(hash);
+          throw e;
+        }
+      } else {
+        if (receipt.status !== 1) return { status: 'reverted', state: 'source_confirmed', hash };
+        return { status: 'confirmed', state: 'source_confirmed', hash };
       }
-      if (receipt.status !== 1) return { status: 'reverted', state: 'source_confirmed', hash };
-      return { status: 'confirmed', state: 'source_confirmed', hash };
     }
     try {
-      const replaced = await detectReplacement(o, from, nonce, hash);
+      const replaced = await detectReplacement(o, from, nonce, hash, receiptDeadline);
       if (replaced) return replaced;
-    } catch { /* a read failed; keep waiting. Do not report this hash confirmed. */ }
-    if (Date.now() >= deadline) return { status: 'pending', state: 'source_sent', hash };
-    await sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+    } catch (e) {
+      if (e instanceof GateBudget) return budgetPending(hash);
+      /* a read failed; keep waiting. Do not report this hash confirmed. */
+    }
+    await sleep(Math.min(250, Math.max(1, receiptDeadline - Date.now())));
+  }
+}
+
+/** One confirmation deeper than the replacement's block. Missing depth stays unconfirmed. */
+async function replacementConfirmed(o: SendSafeOpts, blockNumber: bigint | null, deadline: number): Promise<boolean> {
+  if (blockNumber == null) return false;
+  try {
+    const latest = blockNum(await withinBudget(deadline, o.reader.send('eth_getBlockByNumber', ['latest', false])));
+    return latest != null && latest > blockNumber;
+  } catch (e) {
+    if (e instanceof GateBudget) throw e;
+    return false;
   }
 }
 
@@ -451,52 +560,66 @@ function noMoreEndpoints(e: unknown): boolean {
   return (e as { code?: string } | null)?.code === 'NO_ENDPOINT';
 }
 
-async function submitRaw(o: SendSafeOpts, raw: string): Promise<void> {
-  if (o.reader.broadcastRaw) await o.reader.broadcastRaw(raw);
-  else await o.reader.send('eth_sendRawTransaction', [raw]);
+/** Rebroadcasts cannot spin. Each endpoint is one attempt; this caps a reader that never says it is done. */
+const MAX_REBROADCASTS = 8;
+
+async function submitRaw(o: SendSafeOpts, raw: string, receiptDeadline: number): Promise<void> {
+  // The signature already exists. Refuse to start the send; broadcast() keeps that hash as pending.
+  if (Date.now() >= receiptDeadline) throw new GateBudget();
+  if (o.reader.broadcastRaw) await withinBudget(receiptDeadline, o.reader.broadcastRaw(raw));
+  else await withinBudget(receiptDeadline, o.reader.send('eth_sendRawTransaction', [raw]));
 }
 
 /** Same signed bytes on each remaining endpoint. True once one accepts them or already has the hash. */
-async function rebroadcast(o: SendSafeOpts, raw: string, hash: string): Promise<boolean> {
+async function rebroadcast(o: SendSafeOpts, raw: string, hash: string, receiptDeadline: number, gateDeadline: number): Promise<boolean> {
   if (!o.reader.broadcastNext) return false;
-  for (;;) {
+  for (let n = 0; n < MAX_REBROADCASTS; n++) {
+    if (Date.now() >= receiptDeadline) throw new GateBudget();
     try {
-      await o.reader.broadcastNext(raw);
+      await withinBudget(receiptDeadline, o.reader.broadcastNext(raw));
       return true;
     } catch (e) {
-      if (noMoreEndpoints(e)) return ourTxIsKnown(o, hash);
+      if (e instanceof GateBudget) throw e;
+      if (noMoreEndpoints(e)) return ourTxIsKnown(o, hash, gateDeadline);
       const kind = broadcastKind(e);
       if (kind === 'already_known') return true;
       if (kind === 'stale_nonce') {
-        if (await ourTxIsKnown(o, hash)) return true;
+        if (await ourTxIsKnown(o, hash, gateDeadline)) return true;
         throw e;
       }
       if (kind === 'timeout') {
-        if (await ourTxIsKnown(o, hash)) return true;
+        if (await ourTxIsKnown(o, hash, gateDeadline)) return true;
         continue;
       }
       throw e;
     }
   }
+  return ourTxIsKnown(o, hash, gateDeadline);
 }
 
 /** The signed hash is already on an endpoint, so "nonce too low" is this tx, not a lost nonce. */
-async function ourTxIsKnown(o: SendSafeOpts, hash: string): Promise<boolean> {
+async function ourTxIsKnown(o: SendSafeOpts, hash: string, deadline: number): Promise<boolean> {
   if (o.reader.hasTx) {
-    try { return await o.reader.hasTx(hash); } catch { return false; }
+    try { return await withinBudget(deadline, o.reader.hasTx(hash)); }
+    catch (e) { if (e instanceof GateBudget) throw e; return false; }
   }
   try {
-    const tx = await o.reader.send('eth_getTransactionByHash', [hash]);
+    const tx = await withinBudget(deadline, o.reader.send('eth_getTransactionByHash', [hash]));
     if (tx && typeof tx === 'object') return true;
-  } catch { /* one endpoint missed it; a receipt may still exist */ }
+  } catch (e) { if (e instanceof GateBudget) throw e; /* one endpoint missed it; a receipt may still exist */ }
   try {
-    const receipt = await o.reader.send('eth_getTransactionReceipt', [hash]);
+    const receipt = await withinBudget(deadline, o.reader.send('eth_getTransactionReceipt', [hash]));
     if (receipt && typeof receipt === 'object') return true;
-  } catch { /* not found */ }
+  } catch (e) { if (e instanceof GateBudget) throw e; /* not found */ }
   return false;
 }
 
-async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number): Promise<SendSafeResult> {
+async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number, receiptDeadline: number, gateDeadline: number): Promise<SendSafeResult> {
+  // The nonce read uses the gate deadline and can finish after the receipt mark. Do not sign then.
+  if (Date.now() >= receiptDeadline) {
+    o.nonce.invalidate();
+    fail(o, 'broadcast', 'nothing sent');
+  }
   const tx = o.tx;
   const common = { to: tx.to, data: tx.data, value: tx.value, nonce, gasLimit: plan.gasLimit, chainId: o.chainId };
   const unsigned = plan.gasPrice != null
@@ -518,20 +641,31 @@ async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number): Promise<Se
   }
   let unconfirmedTimeout = false;
   try {
-    await submitRaw(o, raw);
+    await submitRaw(o, raw, receiptDeadline);
   } catch (e) {
+    if (e instanceof GateBudget) unconfirmedTimeout = true;
+    else {
+      try { await settleBroadcastError(e); }
+      catch (e2) {
+        if (e2 instanceof GateBudget) unconfirmedTimeout = true;
+        else throw e2;
+      }
+    }
+  }
+  async function settleBroadcastError(e: unknown) {
     const kind = broadcastKind(e);
-    if (kind === 'already_known' || (kind === 'stale_nonce' && await ourTxIsKnown(o, hash))) {
+    if (kind === 'already_known' || (kind === 'stale_nonce' && await ourTxIsKnown(o, hash, gateDeadline))) {
       // These bytes are already out. Track the local hash.
     } else if (kind === 'timeout') {
-      if (await ourTxIsKnown(o, hash)) {
+      if (await ourTxIsKnown(o, hash, gateDeadline)) {
         // The response was lost after an endpoint accepted the bytes.
       } else {
         try {
           // Same signed bytes, next endpoint. A new signature would be a different transaction.
-          const landed = await rebroadcast(o, raw, hash);
+          const landed = await rebroadcast(o, raw, hash, receiptDeadline, gateDeadline);
           unconfirmedTimeout = !landed;
         } catch (e2) {
+          if (e2 instanceof GateBudget) { unconfirmedTimeout = true; return; }
           o.nonce.invalidate();
           const k2 = broadcastKind(e2);
           if (k2 === 'underpriced') fail(o, 'underpriced', 'replacement underpriced; not resent');
@@ -546,9 +680,16 @@ async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number): Promise<Se
       fail(o, 'broadcast', sanitizeBroadcastError(e));
     }
   }
-  const outcome = await waitOutcome(o, tx.from, hash, nonce);
+  const outcome = await waitOutcome(o, tx.from, hash, nonce, receiptDeadline);
   // The token trader shares this nonce. A timeout that never showed up must not leave a gap.
-  if (unconfirmedTimeout && outcome.status === 'pending' && !(await ourTxIsKnown(o, hash))) o.nonce.invalidate();
+  // Every timeout path, including a broadcast the receipt budget cut off, gets the reserved 60s
+  // to ask whether any endpoint already has the hash. Drop the nonce only when all of them say no.
+  if (unconfirmedTimeout && outcome.status === 'pending' && Date.now() < gateDeadline) {
+    let known = true;
+    try { known = await ourTxIsKnown(o, hash, gateDeadline); }
+    catch (e) { if (!(e instanceof GateBudget)) throw e; }
+    if (!known) o.nonce.invalidate();
+  }
   return { ...outcome, gasLimit: plan.gasLimit, nonce };
 }
 
@@ -567,12 +708,22 @@ export async function sendSafe(o: SendSafeOpts): Promise<SendSafeResult> {
   await assess(o);
 
   // One send, inside the chain gate, with the shared nonce. The wait stays in the gate (same as a bot fill).
+  // The deadline is fixed here: capped receipt wait plus 60s, checked before every later read.
   return o.gate.run(async () => {
-    assertNotHalted(o);
-    const plan = await assess(o);
-    // Same place a bot send reads canSend: after the gate is held, before the nonce is taken.
-    assertNotHalted(o);
-    const nonce = await o.nonce.next(() => o.reader.getTransactionCount(tx.from, 'pending'));
-    return broadcast(o, plan, nonce);
+    const deadlines = sendDeadlines(o.receiptTimeoutMs);
+    try {
+      assertNotHalted(o);
+      const plan = await assess(o, deadlines.gate);
+      // Assess uses the gate deadline, so it can return after the receipt mark. Nothing is signed yet.
+      if (Date.now() >= deadlines.receipt) fail(o, 'broadcast', 'nothing sent');
+      // Same place a bot send reads canSend: after the gate is held, before the nonce is taken.
+      assertNotHalted(o);
+      const nonce = await o.nonce.next(() => withinBudget(deadlines.gate, o.reader.getTransactionCount(tx.from, 'pending')));
+      return await broadcast(o, plan, nonce, deadlines.receipt, deadlines.gate);
+    } catch (e) {
+      // Nothing was signed. A pending/source_sent result would look like in-transit money.
+      if (e instanceof GateBudget) fail(o, 'broadcast', 'nothing sent');
+      throw e;
+    }
   });
 }

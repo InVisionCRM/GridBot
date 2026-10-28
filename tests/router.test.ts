@@ -11,7 +11,7 @@ import { MultiBot, type MultiState } from '../src/server/bot/multi';
 import { MemoryStore } from '../src/server/bot/store';
 import { bridgeConfigured, takeBridgeKeys } from '../src/server/env';
 import { Router, type RouterFile } from '../src/server/router/router';
-import { DEFAULT_MAX_GAS_PRICE_WEI, DEFAULT_MAX_PRIORITY_FEE_WEI, defaultMaxPriorityFee, etaP90Within, MAX_GAS_PRICE_WEI_CAP, ROUTER_HARD_CAPS } from '../src/server/router/settings';
+import { DEFAULT_MAX_GAS_PRICE_WEI, DEFAULT_MAX_PRIORITY_FEE_WEI, defaultMaxPriorityFee, etaP90Within, liveEnableError, MAX_GAS_PRICE_WEI_CAP, ROUTER_HARD_CAPS } from '../src/server/router/settings';
 import { MockChain, NET } from './helpers/mockChain';
 
 const CHAINS = [369, 1, 4663];
@@ -63,6 +63,7 @@ describe('router settings', () => {
     expect(s.cooldownMin).toBe(360);
     expect(s.maxMovesPerDay).toBe(2);
     expect(s.minConfidence).toBe(0.5);
+    expect(s.receiptTimeoutMs).toBe(120_000);
     expect(s.autoClaim).toBe(false);
     expect(s.halt).toBeNull();
     expect(s.configured).toEqual({ across: false, relay: false, lifi: false });
@@ -136,6 +137,8 @@ describe('router settings', () => {
     expect(router.update({ maxPriorityFeeWei: { '369': MAX_GAS_PRICE_WEI_CAP.toString() + '0' } }).maxPriorityFeeWei['369']).toBe(MAX_GAS_PRICE_WEI_CAP.toString());
     expect(() => router.update({ maxPriorityFeeWei: { '999': '1' } })).toThrow(/Unknown chain/);
     expect(s.autoClaim).toBe(true);
+    expect(router.update({ receiptTimeoutMs: 999_999 }).receiptTimeoutMs).toBe(ROUTER_HARD_CAPS.receiptTimeoutMs);
+    expect(router.update({ receiptTimeoutMs: 30_000 }).receiptTimeoutMs).toBe(30_000);
     expect(router.update({ maxPerMoveUsd: 100, maxSlippageBps: 0, maxPerMoveUsdByChain: { '369': 1_000 } }).maxPerMoveUsdByChain).toEqual({ '369': 100 });
     expect(router.status().maxSlippageBps).toBe(1);
     expect(() => router.update({ allowedBridges: ['nope'] })).toThrow(/Unknown bridge/);
@@ -187,6 +190,41 @@ describe('router settings', () => {
     expect(() => router.turnOn()).toThrow(/allowed bridge/);
     router.update({ allowedBridges: ['lifi'] });
     expect(router.turnOn()).toMatchObject({ on: true, mode: 'live' });
+  });
+
+  it('refuses live when the net gain floor is missing or zero', () => {
+    const router = new Router({ store: new MemoryStore<RouterFile>(), host: true, chainIds: CHAINS });
+    router.update({ mode: 'live', maxPerMoveUsd: 10, maxPerDayUsd: 20, allowedChains: [1], allowedBridges: ['across'] });
+    expect(liveEnableError(router.status())).toBeNull();
+    router.update({ minNetGainPct: 0 });
+    expect(() => router.turnOn()).toThrow(/minNetGainPct/);
+    expect(router.status().on).toBe(false);
+    router.update({ minNetGainPct: 0.005, minNetGainTok: { USDG: 0 } });
+    expect(() => router.turnOn()).toThrow(/minNetGainTok/);
+    expect(router.status().on).toBe(false);
+    expect(liveEnableError({ ...router.status(), minNetGainTok: {} })).toMatch(/minNetGainTok/);
+    router.update({ minNetGainTok: { USDG: 5 } });
+    expect(router.turnOn()).toMatchObject({ on: true, mode: 'live' });
+  });
+
+  it('a restart does not re-arm a router that was left on', () => {
+    const liveStore = new MemoryStore<RouterFile>();
+    const live = new Router({ store: liveStore, host: true, chainIds: CHAINS });
+    live.update({ mode: 'live', maxPerMoveUsd: 10, maxPerDayUsd: 20, allowedChains: [369], allowedBridges: ['across'] });
+    expect(live.turnOn()).toMatchObject({ on: true, mode: 'live' });
+    expect(liveStore.load()!.on).toBe(true);
+    const booted = new Router({ store: liveStore, host: true, chainIds: CHAINS });
+    expect(booted.status()).toMatchObject({ on: false, mode: 'live' });
+    expect(liveStore.load()!.on).toBe(false);
+    expect(booted.turnOn()).toMatchObject({ on: true, mode: 'live' });
+
+    const paperStore = new MemoryStore<RouterFile>();
+    const paper = new Router({ store: paperStore, host: true, chainIds: CHAINS });
+    paper.turnOn();
+    expect(paper.status()).toMatchObject({ on: true, mode: 'paper' });
+    const paperAgain = new Router({ store: paperStore, host: true, chainIds: CHAINS });
+    expect(paperAgain.status()).toMatchObject({ on: false, mode: 'paper' });
+    expect(paperStore.load()!.on).toBe(false);
   });
 
   it('Stop all turns the router off and records subject router; STOP chain does not', async () => {

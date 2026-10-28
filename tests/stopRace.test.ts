@@ -19,7 +19,7 @@ const WPLS: Tok = { address: LNET.pulsex.wpls, symbol: 'WPLS', decimals: 18 };
 const DAI: Tok = { address: LNET.quotes.find((q) => q.symbol === 'DAI')!.address, symbol: 'DAI', decimals: 18 };
 
 const P0 = 0.00001;
-const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 };
+const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 };
 
 /** A chain whose reads can be held, to land a stop while a start is waiting on the RPC. */
 function make() {
