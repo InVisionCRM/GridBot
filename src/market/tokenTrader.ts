@@ -9,11 +9,13 @@
  * Exits, in order: sell simulation failed, tax appeared or rose, liquidity pulled, hard stop, trailing stop,
  * take-profit ladders, time stop, volume decay. A sell is split so each piece stays under the price-impact cap.
  */
+import { usdAsEth } from '../lib/ethUnits';
 import { HARD_CAPS } from '../live/limits';
 import { MAX_TAX, TAX_TOLERANCE } from '../live/tax';
 import { simBuy, simSell, type CostModel } from './costs';
 import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, clampHolderShare, holderBound, thinCoverageReason } from './holders';
 import { capSwap, TOKEN_MAX_POOL_SHARE } from './poolSize';
+import { isWashVolume } from './scan';
 import type { LpUnlockEvidence } from './lpUnlock';
 import { v3LockSatisfies, type V3LpReport } from './v3LpLock';
 
@@ -99,7 +101,7 @@ export function filterFresh(pools: FreshPool[], o: { now: number; minAgeMs: numb
     if (p.kind === 'v4') { skipped.push({ pool: p.pool, why: "this app doesn't swap V4" }); continue; }
     if (!(p.price > 0) || !(p.quoteReserve > 0)) { skipped.push({ pool: p.pool, why: 'no price or depth' }); continue; }
     const minL = o.minLiquidityUsd ?? 0;
-    if (p.liquidityUsd < minL) { skipped.push({ pool: p.pool, why: `liquidity $${Math.round(p.liquidityUsd).toLocaleString('en-US')} is below $${minL.toLocaleString('en-US')}` }); continue; }
+    if (p.liquidityUsd < minL) { skipped.push({ pool: p.pool, why: `liquidity ${usdAsEth(p.liquidityUsd)} is below ${usdAsEth(minL)}` }); continue; }
     if (p.createdAt != null && o.minAgeMs > 0 && o.now - p.createdAt < o.minAgeMs) {
       const h = Math.max(0, Math.round((o.now - p.createdAt) / 3600_000));
       skipped.push({ pool: p.pool, why: `pool is ${h}h old (minimum ${Math.round(o.minAgeMs / 3600_000)}h for scan discovery)` });
@@ -179,6 +181,28 @@ export interface GateInput {
   /** The existing safety classifier. Live still requires this. */
   liveAllowed: boolean;
   /**
+   * Wash volume and minimum pool age. Ignored unless this is true, so a gate call that leaves it off
+   * matches the gate from before this check existed.
+   */
+  enforceWashAndAge?: boolean;
+  /** A volume or age read failed. Safe and medium skip when the flag is on. */
+  freshnessUnverified?: boolean;
+  /** Used only for the wash check, and only when the flag is on. */
+  volumeUsd?: number;
+  /** Seconds since the pool was created. null = unknown. Ignored unless the flag is on. */
+  poolAgeSec?: number | null;
+  /** Same setting as scan discovery (`minPoolAgeSec`). 0 means no age requirement. */
+  gateMinPoolAgeSec?: number;
+  /**
+   * Owner, EIP-1967 admin, and setter scan. Ignored unless this is true, so a gate call that
+   * leaves it off matches the gate from before this check existed.
+   */
+  enforceOwnerPowers?: boolean;
+  /** A read we needed failed. Safe and medium skip when the flag is on. */
+  ownerPowersUnverified?: boolean;
+  /** Skip text when a non-renounced owner holds a blocking power, or a live admin can upgrade. */
+  ownerPowersWhy?: string | null;
+  /**
    * Quote impact at the sized trade and cap it. Absent or false: `sizeImpact` is ignored, so the gate
    * matches today. The $100/$500/$1000 depth rules and the sizing cap are unchanged either way.
    */
@@ -230,7 +254,7 @@ export function gateToken(g: GateInput): GateResult {
   if (g.sellSimOk === false) return hard('sell simulation failed');
   if (g.paused === true) return hard('token is paused');
   if (g.decimals == null || !(g.decimals >= 0 && g.decimals <= 36)) return hard('decimals unreadable');
-  if (g.liquidityUsd < g.minLiquidityUsd) return hard(`liquidity $${Math.round(g.liquidityUsd).toLocaleString('en-US')} is under the $${g.minLiquidityUsd.toLocaleString('en-US')} minimum`);
+  if (g.liquidityUsd < g.minLiquidityUsd) return hard(`liquidity ${usdAsEth(g.liquidityUsd)} is under the ${usdAsEth(g.minLiquidityUsd)} minimum`);
   if (g.canMint === true) return hard('owner can mint');
   if (g.recentLiqPull) return hard('liquidity was pulled');
   const tax = Math.max(g.buyTax ?? 0, g.sellTax ?? 0);
@@ -262,6 +286,21 @@ export function gateToken(g: GateInput): GateResult {
     if (g.canBlacklist === true) return hard('owner can blacklist');
     if (tax > TAX_TOLERANCE) return hard(`tax ${(tax * 100).toFixed(2)}% (safe allows none)`);
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
+  }
+  if ((g.risk === 'safe' || g.risk === 'medium') && g.enforceWashAndAge) {
+    if (g.freshnessUnverified) return hard('pool age or volume could not be verified');
+    const volume = g.volumeUsd ?? 0;
+    if (isWashVolume(volume, g.liquidityUsd)) return hard(`volume is ${Math.round(volume / g.liquidityUsd)}× liquidity`);
+    const min = g.gateMinPoolAgeSec ?? 0;
+    if (min > 0 && g.poolAgeSec == null) return hard('pool age could not be verified');
+    if (min > 0 && g.poolAgeSec != null && g.poolAgeSec < min) {
+      const h = Math.max(0, Math.round(g.poolAgeSec / 3600));
+      return hard(`pool is ${h}h old (minimum ${Math.round(min / 3600)}h)`);
+    }
+  }
+  if ((g.risk === 'safe' || g.risk === 'medium') && g.enforceOwnerPowers) {
+    if (g.ownerPowersUnverified) return hard(g.ownerPowersWhy || 'owner powers could not be verified');
+    if (g.ownerPowersWhy) return hard(g.ownerPowersWhy);
   }
   if (g.enforceHolderCheck && !g.holderThin && (g.risk === 'safe' || g.risk === 'medium') && g.holderConcentration != null && g.top10Concentration != null) {
     const maxHolder = clampHolderShare(g.maxHolderShare ?? DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_HOLDER_SHARE);
@@ -314,8 +353,8 @@ export function sizeBuy(p: {
   const fill = simBuy(fit.amount, sellSidePrice(p.price, p.feeBps), model);
   const usd = fit.amount * p.usdPerSpend;
   const why = fit.why
-    ? `${fit.why}; ${usd.toFixed(2)} USD after fees and ${(((p.buyTax ?? 0) * 100).toFixed(1))}% buy tax`
-    : `${usd.toFixed(2)} USD, price impact ${(fit.impact * 100).toFixed(2)}%`;
+    ? `${fit.why}; ${usdAsEth(usd)} after fees and ${(((p.buyTax ?? 0) * 100).toFixed(1))}% buy tax`
+    : `${usdAsEth(usd)}, price impact ${(fit.impact * 100).toFixed(2)}%`;
   return { spend: fit.amount, usd, tokens: fill.pls, impact: fit.impact, why };
 }
 

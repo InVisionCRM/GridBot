@@ -5,7 +5,7 @@
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import { calculateGridLevels } from '../../engine/gridEngine';
 import { DEFAULT_LIMITS, validateLimits, type SafetyLimits } from '../../live/limits';
-import { applySell, replay, roundTripStats, totals, type LiveTrade } from '../../live/ledger';
+import { applySell, legacyTradeNames, upgradeConfigNames, replay, roundTripStats, totals, upgradeQuoteNames, type LiveTrade } from '../../live/ledger';
 import { buildIntervals, buyAmountPerInterval, evaluateTick, onTradeFilled, onTradeSkipped, seedIntervals, type LiveInterval, type QueuedTrade } from '../../live/liveGrid';
 import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
@@ -29,7 +29,7 @@ import { isHalt, requestHalt, resolveHalt, startOverride, StartStopped, systemHa
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
 
-export interface GridConfig { lowerPrice: number; upperPrice: number; gridCount: number; totalCapitalUsd: number }
+export interface GridConfig { lowerPrice: number; upperPrice: number; gridCount: number; totalCapitalQuote: number }
 
 /** What happens to a completed trade's profit: added to that level's next buy, or sent to an address. */
 export type ProfitMode = { mode: 'reinvest' } | { mode: 'send'; to: string };
@@ -66,7 +66,7 @@ export interface BotState {
   limits: SafetyLimits;
   levels: GridLevel[];
   intervals: LiveInterval[];
-  usdPerBuy: number;
+  quotePerBuy: number;
   queue: QueuedTrade[];
   inFlight: InFlight | null;
   trades: LiveTrade[];
@@ -183,7 +183,7 @@ function newId() {
 export function freshState(net: LiveNetwork, id?: string): BotState {
   return {
     version: 1, id: id ?? newId(), mode: 'paper', network: net.key, stable: net.defaultQuote, status: 'idle', config: null,
-    limits: { ...DEFAULT_LIMITS }, levels: [], intervals: [], usdPerBuy: 0, queue: [], inFlight: null,
+    limits: { ...DEFAULT_LIMITS }, levels: [], intervals: [], quotePerBuy: 0, queue: [], inFlight: null,
     trades: [], paperStartStable: 0, lastPrice: null, lastPriceAt: null, spacingWarn: null,
     profits: { mode: 'reinvest' }, payoutPending: 0, payoutInFlight: null, payouts: [],
     closing: false, archivedAt: null, halt: null,
@@ -219,7 +219,8 @@ export class GridEngine {
   constructor(private readonly d: EngineDeps) {
     this.now = d.now ?? Date.now;
     this.hub = d.hub ?? Hub.single(d.net, d.reader, d.signer, { gate: d.txGate, nonce: d.sharedNonce });
-    const loaded = d.store.load();
+    // Saved before the *Usd → *Quote rename (they always held quote-coin amounts): read the old names too.
+    const loaded = upgradeQuoteNames(d.store.load());
     const base = freshState(d.net, d.id);
     // Legacy PulseChain keys must match the configured network; multi-chain keys carry their chain.
     const accept = loaded && (isLegacyKey(loaded.stable ?? d.net.defaultQuote) ? loaded.network === d.net.key : true);
@@ -228,7 +229,7 @@ export class GridEngine {
       : base;
     // Saved before per-level buy sizes: every funded level spent the grid's one buy size; levels above the old start
     // price never had money (0, so a later re-range spreads only the real capital).
-    this.state.intervals = this.state.intervals.map((iv) => (iv.buyAmount == null ? { ...iv, buyAmount: iv.status === 'inactive' ? 0 : this.state.usdPerBuy } : iv));
+    this.state.intervals = this.state.intervals.map((iv) => (iv.buyAmount == null ? { ...iv, buyAmount: iv.status === 'inactive' ? 0 : this.state.quotePerBuy } : iv));
     if (this.state.mode === 'live' && !this.signer) {
       this.tag('warn', 'LIVE mode but no PRIVATE_KEY — stopped.');
       if (this.state.status === 'running') this.state.halt = systemHalt('startup', 'No signing key — stopped.', this.now());
@@ -315,10 +316,11 @@ export class GridEngine {
   }
 
   async start(p: StartParams): Promise<void> {
+    p = upgradeConfigNames(p); // old name `totalCapitalUsd` (same quote-coin amount) still accepted
     if (this.state.status === 'running') throw new Error('Already running. Stop first.');
     if (this.state.inFlight) throw new Error('A transaction from the previous run is still being reconciled.');
     const limits = { ...this.state.limits, ...(p.limits ?? {}) };
-    const errs = [...validateLimits(limits), ...validateGridParams(p.lowerPrice, p.upperPrice, p.gridCount, p.totalCapitalUsd)];
+    const errs = [...validateLimits(limits), ...validateGridParams(p.lowerPrice, p.upperPrice, p.gridCount, p.totalCapitalQuote)];
     const stable = p.stable ?? this.state.stable;
     if (this.state.config && stable !== this.state.stable) throw new Error(`This grid trades ${this.hub.label(this.state.stable)}; its pair can't change. Add a new grid for ${this.hub.label(stable)}.`);
     const def = this.hub.def(stable);
@@ -337,13 +339,13 @@ export class GridEngine {
     // pays gas and is never traded.
     if (p.mode === 'live' && def.quote.native) {
       const bal = await executor.balances();
-      const chk = checkGasReserve({ capital: p.totalCapitalUsd, balance: bal.stable, cfg: reserveCfg(limits), symbol: def.quote.symbol });
+      const chk = checkGasReserve({ capital: p.totalCapitalQuote, balance: bal.stable, cfg: reserveCfg(limits), symbol: def.quote.symbol });
       if (!chk.ok) throw new Error(chk.reason!);
     }
     const price = await executor.getPrice();
     const levels = calculateGridLevels(p.lowerPrice, p.upperPrice, p.gridCount);
-    const usdPerBuy = buyAmountPerInterval(p.gridCount, p.totalCapitalUsd);
-    const intervals = buildIntervals(levels, price, usdPerBuy);
+    const quotePerBuy = buyAmountPerInterval(p.gridCount, p.totalCapitalQuote);
+    const intervals = buildIntervals(levels, price, quotePerBuy);
     if (!intervals.some((i) => i.status === 'waitingBuy')) throw new Error(`The price (${price}) is below the range. Start when it's inside the range, or lower the range.`);
     const profits = checkProfitMode(p.profits ?? this.state.profits);
     await this.checkPayoutTarget(profits);
@@ -353,13 +355,13 @@ export class GridEngine {
     const paperReset = p.mode === 'paper';
     this.state = {
       ...this.state, mode: p.mode, stable, limits, status: 'running',
-      config: { lowerPrice: p.lowerPrice, upperPrice: p.upperPrice, gridCount: p.gridCount, totalCapitalUsd: p.totalCapitalUsd },
-      levels, intervals, usdPerBuy, queue: [], inFlight: null,
+      config: { lowerPrice: p.lowerPrice, upperPrice: p.upperPrice, gridCount: p.gridCount, totalCapitalQuote: p.totalCapitalQuote },
+      levels, intervals, quotePerBuy, queue: [], inFlight: null,
       trades: paperReset ? this.state.trades.filter((t) => !t.paper) : this.state.trades,
-      paperStartStable: paperReset ? p.totalCapitalUsd : this.state.paperStartStable,
+      paperStartStable: paperReset ? p.totalCapitalQuote : this.state.paperStartStable,
       lastPrice: price, lastPriceAt: this.now(),
       spacingWarn: warn, econ,
-      startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalUsd]],
+      startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalQuote]],
       recenter: { enabled: p.recenter ?? this.state.recenter?.enabled ?? false, aboveSince: null, lastAt: this.state.recenter?.lastAt ?? null, count: this.state.recenter?.count ?? 0 },
       profits, closing: false, archivedAt: null, halt: null, startOverride: override,
       ...(paperReset ? { payoutPending: 0, payoutInFlight: null, payouts: this.state.payouts.filter((x) => !x.paper) } : {}),
@@ -367,7 +369,7 @@ export class GridEngine {
     this.seedUpper(price);
     this.lastError = null;
     this.save();
-    this.tag('info', `Started ${p.mode.toUpperCase()} ${this.label} ${p.lowerPrice}–${p.upperPrice} ×${p.gridCount}, ${usdPerBuy.toPrecision(5)} ${stable}/buy, spacing ${(econ.spacingPct * 100).toFixed(3)}%, impact ${(econ.impactPct * 100).toFixed(3)}%, gas ${econ.gasQuote.toPrecision(3)} ${stable}/RT, net ${econ.netPerRoundTrip.toPrecision(4)} ${stable} (${(econ.netPct * 100).toFixed(3)}%)/RT worst, price ${price}`);
+    this.tag('info', `Started ${p.mode.toUpperCase()} ${this.label} ${p.lowerPrice}–${p.upperPrice} ×${p.gridCount}, ${quotePerBuy.toPrecision(5)} ${stable}/buy, spacing ${(econ.spacingPct * 100).toFixed(3)}%, impact ${(econ.impactPct * 100).toFixed(3)}%, gas ${econ.gasQuote.toPrecision(3)} ${stable}/RT, net ${econ.netPerRoundTrip.toPrecision(4)} ${stable} (${(econ.netPct * 100).toFixed(3)}%)/RT worst, price ${price}`);
     if (warn) this.tag('warn', warn);
     this.ev('started', `Grid started — ${this.label} ${p.lowerPrice.toPrecision(4)}–${p.upperPrice.toPrecision(4)} ×${p.gridCount} (${p.mode})`, { level: 'success' });
   }
@@ -579,7 +581,7 @@ export class GridEngine {
     const perLevel = this.state.intervals.reduce((a, i) => a + i.buyAmount, 0) / next.gridCount;
     const intervals = buildIntervals(levels, price, perLevel);
     this.state = {
-      ...this.state, config: next, levels, intervals, usdPerBuy: perLevel, queue: [],
+      ...this.state, config: next, levels, intervals, quotePerBuy: perLevel, queue: [],
       econ, spacingWarn: econWarning(econ),
       recenter: { enabled: true, aboveSince: null, lastAt: now, count: r.count + 1 },
     };
@@ -598,7 +600,7 @@ export class GridEngine {
     const pos = replay(this.modeTrades());
     const owned = this.state.intervals.reduce((a, i) => a + (i.status === 'holding' ? i.plsAmount : 0), 0);
     const free = Math.max(0, pos.plsHeld - owned);
-    const avg = pos.plsHeld > 0 ? pos.costUsd / pos.plsHeld : 0;
+    const avg = pos.plsHeld > 0 ? pos.costQuote / pos.plsHeld : 0;
     const { intervals, job } = seedIntervals(this.state.intervals, price, { pls: free, cost: free * avg }, this.now());
     const fromHeld = intervals.filter((iv, i) => iv.status === 'holding' && this.state.intervals[i].status !== 'holding').length;
     this.state.intervals = intervals;
@@ -777,7 +779,7 @@ export class GridEngine {
         const eq = this.state.equity ??= [];
         if (!eq.length || this.now() - eq[eq.length - 1][0] >= 60_000) {
           const t = totals(this.modeTrades(), price);
-          pushCapped(eq, [this.now(), this.state.config.totalCapitalUsd + t.realized + t.unrealized], 3000);
+          pushCapped(eq, [this.now(), this.state.config.totalCapitalQuote + t.realized + t.unrealized], 3000);
         }
       }
       this.save();
@@ -843,11 +845,11 @@ export class GridEngine {
 
   private recordFailure(job: QueuedTrade, gasPls: number, price: number, hash: string | undefined, note: string, gasUnknown = false) {
     if (!(gasPls > 0) && !gasUnknown) return;
-    const gasUsd = gasPls * price;
+    const gasQuote = gasPls * price;
     this.state.trades.push({
       id: hash ?? `fail-${this.now()}`, network: this.netKey, side: job.side, intervalIndex: job.intervalIndex,
-      stable: this.state.stable, plsAmount: 0, stableAmount: 0, price: 0, gasPls, gasUsd, txHash: hash ?? '',
-      timestamp: this.now(), realizedPnlUsd: -gasUsd, failed: true, paper: this.state.mode === 'paper', note,
+      stable: this.state.stable, plsAmount: 0, stableAmount: 0, price: 0, gasPls, gasQuote, txHash: hash ?? '',
+      timestamp: this.now(), realizedPnlQuote: -gasQuote, failed: true, paper: this.state.mode === 'paper', note,
       ...(gasUnknown ? { gasUnknown: true } : {}),
     });
   }
@@ -881,16 +883,17 @@ export class GridEngine {
       lotCost = stableAmount + gasQuote;
     } else {
       const pos = replay(this.modeTrades());
-      lotCost = iv?.lotCost ?? (pos.plsHeld > 0 ? (pos.costUsd / pos.plsHeld) * plsAmount : undefined);
+      lotCost = iv?.lotCost ?? (pos.plsHeld > 0 ? (pos.costQuote / pos.plsHeld) * plsAmount : undefined);
       realized = applySell(pos, plsAmount, stableAmount, gasQuote, lotCost).realized;
-      roundTripNet = cash ? undefined : realized;
+      // A close / stop sale is a cash-out at market, not a buy → sell round trip: it stays in realized, not in round trips.
+      roundTripNet = cash || job.manual ? undefined : realized;
     }
     this.state.trades.push({
       id: f.txHash, network: this.netKey, side: job.side, intervalIndex: job.intervalIndex, stable: this.state.stable,
-      plsAmount, stableAmount, price: execPrice, gasPls, gasUsd: gasQuote, txHash: f.txHash, approvalTxHash: f.approvalTxHash,
-      timestamp: this.now(), realizedPnlUsd: realized, paper: this.state.mode === 'paper',
+      plsAmount, stableAmount, price: execPrice, gasPls, gasQuote, txHash: f.txHash, approvalTxHash: f.approvalTxHash,
+      timestamp: this.now(), realizedPnlQuote: realized, paper: this.state.mode === 'paper',
       triggerPrice: job.triggerPrice, levelPrice: job.levelPrice, ...(cash ? { closeSale: true } : {}), quotedPrice: f.quotedPrice, execPrice, slippagePct,
-      fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.seed ? { seed: job.seed } : {}),
+      fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.side === 'sell' && job.manual ? { closeOut: true } : {}), ...(job.seed ? { seed: job.seed } : {}),
       ...(f.taxPct ? { taxPct: f.taxPct } : {}), ...(f.outSource ? { outSource: f.outSource } : {}), ...(f.expectedOut != null ? { expectedOut: f.expectedOut } : {}),
       ...(f.gasUnknown ? { gasUnknown: true, note: GAS_UNKNOWN_NOTE } : {}),
       ...(this.def ? { dex: this.def.pool.dex, feeBps: this.def.pool.feeBps, ...(this.def.pool.feeTier != null ? { feeTier: this.def.pool.feeTier } : {}) } : {}),
@@ -1071,14 +1074,17 @@ export class GridEngine {
       chainKey: c?.key ?? this.d.net.key, chainShort: c?.short ?? 'PLS', label: this.label,
       base: this.baseSym, quoteSym: m?.quote.symbol ?? this.state.stable, feeBps: m?.pool.feeBps ?? FEE_BPS,
       flipped: !!m?.flipped, pairKey: m?.flipOf ?? this.state.stable, spends: m?.quote.symbol ?? this.state.stable, stacks: this.baseSym,
-      gasReserve: m?.quote.native && this.state.config ? gasReserve(this.state.config.totalCapitalUsd, reserveCfg(this.state.limits)) : null,
+      gasReserve: m?.quote.native && this.state.config ? gasReserve(this.state.config.totalCapitalQuote, reserveCfg(this.state.limits)) : null,
       dex: m?.pool.dex ?? null, dexName: m ? (c?.dexes.find((x) => x.id === m.pool.dex)?.name ?? m.pool.dex) : null, feeTier: m?.pool.feeTier ?? null, poolMode: m?.poolMode ?? null, custom: !!m?.custom, risk: m?.safety?.risk ?? null, available: !(this.executor instanceof UnavailableExecutor),
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol), stable: this.state.stable,
-      hasSigner: this.hasSigner, status: this.state.status, closing: !!this.state.closing, archivedAt: this.state.archivedAt ?? null, halt: this.state.halt ?? null, startOverride: this.state.startOverride ?? null, config: this.state.config, limits: this.state.limits,
+      hasSigner: this.hasSigner, status: this.state.status, closing: !!this.state.closing, archivedAt: this.state.archivedAt ?? null, halt: this.state.halt ?? null, startOverride: this.state.startOverride ?? null,
+      // totalCapitalUsd: deprecated alias of totalCapitalQuote (quote coin, never dollars) for older API readers
+      config: this.state.config ? { ...this.state.config, totalCapitalUsd: this.state.config.totalCapitalQuote } : null, limits: this.state.limits,
       price: this.state.lastPrice, priceAt: this.state.lastPriceAt, balances: this.balances, walletBalances: this.walletBalances,
-      intervals: this.state.intervals, usdPerBuy: this.state.usdPerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
-      trades: trades.slice(-100).reverse(),
-      pnl: { realized: t.realized, unrealized: t.unrealized, gasUsd: t.gasUsd, plsHeld: t.pos.plsHeld, costUsd: t.pos.costUsd },
+      intervals: this.state.intervals, quotePerBuy: this.state.quotePerBuy, usdPerBuy: this.state.quotePerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
+      trades: trades.slice(-100).reverse().map(legacyTradeNames),
+      // gasUsd / costUsd: deprecated aliases (quote coin) for older API readers
+      pnl: { realized: t.realized, unrealized: t.unrealized, gasQuote: t.gasQuote, plsHeld: t.pos.plsHeld, costQuote: t.pos.costQuote, gasUsd: t.gasQuote, costUsd: t.pos.costQuote },
       profits: this.state.profits,
       payout: (() => {
         const mine = this.state.payouts.filter((x) => x.paper === (this.state.mode === 'paper'));

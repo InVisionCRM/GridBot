@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bestSetup, bestWay, dailySwing, expectedGrid, expectedLp, GRID_PER_SWING, LP_REPEAT, SETUP_BANDS, SETUP_LEVELS, MIN_SCAN_CANDLES, MIN_SELL_HOURS, NATIVE_EEEE, NATIVE_ZERO, parseTopPools, pickTokens, SCAN_EVERY_MS, SCAN_PAGES, SCAN_RULES, TEST_USD, type TopPool } from '../src/market/scan';
+import { bestSetup, bestWay, dailySwing, expectedGrid, expectedLp, GRID_PER_SWING, isWashVolume, LP_REPEAT, SETUP_BANDS, SETUP_LEVELS, MIN_SCAN_CANDLES, MIN_SELL_HOURS, NATIVE_EEEE, NATIVE_ZERO, parseTopPools, pickTokens, SCAN_EVERY_MS, SCAN_PAGES, SCAN_RULES, TEST_USD, type TopPool } from '../src/market/scan';
 import { DEFAULT_COSTS } from '../src/market/costs';
 import { runGridBacktest } from '../src/market/backtest';
 import type { Candle } from '../src/market/candles';
@@ -11,6 +11,10 @@ import { MemoryStore } from '../src/server/bot/store';
 import { RateLimited } from '../src/server/market/gecko';
 import type { MarketDef } from '../src/live/markets';
 import { NET, MockChain } from './helpers/mockChain';
+import { setEthUsdSource } from '../src/lib/ethUnits';
+
+// screen text shows dollar-only figures in ETH; pin the price so the wording is fixed (gates stay in USD)
+setEthUsdSource(() => 2500);
 
 const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
 const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
@@ -59,6 +63,19 @@ describe('ranking (walk-forward, Oct 2026): grids by swing, liquidity by what it
   });
 });
 
+describe('wash volume', () => {
+  it('is volume over 20× liquidity; exactly 20× is still picked and not flagged', () => {
+    expect(isWashVolume(20, 1)).toBe(false);
+    expect(isWashVolume(20.01, 1)).toBe(true);
+    expect(isWashVolume(100, 0)).toBe(false);
+    const r = pickTokens([
+      pool({ name: 'EDGE / USDC', base: '0xe2', quote: USDC, liquidityUsd: 100_000, volume24Usd: 2_000_000 }),
+    ], SPEND, WETH);
+    expect(r.picked.map((p) => p.pool.name)).toEqual(['EDGE / USDC']);
+    expect(r.picked[0].pool.wash).toBe(false);
+  });
+});
+
 describe('pickTokens: real activity, something the bot can spend', () => {
   it('drops fake volume, thin pools, few trades, stable/stable and token/token; keeps one pool per token', () => {
     const r = pickTokens([
@@ -76,7 +93,7 @@ describe('pickTokens: real activity, something the bot can spend', () => {
     expect(r.picked.map((p) => [p.pool.name, p.token, p.spend])).toEqual([['WBTC / USDT', WBTC, USDT], ['USDC / PEPE', '0xf1', USDC], ['WASH / USDC', '0xe1', USDC]]);
     expect(r.picked.find((p) => p.pool.name === 'WASH / USDC')!.pool.wash).toBe(true);
     const why = Object.fromEntries(r.skipped.map((s) => [s.name, s.why]));
-    expect(why['BIS / WETH']).toMatch(/liquidity \$45 is below \$10,000/);
+    expect(why['BIS / WETH']).toMatch(/liquidity ≈ 0\.018 ETH is below ≈ 4 ETH/);
     expect(why['USDC / USDT']).toBe('both sides are the native coin or stablecoins');
     expect(why['ETH / USDT (V4 native)']).toBe('both sides are the native coin or stablecoins');
     expect(why['USDC / ETH (0xEeee)']).toBe('both sides are the native coin or stablecoins');
@@ -346,8 +363,8 @@ describe('DailyScanner: opportunities', () => {
     expect(f.chains[0].items.find((x) => x.label === 'ETH/USDC')).toMatchObject({ usd: 25_000, capital: 25_000 });
     expect((await sc.run()).testUsd).toBe(25_000);
     expect(new DailyScanner(deps).status().testUsd).toBe(25_000); // saved
-    await expect(sc.run(5)).rejects.toThrow(/from \$10 to \$10,000,000/);
-    await expect(sc.run(Number.NaN)).rejects.toThrow(/dollar amount/);
+    await expect(sc.run(5)).rejects.toThrow(/a number from ≈ 0\.004 ETH to ≈ 4,000 ETH/);
+    await expect(sc.run(Number.NaN)).rejects.toThrow(/must be a number/);
   });
 
   it('a saved scan from before (3 picks a chain, ranked with the price move) is dropped; its test size is kept', () => {
@@ -468,7 +485,7 @@ describe('Auto-recenter: follows the price up only', () => {
 
   it(`moves the range up after ${RECENTER_AFTER_MS / 3600_000}h above it, same width/levels/amount, keeps the trades`, async () => {
     const { chain, bot, at } = make();
-    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30, recenter: true });
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30, recenter: true });
     chain.setPrice(P0 * 0.97); await bot.tickAll(); // buys
     chain.setPrice(P0 * 1.15); await bot.tickAll(); // sells everything on the way up, now above the range
     const before = grid(bot, id);
@@ -484,7 +501,7 @@ describe('Auto-recenter: follows the price up only', () => {
     const px = g.price;
     expect(g.config.lowerPrice).toBeCloseTo(px * 0.9, 9);
     expect(g.config.upperPrice).toBeCloseTo(px * 1.1, 9);
-    expect(g.config).toMatchObject({ gridCount: 10, totalCapitalUsd: 30 });
+    expect(g.config).toMatchObject({ gridCount: 10, totalCapitalQuote: 30 });
     // the trades carry over; the new levels above the price got their coins from one start-up buy
     expect(g.trades.length).toBe(trades + 1);
     expect(g.trades[0]).toMatchObject({ side: 'buy', seed: [5, 6, 7, 8, 9] });
@@ -512,7 +529,7 @@ describe('Auto-recenter: follows the price up only', () => {
 
   it(`at most once per ${RECENTER_COOLDOWN_MS / 3600_000}h`, async () => {
     const { chain, bot, at } = make();
-    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30, recenter: true });
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30, recenter: true });
     chain.setPrice(P0 * 1.15); await bot.tickAll();
     at(RECENTER_AFTER_MS + 1); await bot.tickAll();
     expect(grid(bot, id).recenter.count).toBe(1);
@@ -526,8 +543,8 @@ describe('Auto-recenter: follows the price up only', () => {
 
   it('never moves down, and is off unless turned on', async () => {
     const { chain, bot, at } = make();
-    const on = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30, recenter: true });
-    const off = await bot.add({ mode: 'paper', stable: 'USDC', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 });
+    const on = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30, recenter: true });
+    const off = await bot.add({ mode: 'paper', stable: 'USDC', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 });
     chain.setPrice(P0 * 0.8); await bot.tickAll();
     at(RECENTER_AFTER_MS * 5); await bot.tickAll();
     expect(grid(bot, on).config.lowerPrice).toBeCloseTo(P0 * 0.9, 12);
@@ -540,11 +557,11 @@ describe('Auto-recenter: follows the price up only', () => {
 
   it('setRecenter turns it on or off for a running grid and survives a restart', async () => {
     const { bot } = make();
-    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 });
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 });
     bot.setRecenter(id, true);
     expect(grid(bot, id).recenter.enabled).toBe(true);
     bot.stop(id);
-    await bot.start(id, { mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.8, upperPrice: P0 * 1.2, gridCount: 10, totalCapitalUsd: 30 });
+    await bot.start(id, { mode: 'paper', stable: 'DAI', lowerPrice: P0 * 0.8, upperPrice: P0 * 1.2, gridCount: 10, totalCapitalQuote: 30 });
     expect(grid(bot, id).recenter.enabled).toBe(true);
     bot.setRecenter(id, false);
     expect(grid(bot, id).recenter.enabled).toBe(false);

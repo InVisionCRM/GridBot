@@ -77,6 +77,7 @@ export class Router {
       gasCaps: copyCaps(s.gasCaps),
       maxGasPriceWei: { ...s.maxGasPriceWei },
       maxPriorityFeeWei: { ...s.maxPriorityFeeWei },
+      receiptTimeoutMs: s.receiptTimeoutMs,
       autoClaim: s.autoClaim,
       halt: s.halt ? { subject: 'router', halt: { ...s.halt.halt } } : null,
       configured: { ...this.configured },
@@ -177,6 +178,7 @@ export class Router {
       gasCaps: s.gasCaps,
       maxGasPriceWei: s.maxGasPriceWei,
       maxPriorityFeeWei: s.maxPriorityFeeWei,
+      receiptTimeoutMs: s.receiptTimeoutMs,
       autoClaim: s.autoClaim,
       halt: s.halt,
     });

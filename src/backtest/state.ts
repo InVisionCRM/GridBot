@@ -515,7 +515,8 @@ function gridRealized(trades: unknown): number {
   for (const row of trades) {
     const t = obj(row);
     if (!t || t.failed === true || t.side !== 'sell') continue;
-    sum += num(t.realizedPnlUsd) ?? num(t.roundTripNet) ?? 0;
+    // `realizedPnlQuote` since the *Usd → *Quote rename (state v7); older saves still say realizedPnlUsd
+    sum += num(t.realizedPnlQuote) ?? num(t.realizedPnlUsd) ?? num(t.roundTripNet) ?? 0;
   }
   return sum;
 }
@@ -530,7 +531,7 @@ function gridBot(row: Record<string, unknown>, i: number): SavedBot | null {
   const lower = num(cfg.lowerPrice);
   const upper = num(cfg.upperPrice);
   const gridCount = num(cfg.gridCount);
-  const capital = num(cfg.totalCapitalUsd);
+  const capital = num(cfg.totalCapitalQuote) ?? num(cfg.totalCapitalUsd); // renamed *Quote in state v7
   if (lower == null || upper == null || gridCount == null || !(capital != null && capital > 0)) return null;
   const fills = fillsOf(row.trades);
   const profits = obj(row.profits);

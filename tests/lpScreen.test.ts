@@ -2,6 +2,7 @@ import { createElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ShowUsdCtx } from '../src/ui/money';
+import { botMetrics } from '../src/metrics/botMetrics';
 
 vi.mock('../src/ui/Chart', () => ({ Chart: () => null, EquityChart: () => null }));
 
@@ -27,7 +28,7 @@ describe('LP screen figures', () => {
     const html = renderToStaticMarkup(
       createElement(ShowUsdCtx.Provider, { value: { on: true, set: () => undefined } },
         createElement(LpDetail, {
-          s: { lps: [bot], chains: [] }, id: 'lp1', events: [], ticks: null, nav: () => undefined, act: () => undefined, busy: false,
+          s: { lps: [{ ...bot, metrics: botMetrics(bot, 1) }], chains: [] }, id: 'lp1', events: [], ticks: null, nav: () => undefined, act: () => undefined, busy: false,
         })),
     );
     expect(html.match(/Fees waiting/g)).toHaveLength(1);
@@ -36,7 +37,9 @@ describe('LP screen figures', () => {
     expect(html.match(/2 range moves/g)).toHaveLength(1);
     expect(html).not.toMatch(/Realized|Unrealized/);
     const waiting = html.slice(html.indexOf('Fees waiting'), html.indexOf('Compound at'));
-    const moves = html.slice(html.indexOf('Lost to range moves'), html.indexOf('Earned after costs'));
+    // #43: the range-move loss and its count are in Details' breakdown (gas · swaps · range moves), not a KPI of their own
+    expect(html).toContain('gas · swaps · range moves');
+    const moves = html.slice(html.indexOf('gas · swaps · range moves'), html.indexOf('= Generated'));
     expect(waiting).not.toContain('$');
     expect(moves).not.toContain('$');
   });

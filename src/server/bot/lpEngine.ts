@@ -144,6 +144,10 @@ export interface LpState {
    */
   totals: {
     fees: number; gas: number; sent: number; feeCoins: Coins; swapCost: number; moveLoss: number;
+    /** The same costs in the coin they were paid in, at each event's price ("generated" units). Absent on older state. */
+    gasCoins?: Coins; swapCoins?: Coins; moveCoins?: Coins;
+    /** Range-move loss rebuilt at load from the coins put in and taken out (backfillMoveLoss); absent if never needed. */
+    moveLossBackfill?: { loss: number; price: number; at: number };
     /**
      * Native gas of swaps settled by hash after a restart whose base/native rate could be read neither from the save
      * nor now: not in `gas` (booked as 0, never at the starting rate 1). Old saves omit it.
@@ -157,6 +161,8 @@ export interface LpState {
   lastPriceAt: number | null;
   /** [ms, value in quote] */
   equity: [number, number][];
+  /** [ms, pnl.fees in quote] every FEE_HIST_MS, for "fees earned today". Absent on older state. */
+  feeHist?: [number, number][];
   /** Live unwind in progress. Absent on older state. */
   closing?: boolean;
   /** Hidden from the active list; fees and PnL stay for analytics. Absent on older state. */
@@ -215,6 +221,10 @@ export interface LpHold {
 
 /** A tx stage that keeps reverting stops the bot after this many tries. */
 const MAX_TRIES = 3;
+/** Fee samples for "fees earned today": every 5 minutes, 600 kept (~2 days), the last 26h sent with status. */
+const FEE_HIST_MS = 5 * 60_000;
+const FEE_HIST_CAP = 600;
+const FEE_HIST_SHOWN_MS = 26 * 3_600_000;
 /** A native base side keeps this many times the open's estimated gas out of the position, so the open can pay for itself. */
 const OPEN_GAS_HEADROOM = 2;
 /** A close to cash whose smallest sale is over the price-impact cap tries again after this long (as a grid's) */
@@ -223,7 +233,7 @@ const newId = () => `lp-${Date.now().toString(36)}-${Math.random().toString(36).
 
 export function freshLp(net: LiveNetwork, id?: string): LpState {
   return {
-    kind: 'lp', version: 6, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
+    kind: 'lp', version: 7, id: id ?? newId(), mode: 'paper', network: net.key, market: net.defaultQuote, status: 'idle', config: null,
     limits: { ...DEFAULT_LIMITS }, profits: { mode: 'reinvest' }, position: null, idle: { base: 0, quote: 0 }, step: null,
     outSince: null, lastRerangeAt: null, reranges: 0, seen: null, totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 },     startedAt: null, startPrice: null, lastPrice: null, lastPriceAt: null, equity: [],
     closing: false, archivedAt: null, halt: null,
@@ -249,6 +259,10 @@ const RESTART_PAPER = { g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0'
  * 5: fees per coin, swap costs and what moves locked in. Earlier fees stay counted in the quote coin at their worth when
  *    collected; swap costs and move losses count from the upgrade; an open position's coins are taken at its next reading.
  *    The range moves as soon as the price leaves it: the missed-fees tally and the moves-per-day list are dropped.
+ *    That upgrade set lost-to-moves to 0 and cleared the open position's coins put in, so a bot that moved its range
+ *    before (or with that position open across) the upgrade never counted those losses: version 7 rebuilds them.
+ * 7: backfillMoveLoss on a closed bot whose moves were never counted. Runs on every load (idempotent), not only at
+ *    the version step, because it needs the bot to be closed; the state file is only rewritten on the bot's next save.
  */
 export function upgradeLp(s: LpState): LpState {
   let t = s;
@@ -273,7 +287,36 @@ export function upgradeLp(s: LpState): LpState {
     // (they stay in the position until it is taken out); with Send, fees it sent before the upgrade aren't counted as its.
     t = { ...t, version: 6, position: t.position ? { ...t.position, feesBefore: { ...t.totals.feeCoins } } : null };
   }
-  return t;
+  if (t.version < 7) t = { ...t, version: 7 };
+  return backfillMoveLoss(t);
+}
+
+/**
+ * A closed LP that moved its range but shows no loss from it (the v5 upgrade zeroed the tally): rebuild the loss from
+ * what it recorded. It put in config.capital (quote) + config.baseAmount (base) and holds `idle` at the end, which is
+ * the principal plus every fee collected (fees are reinvested, so they all come back at the close). At the exit
+ * price, the shortfall of principal against the coins put in is what the moves locked in, the same measure exited()
+ * books per move. Swap costs before the upgrade weren't tallied either, so they are inside this figure.
+ * Counted in the quote coin at the exit price (the only price the record has for it).
+ * Skipped when it can't be exact: still open, fees sent out, coins set aside, no exit price, or a loss already counted.
+ * Idempotent: once applied, totals.moveLoss is non-zero and moveLossBackfill is set.
+ */
+export function backfillMoveLoss(s: LpState): LpState {
+  const t = s.totals, c = s.config, idle = s.idle, price = s.lastPrice;
+  if (t.moveLossBackfill || t.moveLoss !== 0 || t.swapCost !== 0 || !(s.reranges > 0)) return s;
+  if (s.status !== 'closed' || s.position || s.step || !c || !idle || !(price != null && price > 0)) return s;
+  if (t.sent > 0 || (s.aside && (s.aside.base > 0 || s.aside.quote > 0))) return s;
+  const principal = { base: idle.base - t.feeCoins.base, quote: idle.quote - t.feeCoins.quote };
+  const loss = ((c.baseAmount ?? 0) - principal.base) * price + (c.capital - principal.quote);
+  if (!Number.isFinite(loss) || loss <= 0) return s;
+  return {
+    ...s,
+    totals: {
+      ...t, moveLoss: loss,
+      moveCoins: { base: (t.moveCoins?.base ?? 0), quote: (t.moveCoins?.quote ?? 0) + loss },
+      moveLossBackfill: { loss, price, at: s.lastPriceAt ?? 0 },
+    },
+  };
 }
 
 /** Logs of `name` from the position manager in a receipt. */
@@ -491,7 +534,7 @@ export class LpEngine {
       const coins = vw.coins, fees = vw.owed;
       this.addIdle({ base: coins.base + fees.base, quote: coins.quote + fees.quote });
       this.addFees(fees, vw.v.price);
-      if (p.putIn) this.state.totals.moveLoss += (p.putIn.base - coins.base) * vw.v.price + (p.putIn.quote - coins.quote);
+      if (p.putIn) this.addMoveLoss(p.putIn, coins, vw.v.price);
     } else if (p?.putIn) this.addIdle(p.putIn);
     this.state.position = null;
     this.state.step = null;
@@ -848,6 +891,10 @@ export class LpEngine {
     this.view = { v, inRange: !!p && v.tick >= p.tickLower && v.tick < p.tickUpper, coins, owed: owedCoins, value };
     const eq = this.state.equity, pnl = this.pnl();
     if (pnl && (!eq.length || this.now() - eq[eq.length - 1][0] >= 60_000)) pushCapped(eq, [this.now(), pnl.equity], 3000);
+    if (pnl) {
+      const fh = (this.state.feeHist ??= []);
+      if (!fh.length || this.now() - fh[fh.length - 1][0] >= FEE_HIST_MS) pushCapped(fh, [this.now(), pnl.fees], FEE_HIST_CAP);
+    }
   }
 
   /**
@@ -934,7 +981,7 @@ export class LpEngine {
    * as the grid and trend bots do.
    */
   private bookRecoveredGas(hash: string, r: { gasPls: number; gasNative: number; gasUnknown?: true }, v: PoolView) {
-    this.state.totals.gas += r.gasPls * v.price;
+    this.addGas(r.gasPls * v.price, v); // also books gasCoins (0 when the rate is unknown)
     if (!r.gasUnknown) return;
     this.state.totals.gasUnknownNative = (this.state.totals.gasUnknownNative ?? 0) + r.gasNative;
     const nat = this.def ? this.hub.rt(this.def.chainId).cfg.nativeSymbol : 'native';
@@ -983,7 +1030,7 @@ export class LpEngine {
   private async settled(s: LpStep, v: PoolView): Promise<ReceiptLike | null> {
     const r = await this.hub.rt(this.chainId).reader.getTransactionReceipt(s.hash!);
     if (!r) return null;
-    this.state.totals.gas += await this.receiptGas(r, v);
+    this.addGas(await this.receiptGas(r, v), v);
     s.hash = undefined; s.sentAt = undefined;
     if (r.status === 1) return r;
     s.tries++;
@@ -1019,7 +1066,7 @@ export class LpEngine {
       const snap = await this.hub.quoter(this.state.market).market();
       this.addIdle({ base: coins.base + fees.base, quote: coins.quote + fees.quote });
       this.addFees(fees, v.price);
-      this.state.totals.gas += this.gasQuote(LP_GAS.v3.close, v, snap);
+      this.addGas(this.gasQuote(LP_GAS.v3.close, v, snap), v);
       return this.exited(s, fees, coins, v);
     }
     if (s.hash) {
@@ -1047,6 +1094,27 @@ export class LpEngine {
   /** The non-native token when one side of the market is the native coin (null when both are ERC-20s). */
   private nativeOther(pool: LpPool) { return pool.def.base.native ? pool.quoteAddr : pool.def.quote.native ? pool.baseAddr : null; }
 
+  private addCoins(k: 'gasCoins' | 'swapCoins' | 'moveCoins', c: Coins) {
+    const t = this.state.totals, o = t[k] ?? { base: 0, quote: 0 };
+    t[k] = { base: o.base + c.base, quote: o.quote + c.quote };
+  }
+  /** Gas in quote terms; in coins it is charged to the native coin's side when the pair holds it, else to the quote. */
+  private addGas(q: number, v: { price: number }) {
+    this.state.totals.gas += q;
+    const native = !!this.def?.base.native;
+    this.addCoins('gasCoins', native && v.price > 0 ? { base: q / v.price, quote: 0 } : { base: 0, quote: q });
+  }
+  /**
+   * A position came out with `principal` against the `putIn` coins: the shortfall at this price is "lost to moves".
+   * In coins it is charged to the coin the exit left too much of, i.e. the one the rebalance swap sells.
+   */
+  private addMoveLoss(putIn: Coins, principal: Coins, price: number) {
+    const loss = (putIn.base - principal.base) * price + (putIn.quote - principal.quote);
+    this.state.totals.moveLoss += loss;
+    const soldBase = principal.base > putIn.base;
+    this.addCoins('moveCoins', soldBase && price > 0 ? { base: loss / price, quote: 0 } : { base: 0, quote: loss });
+  }
+
   private addFees(f: Coins, price: number) {
     const t = this.state.totals;
     t.fees += f.base * price + f.quote;
@@ -1058,7 +1126,7 @@ export class LpEngine {
    */
   private exited(s: LpStep, fees: Coins, principal: Coins, v: PoolView) {
     const p = this.state.position!;
-    if (p.putIn) this.state.totals.moveLoss += (p.putIn.base - principal.base) * v.price + (p.putIn.quote - principal.quote);
+    if (p.putIn) this.addMoveLoss(p.putIn, principal, v.price);
     this.state.position = null;
     this.state.outSince = null;
     this.blockMemo = null;
@@ -1116,11 +1184,11 @@ export class LpEngine {
       }
       try {
         const f = await this.execute(q, 'swap');
-        this.state.totals.gas += f.gasPls * v.price;
+        this.addGas(f.gasPls * v.price, v);
         this.applySwap(side, f.amountInHuman, f.amountOutHuman, v.price);
       } catch (e) {
         const o = e instanceof ExecError ? e.opts : {};
-        if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
+        if (o.gasPls) this.addGas(o.gasPls * v.price, v);
         if (o.aborted) return;
         if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
         throw e;
@@ -1182,11 +1250,11 @@ export class LpEngine {
     s.waitUntil = undefined;
     try {
       const f = await this.execute(q, 'sell');
-      this.state.totals.gas += f.gasPls * v.price;
+      this.addGas(f.gasPls * v.price, v);
       this.applySwap('sell', f.amountInHuman, f.amountOutHuman, v.price);
     } catch (e) {
       const o = e instanceof ExecError ? e.opts : {};
-      if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
+      if (o.gasPls) this.addGas(o.gasPls * v.price, v);
       if (o.aborted) return;
       if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
       throw e;
@@ -1202,7 +1270,10 @@ export class LpEngine {
 
   /** A swap to the range's mix landed; its cost is what went in less what came out, at the mid price. */
   private applySwap(side: 'buy' | 'sell', amountIn: number, amountOut: number, price: number) {
-    this.state.totals.swapCost += side === 'buy' ? amountIn - amountOut * price : amountIn * price - amountOut;
+    const cost = side === 'buy' ? amountIn - amountOut * price : amountIn * price - amountOut;
+    this.state.totals.swapCost += cost;
+    // in the coin swapped in: a buy pays quote for base, a sell pays base
+    this.addCoins('swapCoins', side === 'buy' ? { base: 0, quote: cost } : { base: price > 0 ? cost / price : 0, quote: 0 });
     const i = this.state.idle;
     this.state.idle = side === 'buy' ? { base: i.base + amountOut, quote: i.quote - amountIn } : { base: i.base - amountIn, quote: i.quote + amountOut };
   }
@@ -1232,7 +1303,7 @@ export class LpEngine {
       const { L, used } = pool.fund(this.state.idle, range.tickLower, range.tickUpper, v);
       if (!(L > 0)) throw new Error('nothing to put in the position');
       const snap = await this.hub.quoter(this.state.market).market();
-      this.state.totals.gas += this.gasQuote(LP_GAS.v3.open, v, snap);
+      this.addGas(this.gasQuote(LP_GAS.v3.open, v, snap), v);
       const inRange = v.tick >= range.tickLower && v.tick < range.tickUpper;
       return this.minted(s, `paper-${this.now().toString(36)}`, BigInt(Math.floor(L)), used, v, pool, { g0: v.global0.toString(), g1: v.global1.toString(), inRange, owed0: '0', owed1: '0' });
     }
@@ -1313,7 +1384,7 @@ export class LpEngine {
       const fees = pool.coinsFromRaw(o.raw0, o.raw1, v);
       p.paper = { ...p.paper!, owed0: '0', owed1: '0' };
       const snap = await this.hub.quoter(this.state.market).market();
-      this.state.totals.gas += this.gasQuote(LP_GAS.v3.close, v, snap);
+      this.addGas(this.gasQuote(LP_GAS.v3.close, v, snap), v);
       return this.sent(fees, v.price, to);
     }
     if (s.hash) {
@@ -1420,7 +1491,7 @@ export class LpEngine {
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
       status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, move: this.moveStatus(), hold: this.hold, positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, startPrice: s.startPrice, equity: s.equity.slice(-500),
+      outSince: s.outSince, move: this.moveStatus(), hold: this.hold, positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, feeHist: (s.feeHist ?? []).filter(([t]) => t >= this.now() - FEE_HIST_SHOWN_MS), startPrice: s.startPrice, equity: s.equity.slice(-500),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }

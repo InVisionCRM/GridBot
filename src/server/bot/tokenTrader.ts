@@ -6,10 +6,13 @@
  * (impact, fee, tax). Live is opt-in: it needs a signing key and the existing safety classifier, and sends
  * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
  */
+import { usdAsEth } from '../../lib/ethUnits';
+import { tokenMetrics, tokenSpendTotals } from '../../metrics/botMetrics';
 import { chainById } from '../../live/chains';
 import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, DEFAULT_MIN_HOLDER_COVERAGE, clampHolderCoverage, clampHolderShare } from '../../market/holders';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
+import { unverifiedOwnerReport, type OwnerReport } from '../../market/ownerPowers';
 import {
   decideExit, filterFresh, gateToken, sizeBuy, splitSell, EXIT, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SIZE_IMPACT_CAP, DEFAULT_SNIPER_MIN_LIQ_USD,
   type FreshPool, type GateInput,
@@ -43,7 +46,11 @@ export interface TraderOptions {
   mode: 'paper' | 'live';
   perTradeUsd: number;
   totalUsd: number;
-  /** Scan discovery only. Snipes ignore it. */
+  /**
+   * Scan discovery skips a pool younger than this when its age is known. Snipes do not use it there.
+   * When enforceWashAndAge is on, the gate uses the same number for scan pools, and an unknown age skips safe and medium.
+   * Snipes are exempt from the age leg (they only get the wash-volume leg).
+   */
   minPoolAgeSec: number;
   /**
    * Minimum pool liquidity (USD) for a scan buy and the safety gate. 0 matches the old hardcoded floor,
@@ -58,10 +65,29 @@ export interface TraderOptions {
   maxImpact: number;
   maxPoolShare: number;
   /**
+   * When on, safe and medium apply minPoolAgeSec in the gate, treat an unknown pool age as a skip,
+   * and skip wash volume (24h volume over 20× liquidity). Off: the gate ignores this and discovery is unchanged.
+   */
+  enforceWashAndAge: boolean;
+  /**
+   * When on, safe and medium skip a non-renounced owner who can mint, blacklist, pause, or set tax or limits,
+   * and a proxy a live admin can upgrade. Off: the gate ignores this and the trader makes no extra reads.
+   */
+  enforceOwnerPowers: boolean;
+  /**
    * Read Uniswap V3 position NFTs and attach the lock/burn report to the gate.
    * Off unless set: the gate then behaves exactly as it does without the field.
    */
   v3LpLockCheck: boolean;
+  /**
+   * Reuse a V3 lock result for the same chain, pool, and scanned block window.
+   * Off unless set: the check does not consult that cache.
+   */
+  v3LpLockCacheEnabled: boolean;
+  /** TTL for `v3LpLockCacheEnabled`. Default 10 minutes. */
+  v3LpLockCacheTtlMs: number;
+  /** Max public RPC calls for one V3 lock check. 0 means no cap. */
+  v3LpLockCallBudget: number;
   /**
    * Fill lpUnlocked from the pool (V2 burn share, or the V3 position-NFT check).
    * Off unless set: assess leaves lpUnlocked null and the gate output is unchanged.
@@ -193,7 +219,11 @@ export interface GenLedger {
 export type TradeMode = 'paper' | 'live';
 const genKey = (mode: TradeMode, chainId: number, coin: string) => `${mode}:${chainId}:${coin.toLowerCase()}`;
 
-export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null }
+/**
+ * One fill. `usd`/`pnlUsd` are dollars (kept for the API); `spendSym`, `amount` (spend coin bought with / received) and
+ * `pnl` (spend coin) are the same fill in the coin it spends, for the crypto-units screens. Older lines have only dollars.
+ */
+export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null; spendSym?: string; amount?: number; pnl?: number | null }
 export interface FeedItem { t: number; chainId: number; pool: string; label: string; verdict: 'bought' | 'skipped'; why: string }
 
 export interface TraderState {
@@ -259,8 +289,11 @@ const TRADE_MAX = 200;
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   minLiquidityUsd: DEFAULT_MIN_LIQUIDITY_USD, enforceLiquidityFloor: false,
-  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
+  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE, enforceWashAndAge: false, enforceOwnerPowers: false,
   v3LpLockCheck: false,
+  v3LpLockCacheEnabled: false,
+  v3LpLockCacheTtlMs: 10 * 60_000,
+  v3LpLockCallBudget: 0,
   lpUnlockCheck: false,
   enforceHolderCheck: false, maxHolderShare: DEFAULT_MAX_HOLDER_SHARE, maxTop10Share: DEFAULT_MAX_TOP10_SHARE,
   minHolderCoverage: DEFAULT_MIN_HOLDER_COVERAGE,
@@ -344,10 +377,20 @@ export class TokenTrader {
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
     /**
+     * Owner / proxy-admin / setter scan. Called only when enforceOwnerPowers is on.
+     * A throw, or a missing callback while the flag is on, is unverified.
+     */
+    ownerPowers?: (pool: FreshPool) => Promise<OwnerReport>;
+    /**
      * For Generated only: whether a spend coin is the chain's own coin (or its wrapped form), and that coin's symbol.
      * Missing = not native (gas is reported apart, never price-converted).
      */
     coinInfo?: (chainId: number, spend: string) => { native: boolean; nativeSymbol: string } | null;
+    /**
+     * Optional volume and age read. Called only when enforceWashAndAge is on.
+     * Production does not set this: the gate uses the pool row it already has. A throw is unverified.
+     */
+    poolFacts?: (pool: FreshPool) => Promise<{ createdAt: number | null; volumeUsd: number; liquidityUsd: number }>;
     /** Rejected candidates. Omitted in tests that only need the in-memory window. */
     rejects?: RejectSink;
   }) {
@@ -515,8 +558,15 @@ export class TokenTrader {
     const openUsd = this.openUsd();
     const { plays, ...rest } = this.state;
     void plays;
-    return {
-      ...rest,
+    const positions = rest.positions.map((p) => {
+      const pnlUsd = this.pnl(p);
+      const cost = p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0);
+      // the same open result in the spend coin (display only)
+      const pnl = p.usdPerSpend > 0 ? pnlUsd / p.usdPerSpend : null;
+      return { ...p, pnlUsd, pnl, spendSym: p.label.split('/').pop(), pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p) };
+    });
+    const out = {
+      ...rest, id: 'token-trader', kind: 'token' as const,
       openUsd,
       /** Liquidity floor scan buys and the gate actually use (the setting, raised to $50,000 when that flag is on). */
       effectiveMinLiquidityUsd: this.floorUsd(),
@@ -529,12 +579,13 @@ export class TokenTrader {
       offMode: this.state.offMode ?? 'exits',
       modeLog: this.state.modeLog ?? [],
       pendingChoice: this.state.pendingChoice ?? null,
-      positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p), exitsBlocked: this.blocked(p), generated: this.posGenerated(p) })),
+      positions: positions.map((p) => ({ ...p, exitsBlocked: this.blocked(p), generated: this.posGenerated(p) })),
       /** Live positions whose exits are blocked until the wallet balance can be read (lasting, until reconciled) */
       exitsBlocked: this.state.positions.filter((p) => this.blocked(p)).length,
       /** Generated per mode and spend coin (closed sells, less buy fees and gas paid); see types/generated.ts */
       generated: this.generated(),
     };
+    return { ...out, metrics: tokenMetrics(out, Date.now()), spendTotals: tokenSpendTotals(out) };
   }
 
   /** Passed plays. Not trimmed, and not part of `status()`. */
@@ -613,11 +664,20 @@ export class TokenTrader {
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
     const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
     if ('v3LpLockCheck' in o) n.v3LpLockCheck = o.v3LpLockCheck === true;
+    if ('v3LpLockCacheEnabled' in o) n.v3LpLockCacheEnabled = o.v3LpLockCacheEnabled === true;
+    if ('v3LpLockCallBudget' in o) {
+      const b = Number(o.v3LpLockCallBudget);
+      n.v3LpLockCallBudget = Number.isFinite(b) && b > 0 ? Math.floor(b) : 0;
+    }
+    if ('v3LpLockCacheTtlMs' in o) {
+      const t = Number(o.v3LpLockCacheTtlMs);
+      n.v3LpLockCacheTtlMs = Number.isFinite(t) && t > 0 ? Math.floor(t) : 10 * 60_000;
+    }
     if ('lpUnlockCheck' in o) n.lpUnlockCheck = o.lpUnlockCheck === true;
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
-    if (!(n.minLiquidityUsd >= 0)) throw new Error('Minimum liquidity must be 0 or more USD.');
+    if (!(n.minLiquidityUsd >= 0)) throw new Error('Minimum liquidity must be 0 or more.');
     if (typeof n.enforceLiquidityFloor !== 'boolean') throw new Error('Liquidity floor flag must be on or off.');
     if (!(n.maxImpact > 0) || n.maxImpact > HARD_CAPS.maxPriceImpact) throw new Error('Price-impact cap must be between 0% and 5%.');
     if (!(n.sizeImpactCap > 0) || n.sizeImpactCap > HARD_CAPS.maxPriceImpact) throw new Error('Trade-size impact cap must be between 0% and 5%.');
@@ -639,7 +699,11 @@ export class TokenTrader {
     this.state.on = true;
     this.state.pendingChoice = null;
     this.logMode('on', requestHalt('token-trader-on', 'POST /api/token-trader/on', this.now()));
-    this.say(`token trader on (${o.mode}): up to ${o.perTradeUsd} USD a trade, ${o.totalUsd} USD open, pools at least ${Math.round(o.minPoolAgeSec / 3600)}h old unless the sniper is on`);
+    const ageH = Math.round(o.minPoolAgeSec / 3600);
+    const ageNote = o.enforceWashAndAge
+      ? `pools at least ${ageH}h old, safe/medium skip an unknown age or wash volume; snipes skip only wash volume`
+      : `pools at least ${ageH}h old unless the sniper is on`;
+    this.say(`token trader on (${o.mode}): up to ${usdAsEth(o.perTradeUsd)} a trade, ${usdAsEth(o.totalUsd)} open, ${ageNote}`);
     this.save();
   }
 
@@ -807,8 +871,8 @@ export class TokenTrader {
     if (this.state.feed.length > FEED_MAX) this.state.feed.length = FEED_MAX;
   }
 
-  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null }> {
-    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null, warn: null };
+  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null; note: string | null }> {
+    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null, warn: null, note: null };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
     let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: this.gateFloor(pool, g.minLiquidityUsd) };
     if (this.state.options.enforceHolderCheck) {
@@ -839,8 +903,45 @@ export class TokenTrader {
         maxTop10Share: this.state.options.maxTop10Share,
       };
     }
+    if (this.state.options.enforceWashAndAge) {
+      let volumeUsd = pool.volumeUsd;
+      let liquidityUsd = pool.liquidityUsd;
+      let createdAt = pool.createdAt;
+      let freshnessUnverified = false;
+      if (this.d.poolFacts) {
+        try {
+          const f = await this.d.poolFacts(pool);
+          volumeUsd = f.volumeUsd;
+          liquidityUsd = f.liquidityUsd;
+          createdAt = f.createdAt;
+        } catch {
+          freshnessUnverified = true;
+        }
+      }
+      gate.enforceWashAndAge = true;
+      gate.freshnessUnverified = freshnessUnverified;
+      gate.volumeUsd = volumeUsd;
+      gate.liquidityUsd = liquidityUsd;
+      gate.poolAgeSec = createdAt == null ? null : Math.max(0, (this.now() - createdAt) / 1000);
+      // A snipe is a just-created pool with no age by design ("a snipe ignores the age"): the age leg would block
+      // every snipe at safe/medium, so snipes get only the wash-volume leg.
+      gate.gateMinPoolAgeSec = pool.source === 'snipe' ? 0 : this.state.options.minPoolAgeSec;
+    }
+    let note: string | null = null;
+    if (this.state.options.enforceOwnerPowers) {
+      let report: OwnerReport;
+      try {
+        report = this.d.ownerPowers ? await this.d.ownerPowers(pool) : unverifiedOwnerReport('owner powers could not be verified');
+      } catch {
+        report = unverifiedOwnerReport('owner powers could not be verified');
+      }
+      gate.enforceOwnerPowers = true;
+      gate.ownerPowersUnverified = report.unverified;
+      gate.ownerPowersWhy = report.why;
+      note = report.note;
+    }
     const r = gateToken(gate);
-    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate, warn: r.warn ?? null };
+    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate, warn: r.warn ?? null, note: r.ok ? note : null };
   }
 
   private reject(o: { chainId: number; pool: string; token: string; signal: string; source: string; reason: string; price: number | null; feeBps: number | null; spendSymbol?: string }) {
@@ -932,7 +1033,7 @@ export class TokenTrader {
     }
   }
 
-  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput, warn: string | null) {
+  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput, warn: string | null, note: string | null) {
     const o = this.state.options;
     const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
     const skip = (why: string) => {
@@ -1002,8 +1103,9 @@ export class TokenTrader {
     };
     this.state.positions.push(pos);
     this.bookBuy(pos, gasNative ?? 0);
-    const why = warn ? `buy ${sized.why}; ${warn}` : `buy ${sized.why}`;
-    this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null });
+    const extra = [warn, note].filter((s): s is string => !!s).join('; ');
+    const why = extra ? `buy ${sized.why}; ${extra}` : `buy ${sized.why}`;
+    this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode: o.mode } : { mode: o.mode });
     this.rememberEntry(pos, pool, recordedImpact, txEntry, gasUsed, gasPrice, gasNative);
@@ -1024,7 +1126,7 @@ export class TokenTrader {
     if (this.entriesStopped(pool.chainId)) { skip('new buys are stopped (Stop all)'); return; }
     const a = await this.assess(pool);
     if (!a.ok || !a.gate) { skip(a.reason ?? 'safety'); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
-    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate, a.warn);
+    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate, a.warn, a.note);
   }
 
   private async scanEntries() {
@@ -1059,7 +1161,7 @@ export class TokenTrader {
         this.say(`skipped ${label}: ${a.reason}`, 'warn');
         continue;
       }
-      await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn);
+      await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn, a.note);
     }
   }
 
@@ -1088,7 +1190,9 @@ export class TokenTrader {
       const pool = await this.d.resolve?.(hit) ?? null;
       if (!pool) { rejectHit('could not price the new pool', hit.pool.slice(0, 8)); continue; }
       const minLiq = Math.max(sn.minLiquidityUsd, this.floorUsd());
-      if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${minLiq.toLocaleString('en-US')}` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `liquidity under $${minLiq.toLocaleString('en-US')}`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
+      // the gate compares dollars (unchanged); the reason a screen shows is in ETH (src/lib/ethUnits.ts)
+      const thinWhy = `liquidity under ${usdAsEth(minLiq)}`;
+      if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: thinWhy }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: thinWhy, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `${sn.maxPerHour} snipes an hour already`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       const before = this.state.positions.length;
       await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');
@@ -1233,8 +1337,9 @@ export class TokenTrader {
       if (sold > 0) {
         const usd = quote * p.usdPerSpend;
         const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
+        const costCoin = p.spent * (p.entryTokens > 0 ? sold / p.entryTokens : 0); // the same cost in the spend coin (log only)
         const why = stopped ? `${d.why} (partial: ${num(sold)} of ${num(qty)})` : d.why;
-        this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost });
+        this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost, spendSym: p.label.split('/').pop(), amount: quote, pnl: quote - costCoin });
         this.say(`sold ${p.label}: ${why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
       }
       if (tp && (sold > 0 || pend || stopped)) {

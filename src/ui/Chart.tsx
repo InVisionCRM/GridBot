@@ -17,7 +17,7 @@ import { BotMenu, type ChartBot } from './BotMenu';
 import { readOff, saveOff } from './botPick';
 import { px, num, ago } from './fmt';
 import type { Ticks } from './useStream';
-import { ChainBadge, MarketOptions, chainOf, feeLabel, flipKey, isFlipKey, mk, orientedKey, unflipKey } from './chains';
+import { ChainBadge, MarketOptions, chainOf, feeLabel, flipKey, isFlipKey, mk, orientedKey, unflipKey, type MarketInfo } from './chains';
 import { IND, T, alpha, chartBase } from './theme';
 
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -49,11 +49,35 @@ export interface ChartProps {
   onDraw?: DrawCtl['onDraw'];
   /** Set to let lines be dragged: called once per drop with the line's new points */
   onMove?: DrawCtl['onMove'];
+  /** Show the pool's mid price (the sell quote with the pool fee taken back out). For LPs, whose range is in mid prices. */
+  mid?: boolean;
+}
+
+/**
+ * Candles and ticks are sell-side quotes (quote per base after the pool fee). Mid ≈ sell ÷ (1 − fee); a flipped chart
+ * is the inverted series, so its mid is × (1 − fee). 1 when the fee isn't known.
+ */
+export function midFactor(feeBps: number | null | undefined, flipped: boolean): number {
+  if (!(typeof feeBps === 'number' && feeBps > 0 && feeBps < 10_000)) return 1;
+  const f = feeBps / 10_000;
+  return flipped ? 1 - f : 1 / (1 - f);
+}
+
+/** The chart's units line: mid, or sell-side with the pool's own fee. An unknown market claims no fee. */
+export function unitsLabel(m: Pick<MarketInfo, 'quote' | 'base' | 'feeBps' | 'feeTier' | 'kind'>, known: boolean, mid: boolean): string {
+  const fee = feeLabel(m);
+  if (!known) return `units ${m.quote}/${m.base}`;
+  return mid ? `units ${m.quote}/${m.base} (mid price; ${fee} pool fee taken out)` : `units ${m.quote}/${m.base} (sell-side, after the ${fee} pool fee)`;
 }
 
 export function Chart(p: ChartProps) {
   const [pair, setPair] = useState(p.pair ?? p.pairs[0] ?? 'DAI');
   const pm = mk(p.status ?? {}, pair);
+  // mk() falls back to a PulseX 0.29% guess for a key it doesn't list: then no fee is claimed or taken out
+  const known = !pm.legacy || ((p.status?.marketList ?? []) as AnyObj[]).some((x) => x.key === pair) || !pair.includes(':');
+  const scale = p.mid && known ? midFactor(pm.feeBps, isFlipKey(pair)) : 1;
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
   const [tf, setTf] = useState<TF>(p.tf ?? '1h');
   // candles with the market they belong to, so a refresh of the same market keeps the view
   const [loaded, setLoaded] = useState<{ market: string; k: Candle[] }>({ market: '', k: [] });
@@ -89,12 +113,17 @@ export function Chart(p: ChartProps) {
   useEffect(() => {
     let dead = false;
     const load = () => http(`/api/market/candles?pair=${encodeURIComponent(pair)}&tf=${tf}&limit=1500`)
-      .then((r) => { if (!dead) { setLoaded({ market: `${pair}|${tf}`, k: r.candles }); setMeta(r.meta); setErr(null); } })
+      .then((r) => {
+        if (dead) return;
+        const f = scaleRef.current;
+        const k = f === 1 ? r.candles : (r.candles as Candle[]).map((c) => ({ ...c, o: c.o * f, h: c.h * f, l: c.l * f, c: c.c * f }));
+        setLoaded({ market: `${pair}|${tf}`, k }); setMeta(r.meta); setErr(null);
+      })
       .catch((e) => !dead && setErr((e as Error).message));
     void load();
     const id = setInterval(load, 60_000);
     return () => { dead = true; clearInterval(id); };
-  }, [pair, tf]);
+  }, [pair, tf, scale]);
 
   // Build the chart (series, panes, drawing) once per layout; candle data goes in through feed, so the minute refresh
   // updates the chart in place instead of rebuilding it (a rebuild resets the view and cuts off a drag).
@@ -192,7 +221,8 @@ export function Chart(p: ChartProps) {
   useEffect(() => {
     // Flipped charts read the original's inverted series, so they follow the original's tick inverted.
     const o = isFlipKey(pair) ? p.ticks?.prices?.[unflipKey(pair)] : undefined;
-    const price = isFlipKey(pair) ? (o && o > 0 ? 1 / o : undefined) : p.ticks?.prices?.[pair];
+    const raw = isFlipKey(pair) ? (o && o > 0 ? 1 / o : undefined) : p.ticks?.prices?.[pair];
+    const price = raw ? raw * scaleRef.current : raw;
     if (!price || !cs.current || !candles.length) return;
     const b = Math.floor(p.ticks!.t / 1000 / TF_SEC[tf]) * TF_SEC[tf];
     let last = candles[candles.length - 1];
@@ -264,7 +294,7 @@ export function Chart(p: ChartProps) {
       for (const tr of t.trades ?? []) {
         if (tr.failed || snap(tr.timestamp) < s0) continue;
         const buy = tr.side === 'buy';
-        mk.push({ time: ts(snap(tr.timestamp)), position: buy ? 'belowBar' : 'aboveBar', color: buy ? C.entry : tr.realizedPnlUsd >= 0 ? C.up : C.down, shape: buy ? 'arrowUp' : 'arrowDown', size: 1.3, text: buy ? 'buy' : `${tr.reason} ${tr.realizedPnlUsd >= 0 ? '+' : ''}${num(tr.realizedPnlUsd, 3)}` });
+        mk.push({ time: ts(snap(tr.timestamp)), position: buy ? 'belowBar' : 'aboveBar', color: buy ? C.entry : tr.realizedPnlQuote >= 0 ? C.up : C.down, shape: buy ? 'arrowUp' : 'arrowDown', size: 1.3, text: buy ? 'buy' : `${tr.reason} ${tr.realizedPnlQuote >= 0 ? '+' : ''}${num(tr.realizedPnlQuote, 3)}` });
       }
       if (t.position) {
         const r = t.position.risk;
@@ -315,7 +345,7 @@ export function Chart(p: ChartProps) {
       <div className="chart-legend">
         <ChainBadge c={chainOf(p.status ?? {}, pm.chainId)} testnet={false} /><strong>{pm.label.replace(/·.*/, '')}</strong> <span className="muted">{tf}</span>
         {lg && <> · O <b>{px(lg.o)}</b> H <b>{px(lg.h)}</b> L <b>{px(lg.l)}</b> C <b className={lg.c >= lg.o ? 'pos' : 'neg'}>{px(lg.c)}</b></>}
-        <span className="muted small"> · {candles.length} candles · {meta?.source ?? 'no data'}{meta?.updatedAt ? ` · upd ${ago(meta.updatedAt * 1000)}` : ''} · units {pm.quote}/{pm.base} (sell-side, after {feeLabel(pm)} LP fee)</span>
+        <span className="muted small"> · {candles.length} candles · {meta?.source ?? 'no data'}{meta?.updatedAt ? ` · upd ${ago(meta.updatedAt * 1000)}` : ''} · {unitsLabel(pm, known, !!p.mid)}</span>
       </div>
       {err && <div className="banner warn">{err}</div>}
       {p.drawMode && candles.length > 0 && (

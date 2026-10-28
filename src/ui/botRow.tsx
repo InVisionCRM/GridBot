@@ -3,13 +3,15 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { botApi } from './api';
 import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
-import { botFacts } from './deskStats';
-import { cls, dur, pct, px, qty, usd } from './fmt';
+import { botFacts, metricsOf, unitsText } from './deskStats';
+import { isShortRun } from './runRate';
+import type { FeesToday } from '../metrics/feesToday';
+import { cls, dur, pct, px, qty } from './fmt';
 import { ChainMark, TokenMark } from './icons';
-import { useShowUsd } from './money';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
-import { bookUsd, botSpark } from './series';
+import { botSpark } from './series';
 import { StatTable } from './StatTable';
+import { MoneyDetails } from './MoneyDetails';
 
 export function listBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
   return [
@@ -55,26 +57,17 @@ function statusWord(b: AnyObj) {
   return 'Idle';
 }
 
-/** Realized plus what is still unsold, in quote units, and as a fraction of the money put in. */
+/** Total P&L in the quote coin, in dollars and as a fraction of capital in: the server's metrics, nothing recomputed. */
 export function pnlParts(b: AnyObj): { quote: number | null; usd: number | null; pct: number | null } {
-  const k = typeof b.usdPerQuote === 'number' && b.usdPerQuote > 0 ? b.usdPerQuote : null;
-  if (b.kind === 'trader' || b.kind === 'sniper') {
-    const u = typeof b.pnlUsd === 'number' ? b.pnlUsd : typeof b.pnl?.unrealized === 'number' ? b.pnl.unrealized : null;
-    const cap = typeof b.spentUsd === 'number' ? b.spentUsd : null;
-    return { quote: u, usd: u, pct: u != null && cap ? u / cap : null };
-  }
-  if (b.kind === 'lp') {
-    const net = typeof b.pnl?.net === 'number' ? b.pnl.net : null;
-    const cap = b.config?.capital;
-    return { quote: net, usd: net != null && k != null ? net * k : null, pct: net != null && cap ? net / cap : null };
-  }
-  if (b.kind === 'trend') {
-    const q = (b.pnl?.realized ?? 0) + (b.pnl?.unrealized ?? 0);
-    return { quote: q, usd: k != null ? q * k : null, pct: typeof b.pnl?.returnPct === 'number' ? b.pnl.returnPct : null };
-  }
-  const q = (b.pnl?.realized ?? 0) + (b.pnl?.unrealized ?? 0);
-  const cap = b.config?.totalCapitalUsd;
-  return { quote: q, usd: k != null ? q * k : null, pct: cap ? q / cap : null };
+  const m = metricsOf(b);
+  if (!m) return { quote: null, usd: null, pct: null };
+  return { quote: m.quote.totalPnl, usd: m.totalPnlUsd, pct: m.totalPnlPct };
+}
+
+/** The headline per bot: units generated and their dollar value now (server metrics). */
+export function generatedParts(b: AnyObj): { units: Record<string, number> | null; usd: number | null; text: string } {
+  const m = metricsOf(b);
+  return { units: m?.generated ?? null, usd: m?.generatedUsd ?? null, text: unitsText(m?.generated) };
 }
 
 export function fillsToday(b: AnyObj, from = startOfDay()): number | null {
@@ -92,7 +85,7 @@ export function todaySeries(bots: AnyObj[], includePaper: boolean): number[] {
     if (!(typeof k === 'number' && k > 0)) continue;
     for (const tr of (b.trades ?? []) as AnyObj[]) {
       if (tr.failed || tr.side === 'buy' || !(tr.timestamp >= from)) continue;
-      const pnl = tr.roundTripNet ?? tr.realizedPnlUsd;
+      const pnl = tr.roundTripNet ?? tr.realizedPnlQuote;
       if (typeof pnl === 'number' && Number.isFinite(pnl)) ev.push({ t: tr.timestamp, usd: pnl * k });
     }
   }
@@ -103,23 +96,76 @@ export function todaySeries(bots: AnyObj[], includePaper: boolean): number[] {
   return pts;
 }
 
-export function feesTodayUsd(bots: AnyObj[]): number {
-  const from = startOfDay();
-  let sum = 0;
-  for (const b of bots) {
-    const k = b.usdPerQuote as number | null;
-    if (!(typeof k === 'number' && k > 0)) continue;
-    for (const tr of (b.trades ?? []) as AnyObj[]) {
-      if (tr.failed || !(tr.timestamp >= from) || typeof tr.feeQuote !== 'number') continue;
-      sum += tr.feeQuote * k;
-    }
+/** Home's "Fees earned today", from the server's `feesToday` (status payload), limited to the bots on screen. */
+export interface FeesTodayView {
+  liveEarnedUsd: number; paperEarnedUsd: number; livePaidUsd: number; liveSeries: number[];
+  /** The same in coins, per quote coin (what Home shows: units only). */
+  liveEarned: Record<string, number>; paperEarned: Record<string, number>; livePaid: Record<string, number>;
+}
+export function feesTodayOf(s: AnyObj, bots: AnyObj[]): FeesTodayView {
+  const ft = s?.feesToday as FeesToday | undefined;
+  const liveEarned: Record<string, number> = {}, paperEarned: Record<string, number> = {}, livePaid: Record<string, number> = {};
+  if (!ft) return { liveEarnedUsd: 0, paperEarnedUsd: 0, livePaidUsd: 0, liveSeries: [0], liveEarned, paperEarned, livePaid };
+  const ids = new Set(bots.map((b) => String(b.id)));
+  const all = Object.keys(ft.byBot ?? {}).every((id) => ids.has(id));
+  let liveEarnedUsd = 0, paperEarnedUsd = 0, livePaidUsd = 0;
+  const add = (to: Record<string, number>, sym: string | null | undefined, v: number | undefined) => { if (sym && v) to[sym] = (to[sym] ?? 0) + v; };
+  for (const [id, r] of Object.entries(ft.byBot ?? {})) {
+    if (!ids.has(id)) continue;
+    if (r.mode === 'live') { liveEarnedUsd += r.earnedUsd; livePaidUsd += r.paidUsd; add(liveEarned, r.sym, r.earned); add(livePaid, r.sym, r.paid); }
+    else { paperEarnedUsd += r.earnedUsd; add(paperEarned, r.sym, r.earned); }
   }
-  return sum;
+  return { liveEarnedUsd, paperEarnedUsd, livePaidUsd, liveSeries: all ? ft.liveSeries : [0, liveEarnedUsd], liveEarned, paperEarned, livePaid };
 }
 
-export function totalPnlUsd(bots: AnyObj[]): number | null {
+/** Units per token added up over bots (null when none has any). */
+export function sumUnits(recs: (Record<string, number> | null | undefined)[]): Record<string, number> | null {
+  let out: Record<string, number> | null = null;
+  for (const r of recs) {
+    if (!r) continue;
+    out ??= {};
+    for (const [k, u] of Object.entries(r)) if (Number.isFinite(u)) out[k] = (out[k] ?? 0) + u;
+  }
+  return out;
+}
+
+/** Home's headline: Generated per token, live bots only; paper bots separately (never mixed in). */
+export function generatedByMode(bots: AnyObj[]): { live: Record<string, number> | null; paper: Record<string, number> | null } {
+  return {
+    live: sumUnits(bots.filter((b) => b.mode === 'live').map((b) => metricsOf(b)?.generated)),
+    paper: sumUnits(bots.filter((b) => b.mode !== 'live').map((b) => metricsOf(b)?.generated)),
+  };
+}
+
+/** Total P&L per quote coin over the bots of one mode (units; the server's metrics.quote.totalPnl). */
+export function pnlUnits(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): Record<string, number> | null {
+  return sumUnits(bots.filter((b) => (mode === 'live' ? b.mode === 'live' : b.mode !== 'live')).map((b) => {
+    const m = metricsOf(b);
+    return m?.quote.symbol && m.quote.totalPnl != null ? { [m.quote.symbol]: m.quote.totalPnl } : null;
+  }));
+}
+
+/** The live bot that generated the most (ranked by today's value; shown in units). Paper bots never compete. */
+export function bestLiveBot(bots: AnyObj[]): AnyObj | null {
+  const live = bots.filter((b) => b.mode === 'live' && metricsOf(b)?.generated);
+  return live.sort((a, b) => (generatedParts(b).usd ?? -Infinity) - (generatedParts(a).usd ?? -Infinity))[0] ?? null;
+}
+
+/** Σ generatedUsd over the bots of one mode (API / tests; the page shows units). Null when none has a dollar value. */
+export function totalGeneratedUsd(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): number | null {
   let sum = 0, any = false;
-  for (const b of bots) {
+  for (const b of bots.filter((x) => (mode === 'live' ? x.mode === 'live' : x.mode !== 'live'))) {
+    const v = metricsOf(b)?.generatedUsd;
+    if (v == null) continue;
+    sum += v;
+    any = true;
+  }
+  return any ? sum : null;
+}
+
+export function totalPnlUsd(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): number | null {
+  let sum = 0, any = false;
+  for (const b of bots.filter((x) => (mode === 'live' ? x.mode === 'live' : x.mode !== 'live'))) {
     const p = pnlParts(b);
     if (p.usd == null) continue;
     sum += p.usd;
@@ -189,7 +235,13 @@ function RowMenu({ b, nav, pause, close }: { b: AnyObj; nav: Nav; pause: (b: Any
   );
 }
 
-function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
+/**
+ * What a desk row's columns (Value, Generated, P&L, %, Fees, Age, APR, Moves) and its expanded summary (range) already
+ * show, left out of the expanded stat table and Details so no number appears twice.
+ */
+const DESK_SHOWN_ELSEWHERE = ['Generated', 'Age', 'APR', 'Fees earned', 'Moves', 'Range'] as const;
+
+function Expanded({ b, nav, desk = false }: { b: AnyObj; nav: Nav; desk?: boolean }) {
   if (isTrader(b)) return null;
   const sym = String(quoteSym(b) ?? '');
   const fees = feeQuote(b);
@@ -198,7 +250,7 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
     return (
       <div className="bot-more">
         <p>{b.inRange === false ? 'Out of range' : b.inRange ? 'In range' : 'No position'}{pos ? ` · ${px(pos.lower)} – ${px(pos.upper)}` : ''}</p>
-        <p>Fees {qty(fees, sym, 4, false)}</p>
+        {!desk && <p>Fees earned {qty(fees, sym, 4, false)}</p>}
         <button type="button" className="text-link" onClick={() => nav(botView(b.kind, b.id))}>Open</button>
       </div>
     );
@@ -218,9 +270,9 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
     <div className="bot-more">
       <p>Range {b.config ? `${px(b.config.lowerPrice)} – ${px(b.config.upperPrice)}` : '—'}{rs ? ` · ${rs}` : ''} · {b.config?.gridCount ?? levels.length} levels</p>
       <p>Fees {qty(fees, sym, 4, false)} · {b.stats?.roundTrips ?? 0} round trips</p>
-      {levels.slice(0, 6).map((iv) => (
+      <div className="lvls" data-testid="levels" style={{ display: 'contents' }}>{levels.slice(0, 6).map((iv) => (
         <p key={iv.index} className="lvl">{px(iv.buyPrice)} → {px(iv.sellPrice)} · {iv.status === 'holding' ? 'filled' : iv.status === 'waitingBuy' ? 'waiting' : iv.status}</p>
-      ))}
+      ))}</div>
       {levels.length > 6 && <p className="lvl">{levels.length - 6} more levels</p>}
       <button type="button" className="text-link" onClick={() => nav(botView(b.kind, b.id))}>Open</button>
     </div>
@@ -248,17 +300,20 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   columns?: boolean;
   metrics?: boolean;
 }) {
-  const { on: showUsd } = useShowUsd();
   const pair = pairOf(b);
   const chain = chainOf(s, b.chainId ?? s.legacyChainId);
   const pnl = pnlParts(b);
   const fills = fillsToday(b);
   const bad = !!b.lastError;
   const on = b.status === 'running' && !bad;
-  const money = showUsd && pnl.usd != null ? usd(pnl.usd, true) : pnl.quote != null ? qty(pnl.quote, pair.quote, 4) : '—';
+  const money = pnl.quote != null ? qty(pnl.quote, pair.quote, 4) : '—';
   const pos = b.position;
-  const value = bookUsd(b);
+  const m = metricsOf(b);
+  // Crypto units only: the value and fees in the bot's quote coin
+  const value = m?.quote.currentValue ?? null;
+  const feesEarned = m?.quote.feesEarned ?? null;
   const facts = metrics ? botFacts(b) : null;
+  const gen = generatedParts(b);
   const go = () => (isTrader(b) ? nav({ v: 'auto' }) : expandable ? onToggle?.() : nav(botView(b.kind, b.id)));
   if (columns) {
     return (
@@ -280,22 +335,31 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           </button>
           <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
           <span className="desk-range"><BotRange b={b} fills={fills} /></span>
-          <span className="desk-val">{value == null ? '—' : usd(value)}</span>
-          <span className="desk-pnl">
-            <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
-            {!metrics && <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>}
-          </span>
-          {metrics && facts && <>
+          <span className="desk-val">{value == null ? '—' : qty(value, pair.quote, 5, false)}</span>
+          {metrics && facts ? <>
+            <span className="desk-gen" title={m?.calc ?? undefined}>
+              <b className={cls(gen.usd)}>{gen.text}</b>
+            </span>
+            <span className="desk-pnl" title={m?.calc ?? undefined}>
+              <b className={cls(pnl.quote)}>{money}</b>
+            </span>
             <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
+            <span className="desk-fees">{feesEarned == null ? '—' : qty(feesEarned, pair.quote, 4, false)}</span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
-            <span className="desk-apr">{facts.est.d365?.pct == null ? '—' : pct(facts.est.d365.pct, 1, true)}</span>
+            <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'Est. APR shows once the bot has run a day. Until then P&L % is the figure for the run, and Age its length.' : facts.aprPct == null ? facts.estHint.d365 ?? undefined : m?.calc ?? undefined}>{
+              // under a day: no yearly rate, and not the run's % again (it is one column to the left): a dash only (pr-72 MED 1)
+              isShortRun(facts.ageMs) || facts.aprPct == null ? '—' : pct(facts.aprPct, 1, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
-            <span className="desk-fees">{facts.feesEarnedUsd == null ? '—' : usd(facts.feesEarnedUsd)}</span>
-          </>}
+          </> : (
+            <span className="desk-pnl" title={m?.calc ?? undefined}>
+              <b className={cls(gen.usd)}>{gen.text}</b>
+              <small className="muted">{gen.units ? 'generated' : ''}</small>
+            </span>
+          )}
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
         </div>
         {bad && <p className="line-note">{b.lastError}</p>}
-        {open && <div className="desk-expand"><Expanded b={b} nav={nav} /><StatTable b={b} s={s} /></div>}
+        {open && <div className="desk-expand"><Expanded b={b} nav={nav} desk /><StatTable b={b} s={s} hide={DESK_SHOWN_ELSEWHERE} /><MoneyDetails b={b} hide={['Total P&L', 'Value now']} /></div>}
       </div>
     );
   }
@@ -317,9 +381,9 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
             </span>
             {b.kind === 'lp' && pos && <RangeBar lower={pos.lower} upper={pos.upper} price={b.price} inRange={b.inRange} />}
           </span>
-          <span className="bot-pnl">
-            <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
-            <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>
+          <span className="bot-pnl" title={m?.calc ?? undefined}>
+            <b className={cls(gen.usd)}>{gen.text}</b>
+            <small className="muted">{gen.units ? 'generated' : ''}</small>
           </span>
         </button>
         <RowMenu b={b} nav={nav} pause={pause} close={close} />

@@ -81,7 +81,7 @@ export class LpReplay {
     const gasMove = gas(LP_GAS.v3.close) + gas(LP_GAS.v3.open) + approve + swap;
     const usd = this.hub.usdPerQuote(q.market);
     const capital = q.capital ?? (usd ? REPLAY_USD / usd : null);
-    if (!(capital != null && capital > 0)) throw new Error(`no USD price for ${def.quote.symbol}: enter an amount`);
+    if (!(capital != null && capital > 0)) throw new Error(`no price for ${def.quote.symbol}: enter an amount`);
     const maxImpact = q.maxImpact ?? DEFAULT_LIMITS.maxPriceImpact;
     const sides = { baseIs0: v.baseIs0, baseDecimals: def.base.decimals, quoteDecimals: def.quote.decimals, spacing: v.spacing, swapFee: pool.fee / 1e6 };
     const table = replayTable(rows, sides, { capital, gasOpen, gasMove, maxImpact }, REPLAY_BANDS);

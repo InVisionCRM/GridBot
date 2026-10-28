@@ -100,11 +100,11 @@ export function buildFeed(s: AnyObj, events: ActivityEvent[], limit = 30): FeedI
     for (const t of g.trades ?? []) {
       const iv = (g.intervals ?? []).find((i: AnyObj) => i.index === t.intervalIndex);
       const common = { key: `g:${g.id}:${t.id}`, t: t.timestamp, chainId: g.chainId, bot: gridName(g), open: botView('grid', g.id), paper: g.mode === 'paper' };
-      if (t.failed) { out.push({ ...common, tone: 'error', action: 'FAILED', detail: `${t.side} didn't go through; only gas was spent`, result: { v: -t.gasUsd, sym } }); continue; }
+      if (t.failed) { out.push({ ...common, tone: 'error', action: 'FAILED', detail: `${t.side} didn't go through; only gas was spent`, result: { v: -t.gasQuote, sym } }); continue; }
       if (t.side === 'buy') {
         out.push({ ...common, tone: 'neutral', action: t.seed ? 'START-UP BUY' : 'BOUGHT', detail: `${humanAmount(t.plsAmount)} ${base} @ ${px(t.execPrice ?? t.price)}${t.seed ? ` for ${t.seed.length} levels above the price` : iv ? ` · sells at ${px(iv.sellPrice)}` : ''}` });
       } else {
-        const net = t.roundTripNet ?? t.realizedPnlUsd;
+        const net = t.roundTripNet ?? t.realizedPnlQuote;
         out.push({ ...common, tone: net > 0 ? 'win' : 'loss', action: 'SOLD', detail: `${humanAmount(t.plsAmount)} ${base} @ ${px(t.execPrice ?? t.price)}`, result: { v: net, sym } });
       }
     }
@@ -116,7 +116,7 @@ export function buildFeed(s: AnyObj, events: ActivityEvent[], limit = 30): FeedI
       if (t.failed) { out.push({ ...common, tone: 'error', action: 'FAILED', detail: `${t.side} didn't go through; only gas was spent` }); continue; }
       out.push(t.side === 'buy'
         ? { ...common, tone: 'neutral', action: 'BOUGHT', detail: `${humanAmount(t.plsAmount)} ${b.base} @ ${px(t.execPrice ?? t.price)}` }
-        : { ...common, tone: t.realizedPnlUsd > 0 ? 'win' : 'loss', action: 'SOLD', detail: `${humanAmount(t.plsAmount)} ${b.base} · ${t.reason}`, result: { v: t.realizedPnlUsd, sym } });
+        : { ...common, tone: t.realizedPnlQuote > 0 ? 'win' : 'loss', action: 'SOLD', detail: `${humanAmount(t.plsAmount)} ${b.base} · ${t.reason}`, result: { v: t.realizedPnlQuote, sym } });
     }
   }
   const lpIds = new Set((s.lps ?? []).map((l: AnyObj) => l.id));

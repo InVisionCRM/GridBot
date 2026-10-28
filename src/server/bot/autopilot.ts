@@ -752,7 +752,7 @@ export class Autopilot {
       let id: string;
       try {
         id = c.how === 'grid'
-          ? await bot.add({ mode, stable: market, lowerPrice: price! * (1 - c.o.grid!.bandPct), upperPrice: price! * (1 + c.o.grid!.bandPct), gridCount: c.o.grid!.gridCount, totalCapitalUsd: amount, recenter: true })
+          ? await bot.add({ mode, stable: market, lowerPrice: price! * (1 - c.o.grid!.bandPct), upperPrice: price! * (1 + c.o.grid!.bandPct), gridCount: c.o.grid!.gridCount, totalCapitalQuote: amount, recenter: true })
           : await bot.addLp({ mode, market, bandPct: c.o.lp!.bandPct, capital: amount, rerange: true });
       } catch (e) { this.add(a, spend, amount + reserve); throw e; }
       a.bots.push({
