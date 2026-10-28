@@ -14,17 +14,17 @@
  * so Generated + Price change = Total P&L by construction; tests recompute both sides from raw inputs.
  *
  * Quote-coin figures are converted once with usdPerQuote (grid capital is in the quote coin despite its legacy name
- * `totalCapitalQuote`). No rate → the dollar fields are null, never quote-as-dollars. Estimates need the history to be at
- * least window / MAX_SCALE long (365d needs 7d, 7d ~3.2h, 24h ~28 min); until then they are null with a `needs` hint.
+ * `totalCapitalQuote`). No rate → the dollar fields are null, never quote-as-dollars. Estimates (Kyle's rule): Generated
+ * per token ÷ age in days × 1 / 7 / 30 / 365, all of them null with "needs 1 day" until the bot is a day old; no other
+ * cap or minimum history. Age is historyEnd-aware (a stopped bot's age ends at its stop).
  */
 
 import { isCloseOut } from '../live/ledger';
 import { keySymbols, unitOf } from '../lib/marketKey';
 
-export const MIN_AGE_MS = 60_000;
 export const DAY_MS = 86_400_000;
-/** Never stretch the sample more than this many times: 365d needs a week of history, 7d ~3.2h, 24h ~28 min. */
-export const MAX_SCALE = 365 / 7;
+/** Kyle's rule: every estimate (day, 7d, 30d, 365d, APR) needs one day of history, and nothing else. */
+export const MIN_AGE_MS = DAY_MS;
 
 export type MetricsKind = 'grid' | 'trend' | 'lp' | 'token';
 export type Headline = 'generated';
@@ -126,33 +126,25 @@ export function bridgeCostsOf(b: Obj): BotMetrics['bridgeCosts'] {
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
-/** Linear (simple, not compounded) extrapolation; null when the sample is too short for the window. */
+/** Linear (simple, not compounded): amount ÷ age × the window; null under a day of history (MIN_AGE_MS). */
 export function extrapolate(amount: number, invested: number, age: number, windowMs: number): { amount: number; pct: number | null } | null {
   if (!(age >= MIN_AGE_MS) || !(windowMs > 0) || !Number.isFinite(amount)) return null;
-  if (windowMs / age > MAX_SCALE) return null;
   const out = amount * (windowMs / age);
   if (!Number.isFinite(out)) return null;
   const pct = invested > 0 && Number.isFinite(invested) ? (amount / invested) * (windowMs / age) : null;
   return { amount: out, pct: pct != null && Number.isFinite(pct) ? pct : null };
 }
 
-/** Shortest history an estimate over `windowMs` needs: 365d → 7d, 7d → ~3.2h, 24h → ~28 min (never under a minute). */
+/** Shortest history any estimate needs: one day, whatever the window (Kyle's rule). */
 export function estNeedMs(windowMs: number): number {
-  return Math.max(MIN_AGE_MS, windowMs / MAX_SCALE);
+  void windowMs;
+  return MIN_AGE_MS;
 }
 
-function fmtNeed(ms: number): string {
-  const trim = (x: number) => x.toFixed(1).replace(/\.0$/, '');
-  if (ms >= DAY_MS) return `${trim(ms / DAY_MS)}d`;
-  if (ms >= 3_600_000) return `${trim(ms / 3_600_000)}h`;
-  return `${Math.round(ms / 60_000)} min`;
-}
-
-/** "needs 7d of history" while the bot is too young for the window; null once there is enough. */
+/** "needs 1 day" while the bot is under a day old; null from then on (every window alike). */
 export function estHint(age: number | null, windowMs: number): string | null {
-  const need = estNeedMs(windowMs);
-  if (age != null && age >= need) return null;
-  return `needs ${fmtNeed(need)} of history`;
+  if (age != null && age >= estNeedMs(windowMs)) return null;
+  return 'needs 1 day';
 }
 
 /** Milliseconds since start. Null when the start time is missing or in the future. */
@@ -183,7 +175,7 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
   return now - startedAt;
 }
 
-const RATES = 'The 24h/7d/30d/365d estimates are Generated ÷ age × the days, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; they need 28 min / 3.2h / 13.8h / 7d of history.';
+const RATES = 'The day/7d/30d/365d estimates are Generated ÷ age in days × 1, 7, 30 or 365, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; all of them start once the bot is a day old.';
 const GENERATED_CALC: Record<MetricsKind, string> = {
   lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin), swap fees (in the coin swapped in) and range-move losses (in the coin the move sold, locked in at each move).',
   grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown under Open positions. A close / stop cash-out sale is not a round trip; its result is in Price change.',

@@ -1,12 +1,12 @@
 /**
  * Bot pages lead with Generated only; Dollars made / Total P&L / price change sit in a collapsed Details expander; the
- * LP pace comes from BotMetrics (with the min-history rule, a month needs ~13.8h); the chart's units line is honest.
+ * LP pace comes from BotMetrics (every window needs one day of history); the chart's units line is honest.
  */
 import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { lpMetrics, DAY_MS, MAX_SCALE } from '../src/metrics/botMetrics';
+import { lpMetrics, DAY_MS } from '../src/metrics/botMetrics';
 import { MoneyDetails } from '../src/ui/MoneyDetails';
 import { qty } from '../src/ui/fmt';
 import { midFactor, unitsLabel } from '../src/ui/Chart';
@@ -49,19 +49,17 @@ describe('one headline per bot page', () => {
   });
 });
 
-describe('pace from BotMetrics, with the min-history rule', () => {
+describe('pace from BotMetrics, with the one-day rule', () => {
   const lp = (ageMs: number) => lpMetrics({ ...FX.lpLive, startedAt: FX.now - ageMs }, FX.now);
-  it('a month needs 30d ÷ 365/7 ≈ 13.8h: a dash and the hint at 7.8h, the scaled figure after', () => {
-    expect((30 * DAY_MS) / MAX_SCALE / H).toBeCloseTo(13.8, 1);
-    const young = lp(7.8 * H);
-    expect(young.est.d30).toBeNull();
+  it('every window needs a day: dashes and "needs 1 day" at 14h, the scaled figures from a day on', () => {
+    const young = lp(14 * H);
+    expect([young.est.d1, young.est.d7, young.est.d30, young.est.d365]).toEqual([null, null, null, null]);
     expect(young.generatedRate.d30).toBeNull();
-    expect(young.est.needs.d30).toBe('needs 13.8h of history');
-    expect(young.est.d7).not.toBeNull(); // a week needs ~3.2h
-    const old = lp(14 * H);
+    expect(young.est.needs).toEqual({ d1: 'needs 1 day', d7: 'needs 1 day', d30: 'needs 1 day', d365: 'needs 1 day' });
+    const old = lp(26 * H);
     expect(old.est.needs.d30).toBeNull();
-    expect(old.est.d30!).toBeCloseTo(old.generatedUsd! * (30 * DAY_MS) / (14 * H), 6);
-    expect(old.generatedRate.d30!.ETH).toBeCloseTo(old.generated!.ETH * (30 * DAY_MS) / (14 * H), 12);
+    expect(old.est.d30!).toBeCloseTo(old.generatedUsd! * (30 * DAY_MS) / (26 * H), 6);
+    expect(old.generatedRate.d30!.ETH).toBeCloseTo(old.generated!.ETH * (30 * DAY_MS) / (26 * H), 12);
   });
   it('the LP page has no client-side pace math left', () => {
     const s = src('LpDetail.tsx');

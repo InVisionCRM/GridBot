@@ -173,8 +173,8 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
 
 /**
  * The bot's pace: Generated so far carried to a day, a week and a month (Generated ÷ age × the days, per coin, in
- * units), straight from the server's metrics (generatedRate). Same min-history rule as every estimate (window ÷ 365/7): a day needs ~28 min, a week ~3.2h,
- * a month ~13.8h; until then a dash and "needs … of history". No client-side extrapolation.
+ * units), straight from the server's metrics (generatedRate). Same rule as every estimate: nothing until the bot is a day old, then
+ * Generated ÷ age × the days; until then a dash and "needs 1 day". No client-side extrapolation.
  */
 /**
  * Figures the LP page already shows elsewhere, left out of the chart's stat table so no number appears twice:
