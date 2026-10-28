@@ -37,12 +37,13 @@ export function DeskApp() {
             <main>
               {!snap && !failed && <Skeleton />}
               {snap && page.v === 'home' && (
-                <HomeView portfolio={snap.portfolio} bots={snap.bots} onOpen={(id) => go({ v: 'bot', id })} />
+                <HomeView portfolio={snap.portfolio} bots={snap.bots} prices={snap.prices} onOpen={(id) => go({ v: 'bot', id })} />
               )}
               {snap && page.v === 'bot' && bot && (
                 <BotView
                   bot={bot}
                   activity={snap.activity.filter((a) => a.botId === bot.metrics.botId)}
+                  prices={snap.prices}
                   onBack={() => go({ v: 'home' })}
                   onActivity={() => go({ v: 'activity' })}
                 />

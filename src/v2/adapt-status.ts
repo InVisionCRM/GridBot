@@ -85,15 +85,13 @@ function estimates(age: number | null, tokens: TokenQty[], usd: number | null): 
   const d1 = one(MIN_AGE.d1, WIN.d1);
   const d7 = one(MIN_AGE.d7, WIN.d7);
   const d365 = one(MIN_AGE.d365, WIN.d365);
-  const ready = [d1, d7, d365].filter((e) => e.tokens != null).length;
+  const waiting = [d1, d7, d365].some((e) => e.tokens == null);
   return {
     d1: d1.tokens,
     d7: d7.tokens,
     d365: d365.tokens,
     usd: { d1: d1.usd, d7: d7.usd, d365: d365.usd },
-    needs: ready === 3
-      ? 'Extrapolates units generated so far. Not a forecast.'
-      : 'D1 needs about 28 minutes, D7 about 3.2 hours, D365 30 days.',
+    needs: waiting ? 'Day, week and year results appear once the bot has run that long.' : '',
   };
 }
 

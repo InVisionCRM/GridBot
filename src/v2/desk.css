@@ -42,6 +42,7 @@
   font-size: 12px;
 }
 .v2 .ticker-track span { display: inline-flex; gap: 8px; align-items: baseline; white-space: nowrap; }
+.v2 .ticker-clone { display: contents; }
 .v2 .ticker-track b { color: var(--text); font-weight: 500; }
 .v2 .ticker-track .up em { color: var(--profit); font-style: normal; }
 .v2 .ticker-track .down em { color: var(--loss); font-style: normal; }
@@ -238,7 +239,22 @@
   flex: none;
   text-transform: none;
 }
-.v2 .group-title { margin: 16px 0 8px; color: var(--label); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.v2 .group-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin: 16px 0 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.v2 .group-title .section-name { color: var(--label); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.v2 .group-title .section-units { font-family: var(--mono); font-size: 13px; }
+.v2 .group-title small { color: var(--secondary); font-family: var(--mono); font-size: 12px; }
+.v2 .card-note { font-family: var(--font); font-style: normal; font-size: 13px; color: var(--secondary); }
 .v2 .secondary { margin: 0 0 4px; color: var(--secondary); font-size: 13px; }
 .v2 .paper-line { margin: 8px 0 0; color: var(--label); font-size: 13px; }
 .v2 .muted { color: var(--label); }

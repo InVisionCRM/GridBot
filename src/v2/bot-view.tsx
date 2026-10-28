@@ -4,9 +4,10 @@ import { TokenMark } from '../ui/icons';
 import type { View } from '../ui/model';
 import { ActivityTape } from './activity-tape';
 import { CandlePane } from './candle-pane';
-import { formatAge, formatStamp, formatTokenLine, formatUsd, pct, shortenFigures, showsNoFills } from './format';
+import { figureAtoms, heroFigureText, normFigure, projectedLines, sheetRows } from './figures';
+import { formatPx, formatStamp, formatUsd, pct, shortenFigures, showsNoFills } from './format';
 import { LpRangeSlot } from './lp-range-slot';
-import type { ActivityItem, BotDesk, BotMetrics, EstimateBlock, TokenQty } from './metrics';
+import type { ActivityItem, BotDesk, BotMetrics, TapePrice, TokenQty } from './metrics';
 import { usePhone } from './motion';
 import { PairLabel } from './pair-label';
 import { press } from './press';
@@ -26,25 +27,13 @@ function classicView(m: BotMetrics): View {
   return { v: 'tools', tab: 'chart' };
 }
 
-function EstCell({ label, tokens, usd }: { label: string; tokens: TokenQty[] | null; usd: number | null }) {
+function EstCell({ label, tokens, usd }: { label: string; tokens: TokenQty[] | null; usd: string | null }) {
   return (
     <div>
       <dt>{label}</dt>
-      <dd><TokenLine tokens={tokens} usd={usd} /></dd>
-      <small>{tokens == null ? '' : formatUsd(usd, true)}</small>
+      <dd>{tokens == null ? '—' : <TokenLine tokens={tokens} />}</dd>
+      {usd && <small>{usd}</small>}
     </div>
-  );
-}
-
-function Estimates({ est }: { est: EstimateBlock }) {
-  return (
-    <>
-      <dl className="ests">
-        <EstCell label="D7" tokens={est.d7} usd={est.usd.d7} />
-        <EstCell label="D365" tokens={est.d365} usd={est.usd.d365} />
-      </dl>
-      <p className="muted small">{est.needs}</p>
-    </>
   );
 }
 
@@ -53,20 +42,33 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 export function BotView({
-  bot, activity, onBack, onActivity,
+  bot, activity, prices = [], onBack, onActivity,   breakdown = false,
+  showFeed = true,
 }: {
   bot: BotDesk;
   activity: ActivityItem[];
+  prices?: TapePrice[];
   onBack: () => void;
   onActivity: () => void;
+  /** Opens the breakdown sheet. `projected` also opens the pace toggle. */
+  breakdown?: boolean | 'projected';
+  /** Desktop hides this feed in CSS and shows the side tape instead. */
+  showFeed?: boolean;
 }) {
-  const [shot, setShot] = useState<BotMetrics | null>(null);
+  const [shot, setShot] = useState<BotMetrics | null>(() => (breakdown ? structuredClone(bot.metrics) : null));
+  const [projected, setProjected] = useState(breakdown === 'projected');
   const [span, setSpan] = useState<RangeKey>('ALL');
   const phone = usePhone();
   const m = bot.metrics;
   const timed = bot.candles.length > 0 && bot.candles.every((c) => c.t > 0);
   const candles = candlesInRange(bot.candles, span, m.asOf);
   const formula = 'Total P&L = generated + price change';
+  const beside = `${activity.map((a) => shortenFigures(a.text)).join('\n')} ${prices.map((p) => formatPx(p.price)).join(' ')}`;
+  const totalText = shot ? formatUsd(shot.totalPnlUsd, true) : '';
+  const totalRepeats = shot != null && totalText !== '—' && figureAtoms(heroFigureText(shot)).some((atom) => normFigure(atom) === normFigure(totalText));
+  const totalShown = shot != null && totalText !== '—' && !totalRepeats;
+  const rows = shot ? sheetRows(shot, `${beside} ${totalShown ? totalText : ''}`) : [];
+  const pace = shot ? projectedLines(shot.est, [heroFigureText(shot), totalShown ? totalText : '', beside, rows.map((r) => r.value).join(' ')].join(' ')) : [];
   return (
     <div className="bot-page" data-bot={m.botId}>
       <button type="button" className="text-btn" onClick={() => { press(); onBack(); }}>Home</button>
@@ -100,7 +102,11 @@ export function BotView({
             <dd>{m.aprPct == null ? '—' : phone ? pct(m.aprPct, 1, true) : <RollingPct value={m.aprPct} />}</dd>
           </div>
         </dl>
-        <Estimates est={m.est} />
+        <dl className="ests">
+          <EstCell label="D7" tokens={null} usd={null} />
+          <EstCell label="D365" tokens={null} usd={null} />
+        </dl>
+        {m.est.needs && <p className="muted small">{m.est.needs}</p>}
       </section>
       <div className={candles.length > 1 ? 'chart-frame' : 'chart-frame is-empty'}>
         <RangeSelect value={span} onChange={setSpan} timed={timed} />
@@ -112,13 +118,15 @@ export function BotView({
         </div>
       </div>
       <button type="button" className="v2-btn" data-open="breakdown" onClick={() => { press(); setShot(structuredClone(m)); }}>Breakdown</button>
-      <section className="bot-feed">
-        <header>
-          <h2>Activity</h2>
-          <button type="button" className="text-btn" onClick={() => { press(); onActivity(); }}>All activity</button>
-        </header>
-        <ActivityTape items={activity} />
-      </section>
+      {showFeed && (
+        <section className="bot-feed">
+          <header>
+            <h2>Activity</h2>
+            <button type="button" className="text-btn" onClick={() => { press(); onActivity(); }}>All activity</button>
+          </header>
+          <ActivityTape items={activity} />
+        </section>
+      )}
       {shot && (
         <div className="sheet-back" onClick={() => setShot(null)}>
           <motion.aside
@@ -135,32 +143,28 @@ export function BotView({
               <button type="button" className="text-btn" data-close="sheet" onClick={() => setShot(null)}>Close</button>
             </header>
             <p className="muted small">Snapshot · {formatStamp(shot.asOf)}</p>
-            <p className="sheet-eq">
-              Total P&L <b title={formula}>{formatUsd(shot.totalPnlUsd, true)}</b>
-            </p>
+            {totalShown && (
+              <p className="sheet-eq">
+                Total P&L <b title={formula}>{totalText}</b>
+              </p>
+            )}
+            {totalRepeats && <p className="muted small" title={formula}>Total P&L is the generated dollars above.</p>}
             <ul className="break">
-              <Row label="Price change" value={formatUsd(shot.priceChangeUsd, true)} />
-              <Row label="Value" value={formatUsd(shot.currentValueUsd, false)} />
-              <Row label="Deposited" value={formatUsd(shot.capitalInUsd, false)} />
-              <Row label="Fees collected" value={shot.feesCollected.length ? `${formatTokenLine(shot.feesCollected)} · ${formatUsd(shot.feesCollectedUsd, false)}` : formatUsd(shot.feesCollectedUsd, false)} />
-              <Row label="Fees owed" value={shot.feesOwed.length ? `${formatTokenLine(shot.feesOwed)} · ${formatUsd(shot.feesUncollectedUsd, false)}` : formatUsd(shot.feesUncollectedUsd, false)} />
-              <Row label="Gas" value={formatUsd(shot.gasUsd, false)} />
-              <Row label="Swap fees" value={formatUsd(shot.swapCostUsd, false)} />
-              <Row label="Taxes" value={formatUsd(shot.tokenTaxesUsd, false)} />
-              <Row label="Rebalance loss" value={formatUsd(shot.realizedRebalanceLossUsd, false)} />
-              {shot.kind !== 'lp' && <Row label="Realized trade profit" value={formatUsd(shot.realizedUsd, true)} />}
-              <Row label="APR" value={shot.aprPct == null ? '—' : pct(shot.aprPct, 1, true)} />
-              <Row label="Age" value={formatAge(shot.ageSec)} />
-              <Row label="Moves" value={shot.moveCount == null ? '—' : String(shot.moveCount)} />
-              <Row label="Fills" value={shot.fillCount == null ? '—' : String(shot.fillCount)} />
-              {shot.range && (
-                <>
-                  <Row label="Range lower" value={shortenFigures(String(shot.range.lower))} />
-                  <Row label="Range upper" value={shortenFigures(String(shot.range.upper))} />
-                  <Row label="In range" value={shot.range.inRange ? 'yes' : 'no'} />
-                </>
-              )}
+              {rows.map((row) => <Row key={row.label} label={row.label} value={row.value} />)}
             </ul>
+            <p className="sheet-eq">
+              <button type="button" className="text-btn" aria-expanded={projected} onClick={() => setProjected((v) => !v)}>
+                {projected ? 'Hide projected' : 'Projected'}
+              </button>
+            </p>
+            {projected && (
+              <>
+                <dl className="ests">
+                  {pace.map((line) => <EstCell key={line.label} label={line.label} tokens={line.tokens} usd={line.usd} />)}
+                </dl>
+                <p className="muted small">Pace so far, extended. Not a forecast.</p>
+              </>
+            )}
             <p className="muted small" title={shot.calc}>{shot.calc}</p>
             {shot.kind === 'lp' && <LpRangeSlot pair={bot.pair} />}
             <button type="button" className="text-btn" onClick={() => openClassic(classicView(shot))}>Open the classic page</button>
