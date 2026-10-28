@@ -3,6 +3,7 @@
  * the USD / native-coin oracle and the custom-token flow (inspect → discover pools → safety → add).
  * Engines resolve their market key through the hub; nothing here sends transactions.
  */
+import { ethUsdFromChains, registerHubEthUsd } from '../../lib/ethUnits';
 import type { LiveNetwork } from '../../live/networks';
 import { chainFromNetwork, type ChainConfig } from '../../live/chains';
 import { flipMarket, isFlipKey, isLegacyKey, legacyMarkets, marketKey, marketLabel, unflipKey, type MarketDef, type MarketToken, type SafetyReport } from '../../live/markets';
@@ -53,6 +54,8 @@ export class Hub {
 
   constructor(private readonly o: { runtimes: ChainRuntime[]; markets: MarketDef[]; legacyNet: LiveNetwork; custom?: Store<CustomFile>; now?: () => number }) {
     for (const r of o.runtimes) this.rts.set(r.cfg.id, r);
+    // the ETH price screen text uses for dollar-only figures (src/lib/ethUnits.ts): this hub's native/stable read
+    registerHubEthUsd(() => this.ethUsd());
     // Shallow copies: the hub owns its defs (pool switches replace d.pool in place so live Quoters follow).
     for (const m of o.markets) if (this.rts.has(m.chainId)) this.defs.set(m.key, { ...m });
     const saved = o.custom?.load();
@@ -184,6 +187,11 @@ export class Hub {
   usdRefKey(chainId: number): string | null {
     const ms = this.byChain(chainId).filter((m) => m.base.native && m.quoteKind === 'stable');
     return (ms.find((m) => !m.custom) ?? ms[0])?.key ?? null;
+  }
+
+  /** Dollars per ETH: Ethereum's native/stable read, else any other ETH-native chain's (same as chains[].nativeUsd). */
+  ethUsd(): number | null {
+    return ethUsdFromChains(this.runtimes().map((r) => ({ id: r.cfg.id, nativeSymbol: r.cfg.nativeSymbol, nativeUsd: this.nativeUsd(r.cfg.id) })));
   }
 
   nativeUsd(chainId: number): number | null {
@@ -366,7 +374,7 @@ export class Hub {
         if (d.quote.native || sameAddr(d.quote.address, rt.cfg.wrappedNative.address)) return 1 / spot;
         if (!this.isStable(d.chainId, d.quote.address)) throw new Error(`${marketLabel(d)}: no native price route`);
         const nat = await this.nativeUsdAsync(d.chainId);
-        if (!nat) throw new Error(`${rt.cfg.name}: no USD price for ${rt.cfg.nativeSymbol}`);
+        if (!nat) throw new Error(`${rt.cfg.name}: no price for ${rt.cfg.nativeSymbol}`);
         return nat / spot;
       },
       l1Fee: rt.cfg.stack !== 'l1' ? (to, data, gp) => rt.l1Fee(to, data, gp) : undefined,

@@ -1239,7 +1239,7 @@ export class MultiBot {
       bots,
       portfolio: curve,
       portfolioDrawdown: drawdown(curve).max,
-      notes: ['≈USD: each bot\'s quote token is converted at today\'s rate — stables = $1, other tokens through the chain\'s native/stable market (PulseChain: PLS/DAI); historical equity points use today\'s rate. Bots whose quote has no USD route are excluded.', 'Period change = change in PnL (equity − allocated capital) from portfolio snapshots taken every minute while the server runs, so starting or removing a bot is not counted. "partial" = history starts after the period start.', 'The portfolio curve is drawn at today\'s allocated capital (capital + PnL at each time).'],
+      notes: ['Cross-coin totals ≈ETH: each bot\'s quote coin is converted at today\'s rate through the chain\'s native/stable market (PulseChain: PLS/DAI), then to ETH at Ethereum\'s; historical equity points use today\'s rate. Bots whose quote coin has no price route are left out.', 'Period change = change in PnL (equity − allocated capital) from portfolio snapshots taken every minute while the server runs, so starting or removing a bot is not counted. "partial" = history starts after the period start.', 'The portfolio curve is drawn at today\'s allocated capital (capital + PnL at each time).'],
     };
   }
 

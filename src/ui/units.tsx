@@ -13,6 +13,7 @@
 import { createContext, useContext } from 'react';
 import type { HoldingsSnapshot } from '../live/holdingsMath';
 import type { AnyObj } from './model';
+import { coinNum, ethUsdFromChains } from '../lib/ethUnits';
 
 /** Dollars per ETH for the screens (null until a price is known). */
 export const EthUsdCtx = createContext<number | null>(null);
@@ -25,19 +26,10 @@ export function ethUsdOf(s: AnyObj | null | undefined, holdings?: HoldingsSnapsh
     const sym = String(r.coin?.symbol ?? '').toUpperCase();
     if ((sym === 'ETH' || sym === 'WETH') && ok(r.coin.usdEach)) return r.coin.usdEach;
   }
-  const cs = ((s?.chains ?? []) as AnyObj[]).filter((c) => String(c.nativeSymbol ?? '').toUpperCase() === 'ETH' && ok(c.nativeUsd));
-  const eth = cs.find((c) => c.id === 1) ?? cs[0];
-  return eth ? eth.nativeUsd : null;
+  return ethUsdFromChains((s?.chains ?? []) as { id: number; nativeSymbol?: string | null; nativeUsd?: number | null }[]);
 }
 
-/** A plain number of coins: 4 significant figures under 1, thousands separators above (never scientific). */
-export function coinNum(x: number, sig = 4): string {
-  const a = Math.abs(x);
-  if (a === 0) return '0';
-  if (a >= 1000) return a.toLocaleString('en-US', { maximumFractionDigits: 0 });
-  if (a >= 1) return a.toLocaleString('en-US', { maximumFractionDigits: Math.max(0, sig - 1 - Math.floor(Math.log10(a))) });
-  return a.toLocaleString('en-US', { maximumFractionDigits: Math.min(10, sig - 1 - Math.floor(Math.log10(a))) });
-}
+export { coinNum };
 
 /** A dollar amount shown in ETH: "1.234 ETH" (sign: "+1.234 ETH" / "−1.234 ETH"); dash with no price. */
 export function inEth(usd: number | null | undefined, ethUsd: number | null | undefined, sign = false, sig = 4): string {
