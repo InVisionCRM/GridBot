@@ -430,6 +430,7 @@ export function createApp(o: AppOpts) {
     if (typeof b.enforceLiquidityFloor === 'boolean') patch.enforceLiquidityFloor = b.enforceLiquidityFloor;
     if (typeof b.enforceSizeImpact === 'boolean') patch.enforceSizeImpact = b.enforceSizeImpact;
     if (b.risk === 'safe' || b.risk === 'medium' || b.risk === 'any') patch.risk = b.risk;
+    if (typeof b.enforceWashAndAge === 'boolean') patch.enforceWashAndAge = b.enforceWashAndAge;
     if (typeof b.enforceOwnerPowers === 'boolean') patch.enforceOwnerPowers = b.enforceOwnerPowers;
     if (typeof b.v3LpLockCheck === 'boolean') patch.v3LpLockCheck = b.v3LpLockCheck;
     if (typeof b.v3LpLockCacheEnabled === 'boolean') patch.v3LpLockCacheEnabled = b.v3LpLockCacheEnabled;

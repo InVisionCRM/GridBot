@@ -115,7 +115,7 @@ code { font-size: 0.88em; background: var(--surface-2); border: 1px solid var(--
 .usd-switch.on { color: var(--profit); border-color: rgba(14, 203, 129, 0.4); }
 .usd { color: var(--muted); font-weight: 400; font-size: 0.85em; white-space: nowrap; }
 .kpi-v.coins2 { display: flex; flex-direction: column; gap: 2px; font-size: 1.05rem; }
-.kpi-v.coins2 b { font-weight: inherit; }
+.kpi-v.coins2 b { font-weight: inherit; min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 760px) {
   .app { padding-top: env(safe-area-inset-top); }
   .topbar { position: static; max-width: 100%; }
@@ -275,6 +275,8 @@ input:disabled, select:disabled { opacity: 0.55; }
 
 /* ── Tables ────────────────────────────────────────────── */
 .table-wrap { overflow: auto; max-height: 360px; }
+/* a wide per-chain table scrolls on its own instead of widening the page */
+.chain-breakdown { display: block; max-width: 100%; overflow-x: auto; }
 .table-wrap.tall { max-height: 520px; }
 .table-wrap.open-picker { max-height: none; }
 table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
@@ -1168,7 +1170,9 @@ label.wide input { min-width: 180px; }
 .detail-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); border: 1px solid var(--line); border-radius: 6px; background: var(--card); overflow: hidden; }
 .detail-stats .kpi { background: transparent; border: 0; border-radius: 0; border-right: 1px solid var(--line); }
 .detail-stats .kpi:last-child { border-right: 0; }
-.detail-stats .kpi-v { font-size: 24px; line-height: 1.15; }
+.detail-stats .kpi-v { font-size: 24px; line-height: 1.15; font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
+/* phones: long coin amounts and small prices scale down with the screen and break inside the tile instead of running out */
+@media (max-width: 640px) { .detail-stats .kpi-v { font-size: clamp(16px, 5.2vw, 24px); } }
 .detail-range { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
 .detail-range .k { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .detail-range .chart.rangebar { flex: 1; }
@@ -1187,6 +1191,12 @@ label.wide input { min-width: 180px; }
     gap: 6px 8px;
   }
   .desk-pair { grid-area: pair; }
+  /* phones: the meta line (chain · kind · status · mode) wraps instead of being cut off */
+  .desk-id .bot-meta { white-space: normal; flex-wrap: wrap; overflow: visible; row-gap: 0; }
+  /* a long per-coin figure wraps in its column instead of squeezing the bot's name to a sliver */
+  .desk-row .desk-pnl, .desk-row .desk-gen { min-width: 0; max-width: 45vw; overflow-wrap: anywhere; }
+  .desk-row .desk-gen b { white-space: normal; overflow: visible; }
+  .desk-id .bot-title { white-space: normal; overflow-wrap: anywhere; }
   .desk-pnl { grid-area: pnl; }
   .desk-row .row-menu { grid-area: menu; }
   .desk-range { grid-area: range; }
@@ -1199,9 +1209,12 @@ label.wide input { min-width: 180px; }
   .join > div { border-bottom: 1px solid var(--line); }
   .join > div:nth-child(2n) { border-right: 0; }
   .join > div:nth-last-child(-n+2) { border-bottom: 0; }
-  .join b { font-size: 24px; white-space: normal; }
+  .join b { font-size: 24px; white-space: normal; overflow-wrap: anywhere; }
   .join b.units { font-size: 16px; }
   .join .sparkline { width: 52px; height: 28px; }
+  /* the spark sits beside the label; the figure and its sub-lines take the tile's full width under it */
+  .join b, .join .fees-sub { grid-column: 1 / -1; }
+  .join .sparkline, .join .segs { grid-row: 1; }
   .segs { width: 52px; }
   .home-num { font-size: 36px; }
   .chart.meter { display: none; }
@@ -1272,12 +1285,15 @@ label.wide input { min-width: 180px; }
 }
 .desk-group b { font-weight: 500; }
 .desk-group .mono, .desk-group .pos, .desk-group .neg { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+/* group totals per coin wrap inside the header row instead of widening the page */
+.desk-group .units { min-width: 0; overflow-wrap: anywhere; text-align: right; }
 .desk-chev { color: var(--muted); width: 12px; }
 /* Generated (the headline): units per token, dollars under it */
 .desk-gen { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 0; }
 .desk-gen b { display: block; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .desk-gen small { font-size: 11px; color: var(--muted); }
 .desk-pct, .desk-age, .desk-apr, .desk-moves, .desk-fees { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
+.desk-apr .desk-run { display: block; font-size: 10px; color: var(--muted); white-space: nowrap; }
 .desk-expand { padding: 4px 0 12px; }
 .stat-table { margin-top: 8px; }
 .stat-note { color: var(--muted); font-size: 12px; margin: 0 0 8px; }

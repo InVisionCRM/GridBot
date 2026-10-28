@@ -8,7 +8,7 @@ import { Chart, EquityChart } from './Chart';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
 import { metricsOf } from './deskStats';
-import { ago, cls, num, pct, px, qty, time } from './fmt';
+import { ago, cls, num, pct, px, qty, time, pxShort } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { T } from './theme';
@@ -266,7 +266,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <span className="sub">from completed buy → sell trades, after fees and gas</span>
         </div>
         <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">{g.stats.roundTrips > 1 && <>avg {qty(g.stats.avgNet, q, 4)} each · </>}{g.stats.wins} profitable</span></div>
-        <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{q} per {g.base}</span></div>
+        <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v" title={g.price ? px(g.price) : undefined}>{g.price ? pxShort(g.price) : '—'}</div><span className="sub">{q} per {g.base}</span></div>
         <div className="kpi"><span><L tip="Pool fees paid on this grid's fills, in the quote coin.">Fees</L></span><div className="kpi-v">{qty(((g.trades ?? []) as AnyObj[]).reduce((a, t) => a + (typeof t.feeQuote === 'number' ? t.feeQuote : 0), 0), q, 4, false)}</div><span className="sub">paid on fills</span></div>
       </div>
       <MoneyDetails b={g} note="what it holds, open positions, total P&L" hide={held > 0 ? ['Open positions'] : []} breakdown={held > 0 ? [

@@ -1,6 +1,7 @@
 /** Group, filter, and sort the bots table. Presentation only. */
 import { quoteSym, rangeState, type AnyObj } from './model';
 import { botFacts, type DeskFacts } from './deskStats';
+import { aprShown } from './runRate';
 
 export const GROUPS = ['Grid', 'Trend', 'Liquidity', 'Token trader', 'Paper'] as const;
 export type DeskGroup = typeof GROUPS[number];
@@ -91,7 +92,7 @@ function sortValue(it: DeskItem, key: DeskSort): number | string | null {
   if (key === 'pnl') return f.pnlUsd;
   if (key === 'pnlPct') return f.pnlPct;
   if (key === 'age') return f.ageMs;
-  if (key === 'apr') return f.est.d365?.pct ?? null;
+  if (key === 'apr') return aprShown(f.ageMs, f.est.d365?.pct); // the same number the APR cell shows (none under a day)
   if (key === 'moves') return f.moves.n;
   return f.feesEarnedUsd;
 }

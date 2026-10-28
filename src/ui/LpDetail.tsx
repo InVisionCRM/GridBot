@@ -18,6 +18,7 @@ import { type AnyObj, type Nav } from './model';
 import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
 import { metricsOf, unitsText } from './deskStats';
+import { isShortRun } from './runRate';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -218,7 +219,10 @@ function lpBreakdown(b: AnyObj): DetailRow[] {
 function GeneratedPace({ b }: { b: AnyObj }) {
   const m = metricsOf(b);
   if (!m || !m.generated) return null;
-  const rows = [['A day', m.generatedRate.d1, m.generatedRate.needs.d1], ['A week', m.generatedRate.d7, m.generatedRate.needs.d7], ['A month', m.generatedRate.d30, m.generatedRate.needs.d30]] as const;
+  const all = [['A day', m.generatedRate.d1, m.generatedRate.needs.d1], ['A week', m.generatedRate.d7, m.generatedRate.needs.d7], ['A month', m.generatedRate.d30, m.generatedRate.needs.d30]] as const;
+  // under a day: no pace scaled up from a few hours (runRate.ts, #72)
+  const short = isShortRun(m.ageSec != null ? m.ageSec * 1000 : null);
+  const rows = short ? all.map(([label]) => [label, null, 'shows after a day'] as const) : all;
   return (
     <div className="card pace" data-testid="generated-pace">
       <div className="card-head">
