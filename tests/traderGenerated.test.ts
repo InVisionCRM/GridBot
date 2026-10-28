@@ -160,6 +160,34 @@ describe('token trader Generated (coins)', () => {
     expect(t.status().generated).toHaveLength(2);
   });
 
+  it('live buy with the spend reserved (#59 pendingBuy): gas booked into Generated exactly once; the hold is released on fill and on failure', async () => {
+    let t!: TokenTrader;
+    let fail = false;
+    const during: unknown[] = [];
+    t = live({
+      pools: [pool({ price: 1 / 900 }), pool({ price: 1 / 900 })],
+      buy: (p, spend) => {
+        // while the send is in flight the spend coin is held for this buy, and nothing is booked yet
+        during.push({ held: t.reservations().filter((r) => r.address === p.spend && r.amount === spend).length, gas: t.status().generated.reduce((a, g) => a + g.gasNative, 0) });
+        if (fail) throw Object.assign(new Error('swap reverted'), { opts: { gasNative: 0.0009 } });
+        fail = true; // the second buy reverts after paying gas
+        return { tokens: 900, spent: 1, spentUsd: 2000, price: 1 / 900, impact: 0, gasNative: 0.002 };
+      },
+      sell: (tokens) => ({ quoteOut: tokens * 0.001, tokensIn: tokens, price: 0.001, impact: 0, gasNative: 0 }),
+    });
+    await t.tick();
+    expect(during).toEqual([{ held: 1, gas: 0 }, { held: 1, gas: 0.002 }]);
+    const ps = t.status().positions;
+    expect(ps).toHaveLength(1); // the failed buy books no position
+    expect(t.status().lastError).toMatch(/reverted/);
+    // hold released: only the open position's coins remain reserved, no pending spend
+    expect(t.reservations().filter((r) => r.address === WETH)).toEqual([expect.objectContaining({ amount: ps[0].spent })]);
+    const g = byCoin(t, WETH);
+    expect(g.gasNative).toBeCloseTo(0.002 + 0.0009, 12); // filled buy once + failed send once, never twice
+    expect(ps[0].generated.gasNative).toBeCloseTo(0.002, 12); // the failed send is not charged to the open position
+    expect(g.amount).toBeCloseTo(-0.003 - 0.0029, 12);
+  });
+
   it('paper: fee and both taxes come out of what it generated, on a deep pool at a flat price', async () => {
     const f = 0.003, tb = 0.04, ts = 0.04;
     let queue = [pool({ quoteReserve: 1e9, tokenReserve: 2.5e13 })];
