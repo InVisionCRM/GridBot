@@ -13,6 +13,7 @@ import { ChainRuntime } from './runtime';
 import { discoverPools, type DiscoveredPool } from '../dex/discovery';
 import { readTokenMeta, type TokenMeta } from '../dex/tokens';
 import { classify, depthAt, hopFor, simulateRoundTrip, type ProbeResult } from '../dex/safety';
+import { isInconclusive } from '../bot/taxWatch';
 import { sameAddr } from '../dex/types';
 import { toUnits } from '../../live/swapMath';
 import { readDecimals } from '../../live/decimals';
@@ -412,14 +413,55 @@ export class Hub {
     return r.draft;
   }
 
-  async recheck(key: string): Promise<SafetyReport> {
+  /** A market's safety report went stale (first failure of a run) / was measured again after being stale. */
+  onSafetyStale: ((key: string, report: SafetyReport) => void) | null = null;
+  onSafetyFresh: ((key: string, report: SafetyReport) => void) | null = null;
+
+  /**
+   * Re-run the safety probe.
+   * - Measured: the fresh report replaces the stored one (and clears `stale`).
+   * - The re-check threw (RPC down, pool read failed): the stored report is kept, marked `stale`, and the error is
+   *   re-thrown, so callers behave exactly as before (a grid / trend live start falls back to the stored report, a
+   *   liquidity-bot live start is refused, the tax watcher warns or, after a suspicious event, fails closed).
+   * - The re-check returned no report (no usable pool, no price): the stored report is kept, marked `stale`, and
+   *   returned — its last known values, labelled stale, never silently passed off as fresh.
+   * - `keepMeasured` (the tax watcher's periodic check) and the simulation didn't run: the stored measured report is
+   *   kept (and the taxes its quotes use), marked `stale`; the caller gets the fresh inconclusive one. Without it (a
+   *   live start, a manual re-check) the fresh report replaces it, as before (#32).
+   * Being stale only labels the report: `liveAllowed` and the taxes keep their last known values, and nothing here
+   * pauses or stops a bot.
+   */
+  async recheck(key: string, o: { keepMeasured?: boolean } = {}): Promise<SafetyReport> {
     key = unflipKey(key);
     const d = this.def(key);
     if (!d.safety) throw new Error(`${this.label(key)} has no safety check (built-in PulseChain market)`);
-    const r = await this.inspect({ chainId: d.chainId, address: d.base.address, quote: d.quote.address, pool: d.pool.address });
-    d.safety = r.safety ?? d.safety;
+    let r: InspectResult;
+    try {
+      r = await this.inspect({ chainId: d.chainId, address: d.base.address, quote: d.quote.address, pool: d.pool.address });
+    } catch (e) {
+      this.markStale(key, `re-check failed: ${(e as Error).message}`);
+      throw e;
+    }
+    const fresh = r.safety ?? null;
+    if (!fresh) return this.markStale(key, r.chosen ? 'the re-check measured nothing' : 'the re-check found no usable pool');
+    if (o.keepMeasured && isInconclusive(fresh) && !isInconclusive(d.safety)) {
+      this.markStale(key, `simulation didn't run: ${fresh.reasons[0] ?? 'unavailable'}`);
+      return fresh;
+    }
+    const was = d.safety.stale;
+    d.safety = fresh;
     this.persist();
-    return d.safety!;
+    if (was) this.onSafetyFresh?.(key, fresh);
+    return fresh;
+  }
+
+  /** Keep the stored report's values, label them stale. */
+  private markStale(key: string, why: string): SafetyReport {
+    const d = this.def(key), prev = d.safety!, now = this.now();
+    d.safety = { ...prev, stale: { since: prev.stale?.since ?? now, lastTry: now, why: why.slice(0, 160) } };
+    this.persist();
+    if (!prev.stale) this.onSafetyStale?.(key, d.safety);
+    return d.safety;
   }
 
   /**
@@ -431,6 +473,27 @@ export class Hub {
     const pair = (x: string, y: string) => (sameAddr(x, a) && sameAddr(y, b)) || (sameAddr(x, b) && sameAddr(y, a));
     return this.byChain(chainId).find((m) => m.pool.dex === dex
       && (m.pool.kind === 'v3' ? sameAddr(m.pool.address, pool) : pair(m.base.address, m.quote.address)))?.key ?? null;
+  }
+  /** This app's market for two coins on any pool, turned to spend `quote`; null when it has none */
+  marketForCoins(chainId: number, base: string, quote: string): string | null {
+    for (const m of this.byChain(chainId)) {
+      if (sameAddr(m.base.address, base) && sameAddr(m.quote.address, quote)) return m.key;
+      if (sameAddr(m.quote.address, base) && sameAddr(m.base.address, quote)) return `${m.key}~`;
+    }
+    return null;
+  }
+  /**
+   * This app's market for a scanned pool (`ref`: its coin, the coin it spends, the pool), turned to spend ref.quote
+   * ('HEX~' for HEX spending PLS on the PLS/HEX market); null when the pool isn't in this app.
+   */
+  marketFor(chainId: number, dex: string, ref: { address: string; quote: string; pool: string }): string | null {
+    const key = this.marketOnPool(chainId, dex, ref.pool, ref.address, ref.quote);
+    // Not on that pool any more (its pool was switched since the scan): the app's market for the same two coins
+    if (key == null) return this.marketForCoins(chainId, ref.address, ref.quote);
+    const d = this.def(key);
+    if (sameAddr(d.base.address, ref.address) && sameAddr(d.quote.address, ref.quote)) return key;
+    if (sameAddr(d.quote.address, ref.address) && sameAddr(d.base.address, ref.quote)) return `${key}~`;
+    return null;
   }
 
   // ── Pool selection (PulseChain: PulseX V1 / PulseX V2 / 9mm V2 / 9mm V3; elsewhere every configured DEX) ──

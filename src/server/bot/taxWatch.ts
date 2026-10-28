@@ -12,7 +12,8 @@ export interface TaxWatchDeps {
   /** Custom market keys with at least one running (or in-flight) bot */
   markets(): string[];
   current(key: string): SafetyReport | undefined;
-  recheck(key: string): Promise<SafetyReport>;
+  /** `why` is 'scheduled' for the periodic pass, else what triggered the check */
+  recheck(key: string, why: string): Promise<SafetyReport>;
   /** Pause every bot on the market; returns how many were running */
   pause(key: string, why: string): number;
   alert(key: string, level: 'info' | 'warn' | 'error', msg: string, notify: boolean): void;
@@ -20,6 +21,11 @@ export interface TaxWatchDeps {
   intervalMs?: number;
   /** Minimum gap between two suspicion-triggered checks of one market */
   debounceMs?: number;
+}
+
+/** A report whose buy/sell simulation did not run: it measured no taxes and says nothing about the token. */
+export function isInconclusive(r: SafetyReport): boolean {
+  return r.simulated === false;
 }
 
 export interface TaxCheck { key: string; rose: string | null; blocked: boolean; paused: number; report: SafetyReport | null; error?: string }
@@ -58,7 +64,7 @@ export class TaxWatch {
     const label = this.d.label(key);
     try {
       let next: SafetyReport;
-      try { next = await this.d.recheck(key); } catch (e) {
+      try { next = await this.d.recheck(key, why); } catch (e) {
         const msg = (e as Error).message.slice(0, 160);
         // A failed re-check after a suspicious event is treated as unsafe; a failed scheduled one only warns.
         if (why !== 'scheduled') {
@@ -68,6 +74,21 @@ export class TaxWatch {
         }
         this.d.alert(key, 'warn', `${label}: scheduled tax re-check failed (${msg}); will retry`, false);
         return { key, rose: null, blocked: false, paused: 0, report: null, error: msg };
+      }
+      // The re-check produced no report: the hub kept the last known one, labelled stale. Nothing new was measured, so
+      // there is nothing to compare; warn and retry. Staleness alone never pauses a bot.
+      if (next.stale) {
+        const msg = next.stale.why;
+        this.d.alert(key, 'warn', `${label}: tax re-check${why === 'scheduled' ? '' : ` after ${why}`} measured nothing (${msg}); showing the last known report as stale, bots keep running, will retry`, false);
+        return { key, rose: null, blocked: false, paused: 0, report: next, error: msg };
+      }
+      // The buy/sell simulation didn't run (RPC timeout, rate limit, eth_call override refused): nothing was measured.
+      // A scheduled check treats that like a failed re-check: it warns and tries again; it never pauses on it. A real
+      // honeypot or paused() flag still pauses. Checks after a suspicious event (or a manual one) keep failing closed.
+      if (why === 'scheduled' && isInconclusive(next) && next.honeypot !== true && next.paused !== true) {
+        const msg = (next.reasons[0] ?? 'simulation unavailable').slice(0, 160);
+        this.d.alert(key, 'warn', `${label}: scheduled tax re-check inconclusive (${msg}); bots keep running, will retry`, false);
+        return { key, rose: null, blocked: false, paused: 0, report: next, error: msg };
       }
       const rose = taxRise(taxesOf(prev), taxesOf(next), TAX_RISE_EPS);
       const blocked = !!prev?.liveAllowed && !next.liveAllowed;
