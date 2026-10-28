@@ -50,7 +50,7 @@ export interface SendableTx {
 
 export interface SwapRoute {
   id: string;
-  kind: 'v2' | 'v3' | 'aggregator';
+  kind: 'v2' | 'v3' | 'v4' | 'aggregator';
   /** Post-tax amount the wallet is expected to receive. */
   amountOut: bigint;
   /** Pool output before the output-token tax. Equals amountOut when that tax is 0. */
