@@ -42,6 +42,7 @@ describe('close', () => {
     const journal = bot.journal({ mode: 'paper' }).length;
     expect(journal).toBeGreaterThan(0);
     const before = reads.n;
+    expect(bot.overview('paper').totals.capitalUsd).toBeGreaterThan(0);
     const out = bot.closeAll();
     expect(reads.n).toBe(before);
     expect(out.closing).toBe(0);
@@ -54,6 +55,12 @@ describe('close', () => {
     const rows = bot.overview('paper').bots;
     expect(rows.map((r) => r.id).sort()).toEqual([g1, g2, ...st.trends.map((t) => t.id)].sort());
     expect(rows.every((r) => r.status === 'closed')).toBe(true);
+    // closed bots gave their coins back: nothing is held or allocated now; their trades stay in the all-time sums
+    const tot = bot.overview('paper').totals;
+    expect(tot.capitalUsd).toBe(0);
+    expect(tot.equityUsd).toBe(0);
+    expect(tot.unrealizedUsd).toBe(0);
+    expect(bot.overview('paper').allocation).toEqual([]);
     // Stop all is still only a pause: a fresh running bot is not archived.
     const still = await bot.add({ mode: 'paper', stable: 'USDT', ...base });
     bot.stopAll();

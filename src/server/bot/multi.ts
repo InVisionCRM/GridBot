@@ -1301,9 +1301,10 @@ export class MultiBot {
       if (p.length && this.now() - p[p.length - 1][0] < 60_000) continue;
       const rows = this.botRows(mode);
       if (!rows.length) continue;
-      const eq = rows.reduce((a, r) => a + (r.usdPerQuote ? r.equity * r.usdPerQuote : 0), 0);
+      const open = rows.filter((r) => r.status !== 'closed'); // what the bots hold now; a closed bot gave its coins back
+      const eq = open.reduce((a, r) => a + (r.usdPerQuote ? r.equity * r.usdPerQuote : 0), 0);
       const re = rows.reduce((a, r) => a + (r.usdPerQuote ? r.realized * r.usdPerQuote : 0), 0);
-      const cap = rows.reduce((a, r) => a + (r.usdPerQuote ? r.capital * r.usdPerQuote : 0), 0);
+      const cap = open.reduce((a, r) => a + (r.usdPerQuote ? r.capital * r.usdPerQuote : 0), 0);
       pushCapped(p, [this.now(), usdFmt(eq), usdFmt(re), usdFmt(cap)], 4000);
       changed = true;
     }
@@ -1318,11 +1319,14 @@ export class MultiBot {
     const periods = { today: day.getTime(), d7: now - 7 * 86_400_000, all: 0 };
     const usd = (r: (typeof rows)[number], v: number) => (r.usdPerQuote ? v * r.usdPerQuote : 0);
     const realizedSince = (from: number) => rows.reduce((a, r) => a + usd(r, r.trades.filter((t) => t.timestamp >= from).reduce((s, t) => s + t.realizedPnlQuote, 0)), 0);
+    // A closed bot gave its coins back: its history (trades, fees, gas) stays in the all-time sums and the table, but
+    // what the bots hold now and what is allocated to them count open bots only.
+    const open = rows.filter((r) => r.status !== 'closed');
     // Only snapshots that carry the allocated capital can be compared: PnL = equity − capital, so starting,
     // adding or removing a bot is not counted as a gain or loss.
     const ph = this.multi.portfolio[mode];
-    const eqNow = rows.reduce((a, r) => a + usd(r, r.equity), 0);
-    const capNow = rows.reduce((a, r) => a + usd(r, r.capital), 0);
+    const eqNow = open.reduce((a, r) => a + usd(r, r.equity), 0);
+    const capNow = open.reduce((a, r) => a + usd(r, r.capital), 0);
     const pnlNow = eqNow - capNow;
     const pnlAt = (from: number) => {
       const p = ph.find((x) => x[0] >= from);
@@ -1352,7 +1356,8 @@ export class MultiBot {
         equity_hist: r.equityHist.map(([t, v]) => [t, usd(r, v)] as [number, number]),
       };
     });
-    const sum = (k: 'equityUsd' | 'capitalUsd' | 'realizedUsd' | 'unrealizedUsd' | 'feesUsd' | 'gasUsd') => bots.reduce((a, b) => a + b[k], 0);
+    const now_ = new Set(open.map((r) => r.id));
+    const sum = (k: 'equityUsd' | 'capitalUsd' | 'realizedUsd' | 'unrealizedUsd' | 'feesUsd' | 'gasUsd', held = false) => bots.filter((b) => !held || now_.has(b.id)).reduce((a, b) => a + b[k], 0);
     // Allocation by asset: base held (valued via the hub oracle) + free quote, labelled per chain.
     const alloc = new Map<string, { asset: string; chainId: number; usd: number; amount: number | null }>();
     const addA = (asset: string, chainId: number, v: number, amount: number | null) => {
@@ -1360,7 +1365,7 @@ export class MultiBot {
       x.usd += v; if (x.amount != null && amount != null) x.amount += amount;
       alloc.set(asset, x);
     };
-    for (const r of rows) {
+    for (const r of open) {
       const d = this.hub.has(r.pair) ? this.hub.def(r.pair) : null;
       if (!d) continue;
       if (r.plsHeld > 0) addA(this.tokLabel(d.chainId, d.base.symbol), d.chainId, r.plsHeld * (this.hub.baseUsd(r.pair) ?? 0), r.plsHeld);
@@ -1375,8 +1380,8 @@ export class MultiBot {
       return {
         chainId: rt.cfg.id, key: rt.cfg.key, name: rt.cfg.name, short: rt.cfg.short, color: rt.cfg.color, status: rt.cfg.status,
         bots: bs.length, running: bs.filter((b) => b.status === 'running').length,
-        equityUsd: bs.reduce((a, b) => a + b.equityUsd, 0), capitalUsd: bs.reduce((a, b) => a + b.capitalUsd, 0),
-        realizedUsd: bs.reduce((a, b) => a + b.realizedUsd, 0), unrealizedUsd: bs.reduce((a, b) => a + b.unrealizedUsd, 0),
+        equityUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.equityUsd, 0), capitalUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.capitalUsd, 0),
+        realizedUsd: bs.reduce((a, b) => a + b.realizedUsd, 0), unrealizedUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.unrealizedUsd, 0),
         gasUsd: bs.reduce((a, b) => a + b.gasUsd, 0),
         gasNative: native, gasNativeUsd: native != null && nat ? native * nat : null,
         lowGas: mode === 'live' && rt.gas.low, nativeSymbol: rt.cfg.nativeSymbol,
@@ -1384,7 +1389,7 @@ export class MultiBot {
     }).filter((c) => c.bots > 0 || c.gasNative != null);
     return {
       t: now, mode,
-      totals: { equityUsd: sum('equityUsd'), capitalUsd: sum('capitalUsd'), realizedUsd: sum('realizedUsd'), unrealizedUsd: sum('unrealizedUsd'), feesUsd: sum('feesUsd'), gasUsd: sum('gasUsd') },
+      totals: { equityUsd: sum('equityUsd', true), capitalUsd: sum('capitalUsd', true), realizedUsd: sum('realizedUsd'), unrealizedUsd: sum('unrealizedUsd', true), feesUsd: sum('feesUsd'), gasUsd: sum('gasUsd') },
       periods: per,
       allocation: [...alloc.values()].filter((x) => x.usd > 0.005).sort((a, b) => b.usd - a.usd),
       chains,
