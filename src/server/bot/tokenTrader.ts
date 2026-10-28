@@ -520,6 +520,13 @@ export class TokenTrader {
     return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate, warn: r.warn ?? null };
   }
 
+  /** A pool the scan already decided not to buy. The feed line and the reject record use the same reason. */
+  private noteSkip(pool: FreshPool, why: string) {
+    const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
+    this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why });
+    this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: signalOf(pool.source), source: pool.dex, reason: why, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol });
+  }
+
   private reject(o: { chainId: number; pool: string; token: string; signal: string; source: string; reason: string; price: number | null; feeBps: number | null; spendSymbol?: string }) {
     const pool = o.pool.toLowerCase();
     const key = rejectKey(o.chainId, pool, o.reason);
@@ -703,17 +710,15 @@ export class TokenTrader {
     for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
     const eligible: FreshPool[] = [];
     for (const p of keep) {
-      const label = `${p.tokenSymbol}/${p.spendSymbol}`;
-      if (!this.wantChain(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'chain is off' }); continue; }
-      if (p.kind === 'v4') { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); continue; }
-      if (this.entriesStopped(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); continue; }
+      if (!this.wantChain(p.chainId)) { this.noteSkip(p, 'chain is off'); continue; }
+      if (p.kind === 'v4') { this.noteSkip(p, "this app doesn't swap V4"); continue; }
+      if (this.entriesStopped(p.chainId)) { this.noteSkip(p, 'new buys are stopped (Stop all)'); continue; }
       eligible.push(p);
     }
     // Safety reads, including LP checks, overlap. Each check has its own timeout, so one pool cannot stall the rest.
     const checked = await Promise.all(eligible.map(async (p) => ({ p, a: await this.assess(p) })));
     for (const { p, a } of checked) {
-      const label = `${p.tokenSymbol}/${p.spendSymbol}`;
-      if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); continue; }
+      if (!a.ok || !a.gate) { this.noteSkip(p, a.reason ?? 'safety'); this.say(`skipped ${p.tokenSymbol}/${p.spendSymbol}: ${a.reason}`, 'warn'); continue; }
       await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn);
     }
   }
