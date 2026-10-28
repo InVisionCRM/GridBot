@@ -167,6 +167,7 @@ export class TokenTrader {
     holders?: (pool: FreshPool) => Promise<{
       largest: number | null; top10: number | null; unverified: boolean;
       unavailable?: 'no-source' | 'read-failed'; chainName?: string;
+      unseen?: number | null; top10Exact?: boolean;
     }>;
     /**
      * Impact of spending `spend` (human units of the pool's spend token) on this pool.
@@ -367,7 +368,7 @@ export class TokenTrader {
     let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
     if (this.state.options.enforceHolderCheck) {
       const chainName = chainById(pool.chainId)?.name ?? `chain ${pool.chainId}`;
-      let h: { largest: number | null; top10: number | null; unverified: boolean; unavailable?: 'no-source' | 'read-failed'; chainName?: string } = {
+      let h: { largest: number | null; top10: number | null; unverified: boolean; unavailable?: 'no-source' | 'read-failed'; chainName?: string; unseen?: number | null; top10Exact?: boolean } = {
         largest: null, top10: null, unverified: true, unavailable: 'read-failed', chainName,
       };
       if (this.d.holders) {
@@ -382,6 +383,8 @@ export class TokenTrader {
         holderChain: h.chainName?.trim() || chainName,
         holderConcentration: unverified ? null : h.largest,
         top10Concentration: unverified ? null : h.top10,
+        holderUnseen: unverified ? null : h.unseen ?? 0,
+        top10Exact: unverified ? false : h.top10Exact,
         maxHolderShare: this.state.options.maxHolderShare,
         maxTop10Share: this.state.options.maxTop10Share,
       };

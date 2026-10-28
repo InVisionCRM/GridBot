@@ -12,7 +12,7 @@
 import { HARD_CAPS } from '../live/limits';
 import { MAX_TAX, TAX_TOLERANCE } from '../live/tax';
 import { simBuy, simSell, type CostModel } from './costs';
-import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, clampHolderShare } from './holders';
+import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, clampHolderShare, holderBound } from './holders';
 import { capSwap, TOKEN_MAX_POOL_SHARE } from './poolSize';
 
 export const DEFAULT_MIN_POOL_AGE_SEC = 24 * 3600;
@@ -149,6 +149,10 @@ export interface GateInput {
   maxHolderShare?: number;
   /** Top-10 cap, as a share. Ignored unless `enforceHolderCheck`. Default 40%. */
   maxTop10Share?: number;
+  /** Circulating share a log sample did not measure. Ignored unless `enforceHolderCheck`. */
+  holderUnseen?: number | null;
+  /** The top-10 figure is a full list, so `holderUnseen` is not added to it. */
+  top10Exact?: boolean;
   recentLiqPull: boolean;
   /** The existing safety classifier. Live still requires this. */
   liveAllowed: boolean;
@@ -209,11 +213,17 @@ export function gateToken(g: GateInput): GateResult {
     if (tax > TAX_TOLERANCE) return hard(`tax ${(tax * 100).toFixed(2)}% (safe allows none)`);
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
   }
-  if (g.enforceHolderCheck && (g.risk === 'safe' || g.risk === 'medium')) {
+  if (g.enforceHolderCheck && (g.risk === 'safe' || g.risk === 'medium') && g.holderConcentration != null && g.top10Concentration != null) {
     const maxHolder = clampHolderShare(g.maxHolderShare ?? DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_HOLDER_SHARE);
     const maxTop10 = clampHolderShare(g.maxTop10Share ?? DEFAULT_MAX_TOP10_SHARE, DEFAULT_MAX_TOP10_SHARE);
-    if (g.holderConcentration != null && g.holderConcentration > maxHolder) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}% (maximum ${(maxHolder * 100).toFixed(0)}%)`);
-    if (g.top10Concentration != null && g.top10Concentration > maxTop10) return hard(`top 10 holders have ${(g.top10Concentration * 100).toFixed(0)}% (maximum ${(maxTop10 * 100).toFixed(0)}%)`);
+    const chain = g.holderChain && g.holderChain.trim() ? g.holderChain.trim() : 'this chain';
+    const bound = holderBound({
+      largest: g.holderConcentration, top10: g.top10Concentration, unseen: g.holderUnseen ?? 0, top10Exact: g.top10Exact,
+      maxHolder, maxTop10,
+    });
+    if (bound === 'largest') return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}% (maximum ${(maxHolder * 100).toFixed(0)}%)`);
+    if (bound === 'top10') return hard(`top 10 holders have ${(g.top10Concentration * 100).toFixed(0)}% (maximum ${(maxTop10 * 100).toFixed(0)}%)`);
+    if (bound === 'unread') return hard(`holder concentration unavailable: holder read failed for ${chain}`);
   }
   if (g.enforceSizeImpact) {
     const why = sizeImpactReason(g.sizeImpact ?? null, g.sizeImpactCap ?? DEFAULT_SIZE_IMPACT_CAP);

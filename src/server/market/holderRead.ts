@@ -1,15 +1,19 @@
 /**
- * Read-only holder concentration. Uses the chain's Blockscout token API (the same one Convert uses where it
- * exists). Robinhood Chain has no tokenApi — its explorer answers wallet-token lists with a Cloudflare
- * challenge — but the public Blockscout API is still the holder source, derived from the explorer URL and
- * not written back onto the chain config.
+ * Read-only holder concentration.
  *
- * One chain, one public RPC: explorer calls are paced and cached. A missing total supply is one totalSupply()
- * eth_call, never a log scan. Anything we can't read comes back unverified; the caller decides whether that
- * blocks.
+ * Blockscout's token API is the list when it answers. Robinhood Chain's Blockscout sits behind Cloudflare and
+ * returns 403 to this client, so that chain falls back to a bounded Transfer-log sample plus balanceOf and
+ * totalSupply on its RPC, and to GeckoTerminal's top-10 share when the token info page has one.
+ *
+ * Explorer and RPC calls are paced per chain and cached. A chain with neither an API nor a log reader has no
+ * holder source. Anything we still can't pin down comes back unverified; the caller decides whether that blocks.
  */
+import { getAddress, id } from 'ethers';
 import type { ChainConfig } from '../../live/chains';
-import { HOLDER_PAGE_CAP, holderShares, includedHolders, type HolderMath, type HolderRow } from '../../market/holders';
+import { V4_POOL_MANAGER } from '../../market/poolEvents';
+import { HOLDER_PAGE_CAP, geckoTop10Share, holderShares, includedHolders, isExcludedHolder, protocolExclusions, type HolderMath, type HolderRow } from '../../market/holders';
+import { ERC20, FACTORY, V3_FACTORY } from '../dex/abis';
+import { isZero, readCall } from '../dex/types';
 import type { FetchJson } from '../fetchJson';
 
 export const HOLDER_PACE_MS = 500;
@@ -24,6 +28,24 @@ export interface HolderQuery {
   /** Blockscout v2 base, no trailing path. null = this chain has no public holder API. */
   api: string | null;
   exclude: readonly string[];
+  /** Wrapped native and stables. Used to look up every factory pool for this token. */
+  spends?: readonly string[];
+  /** Factories on this chain. V2 uses getPair; V3 uses getPool for each fee tier. */
+  dexes?: readonly { kind: string; factory?: string; feeTiers?: readonly number[]; positionManager?: string | null }[];
+  /** GeckoTerminal network slug, for the top-10 share when the explorer list is unreachable. */
+  geckoSlug?: string | null;
+}
+
+export interface HolderLog {
+  topics: readonly string[];
+  data?: string;
+}
+
+/** The chain RPC, used when the explorer list is missing or refused. */
+export interface HolderChain {
+  getBlockNumber(): Promise<number>;
+  getLogs(f: { address: string; topics: string[]; fromBlock: number; toBlock: number }): Promise<readonly HolderLog[]>;
+  call(tx: { to: string; data: string }): Promise<string>;
 }
 
 export interface HolderReadOpts {
@@ -33,6 +55,12 @@ export interface HolderReadOpts {
   now?: () => number;
   /** Tests pass 0. Production uses HOLDER_PACE_MS. */
   paceMs?: number;
+  /** Present when this process can read the chain. Robinhood uses it after Blockscout returns 403. */
+  chain?: HolderChain;
+  /** Blocks per eth_getLogs. Halved when the RPC says the query matched too many logs. */
+  logSpan?: number;
+  /** How many spans to walk back from the head. The window stays bounded. */
+  logChunks?: number;
 }
 
 interface HolderPage {
@@ -44,13 +72,14 @@ interface HolderPage {
 }
 
 const cache = new Map<string, { at: number; value: HolderMath }>();
-let paceChain: Promise<unknown> = Promise.resolve();
-let lastPaceAt = 0;
+const lanes = new Map<number, { chain: Promise<unknown>; lastAt: number }>();
+const blockedHosts = new Map<string, number>();
+const TRANSFER = id('Transfer(address,address,uint256)');
 
 export function clearHolderCache() {
   cache.clear();
-  paceChain = Promise.resolve();
-  lastPaceAt = 0;
+  lanes.clear();
+  blockedHosts.clear();
 }
 
 /** Blockscout v2 base for holder lists. Does not invent a tokenApi for chains that deliberately omit one. */
@@ -98,23 +127,185 @@ function withParams(url: string, params: Record<string, string | number> | null)
   return s ? `${url}?${s}` : url;
 }
 
-function paced<T>(gap: number, now: () => number, fn: () => Promise<T>): Promise<T> {
-  const run = paceChain.then(async () => {
-    const wait = Math.max(0, gap - (now() - lastPaceAt));
+/** One lane per chain, so a slow Robinhood read does not hold up Ethereum. */
+function paced<T>(chainId: number, gap: number, now: () => number, fn: () => Promise<T>): Promise<T> {
+  let lane = lanes.get(chainId);
+  if (!lane) { lane = { chain: Promise.resolve(), lastAt: 0 }; lanes.set(chainId, lane); }
+  const run = lane.chain.then(async () => {
+    const wait = Math.max(0, gap - (now() - lane!.lastAt));
     if (wait) await new Promise((r) => setTimeout(r, wait));
-    lastPaceAt = now();
+    lane!.lastAt = now();
     return fn();
   });
-  paceChain = run.then(() => undefined, () => undefined);
+  lane.chain = run.then(() => undefined, () => undefined);
   return run;
+}
+
+function hostOf(api: string): string {
+  try { return new URL(api).host; } catch { return api; }
+}
+
+function topicAddr(topic: string | undefined): string | null {
+  if (!topic || topic.length < 42) return null;
+  try { return getAddress(`0x${topic.slice(-40)}`); } catch { return null; }
 }
 
 function unverified(kind: 'no-source' | 'read-failed', chainName: string): HolderMath {
   return { unverified: true, largest: null, top10: null, included: 0, unavailable: kind, chainName };
 }
 
+async function excludeAll(q: HolderQuery, opts: HolderReadOpts, gap: number, now: () => number): Promise<string[]> {
+  const out = new Set<string>([...q.exclude, ...protocolExclusions(q.dexes ?? []), V4_POOL_MANAGER]);
+  const chain = opts.chain;
+  const spends = (q.spends ?? []).filter((s) => s.toLowerCase() !== q.token.toLowerCase());
+  if (chain && spends.length && q.dexes?.length) {
+    for (const dex of q.dexes) {
+      if (!dex.factory) continue;
+      for (const spend of spends) {
+        if (dex.kind === 'v2') {
+          try {
+            const [pair] = await paced(q.chainId, gap, now, () => readCall<[string]>(chain, dex.factory!, FACTORY, 'getPair', [q.token, spend]));
+            if (!isZero(pair)) out.add(getAddress(pair));
+          } catch { /* this factory didn't answer */ }
+        } else if (dex.kind === 'v3') {
+          for (const tier of dex.feeTiers ?? []) {
+            try {
+              const [pool] = await paced(q.chainId, gap, now, () => readCall<[string]>(chain, dex.factory!, V3_FACTORY, 'getPool', [q.token, spend, tier]));
+              if (!isZero(pool)) out.add(getAddress(pool));
+            } catch { /* this fee tier didn't answer */ }
+          }
+        }
+      }
+    }
+  }
+  return [...out];
+}
+
+/** Blockscout list. Throws when the host refuses the call (Cloudflare 403), so the caller can try the chain. */
+async function readExplorer(q: HolderQuery, opts: HolderReadOpts, exclude: readonly string[], gap: number, now: () => number, chainName: string): Promise<HolderMath> {
+  const api = q.api!.replace(/\/$/, '');
+  const tokenUrl = `${api}/tokens/${q.token}`;
+  let supply: bigint | null = null;
+  try {
+    const info = await paced(q.chainId, gap, now, () => opts.fetchJson(tokenUrl)) as { total_supply?: unknown };
+    const s = asBig(info?.total_supply);
+    if (s != null && s > 0n) supply = s;
+  } catch (e) {
+    if (/HTTP 403/.test((e as Error).message ?? '')) blockedHosts.set(hostOf(api), now() + VERIFIED_TTL_MS);
+    /* holders may still be readable; supply can fall back to one eth_call */
+  }
+
+  const rows: HolderRow[] = [];
+  let params: Record<string, string | number> | null = null;
+  let more = false;
+  let trustOrder = true;
+  for (let page = 0; page < HOLDER_PAGE_CAP; page++) {
+    const j = await paced(q.chainId, gap, now, () => opts.fetchJson(withParams(`${tokenUrl}/holders`, params))) as HolderPage;
+    if (!Array.isArray(j?.items)) throw new Error('holders page');
+    if (!descending(j.items)) trustOrder = false;
+    for (const it of j.items) {
+      const addr = it.address?.hash ?? it.address?.address_hash;
+      const balance = asBig(it.value);
+      if (!addr || balance == null || balance === 0n) continue;
+      rows.push({ address: addr, balance, name: rowName(it) });
+    }
+    const next = j.next_page_params && Object.keys(j.next_page_params).length ? j.next_page_params : null;
+    if (!next) { more = false; break; }
+    if (trustOrder && includedHolders(rows, exclude).length >= 10) { more = false; break; }
+    params = next;
+    more = true;
+  }
+  if (!trustOrder && more) return unverified('read-failed', chainName);
+  if (supply == null && opts.totalSupply) {
+    try { supply = await paced(q.chainId, gap, now, () => opts.totalSupply!(q.chainId, q.token)); } catch { supply = null; }
+  }
+  if (supply == null || !(supply > 0n)) return unverified('read-failed', chainName);
+  const math = holderShares({ totalSupply: supply, holders: rows, exclude, moreHolders: more });
+  if (math.unverified) return { ...math, unavailable: 'read-failed', chainName };
+  return { ...math, chainName, unseen: 0, top10Exact: true };
+}
+
+async function geckoTop10(q: HolderQuery, opts: HolderReadOpts, gap: number, now: () => number): Promise<number | null> {
+  if (!q.geckoSlug) return null;
+  try {
+    const body = await paced(q.chainId, gap, now, () => opts.fetchJson(`https://api.geckoterminal.com/api/v2/networks/${q.geckoSlug}/tokens/${q.token}/info`));
+    return geckoTop10Share(body);
+  } catch { return null; }
+}
+
+/** Recent Transfer counterparties, confirmed with balanceOf. Bounded so one token cannot sweep the RPC. */
+async function readLogs(q: HolderQuery, opts: HolderReadOpts, exclude: readonly string[], gap: number, now: () => number, chainName: string): Promise<HolderMath | null> {
+  const chain = opts.chain;
+  if (!chain) return null;
+  let supply: bigint | null = null;
+  if (opts.totalSupply) {
+    try { supply = await paced(q.chainId, gap, now, () => opts.totalSupply!(q.chainId, q.token)); } catch { supply = null; }
+  }
+  if (supply == null || !(supply > 0n)) {
+    try {
+      const [s] = await paced(q.chainId, gap, now, () => readCall<[bigint]>(chain, q.token, ERC20, 'totalSupply'));
+      supply = s;
+    } catch { return null; }
+  }
+  if (supply == null || !(supply > 0n)) return null;
+
+  let head = 0;
+  try { head = await paced(q.chainId, gap, now, () => chain.getBlockNumber()); } catch { return null; }
+  let span = Math.max(250, opts.logSpan ?? 2_000);
+  const chunks = Math.max(1, opts.logChunks ?? 4);
+  const weight = new Map<string, bigint>();
+  const bump = (addr: string | null, amount: bigint) => {
+    if (!addr || isExcludedHolder(addr, null, exclude)) return;
+    weight.set(addr, (weight.get(addr) ?? 0n) + (amount > 0n ? amount : 1n));
+  };
+  let cursor = head;
+  for (let i = 0; i < chunks && cursor > 0; i++) {
+    const from = Math.max(0, cursor - span);
+    try {
+      const logs = await paced(q.chainId, gap, now, () => chain.getLogs({ address: q.token, topics: [TRANSFER], fromBlock: from, toBlock: cursor }));
+      for (const l of logs) {
+        const amount = l.data && l.data !== '0x' ? BigInt(l.data) : 1n;
+        bump(topicAddr(l.topics[1]), amount);
+        bump(topicAddr(l.topics[2]), amount);
+      }
+      cursor = from - 1;
+    } catch (e) {
+      const msg = `${(e as Error).message ?? ''} ${JSON.stringify((e as { error?: unknown }).error ?? '')}`;
+      if (span > 250 && /exceeds limit|too many|10000/i.test(msg)) { span = Math.floor(span / 2); i--; continue; }
+      break;
+    }
+  }
+
+  const ranked = [...weight.entries()].sort((a, b) => (a[1] > b[1] ? -1 : a[1] < b[1] ? 1 : 0)).slice(0, 40).map(([a]) => a);
+  const ask = [...new Set([...ranked, ...exclude].map((a) => a.toLowerCase()))];
+  const rows: HolderRow[] = [];
+  for (const addr of ask) {
+    try {
+      const raw = await paced(q.chainId, gap, now, () => chain.call({ to: q.token, data: ERC20.encodeFunctionData('balanceOf', [addr]) }));
+      const balance = asBig(raw.startsWith('0x') ? BigInt(raw).toString() : raw);
+      if (balance != null && balance > 0n) rows.push({ address: addr, balance });
+    } catch { /* this balance is missing; the unseen share covers it */ }
+  }
+  const math = holderShares({ totalSupply: supply, holders: rows, exclude, moreHolders: false });
+  if (math.unverified || math.largest == null || math.top10 == null) return null;
+  let excludedBal = 0n;
+  let seen = 0n;
+  for (const r of rows) {
+    if (isExcludedHolder(r.address, r.name, exclude)) excludedBal += r.balance;
+    else seen += r.balance;
+  }
+  const circulating = supply - excludedBal;
+  const unseen = circulating > seen ? Number((circulating - seen) * 1_000_000n / circulating) / 1_000_000 : 0;
+  const gecko = await geckoTop10(q, opts, gap, now);
+  return {
+    unverified: false, largest: math.largest, top10: gecko ?? math.top10, included: math.included,
+    chainName, unseen, top10Exact: gecko != null,
+  };
+}
+
 /**
- * Largest holder and top 10, or unverified. Never throws: a failed explorer or a failed totalSupply() is unverified.
+ * Largest holder and top 10, or unverified. Never throws. No API and no chain reader is "no holder data source".
+ * An API or log read that fails is "holder read failed".
  */
 export async function readHolderConcentration(q: HolderQuery, opts: HolderReadOpts): Promise<HolderMath> {
   const now = opts.now ?? Date.now;
@@ -128,48 +319,28 @@ export async function readHolderConcentration(q: HolderQuery, opts: HolderReadOp
     cache.set(key, { at: now(), value });
     return value;
   };
-  if (!q.api) return finish(unverified('no-source', chainName));
+  let exclude: string[] = [];
+  try { exclude = await excludeAll(q, opts, gap, now); } catch { exclude = [...q.exclude]; }
 
-  const api = q.api.replace(/\/$/, '');
-  const tokenUrl = `${api}/tokens/${q.token}`;
-  let supply: bigint | null = null;
-  try {
-    const info = await paced(gap, now, () => opts.fetchJson(tokenUrl)) as { total_supply?: unknown };
-    const s = asBig(info?.total_supply);
-    if (s != null && s > 0n) supply = s;
-  } catch { /* holders may still be readable; supply can fall back to one eth_call */ }
-
-  const rows: HolderRow[] = [];
-  let params: Record<string, string | number> | null = null;
-  let more = false;
-  let trustOrder = true;
-  try {
-    for (let page = 0; page < HOLDER_PAGE_CAP; page++) {
-      const j = await paced(gap, now, () => opts.fetchJson(withParams(`${tokenUrl}/holders`, params))) as HolderPage;
-      if (!Array.isArray(j?.items)) throw new Error('holders page');
-      if (!descending(j.items)) trustOrder = false;
-      for (const it of j.items) {
-        const addr = it.address?.hash ?? it.address?.address_hash;
-        const balance = asBig(it.value);
-        if (!addr || balance == null || balance === 0n) continue;
-        rows.push({ address: addr, balance, name: rowName(it) });
-      }
-      const next = j.next_page_params && Object.keys(j.next_page_params).length ? j.next_page_params : null;
-      if (!next) { more = false; break; }
-      if (trustOrder && includedHolders(rows, q.exclude).length >= 10) { more = false; break; }
-      params = next;
-      more = true;
+  const host = q.api ? hostOf(q.api) : '';
+  const skipExplorer = !q.api || (blockedHosts.get(host) ?? 0) > now();
+  if (!skipExplorer) {
+    try {
+      const listed = await readExplorer(q, opts, exclude, gap, now, chainName);
+      if (!listed.unverified) return finish(listed);
+      if (!opts.chain) return finish(listed);
+    } catch (e) {
+      if (q.api && /HTTP 403/.test((e as Error).message ?? '')) blockedHosts.set(host, now() + VERIFIED_TTL_MS);
+      if (!opts.chain) return finish(unverified('read-failed', chainName));
     }
-  } catch {
+  }
+  if (opts.chain) {
+    try {
+      const sampled = await readLogs(q, opts, exclude, gap, now, chainName);
+      if (sampled) return finish(sampled);
+    } catch { /* the log read failed */ }
     return finish(unverified('read-failed', chainName));
   }
-
-  if (!trustOrder && more) return finish(unverified('read-failed', chainName));
-  if (supply == null && opts.totalSupply) {
-    try { supply = await paced(gap, now, () => opts.totalSupply!(q.chainId, q.token)); } catch { supply = null; }
-  }
-  if (supply == null || !(supply > 0n)) return finish(unverified('read-failed', chainName));
-  const math = holderShares({ totalSupply: supply, holders: rows, exclude: q.exclude, moreHolders: more });
-  if (math.unverified) return finish({ ...math, unavailable: 'read-failed', chainName });
-  return finish({ ...math, chainName });
+  if (!q.api) return finish(unverified('no-source', chainName));
+  return finish(unverified('read-failed', chainName));
 }

@@ -10,7 +10,7 @@ import { mintInBytecode } from '../../market/tokenChecks';
 import { ERC20, ROUTER } from '../dex/abis';
 import { readCall } from '../dex/types';
 import { fetchJson } from '../fetchJson';
-import { holderApiBase, readHolderConcentration } from './holderRead';
+import { holderApiBase, readHolderConcentration, type HolderChain } from './holderRead';
 import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
 import type { DexConfig } from '../../live/chains';
 import type { SafetyLimits } from '../../live/limits';
@@ -99,12 +99,21 @@ export function createTokenTrader(o: {
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk),
     // Called only when the holder check is on. Flag off never reaches this, so a scan makes no explorer calls.
     holders: (pool) => {
-      const cfg = o.hub.rt(pool.chainId).cfg;
+      const rt = o.hub.rt(pool.chainId);
+      const cfg = rt.cfg;
+      const reader = rt.reader as typeof rt.reader & { getBlockNumber?: () => Promise<number>; getLogs?: HolderChain['getLogs'] };
+      const chain: HolderChain | undefined = reader.getBlockNumber && reader.getLogs ? {
+        getBlockNumber: () => reader.getBlockNumber!(),
+        getLogs: (f) => reader.getLogs!(f),
+        call: (tx) => reader.call(tx),
+      } : undefined;
       return readHolderConcentration({
         chainId: pool.chainId, chainName: cfg.name, token: pool.token, exclude: [pool.pool],
         api: holderApiBase(cfg),
+        spends: [cfg.wrappedNative.address, ...cfg.stables.map((s) => s.address)],
+        dexes: cfg.dexes, geckoSlug: cfg.geckoSlug,
       }, {
-        fetchJson,
+        fetchJson, chain,
         totalSupply: async (chainId, token) => {
           const [supply] = await readCall<[bigint]>(o.hub.rt(chainId).reader, token, ERC20, 'totalSupply');
           return supply;

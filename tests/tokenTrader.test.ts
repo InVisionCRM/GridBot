@@ -87,6 +87,11 @@ describe('safety gate', () => {
     expect(gateToken({ ...unknown, risk: 'medium', ...under, holderConcentration: 0.3, maxHolderShare: 0.25, maxTop10Share: 0.6 }).reason).toBe('one holder has 30% (maximum 25%)');
     expect(gateToken({ ...unknown, risk: 'any', enforceHolderCheck: true, holdersUnverified: false, holderConcentration: 0.9, top10Concentration: 0.95 }).ok).toBe(true);
     expect(gateToken(clean({ holderConcentration: 0.6, enforceHolderCheck: true, holdersUnverified: false, top10Concentration: 0.6 })).reason).toMatch(/one holder has 60%/);
+    const sample = { enforceHolderCheck: true, holdersUnverified: false, holderChain: 'Robinhood Chain' };
+    expect(gateToken(clean({ ...sample, holderConcentration: 0.23, top10Concentration: 0.27, holderUnseen: 0.71 })).reason).toBe('one holder has 23% (maximum 10%)');
+    expect(gateToken(clean({ ...sample, risk: 'medium', holderConcentration: 0.05, top10Concentration: 0.2, holderUnseen: 0.5 })).reason).toBe('holder concentration unavailable: holder read failed for Robinhood Chain');
+    expect(gateToken(clean({ ...sample, holderConcentration: 0.04, top10Concentration: 0.2, holderUnseen: 0.05 })).ok).toBe(true);
+    expect(gateToken(clean({ holderConcentration: 0.05, top10Concentration: 0.9, holderUnseen: 0.5 })).ok).toBe(true);
     expect(gateToken(clean({ risk: 'medium', holderConcentration: 0.6, enforceHolderCheck: true, holdersUnverified: false, top10Concentration: 0.6, maxHolderShare: 0.8, maxTop10Share: 0.9 })).ok).toBe(true);
   });
 

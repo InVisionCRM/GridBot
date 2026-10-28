@@ -1,8 +1,9 @@
 /**
- * Holder concentration (pure). Circulating supply is total supply minus balances we exclude: the pool or pair
- * being traded, burn / dead addresses, and known liquidity lockers (by address or by the explorer's name tag).
+ * Holder concentration (pure). Circulating supply is total supply minus balances we exclude: every known pool
+ * or pair, burn / dead addresses, the V3 position manager, the V4 pool manager, and known liquidity lockers.
  * Shares are of that circulating supply. The largest holder and the top 10 are what the token-trader gate reads.
  */
+import { V4_POOL_MANAGER } from './poolEvents';
 
 /**
  * Paper-vetting caps, used only when the holder check is turned on.
@@ -85,6 +86,13 @@ export interface HolderMath {
   unavailable?: 'no-source' | 'read-failed';
   /** Chain name for the skip reason. Set by the reader, not by the share math. */
   chainName?: string;
+  /**
+   * Share of circulating supply that this sample did not see. 0 for a full explorer list.
+   * A log sample can miss a wallet; the gate treats that remainder as one possible holder.
+   */
+  unseen?: number | null;
+  /** Top 10 came from a full list (explorer or GeckoTerminal), so `unseen` is not added to it. */
+  top10Exact?: boolean;
 }
 
 const UNVERIFIED: HolderMath = { unverified: true, largest: null, top10: null, included: 0 };
@@ -117,5 +125,39 @@ export function holderShares(i: HolderMathInput): HolderMath {
   const largest = shareOf(included[0], circulating);
   const top10 = shareOf(top, circulating);
   if (!(largest >= 0) || largest > 1 || !(top10 >= 0) || top10 > 1) return UNVERIFIED;
-  return { unverified: false, largest, top10, included: included.length };
+  return { unverified: false, largest, top10, included: included.length, unseen: 0, top10Exact: true };
+}
+
+/** Position managers and the V4 PoolManager. Burn addresses are excluded by `isExcludedHolder`. */
+export function protocolExclusions(dexes: readonly { positionManager?: string | null }[]): string[] {
+  const out = [V4_POOL_MANAGER];
+  for (const d of dexes) if (d.positionManager) out.push(d.positionManager);
+  return out;
+}
+
+/** GeckoTerminal token info: `holders.distribution_percentage.top_10` is a percent string. null when it isn't there. */
+export function geckoTop10Share(body: unknown): number | null {
+  const raw = (body as { data?: { attributes?: { holders?: { distribution_percentage?: { top_10?: unknown } } } } })
+    ?.data?.attributes?.holders?.distribution_percentage?.top_10;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
+  if (!Number.isFinite(n) || n < 0 || n > 100) return null;
+  return n / 100;
+}
+
+/**
+ * A partial holder sample (Transfer logs, then balanceOf). `unseen` is circulating supply we did not measure.
+ * Returns 'largest' or 'top10' when the measured share is already over the cap, 'unread' when a missed wallet
+ * could still be over it, and null when even that missed wallet would stay inside both caps.
+ */
+export function holderBound(p: {
+  largest: number; top10: number; unseen: number; top10Exact?: boolean;
+  maxHolder: number; maxTop10: number;
+}): 'largest' | 'top10' | 'unread' | null {
+  const unseen = Number.isFinite(p.unseen) && p.unseen > 0 ? p.unseen : 0;
+  if (p.largest > p.maxHolder) return 'largest';
+  if (p.top10 > p.maxTop10) return 'top10';
+  if (Math.max(p.largest, unseen) > p.maxHolder) return 'unread';
+  const topUpper = p.top10Exact ? p.top10 : Math.min(1, p.top10 + unseen);
+  if (topUpper > p.maxTop10) return 'unread';
+  return null;
 }
