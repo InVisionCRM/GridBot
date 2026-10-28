@@ -110,6 +110,14 @@ export const SCAN_RULES = {
   minPoolAgeMs: 24 * 3600_000,
 };
 
+/**
+ * Reported 24h volume is more than `max` times liquidity. Exactly `max` is not wash, and zero liquidity is not wash.
+ * The scanner and, when its flag is on, the token gate both use this.
+ */
+export function isWashVolume(volumeUsd: number, liquidityUsd: number, max = SCAN_RULES.maxVolumeToLiquidity): boolean {
+  return liquidityUsd > 0 && volumeUsd / liquidityUsd > max;
+}
+
 export interface TokenCandidate { token: string; spend: string; pool: TopPool }
 export interface Skipped { name: string; why: string }
 
@@ -131,7 +139,7 @@ export function pickTokens(pools: TopPool[], spendable: string[], wrapped: strin
     const p = { ...p0, base: native(p0.base), quote: native(p0.quote) };
     const b = sp.has(p.base), q = sp.has(p.quote);
     const ageMs = p.createdAt == null ? null : now - p.createdAt;
-    const wash = p.liquidityUsd > 0 && p.volume24Usd / p.liquidityUsd > rules.maxVolumeToLiquidity;
+    const wash = isWashVolume(p.volume24Usd, p.liquidityUsd, rules.maxVolumeToLiquidity);
     const why = b && q ? 'both sides are the native coin or stablecoins'
       : !b && !q ? 'neither side is the native coin or a stablecoin'
         : p.liquidityUsd < rules.minLiquidityUsd ? `liquidity ${usdAsEth(p.liquidityUsd)} is below ${usdAsEth(rules.minLiquidityUsd)}`
