@@ -18,6 +18,7 @@ import type { Emit } from './activity';
 import type { Store } from './store';
 import type { PoolSniper, SnipeHit } from '../market/sniper';
 import { requestHalt, type Halt } from './audit';
+import type { Generated } from '../../types/generated';
 
 export interface SniperOptions {
   on: boolean;
@@ -95,6 +96,31 @@ export interface Position {
   tp2Done: boolean;
   source: 'scan' | 'snipe';
   exitPlan: string;
+  /** Generated bookkeeping (in the spend coin). Missing = a position from before; read as zeros (genOf). */
+  gen?: PositionGen;
+}
+
+/**
+ * A position's share of Generated, in its spend coin. The buy fee is booked when paid (feeBooked), so a sell's cost
+ * basis is the rest of `spent` pro rata: a whole round trip costs exactly `spent`.
+ */
+export interface PositionGen {
+  /** Pool fee paid on the buy (spent × fee), already counted in the bot's Generated */
+  feeBooked: number;
+  /** Cost basis of the tokens sold so far */
+  costSold: number;
+  /** Coins received from its sells */
+  proceeds: number;
+  fees: number;
+  taxes: number;
+  /** Gas its buy and sells paid, in the chain's own coin */
+  gasNative: number;
+}
+
+/** Generated per spend coin (`chainId:address`), kept after positions close. */
+export interface GenLedger {
+  chainId: number; coin: string; symbol: string;
+  proceeds: number; cost: number; fees: number; taxes: number; gasNative: number; closed: number;
 }
 
 export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null }
@@ -117,10 +143,17 @@ export interface TraderState {
   entriesHalt?: { halt: Halt; chains: number[] | null } | null;
   /** The last stop of the token trader itself (turned off, or new buys stopped), for the stop audit */
   lastHalt?: Halt | null;
+  /** Generated per spend coin. Missing = a file from before (starts empty; nothing else changes). */
+  generated?: Record<string, GenLedger>;
 }
 
-export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string }
-export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string }
+/** gasNative: gas the swap paid, in the chain's own coin (approval included). Missing = not known (counted as 0). */
+export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string; gasNative?: number }
+export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string; gasNative?: number }
+
+const genOf = (p: Position): PositionGen => p.gen ?? (p.gen = { feeBooked: 0, costSold: 0, proceeds: 0, fees: 0, taxes: 0, gasNative: 0 });
+/** Gas a failed send still paid (ExecError opts), else 0 */
+const gasOfError = (e: unknown): number => { const g = (e as { opts?: { gasNative?: number } } | null)?.opts?.gasNative; return typeof g === 'number' && g > 0 ? g : 0; };
 
 const HOUR = 3600_000;
 const FEED_MAX = 80;
@@ -166,6 +199,11 @@ export class TokenTrader {
     feeNow?: (p: { chainId: number; pool: string }) => Promise<number>;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
+    /**
+     * For Generated only: whether a spend coin is the chain's own coin (or its wrapped form), and that coin's symbol.
+     * Missing = not native (gas is reported apart, never price-converted).
+     */
+    coinInfo?: (chainId: number, spend: string) => { native: boolean; nativeSymbol: string } | null;
   }) {
     const loaded = d.store.load();
     this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } } } : fresh();
@@ -212,8 +250,63 @@ export class TokenTrader {
       lastHalt: this.state.lastHalt ?? null,
       /** Open positions whose exits (stops, take-profits) are still managed, also while new buys are stopped */
       exitsManaged: this.state.on ? this.state.positions.length : 0,
-      positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p) })),
+      positions: this.state.positions.map((p) => ({ ...p, pnlUsd: this.pnl(p), exitPlan: this.plan(p), generated: this.posGenerated(p) })),
+      /** Generated per spend coin (closed sells, less buy fees and gas paid); see types/generated.ts */
+      generated: this.generated(),
     };
+  }
+
+  // ── Generated (coins, no USD): bookkeeping only, read by nothing that trades ──
+  private ledger(chainId: number, coin: string, symbol: string): GenLedger {
+    const g = this.state.generated ?? (this.state.generated = {});
+    const k = `${chainId}:${coin.toLowerCase()}`;
+    return g[k] ?? (g[k] = { chainId, coin: coin.toLowerCase(), symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0 });
+  }
+  private spendSymbol(p: Pick<Position, 'label' | 'spend'>) { return p.label.split('/')[1] ?? p.spend; }
+  private view(coin: { chainId: number; coin: string; symbol: string }, x: Omit<GenLedger, 'chainId' | 'coin' | 'symbol'>): Generated {
+    const info = this.d.coinInfo?.(coin.chainId, coin.coin) ?? null;
+    const gasInAmount = !!info?.native;
+    return {
+      coin: { chainId: coin.chainId, address: coin.coin, symbol: coin.symbol, native: gasInAmount },
+      amount: x.proceeds - x.cost - (gasInAmount ? x.gasNative : 0),
+      proceeds: x.proceeds, cost: x.cost, fees: x.fees, taxes: x.taxes,
+      gasNative: x.gasNative, gasSymbol: info?.nativeSymbol ?? null, gasInAmount, closed: x.closed, basis: 'closed',
+    };
+  }
+  /** Per spend coin, every position since this was added (closed ones included) */
+  generated(): Generated[] {
+    return Object.values(this.state.generated ?? {}).map((l) => this.view(l, l));
+  }
+  /** One position: its sells so far, less its buy fee and gas (its unsold tokens count nothing: no mark to market) */
+  private posGenerated(p: Position): Generated {
+    const g = p.gen ?? { feeBooked: 0, costSold: 0, proceeds: 0, fees: 0, taxes: 0, gasNative: 0 };
+    return this.view({ chainId: p.chainId, coin: p.spend, symbol: this.spendSymbol(p) }, {
+      proceeds: g.proceeds, cost: g.costSold + g.feeBooked, fees: g.fees + g.feeBooked, taxes: g.taxes, gasNative: g.gasNative, closed: 0,
+    });
+  }
+  /** A buy: its pool fee (paid in the spend coin) and its gas are booked now; the rest of what it spent is cost when sold */
+  private bookBuy(p: Position, gasNative: number) {
+    const g = genOf(p), l = this.ledger(p.chainId, p.spend, this.spendSymbol(p));
+    const fee = p.spent * (p.feeBps / 10_000);
+    g.feeBooked = fee; g.gasNative += gasNative;
+    l.cost += fee; l.fees += fee; l.gasNative += gasNative;
+  }
+  /** A sell of `sold` tokens that brought `quote` spend coins (actual: after fee, tax and impact) */
+  private bookSell(p: Position, sold: number, quote: number, gasNative: number) {
+    const g = genOf(p), l = this.ledger(p.chainId, p.spend, this.spendSymbol(p));
+    const basis = p.entryTokens > 0 ? (p.spent - g.feeBooked) * (sold / p.entryTokens) : 0;
+    // For reference (already inside `quote`): the pool fee and the sell tax that came off it
+    const f = p.feeBps / 10_000, t = Math.max(0, Math.min(p.sellTax, 0.99));
+    const gross = quote / ((1 - f) * (1 - t));
+    const fee = gross * (1 - t) * f, tax = gross * t;
+    g.costSold += basis; g.proceeds += quote; g.fees += fee; g.taxes += tax; g.gasNative += gasNative;
+    l.cost += basis; l.proceeds += quote; l.fees += fee; l.taxes += tax; l.gasNative += gasNative; l.closed++;
+  }
+  /** Gas a failed send paid (nothing else changed hands) */
+  private bookGas(chainId: number, spend: string, symbol: string, gasNative: number, p?: Position) {
+    if (!(gasNative > 0)) return;
+    this.ledger(chainId, spend, symbol).gasNative += gasNative;
+    if (p) genOf(p).gasNative += gasNative;
   }
 
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
@@ -375,10 +468,13 @@ export class TokenTrader {
       if (!again.ok) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: again.reason ?? 'price impact' }); return; }
     }
     let tokens = sized.tokens, spent = sized.spend, spentUsd = sized.usd;
+    let gasNative = 0;
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('live broker missing');
-      const fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
+      let fill: LiveFill;
+      try { fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits()); } catch (e) { this.bookGas(pool.chainId, pool.spend, pool.spendSymbol, gasOfError(e)); throw e; }
       tokens = fill.tokens; spent = fill.spent; spentUsd = fill.spentUsd;
+      gasNative = fill.gasNative ?? 0;
     }
     // One formula for paper and live: what was spent over what arrived (fee, impact, slippage and buy tax in).
     // A fill that reports no tokens (shouldn't happen) still gets booked, at the mid, never dropped.
@@ -395,6 +491,7 @@ export class TokenTrader {
       tokenReserve: pool.tokenReserve, usdPerSpend: pool.usdPerSpend, buyTax, tp1Done: false, tp2Done: false, source, exitPlan: 'hold',
     };
     this.state.positions.push(pos);
+    this.bookBuy(pos, gasNative);
     const why = `buy ${sized.why}`;
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
@@ -476,17 +573,19 @@ export class TokenTrader {
       }
       const qty = Math.min(p.tokens, p.entryTokens * d.frac);
       const parts = splitSell(qty, Math.max(p.tokenReserve, 1e-12), p.feeBps, this.state.options.maxImpact);
-      let quote = 0, sold = 0;
+      let quote = 0, sold = 0, gasNative = 0;
       if (p.mode === 'live' && this.d.live) {
         for (const part of parts) {
-          const s = await this.d.live.sell(p, part, this.limits());
-          quote += s.quoteOut; sold += s.tokensIn;
+          let s: LiveSell;
+          try { s = await this.d.live.sell(p, part, this.limits()); } catch (e) { this.bookGas(p.chainId, p.spend, this.spendSymbol(p), gasOfError(e), p); throw e; }
+          quote += s.quoteOut; sold += s.tokensIn; gasNative += s.gasNative ?? 0;
         }
       } else {
         const model = this.model(p);
         for (const part of parts) { quote += simSell(part, sellSidePrice(p.price, p.feeBps), model).quote; sold += part; }
       }
       p.tokens -= sold;
+      this.bookSell(p, sold, quote, gasNative);
       const usd = quote * p.usdPerSpend;
       const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
       this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why: d.why, pnlUsd: usd - cost });

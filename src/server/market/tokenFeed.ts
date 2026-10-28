@@ -99,6 +99,13 @@ export function createTokenTrader(o: {
     resolve: (hit) => resolveHit(o.hub, hit),
     // dynamic-fee pools: the fee at quote time (never cached)
     feeNow: (p) => readV3FeeBps(o.hub.rt(p.chainId).reader, p.pool),
+    // Generated only: is the spend coin the chain's own (wrapped or not), so its gas comes out of Generated
+    coinInfo: (chainId, spend) => {
+      try {
+        const cfg = o.hub.rt(chainId).cfg, a = spend.toLowerCase();
+        return { native: [cfg.wrappedNative.address, NATIVE_ZERO, NATIVE_EEEE].some((x) => x.toLowerCase() === a), nativeSymbol: cfg.nativeSymbol };
+      } catch { return null; } // a chain not on in this app: gas stays apart
+    },
     live: {
       buy: async (pool, spend, limits) => {
         const draft = await draftOf(o.hub, pool);
@@ -106,13 +113,13 @@ export function createTokenTrader(o: {
         // (sells keep running: they are exits).
         const { q, fill } = await liveSwap(o.hub.rt(pool.chainId), o.hub.draftQuoter(draft), swapOpts(o, pool.chainId, trader.status().options.sniper.mevRpc), 'buy', spend, limits, sendChecks(trader).buy(pool.chainId));
         const usd = fill.amountInHuman * pool.usdPerSpend;
-        return { tokens: fill.amountOutHuman, spent: fill.amountInHuman, spentUsd: usd, price: fill.amountOutHuman > 0 ? fill.amountInHuman / fill.amountOutHuman : pool.price, impact: q.priceImpact, tx: fill.txHash };
+        return { tokens: fill.amountOutHuman, spent: fill.amountInHuman, spentUsd: usd, price: fill.amountOutHuman > 0 ? fill.amountInHuman / fill.amountOutHuman : pool.price, impact: q.priceImpact, tx: fill.txHash, gasNative: fill.gasNative };
       },
       sell: async (pos, tokens, limits) => {
         const pool = positionPool(pos);
         const draft = await draftOf(o.hub, pool);
         const { q, fill } = await liveSwap(o.hub.rt(pos.chainId), o.hub.draftQuoter(draft), swapOpts(o, pos.chainId, trader.status().options.sniper.mevRpc), 'sell', tokens, limits, sendChecks(trader).sell());
-        return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash };
+        return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash, gasNative: fill.gasNative };
       },
     },
   });
