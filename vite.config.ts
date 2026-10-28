@@ -1,8 +1,11 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import { demoPlugin } from './src/v2/demo-plugin';
 
 export default defineConfig({
-  plugins: [react()],
+  // Inert unless GRIDBOT_V2_FIXTURE=1. Then it serves only GET /api/v2/stream.
+  // demoPlugin is structurally a Vite plugin. Cast because Vitest bundles its own Vite types.
+  plugins: [react(), demoPlugin() as never],
   server: {
     port: 5173,
     proxy: {
@@ -19,6 +22,6 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['tests/**/*.test.ts'],
+    include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
   },
 });

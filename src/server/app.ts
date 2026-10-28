@@ -32,6 +32,7 @@ import { holdingsSnapshot } from './holdings/read';
 import { requestStore, type HaltOrigin } from './bot/audit';
 import type { LpCompoundPolicy, LpRangePolicy } from '../market/lpPolicy';
 import { redact } from './bot/logger';
+import { deskChanged, deskDelta, deskFromStatus } from './v2Desk';
 
 export interface AppOpts {
   bot: MultiBot;
@@ -576,6 +577,42 @@ export function createApp(o: AppOpts) {
     }));
   }
   app.get('/api/activity', wrap((req) => ({ events: bot.activity.recent(Math.min(400, num(req.query.n) ?? 100), num(req.query.since) ?? 0) })));
+
+  // ── v2 desk (read-only). Friend copies run this same app on their own bot, so they see
+  //    only what /api/bot/status already returns for that process. No wallet fields are copied.
+  const v2Desk = () => deskFromStatus(bot.status() as unknown as Record<string, unknown>, bot.activity.recent(80));
+  app.get('/api/v2/stream', (req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    const send = (event: string, data: unknown) => {
+      try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* client gone */ }
+    };
+    let last: ReturnType<typeof v2Desk> | null = null;
+    const publish = (hello: boolean) => {
+      let desk: ReturnType<typeof v2Desk>;
+      try { desk = v2Desk(); } catch {
+        send('problem', { error: 'Desk unavailable' });
+        return;
+      }
+      if (hello || !last) { send('snapshot', desk); last = desk; return; }
+      const delta = deskDelta(last, desk);
+      last = desk;
+      if (deskChanged(delta)) send('delta', delta);
+    };
+    publish(true);
+    const hbMs = o.heartbeatMs ?? 15_000;
+    const hb = setInterval(() => { send('hb', { t: Date.now() }); publish(false); }, hbMs);
+    const onAct = (e: ActivityEvent) => { if (e.type !== 'tick' && e.type !== 'candles') publish(false); };
+    bot.activity.on('activity', onAct);
+    req.on('close', () => {
+      clearInterval(hb);
+      bot.activity.off('activity', onAct);
+    });
+  });
 
   // ── SSE: activity + ticks + status pushes ────────────────────────────
   // The status is computed once per push for all clients (StatusFeed). v1 (no ?v): the whole status, as before.
