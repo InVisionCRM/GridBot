@@ -208,3 +208,17 @@ describe('halt sentence', () => {
     expect(showHalt({ status: 'stopped', halt: { detail: 'Stop button', origin: 'localhost', at } }, false, now)).toBe('Stop button from this computer, 2h ago');
   });
 });
+
+describe('log rotation keeps more history', () => {
+  it('rotates name.1 … name.5, never rewrites a line, and reads them oldest first', async () => {
+    const { mkdtempSync: mk, existsSync } = await import('node:fs');
+    const { readLogLines } = await import('../src/server/bot/fileLog');
+    const dir = mk(join(tmpdir(), 'rot-'));
+    const f = join(dir, 'a.log');
+    for (let i = 0; i < 8; i++) appendLogLine(f, `line ${i} padded to rotate`, 30);
+    expect(existsSync(`${f}.5`)).toBe(true);
+    expect(existsSync(`${f}.6`)).toBe(false);
+    expect(readLogLines(f)).toEqual([2, 3, 4, 5, 6, 7].map((i) => `line ${i} padded to rotate`));
+    expect(readLogLines(f, 1)).toEqual([6, 7].map((i) => `line ${i} padded to rotate`));
+  });
+});

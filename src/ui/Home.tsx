@@ -179,7 +179,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
       <details className="glance" open>
         <summary>Best this week</summary>
         {picks.map(({ o, w }) => (
-          <button key={`${o.chainId}-${o.key ?? o.add?.pool}`} type="button" className="pick" onClick={() => tryIt(o, w.how, nav, act)}>
+          <button key={`${o.chainId}-${o.key ?? o.ref.pool}`} type="button" className="pick" onClick={() => tryIt(o, w.how, nav, act)}>
             <span className="pick-name">{o.label}<small>{chainOf(s, o.chainId)?.short} · {w.how === 'lp' ? 'Liquidity' : 'Grid'}</small></span>
             <Meter value={top > 0 ? w.expected / top : 0} />
             <b className="pos">{pct(w.expected, 1, true)}</b>
