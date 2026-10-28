@@ -8,6 +8,7 @@ import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj } from './model';
 import { haltText } from './haltText';
 import { ENFORCED_LIQUIDITY_FLOOR_USD, shownMinLiquidityUsd } from '../market/liquidityFloor';
+import { inEth, useEthUsd } from './units';
 
 const usd = (n: number) => `$${num(Math.abs(n), Math.abs(n) >= 100 ? 0 : 2)}`;
 
@@ -26,6 +27,8 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
   const o = t.options;
   const chains: AnyObj[] = (s.chains ?? []).filter((c: AnyObj) => c.tradable);
   const save = (patch: AnyObj) => run(() => http('/api/token-trader', 'PUT', patch));
+  const ethUsd = useEthUsd();
+  const liqEth = (usd: number) => inEth(usd, ethUsd);
 
   return (
     <section className="card" id="token-trader">
@@ -59,7 +62,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         <label className="smart-field"><span className="k">Max pool share %</span><input value={Math.round(o.maxPoolShare * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxPoolShare: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxPoolShare: o.maxPoolShare })} /></label>
         <label className="smart-field"><span className="k">Impact cap %</span><input value={Math.round(o.maxImpact * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxImpact: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxImpact: o.maxImpact })} /></label>
         <label className="smart-field"><span className="k">Trade-size cap %</span><input value={Math.round((o.sizeImpactCap ?? 0.01) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sizeImpactCap: numIn(e.target.value) / 100 } })} onBlur={() => void save({ sizeImpactCap: o.sizeImpactCap })} /></label>
-        <label className="smart-field"><span className="k">Min liquidity USD</span><input value={o.minLiquidityUsd ?? 0} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, minLiquidityUsd: numIn(e.target.value) } })} onBlur={() => void save({ minLiquidityUsd: o.minLiquidityUsd ?? 0 })} /></label>
+        <label className="smart-field"><span className="k">{`Min liquidity (≈ ${liqEth(o.minLiquidityUsd ?? 0)})`}</span><input value={o.minLiquidityUsd ?? 0} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, minLiquidityUsd: numIn(e.target.value) } })} onBlur={() => void save({ minLiquidityUsd: o.minLiquidityUsd ?? 0 })} /></label>
         <label className="smart-field"><span className="k">Risk</span>
           <select value={o.risk} onChange={(e) => void save({ risk: e.target.value })}>
             <option value="safe">Safe</option>
@@ -76,8 +79,8 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       </div>
 
       <div className="tt-row" style={{ marginTop: 10 }}>
-        <label className="check"><input type="checkbox" checked={!!o.enforceLiquidityFloor} onChange={(e) => void save({ enforceLiquidityFloor: e.target.checked })} /><span>{`Enforce $${ENFORCED_LIQUIDITY_FLOOR_USD.toLocaleString('en-US')} floor`}</span></label>
-        <span className="muted small">{`In force $${shownMinLiquidityUsd(t).toLocaleString('en-US')}. Scan buys and the safety gate use this. A snipe still has to clear its own minimum when that is higher.`}</span>
+        <label className="check"><input type="checkbox" checked={!!o.enforceLiquidityFloor} onChange={(e) => void save({ enforceLiquidityFloor: e.target.checked })} /><span>{`Enforce liquidity floor (≈ ${liqEth(ENFORCED_LIQUIDITY_FLOOR_USD)})`}</span></label>
+        <span className="muted small">{`In force ${liqEth(shownMinLiquidityUsd(t))}. Scan buys and the safety gate use this. A snipe still has to clear its own minimum when that is higher.`}</span>
       </div>
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={o.enforceHolderCheck === true} onChange={(e) => void save({ enforceHolderCheck: e.target.checked })} /><span>Holder concentration</span></label>

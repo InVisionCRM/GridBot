@@ -6,6 +6,7 @@ import {
   type ExitPos, type FreshPool, type GateInput,
 } from '../src/market/tokenTrader';
 import { effectiveMinLiquidityUsd, ENFORCED_LIQUIDITY_FLOOR_USD, gateMinLiquidityUsd, shownMinLiquidityUsd } from '../src/market/liquidityFloor';
+import { ethUsdOf, inEth } from '../src/ui/units';
 
 const clean = (o: Partial<GateInput> = {}): GateInput => ({
   mode: 'paper', risk: 'safe', honeypot: false, sellSimOk: true, paused: false, decimals: 18,
@@ -258,11 +259,24 @@ describe('liquidity floor', () => {
     expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { enforceLiquidityFloor: true, sniperMinLiquidityUsd: 80_000 })).toBe(80_000);
   });
 
-  it('the desk shows the floor in force', () => {
+  it('the desk shows the floor in force, in ETH at the snapshot price', () => {
     expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 50_000 })).toBe(50_000);
     expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 12_000 })).toBe(12_000);
     const panel = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
     expect(panel.match(/shownMinLiquidityUsd\(t\)/g)).toEqual(['shownMinLiquidityUsd(t)']);
-    expect(panel).toContain('ENFORCED_LIQUIDITY_FLOOR_USD.toLocaleString');
+    expect(panel).toContain('Min liquidity (≈');
+    expect(panel).toContain('Enforce liquidity floor (≈');
+    expect(panel).toContain('In force ${liqEth(shownMinLiquidityUsd(t))}');
+    expect(panel).not.toContain('Min liquidity USD');
+    expect(panel).not.toContain('Enforce $');
+    expect(panel).not.toContain('.toLocaleString');
+    const price = ethUsdOf({ chains: [{ id: 1, nativeSymbol: 'ETH', nativeUsd: 2_500 }] });
+    expect(price).toBe(2_500);
+    expect(inEth(ENFORCED_LIQUIDITY_FLOOR_USD, price)).toBe('20 ETH');
+    expect(inEth(12_000, price)).toBe('4.8 ETH');
+    expect(inEth(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 50_000 }), null)).toBe('—');
+    expect(ethUsdOf({ chains: [{ id: 4663, nativeSymbol: 'ETH', nativeUsd: 1_800 }] }, {
+      wallet: [{ coin: { symbol: 'WETH', usdEach: 2_000 } }],
+    } as never)).toBe(2_000);
   });
 });
