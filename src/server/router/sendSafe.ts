@@ -192,11 +192,9 @@ function budgetPending(hash: string): Outcome {
 async function withinBudget<T>(deadline: number, work: Promise<T>): Promise<T> {
   const left = deadline - Date.now();
   void work.catch(() => undefined);
-  // Past this call's deadline, wait for a result that is already on the way only when the caller
-  // still chose to start it. Callers check the deadline first so a new hang is not started here.
-  // Already past this deadline: the caller should have refused to start the read.
-  // Awaiting here means a removed pre-check hangs the gate instead of slipping past it.
-  if (left <= 0) return await work;
+  // A call that has already missed its deadline must not wait. Callers that still need an answer
+  // use a later deadline (the gate mark) so a slow known-tx check can finish.
+  if (left <= 0) throw new GateBudget();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new GateBudget()), left);
@@ -522,8 +520,13 @@ async function waitOutcome(o: SendSafeOpts, from: string, hash: string, nonce: n
     if (receipt) {
       if (receipt.hash.toLowerCase() !== hash.toLowerCase()) {
         // Same depth as the block scan: the tip can still reorg, so one confirmation is required.
-        if (await replacementConfirmed(o, receipt.blockNumber, receiptDeadline)) {
-          return { status: 'replaced', state: 'source_replaced', hash, replacementHash: receipt.hash };
+        try {
+          if (await replacementConfirmed(o, receipt.blockNumber, receiptDeadline)) {
+            return { status: 'replaced', state: 'source_replaced', hash, replacementHash: receipt.hash };
+          }
+        } catch (e) {
+          if (e instanceof GateBudget) return budgetPending(hash);
+          throw e;
         }
       } else {
         if (receipt.status !== 1) return { status: 'reverted', state: 'source_confirmed', hash };
@@ -561,6 +564,8 @@ function noMoreEndpoints(e: unknown): boolean {
 const MAX_REBROADCASTS = 8;
 
 async function submitRaw(o: SendSafeOpts, raw: string, receiptDeadline: number): Promise<void> {
+  // The signature already exists. Refuse to start the send; broadcast() keeps that hash as pending.
+  if (Date.now() >= receiptDeadline) throw new GateBudget();
   if (o.reader.broadcastRaw) await withinBudget(receiptDeadline, o.reader.broadcastRaw(raw));
   else await withinBudget(receiptDeadline, o.reader.send('eth_sendRawTransaction', [raw]));
 }
@@ -610,6 +615,11 @@ async function ourTxIsKnown(o: SendSafeOpts, hash: string, deadline: number): Pr
 }
 
 async function broadcast(o: SendSafeOpts, plan: Plan, nonce: number, receiptDeadline: number, gateDeadline: number): Promise<SendSafeResult> {
+  // The nonce read uses the gate deadline and can finish after the receipt mark. Do not sign then.
+  if (Date.now() >= receiptDeadline) {
+    o.nonce.invalidate();
+    fail(o, 'broadcast', 'nothing sent');
+  }
   const tx = o.tx;
   const common = { to: tx.to, data: tx.data, value: tx.value, nonce, gasLimit: plan.gasLimit, chainId: o.chainId };
   const unsigned = plan.gasPrice != null
@@ -704,6 +714,8 @@ export async function sendSafe(o: SendSafeOpts): Promise<SendSafeResult> {
     try {
       assertNotHalted(o);
       const plan = await assess(o, deadlines.gate);
+      // Assess uses the gate deadline, so it can return after the receipt mark. Nothing is signed yet.
+      if (Date.now() >= deadlines.receipt) fail(o, 'broadcast', 'nothing sent');
       // Same place a bot send reads canSend: after the gate is held, before the nonce is taken.
       assertNotHalted(o);
       const nonce = await o.nonce.next(() => withinBudget(deadlines.gate, o.reader.getTransactionCount(tx.from, 'pending')));
