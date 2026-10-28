@@ -9,13 +9,18 @@ import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenT
 import { gateMinLiquidityUsd } from '../../market/liquidityFloor';
 import { mintInBytecode } from '../../market/tokenChecks';
 import { ROUTER } from '../dex/abis';
-import { LiveExecutor, type ChainReader } from '../bot/chain';
+import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
+import type { DexConfig } from '../../live/chains';
+import type { SafetyLimits } from '../../live/limits';
+import type { SharedNonce, TxGate } from '../bot/txGate';
+import { poolFeeBps, readV3FeeBps } from '../dex/poolFee';
 import { JsonStore, type Store } from '../bot/store';
 import type { Emit } from '../bot/activity';
 import type { Hub } from '../chains/hub';
 import type { GeckoSource } from './gecko';
 import { PoolSniper, type LogSource, type SniperChain } from './sniper';
 import { TokenTrader, type Position, type TraderOptions, type TraderState } from '../bot/tokenTrader';
+import { quoteTradeImpact } from './tradeImpact';
 
 interface Reader extends ChainReader {
   getBlockNumber(): Promise<number>;
@@ -90,29 +95,24 @@ export function createTokenTrader(o: {
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, trader.status().options),
+    // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
+    quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
     resolve: (hit) => resolveHit(o.hub, hit),
+    // dynamic-fee pools: the fee at quote time (never cached)
+    feeNow: (p) => readV3FeeBps(o.hub.rt(p.chainId).reader, p.pool),
     live: {
       buy: async (pool, spend, limits) => {
         const draft = await draftOf(o.hub, pool);
-        const ex = executor(o, draft, pool.chainId, trader.status().options.sniper.mevRpc);
-        const q = await ex.quote('buy', spend, limits);
-        if (q.block) throw new Error(q.block);
-        if (!q.balanceOk) throw new Error(q.balanceNote ?? 'balance');
-        if (q.priceImpact > limits.maxPriceImpact) throw new Error(`price impact ${(q.priceImpact * 100).toFixed(2)}% is over the cap`);
-        // A Stop all that lands between the quote and the send stops the buy (sells keep running: they are exits).
-        const fill = await ex.execute(q, { canSend: () => trader.canBuy(pool.chainId), onSent: () => undefined });
+        // A Stop all that lands while this buy waits in the chain's queue, or between the quote and the send, stops it
+        // (sells keep running: they are exits).
+        const { q, fill } = await liveSwap(o.hub.rt(pool.chainId), o.hub.draftQuoter(draft), swapOpts(o, pool.chainId, trader.status().options.sniper.mevRpc), 'buy', spend, limits, sendChecks(trader).buy(pool.chainId));
         const usd = fill.amountInHuman * pool.usdPerSpend;
         return { tokens: fill.amountOutHuman, spent: fill.amountInHuman, spentUsd: usd, price: fill.amountOutHuman > 0 ? fill.amountInHuman / fill.amountOutHuman : pool.price, impact: q.priceImpact, tx: fill.txHash };
       },
       sell: async (pos, tokens, limits) => {
         const pool = positionPool(pos);
         const draft = await draftOf(o.hub, pool);
-        const ex = executor(o, draft, pos.chainId, trader.status().options.sniper.mevRpc);
-        const q = await ex.quote('sell', tokens, limits);
-        if (q.block) throw new Error(q.block);
-        if (!q.balanceOk) throw new Error(q.balanceNote ?? 'balance');
-        if (q.priceImpact > limits.maxPriceImpact) throw new Error(`price impact ${(q.priceImpact * 100).toFixed(2)}% is over the cap`);
-        const fill = await ex.execute(q, { canSend: () => trader.status().on, onSent: () => undefined });
+        const { q, fill } = await liveSwap(o.hub.rt(pos.chainId), o.hub.draftQuoter(draft), swapOpts(o, pos.chainId, trader.status().options.sniper.mevRpc), 'sell', tokens, limits, sendChecks(trader).sell());
         return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash };
       },
     },
@@ -120,13 +120,42 @@ export function createTokenTrader(o: {
   return trader;
 }
 
-function executor(o: { hub: Hub; approval: 'exact' | 'max'; receiptTimeoutMs: number }, draft: import('../../live/markets').MarketDef, chainId: number, mev: string | null) {
-  const signer = o.hub.rt(chainId).signer;
-  if (!signer) throw new Error('no signing key');
+/** The halt checks a token-trader send runs right before it takes a nonce (and again between approve and swap). */
+export function sendChecks(trader: Pick<TokenTrader, 'canBuy' | 'status'>) {
+  return {
+    buy: (chainId: number) => () => trader.canBuy(chainId),
+    sell: () => () => trader.status().on,
+  };
+}
+
+function swapOpts(o: { approval: 'exact' | 'max'; receiptTimeoutMs: number }, chainId: number, mev: string | null) {
   const url = chainId === 1 && mev && /^https:\/\//.test(mev) ? mev : null;
-  return new LiveExecutor(o.hub.draftQuoter(draft), signer, {
-    approval: o.approval, receiptTimeoutMs: o.receiptTimeoutMs,
-    sendRaw: url ? (raw) => broadcast(url, raw) : undefined,
+  return { approval: o.approval, receiptTimeoutMs: o.receiptTimeoutMs, sendRaw: url ? (raw: string) => broadcast(url, raw) : undefined };
+}
+
+/**
+ * One token-trader swap, sent the way the bots send: inside the chain's TxGate (one transaction at a time per chain,
+ * shared with grids, LP and the converter) and with the wallet's SharedNonce. The halt check runs first thing inside
+ * the gate, so a send that queued behind another is refused if Stop all / off landed while it waited; LiveExecutor
+ * runs it again right before each nonce is taken. The quote is taken inside the gate too (fresh, and the balance-delta
+ * fill measurement only sees this swap). Quote checks are unchanged.
+ */
+export async function liveSwap(
+  rt: { signer: TxSender | null; gate: TxGate; nonce: SharedNonce }, quoter: Quoter,
+  opts: { approval: 'exact' | 'max'; receiptTimeoutMs: number; sendRaw?: (raw: string) => Promise<string> },
+  side: 'buy' | 'sell', amount: number, limits: SafetyLimits, canSend: () => boolean,
+): Promise<{ q: Quote; fill: Fill }> {
+  const signer = rt.signer;
+  if (!signer) throw new Error('no signing key');
+  const ex = new LiveExecutor(quoter, signer, { ...opts, sharedNonce: rt.nonce });
+  return rt.gate.run(async () => {
+    if (!canSend()) throw new Error('stopped before sending');
+    const q = await ex.quote(side, amount, limits);
+    if (q.block) throw new Error(q.block);
+    if (!q.balanceOk) throw new Error(q.balanceNote ?? 'balance');
+    if (q.priceImpact > limits.maxPriceImpact) throw new Error(`price impact ${(q.priceImpact * 100).toFixed(2)}% is over the cap`);
+    const fill = await ex.execute(q, { canSend, onSent: () => undefined });
+    return { q, fill };
   });
 }
 
@@ -158,15 +187,32 @@ async function discover(hub: Hub, gecko: GeckoSource): Promise<FreshPool[]> {
     const take = (rows: typeof fresh, source: 'new' | 'trending') => {
       for (const row of rows) {
         const dex = rt.cfg.dexes.find((d) => d.gecko === row.dex);
-        const feeBps = dex?.feeBps ?? (dex?.feeTiers?.[0] != null ? dex.feeTiers[0] / 100 : 30);
-        const pool = fromTopPool(row, { id: rt.cfg.id, spend, kind: dex?.kind === 'v2' ? 'v2' : 'v3', feeBps }, source);
+        // feeBps is a placeholder until withPoolFees reads the pool's real fee (V3 fee(), or the DEX's V2 fee)
+        const pool = fromTopPool(row, { id: rt.cfg.id, spend, kind: dex?.kind === 'v2' ? 'v2' : 'v3', feeBps: dex?.feeBps ?? 30 }, source);
         if (pool) out.push(pool);
       }
     };
     take(fresh, 'new');
     take(hot, 'trending');
   }
-  return out.slice(0, 40);
+  return withPoolFees(out.slice(0, 40), (id) => hub.rt(id).reader, (p) => hub.rt(p.chainId).cfg.dexes.find((d) => d.gecko === p.dex) ?? null);
+}
+
+/**
+ * Every discovered pool gets its real fee: V2 = the DEX's fee, V3 = the pool's fee() (one eth_call each). A pool whose
+ * fee can't be read is dropped: pricing it at a guessed tier is how 1 % pools were sized as 0.01 % ones.
+ */
+export async function withPoolFees(
+  pools: FreshPool[], readerFor: (chainId: number) => Pick<ChainReader, 'call'>,
+  dexOf: (p: FreshPool) => Pick<DexConfig, 'kind' | 'feeBps' | 'dynamicFee'> | null,
+): Promise<FreshPool[]> {
+  const read = await Promise.all(pools.map(async (p) => {
+    const dex = dexOf(p);
+    if (!dex) return null; // a DEX this app doesn't swap on: inspect() could not find the pool anyway
+    const feeBps = await poolFeeBps(readerFor(p.chainId), p.pool, dex);
+    return feeBps == null ? null : { ...p, kind: dex.kind === 'v2' ? 'v2' as const : 'v3' as const, feeBps, ...(dex.dynamicFee ? { dynamicFee: true } : {}) };
+  }));
+  return read.filter((p): p is NonNullable<typeof p> => !!p);
 }
 
 async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', opt: TraderOptions): Promise<GateInput> {
@@ -197,13 +243,18 @@ async function resolveHit(hub: Hub, hit: import('./sniper').SnipeHit): Promise<F
     const r = await hub.inspect({ chainId: hit.chainId, address: token, quote: spend, pool: hit.pool });
     const chosen = r.chosen;
     if (!chosen?.mid || !r.token) return null;
+    // the pool's own fee (V3 fee(), V2 DEX fee); unknown = can't price it
+    const dex = rt.cfg.dexes.find((d) => d.id === chosen.dex) ?? null;
+    const feeBps = chosen.feeBps ?? await poolFeeBps(rt.reader, hit.pool, dex);
+    if (feeBps == null) return null;
     const usd = r.quote.kind === 'stable' ? 1 : (await hub.nativeUsdAsync(hit.chainId)) ?? 0;
     const liq = r.safety?.liquidityUsd ?? chosen.tvlUsd ?? 0;
     return {
       chainId: hit.chainId, pool: hit.pool, dex: hit.dex, kind: hit.kind, token, spend,
       tokenSymbol: r.token.symbol, spendSymbol: r.quote.symbol, liquidityUsd: liq, volumeUsd: 0, createdAt: null, source: 'snipe',
       quoteReserve: usd > 0 ? (liq / 2) / usd : 0, tokenReserve: chosen.mid > 0 && usd > 0 ? (liq / 2) / usd / chosen.mid : 0,
-      feeBps: chosen.feeBps ?? 30, price: chosen.mid, usdPerSpend: usd || 1,
+      feeBps, price: chosen.mid, usdPerSpend: usd || 1,
+      ...(dex?.dynamicFee ? { dynamicFee: true } : {}),
     };
   } catch { return null; }
 }

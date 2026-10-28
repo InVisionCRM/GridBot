@@ -1,7 +1,7 @@
 /**
  * Friends' keys at rest: AES-256-GCM under a key derived from FRIENDS_SECRET (which lives in the host's .env, not in
  * data/). Each box is bound to its friend's id, so a box copied onto another friend doesn't open. The host opens a key
- * only to start that friend's copy (copies.ts), which reads it once from its environment like the host's PRIVATE_KEY.
+ * only to start that friend's copy (copies.ts), which asks for it once over the IPC channel (never its environment).
  */
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
 import { computeAddress } from 'ethers';
