@@ -34,20 +34,20 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   const gr = f.generatedRate;
   const sym = f.quoteSym ?? '';
   // Est. = Generated ÷ age × the window, per token (the server's generatedRate); a dash and "shows after a day" until the history is long enough
-  // a liquidity bot has no move count of its own here (main: hidden for lp); #43 has no Realized/Unrealized rows
-  const hidden: readonly string[] = b.kind === 'lp' ? [...hide, 'Moves'] : hide;
+  // a stat a kind does not have is left out, not dashed: a dash means "not yet", never "not a thing here"
+  const notFor: Record<string, readonly string[]> = { grid: ['Fees earned'], trend: ['Fees earned', 'Spacing', 'Range'], lp: ['Moves', 'Win rate'] };
+  const hidden: readonly string[] = [...hide, ...(notFor[String(b.kind)] ?? [])];
   const rows: [string, string, string?][] = [
     ['Generated', unitsText(f.generated), calc],
     ['Est. 24h', rate(gr?.d1, gr?.needs.d1), calc],
     ['Est. 7d', rate(gr?.d7, gr?.needs.d7), calc],
     ['Est. 365d', rate(gr?.d365, gr?.needs.d365), calc],
-    ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pctShown(f.aprPct, 1, true), calc],
+    ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pctShown(f.aprPct, 2, true), calc],
     ['Age', f.ageMs == null ? '—' : dur(f.ageMs)],
     ['Moves', f.moves.text ?? '—'],
     ['Win rate', f.winRate == null ? '—' : pct(f.winRate, 0)],
     ['Fees paid', f.feesPaid == null ? '—' : qty(f.feesPaid, sym, 4, false), `Gas + swap fees paid, in ${sym || 'the quote coin'}; for an LP also what range moves locked in.`],
     ['Fees earned', f.feesEarned == null ? '—' : qty(f.feesEarned, sym, 4, false), `In ${sym || 'the quote coin'}, both coins' fees at today's price.`],
-    ['Time in range', f.timeInRange == null ? '—' : pct(f.timeInRange, 0)],
     ['Range', range],
     ['Spacing', spacing],
     ['Last move', f.lastMoveAt == null ? '—' : `${dur(Date.now() - f.lastMoveAt)} ago`], // to the tenth, like Age

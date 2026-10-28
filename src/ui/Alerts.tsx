@@ -9,6 +9,7 @@ import { RangeBar } from './charts';
 import { dur, num, px, time } from './fmt';
 import { disablePush, enablePush, isIos, loadPushStatus, localSubscription, needsHomeScreen, pushOptedIn, savePushPrefs, setPushOptIn, shouldRestorePush, unsubscribePush } from './pushClient';
 import type { ActivityEvent } from './useStream';
+import { lpName } from './model';
 
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -102,7 +103,7 @@ function LpHealth({ s }: { s: AnyObj }) {
           <article key={lp.id} className="lp-row">
             <div className="lp-top">
               <div>
-                <strong>{lp.label}</strong>
+                <strong>{lpName(lp)}</strong>
                 <p className="muted small">{[lp.dexName ?? lp.dex, feeOf(lp)].filter(Boolean).join(' · ')} <ChainBadge c={chainOf(s, lp.chainId)} /></p>
               </div>
               <div className={`lp-edge ${zone}`}>

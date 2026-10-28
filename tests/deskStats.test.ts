@@ -72,7 +72,6 @@ describe('desk stat math', () => {
     expect(f.est.d365).toEqual({ amount: 730, pct: 7.3 }); // 4 over 2 days × 365, on 100 in (a day of history is enough)
     expect(f.feesPaidUsd).toBeCloseTo(0.5);
     expect(f.feesEarnedUsd).toBeNull();
-    expect(f.timeInRange).toBeNull();
     expect(f.winRate).toBe(0.5);
     expect(f.moves.n).toBe(5);
     expect(f.spacingFrac).toBeGreaterThan(0);

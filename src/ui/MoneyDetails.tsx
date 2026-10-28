@@ -14,7 +14,7 @@
  */
 import type { ReactNode } from 'react';
 import { echoes, metricsOf, unitsText } from './deskStats';
-import { pctShown, qty, qtyFixed } from './fmt';
+import { bagFixed, pctShown, qty } from './fmt';
 
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 import type { AnyObj } from './model';
@@ -92,7 +92,7 @@ export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { 
   }
   const tp = rows.find((r) => r[0].startsWith('Total P&L'));
   if (tp && m.totalPnlPct != null && pctShown(m.totalPnlPct, 2) !== '—') tp[1] = `${tp[1]} · ${pctShown(m.totalPnlPct, 2, true)} of capital in`;
-  const deposit = q.capitalIn == null ? '—' : qtyFixed(q.capitalIn, sym, 5); // exact: reads apart from the value beside it
+  const deposit = bagFixed(m.capitalCoins); // exact, coin by coin: reads apart from the value beside it
   // 'Deposit' hidden: the page shows Invested elsewhere (Kyle: each figure once), so this row is the value now alone
   const value: [string, string, string] | null = no.has('Value now') && no.has('Deposit') ? null
     : no.has('Value now') ? ['Deposit', `${deposit} in`, `The capital put in, in ${sym} at today's price.`]

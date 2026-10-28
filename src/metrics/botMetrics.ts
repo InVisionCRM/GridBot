@@ -109,6 +109,8 @@ export interface BotMetrics {
   /** Invested in the quote coin (= quote.capitalIn) and where it came from. */
   capitalInQuote: number | null;
   capitalInSource: CapitalSource;
+  /** What was put in, per coin (units). A liquidity bot funded with both coins lists both; capitalIn values them in the quote coin. */
+  capitalCoins: Record<string, number> | null;
   /** Extra: the same totals in the quote coin (the "show in quote coin" toggle and detail KPIs). */
   quote: {
     symbol: string | null; usdPerQuote: number | null; capitalIn: number | null; currentValue: number | null; totalPnl: number | null; realized: number | null; unrealized: number | null; feesEarned: number | null;
@@ -226,6 +228,8 @@ interface Core {
   /** Per-coin parts before bridge costs (finish adds bridge and checks nothing else is left over). */
   parts?: Record<string, Omit<CoinBreakdown, 'bridge' | 'generated'>> | null; basis?: BreakdownBasis | null;
   capitalSource?: CapitalSource;
+  /** What was put in, per coin (units): a liquidity bot funded with both coins lists both. Null when unknown. */
+  capitalCoins?: Record<string, number> | null;
   /** End of the bot's history for rates / estimates / APR (historyEnd); now when absent */
   end?: number;
 }
@@ -306,6 +310,7 @@ function finish(c: Core, now: number): BotMetrics {
     breakdownByCoin: breakdown, breakdownBasis: breakdown ? c.basis ?? null : null,
     // a multi-coin token trader keeps its money figures in dollars inside: no quote-coin Invested for it
     capitalInQuote: c.symbol === 'USD' ? null : c.capitalIn, capitalInSource: c.capitalIn == null || c.symbol === 'USD' ? null : c.capitalSource ?? null,
+    capitalCoins: c.capitalCoins ?? (c.capitalIn == null || c.symbol == null || c.symbol === 'USD' ? null : { [c.symbol]: c.capitalIn }),
     calc: `${GENERATED_CALC[c.kind]} ${RATES} ${TOTAL_CALC[c.kind]}`,
     quote: {
       symbol: c.symbol, usdPerQuote: c.k, capitalIn: c.capitalIn, currentValue: c.currentValue, totalPnl: total, realized: c.realized, unrealized: c.unrealized, feesEarned: c.feesEarned,
@@ -367,6 +372,8 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   const capitalSource: CapitalSource = capQ != null ? 'config' : capLegacy != null ? 'legacy-config' : null;
   const realized = num(b.pnl?.realized), unrealized = num(b.pnl?.unrealized);
   const sent = num(b.payout?.sent) ?? 0;
+  // sending profits out costs gas too (payout.gasQuote, booked in the quote): a cost of the profit, like trade gas
+  const payoutGas = num(b.payout?.gasQuote) ?? 0;
   const equity = cap == null ? null : cap + (realized ?? 0) + (unrealized ?? 0);
   const fills = num(b.moveCount), rec = num(b.recenter?.count);
   const lo = num(b.config?.lowerPrice), hi = num(b.config?.upperPrice), price = num(b.price);
@@ -375,15 +382,18 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   const sym = String(unitOf(b.quoteSym) ?? unitOf(b.stable) ?? 'quote'); // never a market key as the unit
   // Generated = completed round trips (minus gas lost on failed / manual trades). A close / stop cash-out sale is a
   // liquidation at the day's price, so it is in Total P&L (price change) but not here. Older payloads: realized.
-  const gen = num(b.stats?.generated) ?? realized ?? (noFills(b) ? 0 : null);
+  const gross = num(b.stats?.generated) ?? realized ?? (noFills(b) ? 0 : null);
+  const gen = gross == null ? null : gross - payoutGas;
   const fromStats = num(b.stats?.generated) != null;
-  const rt = fromStats && b.stats?.rtCosts ? b.stats.rtCosts as RoundTripCosts : Array.isArray(b.trades) && fromStats ? roundTripCosts(b.trades, 'grid') : null;
+  const rt0 = fromStats && b.stats?.rtCosts ? b.stats.rtCosts as RoundTripCosts : Array.isArray(b.trades) && fromStats ? roundTripCosts(b.trades, 'grid') : null;
+  const rt = rt0 && payoutGas ? { ...rt0, gas: rt0.gas + payoutGas } : rt0;
+  const tradeGas = num(b.stats?.totalGas);
   return finish({
     ...tradeParts(sym, gen, rt, !b.stats?.rtCosts, b.trades), capitalSource,
     kind: 'grid', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'grid' }, now),
-    capitalIn: cap, currentValue: equity == null ? null : equity - sent, paidOut: sent, extraCost: 0,
+    capitalIn: cap, currentValue: equity == null ? null : equity - sent, paidOut: sent, extraCost: payoutGas,
     realized, unrealized, feesEarned: null, feesCollected: null, feesUncollected: null,
-    gas: num(b.stats?.totalGas), swapCost: num(b.stats?.totalFees),
+    gas: tradeGas == null ? (payoutGas || null) : tradeGas + payoutGas, swapCost: num(b.stats?.totalFees),
     moveCount: fills == null && rec == null ? null : (fills ?? 0) + (rec ?? 0), fillCount: fills,
     range: lo != null && hi != null && hi > lo ? { lower: lo, upper: hi, current: price, inRange: inside(lo, hi, price) } : null,
     k: rate(b), symbol: sym,
@@ -473,6 +483,14 @@ function closedLpPnl(b: Obj): Obj | null {
   return { equity, value, fees, gas, swapCost, moveLoss, net, price: equity - start - net, feeCoins: t.feeCoins };
 }
 
+/** What a liquidity bot was given, per coin: config.capital in the quote coin and config.baseAmount in the base coin. */
+function lpCapitalCoins(b: Obj): Record<string, number> | null {
+  const quote = unitOf(b.quoteSym) ?? unitOf(b.quote), base = unitOf(b.base);
+  const capital = num(b.config?.capital), baseAmount = num(b.config?.baseAmount) ?? 0;
+  if (capital == null || !quote) return null;
+  return baseAmount > 0 && base ? { [quote]: capital, [base]: baseAmount } : { [quote]: capital };
+}
+
 /** LP status (lpEngine.status()). `pnl` is LpEngine.pnl(): equity = value + sent − gas. */
 export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
   b = withMoveLoss(b);
@@ -489,6 +507,7 @@ export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
   const n = num(b.reranges);
   return finish({
     capitalSource: start == null ? null : 'start-value',
+    capitalCoins: lpCapitalCoins(b),
     kind: 'lp', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'lp' }, now),
     capitalIn: start, currentValue: p ? value : null, paidOut: sent, extraCost: gas ?? 0,
     realized: num(p?.net), unrealized: num(p?.price),
@@ -562,35 +581,64 @@ function tokenParts(generated: Record<string, number>): Pick<Core, 'parts' | 'ba
   };
 }
 
+/**
+ * Token trader (TokenTrader state). Paper and live are never added together: every figure is the trader's current mode
+ * (options.mode). Generated comes from the trader's own per-mode ledger (`generated`: closed sells less what was paid
+ * for them and, for a native spend coin, the gas; all-time, per spend coin), never from the trade log, which keeps
+ * only its newest rows. Open positions count what they cost and what they are worth now.
+ */
 export function tokenMetrics(t: Obj, now = Date.now()): BotMetrics {
-  const trades = (t.trades ?? []) as Obj[];
-  const positions = (t.positions ?? []) as Obj[];
+  const mode: 'live' | 'paper' = t.options?.mode === 'live' ? 'live' : 'paper';
+  const ofMode = (x: Obj) => (x.mode === 'live' ? 'live' : 'paper') === mode;
+  const trades = ((t.trades ?? []) as Obj[]).filter(ofMode);
+  const positions = ((t.positions ?? []) as Obj[]).filter(ofMode);
+  const ledger = ((t.generated ?? []) as Obj[]).filter(ofMode);
   const firstT = trades.reduce((m, x) => (num(x.t) != null && (m == null || x.t < m) ? x.t : m), null as number | null);
   const base = {
-    kind: 'token' as const, id: String(t.id ?? 'token-trader'), mode: t.options?.mode === 'live' ? 'live' as const : 'paper' as const, status: t.on ? 'running' : 'stopped', startedAt: firstT,
+    kind: 'token' as const, id: String(t.id ?? 'token-trader'), mode, status: t.on ? 'running' : 'stopped', startedAt: firstT,
     extraCost: 0, feesEarned: null, feesCollected: null, feesUncollected: null, gas: null, swapCost: null,
     moveCount: trades.length, fillCount: trades.length, range: null, taxes: null,
   };
-  const coins = trades.length ? tokenSpendTotals(t) : null;
   const rates = spendRates(trades, positions);
-  const syms = coins ? Object.keys(coins) : [];
-  if (coins && syms.length && syms.every((s) => rates[s] != null)) {
-    const generated = Object.fromEntries(syms.map((s) => [s, coins[s].fromSells]));
-    const px = Object.fromEntries(syms.map((s) => [s, rates[s]]));
-    if (syms.length === 1) {
-      const [s] = syms, c = coins[s];
-      return finish({
-        ...base, capitalIn: c.bought, currentValue: c.openCost + c.open, paidOut: c.sold,
-        realized: c.fromSells, unrealized: c.open, k: rates[s], symbol: s, generated, px, dollarsMade: c.fromSells, ...tokenParts(generated), capitalSource: 'token-buys',
-        rebalanceLoss: trades.filter((x) => x.side === 'sell').reduce((a, x) => { const v = num(x.pnl) ?? (num(x.pnlUsd) ?? 0) / rates[s]; return v < 0 ? a - v : a; }, 0),
-      }, now);
-    }
-    const dollars = tokenDollars(trades, positions);
-    return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated, px, ...tokenParts(generated) }, now);
+  // the ledger per spend coin: net generated, coins received from sells, coins paid for them, gas taken out of it
+  const by: Record<string, { amount: number; proceeds: number; cost: number; gas: number }> = {};
+  for (const g of ledger) {
+    const sym = typeof g.coin?.symbol === 'string' ? g.coin.symbol : null;
+    if (!sym) continue;
+    const r = (by[sym] ??= { amount: 0, proceeds: 0, cost: 0, gas: 0 });
+    r.amount += num(g.amount) ?? 0; r.proceeds += num(g.proceeds) ?? 0; r.cost += num(g.cost) ?? 0;
+    if (g.gasInAmount) r.gas += num(g.gasNative) ?? 0;
   }
-  // no coin amounts in the log (older format): dollars inside (the page shows them as ETH)
+  // open positions per spend coin: the unsold part's cost and its result at today's price
+  const open: Record<string, { cost: number; pnl: number }> = {};
+  for (const p of positions) {
+    const sym = spendSym(p);
+    if (!sym) continue;
+    const left = (num(p.entryTokens) ?? 0) > 0 ? (num(p.tokens) ?? 0) / p.entryTokens : 0;
+    const r = (open[sym] ??= { cost: 0, pnl: 0 });
+    r.cost += (num(p.spent) ?? 0) * left; r.pnl += num(p.pnl) ?? 0;
+  }
+  const syms = [...new Set([...Object.keys(by), ...Object.keys(open)])];
+  if (!syms.length) {
+    // nothing in this mode's ledger: an older file whose log carries dollars only (the page shows them as ETH)
+    const dollars = tokenDollars(trades, positions);
+    return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated: trades.length ? { USD: dollars.realized } : null, px: { USD: 1 } }, now);
+  }
+  const generated = Object.fromEntries(syms.map((s) => [s, by[s]?.amount ?? 0]));
+  const px = Object.fromEntries(syms.map((s) => [s, rates[s] ?? null]));
+  if (syms.length === 1) {
+    const [s] = syms, l = by[s] ?? { amount: 0, proceeds: 0, cost: 0, gas: 0 }, o = open[s] ?? { cost: 0, pnl: 0 };
+    // Total P&L = value now + coins received − gas − coins paid = open result + Generated
+    return finish({
+      ...base, capitalIn: l.cost + o.cost, currentValue: o.cost + o.pnl, paidOut: l.proceeds, extraCost: l.gas, gas: l.gas || null,
+      realized: l.amount, unrealized: o.pnl, k: rates[s] ?? null, symbol: s, generated, px, dollarsMade: l.amount,
+      ...tokenParts(generated), capitalSource: 'token-buys', capitalCoins: { [s]: l.cost + o.cost },
+      rebalanceLoss: trades.filter((x) => x.side === 'sell').reduce((a, x) => { const v = num(x.pnl) ?? (num(x.pnlUsd) ?? 0) / (rates[s] ?? 1); return v < 0 ? a - v : a; }, 0),
+    }, now);
+  }
+  // several spend coins: the money figures stay in dollars inside (the page shows them as ETH); Generated per coin
   const dollars = tokenDollars(trades, positions);
-  return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated: trades.length ? { USD: dollars.realized } : null, px: { USD: 1 } }, now);
+  return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated, px, ...tokenParts(generated) }, now);
 }
 
 function tokenDollars(trades: Obj[], positions: Obj[]) {

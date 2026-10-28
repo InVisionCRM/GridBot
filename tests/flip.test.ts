@@ -530,3 +530,19 @@ describe('humanAmount', () => {
     expect(humanAmount(2_500_000_000)).toBe('2.5B');
   });
 });
+
+describe('units in the engine log are coin symbols, never market keys', () => {
+  it("a flipped grid's start line says what it spends per buy and per round trip in PLS, not 'HEX~'", async () => {
+    const chain = new MockChain(P0, { quoteDepth: 100_000_000 });
+    chain.setPrice(QH, 'HEX');
+    const log = new Logger(true);
+    const bot = new MultiBot({ net: NET, reader: chain, signer: null, store: new MemoryStore<MultiState>(), log, maxRetries: 0, retryDelayMs: 0 });
+    const mid = flipMid();
+    await bot.add({ mode: 'paper', stable: 'HEX~', lowerPrice: mid * 0.9, upperPrice: mid * 1.1, gridCount: 10, totalCapitalQuote: 1_000_000 });
+    const started = log.entries.find((e) => /Started PAPER/.test(e.msg))!;
+    expect(started.msg).toMatch(/ PLS\/buy, /);
+    expect(started.msg).toMatch(/ PLS\/RT, /);
+    expect(started.msg).toMatch(/ PLS \(/);
+    expect(started.msg).not.toMatch(/HEX~\//);
+  });
+});

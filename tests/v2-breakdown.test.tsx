@@ -66,7 +66,7 @@ describe('breakdown rows come from botMetrics', () => {
       expect(formatTokenLine(bot?.metrics.generated)).toBe(`0 ${sym}`);
       expect(bot?.metrics.invested).toEqual([{ symbol: sym, amount: 100, usd: null }]);
       const html = renderToStaticMarkup(
-        <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />,
+        <HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} />,
       );
       const chunk = html.split(`data-bot="${id}"`)[1] ?? '';
       const face = textOf(chunk.split('card-details')[0] ?? '');
@@ -101,12 +101,12 @@ describe('breakdown rows come from botMetrics', () => {
     expect(heroEth).toBeCloseTo(0.001731, 8);
     expect(cardEth).toBeCloseTo(heroEth ?? NaN, 8);
     const html = textOf(renderToStaticMarkup(
-      <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />,
+      <HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} />,
     ));
     expect(html).toContain('Closed · 1');
     expect(html).toContain('0.001731 ETH');
-    expect(html).toContain('All live USDC + ETH');
-    expect((html.match(/0\.001731 ETH/g) ?? []).length).toBe(1);
+    expect(html).not.toMatch(/All (live|paper)/);
+    expect((html.match(/0\.001731 ETH/g) ?? []).length).toBe(2); // the hero and the open card
     const hero = html.split('LIVE')[0];
     expect(hero).toContain('0.001731 ETH');
     expect(hero).not.toMatch(/Generated\s+—/);
@@ -156,7 +156,7 @@ describe('breakdown rows come from botMetrics', () => {
         },
       ],
     }, [], now);
-    const html = renderToStaticMarkup(<HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />);
+    const html = renderToStaticMarkup(<HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} />);
     const card = textOf(html.split('data-bot="stonk"')[1]?.split('data-bot=')[0] ?? '');
     expect(card).toContain('10.0k USDG');
     expect(card).not.toMatch(/All (live|paper)/);

@@ -46,12 +46,9 @@ function screenCalc(calc: string): string {
     .join(' ');
 }
 
-/** Quote-coin units from capitalInQuote. A USD book has none. The source tag is not shown. */
+/** The coins put in, from capitalCoins (a liquidity bot funded with both coins lists both). A USD book has none. */
 function coinInvested(m: ServerMetrics): TokenQty[] {
-  const symbol = m.quote.symbol;
-  const amount = m.capitalInQuote;
-  if (amount == null || !symbol || symbol === 'USD') return [];
-  return [{ symbol, amount, usd: null }];
+  return Object.entries(m.capitalCoins ?? {}).map(([symbol, amount]) => ({ symbol, amount, usd: null }));
 }
 
 /** `keepZero` retains an explicit 0, such as a grid with no fills (`{PLS: 0}`). */
@@ -232,7 +229,7 @@ function desk(metrics: BotMetrics, label: string, base: string, quote: string, c
     : metrics.range.inRange ? 'in' : 'out';
   return {
     metrics, pair: shownPair(base, quote, price, label), base, quote, chain: chain.short, chainName: chain.name, chainColor: chain.color, dex: dex || '—',
-    tone, spark: spark.length > 1 ? spark : [], levels: [], candles: [], fills: [], flashLevel: null,
+    tone, spark: spark.length > 1 ? spark : [],
     price, change24h: null, feeBps, priceAt, archived,
   };
 }
@@ -310,9 +307,8 @@ function portfolio(bots: BotDesk[], asOf: number): PortfolioSnapshot {
     capitalInUsd: sumField(live.filter((b) => b.metrics.status === 'running'), (b) => b.metrics.capitalInUsd),
     feesTodayLiveUsd: null,
     feesTodayPaperUsd: null,
-    botsRunning: bots.filter((b) => b.metrics.status === 'running').length,
-    botsTotal: bots.length,
-    madeSeries: [],
+    botsRunning: live.filter((b) => b.metrics.status === 'running').length,
+    botsTotal: live.length,
   };
 }
 
@@ -413,6 +409,5 @@ export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = nu
     bots,
     prices: deskPrices(bots),
     activity: activityOf(events, new Map(bots.map((b) => [b.metrics.botId, { pair: b.pair, chain: b.chain }]))),
-    holdings: [],
   };
 }

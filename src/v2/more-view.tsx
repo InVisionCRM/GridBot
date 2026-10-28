@@ -25,14 +25,14 @@ const LINKS: { label: string; view: View }[] = [
 function openClassic(view: View) {
   press();
   try { localStorage.setItem('view', JSON.stringify(view)); } catch { /* storage unavailable */ }
-  location.href = '/?classic=1';
+  location.href = '/';
 }
 
 export function MoreView() {
   return (
     <div className="more">
       <h1>More</h1>
-      <p className="muted">The classic desk stays reachable. v2 only changes what is on screen.</p>
+      <p className="muted">This desk is a read-only view. Every control is in the app at /.</p>
       <WebPushSlot />
       <ul className="more-links">
         {LINKS.map((link) => (

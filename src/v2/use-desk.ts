@@ -31,7 +31,6 @@ export function applyDelta(cur: DeskSnapshot, d: DeskDelta): DeskSnapshot {
     prices: d.prices.length ? d.prices : cur.prices,
     bots,
     activity: d.activity.length ? [...d.activity, ...cur.activity].slice(0, 48) : cur.activity,
-    holdings: cur.holdings,
   };
 }
 

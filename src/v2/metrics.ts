@@ -98,8 +98,6 @@ export interface BotMetrics {
   moveLoss: TokenQty[];
 }
 
-export interface CandleBar { t: number; o: number; h: number; l: number; c: number; v: number }
-export interface FillMark { id: string; t: number; price: number; side: 'buy' | 'sell' }
 
 export interface BotDesk {
   metrics: BotMetrics;
@@ -114,10 +112,6 @@ export interface BotDesk {
   /** in / out / idle from the payload. "near" is only set when the server says so. */
   tone: 'in' | 'near' | 'out' | 'idle';
   spark: number[];
-  levels: number[];
-  candles: CandleBar[];
-  fills: FillMark[];
-  flashLevel: number | null;
   price: number | null;
   /** Saved with archivedAt. Listed under Closed, and left out of section totals. */
   archived: boolean;
@@ -165,13 +159,10 @@ export interface PortfolioSnapshot {
   capitalInUsd: number | null;
   feesTodayLiveUsd: number | null;
   feesTodayPaperUsd: number | null;
+  /** Live bots in the section (not archived, not closed): running, and all of them. */
   botsRunning: number;
   botsTotal: number;
-  /** Real generated points only. Empty when the snapshot has no path. */
-  madeSeries: number[];
 }
-
-export interface HoldingLine { symbol: string; amount: number; chain: string }
 
 export interface DeskSnapshot {
   /** live: the bot server. snapshot: the gitignored owner file. fixture: the AAA/BBB sample. */
@@ -180,8 +171,6 @@ export interface DeskSnapshot {
   bots: BotDesk[];
   prices: TapePrice[];
   activity: ActivityItem[];
-  /** Token balances only. Empty on the live stream, which does not carry a wallet. */
-  holdings: HoldingLine[];
 }
 
 export interface DeskDelta {

@@ -44,4 +44,17 @@ describe('LP screen figures', () => {
     expect(waiting).not.toContain('$');
     expect(moves).not.toContain('$');
   });
+
+  it('a bot funded with both coins lists both as Invested; coins set aside are shown', () => {
+    const both = { ...bot, config: { ...bot.config, baseAmount: 0.2 }, aside: { base: 0, quote: 150 } };
+    const html = renderToStaticMarkup(
+      createElement(ShowUsdCtx.Provider, { value: { on: false, set: () => undefined } },
+        createElement(LpDetail, {
+          s: { lps: [{ ...both, metrics: botMetrics(both, 1) }], chains: [] }, id: 'lp1', events: [], ticks: null, nav: () => undefined, act: () => undefined, busy: false,
+        })),
+    );
+    const invested = html.slice(html.indexOf('data-testid="invested"'), html.indexOf('Generated'));
+    expect(invested).toContain('1,000.0 DAI + 0.20000 PLS');
+    expect(html).toContain('Set aside: 0 PLS + 150 DAI');
+  });
 });

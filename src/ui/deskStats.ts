@@ -79,7 +79,6 @@ export interface DeskFacts {
   feesPaid: number | null;
   feesEarned: number | null;
   quoteSym: string | null;
-  timeInRange: number | null;
   range: { lower: number; upper: number } | null;
   spacingFrac: number | null;
   bandPct: number | null;
@@ -135,7 +134,6 @@ export function botFacts(b: AnyObj, _now = Date.now(), extra?: { chain?: string 
   const m = metricsOf(b);
   const ex = (v: number | null | undefined, pct: number | null = null): Extrapolation | null => (v == null ? null : { amount: v, pct });
   const space = spacingOf(b);
-  const inRange = num(b.timeInRange);
   // Everything that came off what the bot earned: gas + swap fees, and for an LP the range-move losses too (so
   // fees earned − fees paid = Generated, at event prices). Grid / trend losing round trips are already in their profit.
   const paid = m && (m.swapCostUsd != null || m.gasUsd != null)
@@ -168,7 +166,6 @@ export function botFacts(b: AnyObj, _now = Date.now(), extra?: { chain?: string 
     feesPaid: paidQ,
     feesEarned: q?.feesEarned ?? null,
     quoteSym: q?.symbol ?? null,
-    timeInRange: inRange != null && inRange >= 0 && inRange <= 1 ? inRange : null,
     range: rangeOf(b),
     spacingFrac: space.frac,
     bandPct: space.band,

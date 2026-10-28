@@ -95,6 +95,28 @@ describe('grid / trend: trade profit before costs', () => {
     expect(c.taxes).toBeCloseTo(1.1, 12);
     expect(c.roundTrips).toBe(1);
   });
+  it('grid: the gas spent sending profits out is a cost of Generated and of Total P&L', () => {
+    const g = {
+      id: 'gp', kind: 'grid', status: 'running', quoteSym: 'USDC', config: { totalCapitalQuote: 100 }, pnl: { realized: 10, unrealized: 0 },
+      stats: { generated: 10, roundTrips: 2, totalGas: 1, totalFees: 0.5, rtCosts: { gas: 1, poolFees: 0.5, taxes: 0, lostGas: 0, roundTrips: 2, unmatched: 0 } },
+      payout: { sent: 8, gasQuote: 0.3 }, trades: [], startedAt: 1,
+    };
+    const m = gridMetrics(g, AS_OF);
+    expect(m.generated!.USDC).toBeCloseTo(9.7, 12);
+    expect(m.quote.totalPnl).toBeCloseTo(9.7, 12); // value now 102 + paid out 8 − gas 0.3 − capital 100
+    expect(m.quote.gas).toBeCloseTo(1.3, 12);
+    expect(m.breakdownByCoin!.USDC.gasSwap).toBeCloseTo(1.8, 12);
+    identity(m);
+    const kept = gridMetrics({ ...g, payout: { sent: 0, gasQuote: 0 } }, AS_OF);
+    expect(kept.generated!.USDC).toBe(10);
+    expect(kept.quote.totalPnl).toBeCloseTo(10, 12);
+  });
+  it('what was put in, per coin: a liquidity bot funded with both coins lists both', () => {
+    const lp = { id: 'l2', kind: 'lp', status: 'running', base: 'ETH', quote: 'USDG', quoteSym: 'USDG', usdPerQuote: 1, startValue: 1468.5, startPrice: 2342.5, startedAt: 1, config: { capital: 1000, baseAmount: 0.2, bandPct: 0.1 }, pnl: { net: 0, price: 0, fees: 0, gas: 0, swapCost: 0, moveLoss: 0, equity: 1468.5, feeCoins: { base: 0, quote: 0 } }, totals: { gas: 0, swapCost: 0, moveLoss: 0 }, value: 1468.5 };
+    expect(lpMetrics(lp, AS_OF).capitalCoins).toEqual({ USDG: 1000, ETH: 0.2 });
+    expect(lpMetrics({ ...lp, config: { ...lp.config, baseAmount: 0 } }, AS_OF).capitalCoins).toEqual({ USDG: 1000 });
+    expect(gridMetrics({ id: 'g3', kind: 'grid', status: 'running', quoteSym: 'DAI', config: { totalCapitalQuote: 200 }, pnl: { realized: 0 }, stats: {}, trades: [] }, AS_OF).capitalCoins).toEqual({ DAI: 200 });
+  });
   it('a sell whose buy is not in the log: not itemized, still adds up', () => {
     const m = gridMetrics({ id: 'g2', kind: 'grid', status: 'running', quoteSym: 'DAI', config: { totalCapitalQuote: 200 }, pnl: { realized: 8 }, stats: { generated: 8 }, trades: [sell] }, AS_OF);
     expect(m.breakdownBasis!.itemized).toBe(false);
@@ -108,7 +130,9 @@ describe('grid / trend: trade profit before costs', () => {
     expect(trendMetrics({ ...t, rtCosts: { gas: 1, poolFees: 0, taxes: 0, lostGas: 0, roundTrips: 1, unmatched: 0 } }, AS_OF).breakdownByCoin!.USDC.earned).toBe(9);
   });
   it('token trader: the closed sells per coin, costs inside (not itemized); an old dollar log has no lines', () => {
-    const tt = tokenMetrics({ on: true, trades: [{ t: 1, side: 'buy', label: 'PEPE/WETH', amount: 1, usd: 3000 }, { t: 2, side: 'sell', label: 'PEPE/WETH', amount: 1.1, usd: 3300, pnl: 0.1 }], positions: [] }, AS_OF);
+    // the trader's own ledger is the source (one mode at a time); the log only names the fills
+    const weth = { chainId: 1, address: null, symbol: 'WETH', native: true };
+    const tt = tokenMetrics({ on: true, options: { mode: 'paper' }, generated: [{ mode: 'paper', coin: weth, amount: 0.1, proceeds: 1.1, cost: 1, gasNative: 0, gasInAmount: true, closed: 1, basis: 'closed' }], trades: [{ t: 1, mode: 'paper', side: 'buy', label: 'PEPE/WETH', amount: 1, usd: 3000 }, { t: 2, mode: 'paper', side: 'sell', label: 'PEPE/WETH', amount: 1.1, usd: 3300, pnl: 0.1 }], positions: [] }, AS_OF);
     expect(tt.breakdownByCoin).toEqual({ WETH: { earned: 0.1, gasSwap: 0, rangeMoveLoss: 0, taxes: 0, bridge: 0, generated: 0.1 } });
     expect(tt.breakdownBasis!.itemized).toBe(false);
     const old = tokenMetrics({ on: true, trades: [{ t: 1, side: 'sell', usd: 30, pnlUsd: 2 }], positions: [] }, AS_OF);

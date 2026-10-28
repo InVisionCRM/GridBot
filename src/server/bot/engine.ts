@@ -364,7 +364,11 @@ export class GridEngine {
       paperStartStable: paperReset ? p.totalCapitalQuote : this.state.paperStartStable,
       lastPrice: price, lastPriceAt: this.now(),
       spacingWarn: warn, econ,
-      startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalQuote]],
+      // a live restart (Change range, start again) continues the same bot: its trades stay, so its age and its equity
+      // history stay too, or every rate and the APR would restart from zero time on a lifetime of profit
+      startedAt: paperReset ? this.now() : this.state.startedAt ?? this.now(),
+      startPrice: price,
+      equity: paperReset ? [[this.now(), p.totalCapitalQuote]] : [...(this.state.equity ?? []), [this.now(), p.totalCapitalQuote]],
       recenter: { enabled: p.recenter ?? this.state.recenter?.enabled ?? false, aboveSince: null, lastAt: this.state.recenter?.lastAt ?? null, count: this.state.recenter?.count ?? 0 },
       profits, closing: false, archivedAt: null, halt: null, startOverride: override,
       ...(paperReset ? { payoutPending: 0, payoutInFlight: null, payouts: this.state.payouts.filter((x) => !x.paper) } : {}),
@@ -372,7 +376,7 @@ export class GridEngine {
     this.seedUpper(price);
     this.lastError = null;
     this.save();
-    this.tag('info', `Started ${p.mode.toUpperCase()} ${this.label} ${p.lowerPrice}–${p.upperPrice} ×${p.gridCount}, ${quotePerBuy.toPrecision(5)} ${stable}/buy, spacing ${(econ.spacingPct * 100).toFixed(3)}%, impact ${(econ.impactPct * 100).toFixed(3)}%, gas ${econ.gasQuote.toPrecision(3)} ${stable}/RT, net ${econ.netPerRoundTrip.toPrecision(4)} ${stable} (${(econ.netPct * 100).toFixed(3)}%)/RT worst, price ${price}`);
+    this.tag('info', `Started ${p.mode.toUpperCase()} ${this.label} ${p.lowerPrice}–${p.upperPrice} ×${p.gridCount}, ${quotePerBuy.toPrecision(5)} ${this.quoteSym}/buy, spacing ${(econ.spacingPct * 100).toFixed(3)}%, impact ${(econ.impactPct * 100).toFixed(3)}%, gas ${econ.gasQuote.toPrecision(3)} ${this.quoteSym}/RT, net ${econ.netPerRoundTrip.toPrecision(4)} ${this.quoteSym} (${(econ.netPct * 100).toFixed(3)}%)/RT worst, price ${price}`);
     if (warn) this.tag('warn', warn);
     this.ev('started', `Grid started — ${this.label} ${p.lowerPrice.toPrecision(4)}–${p.upperPrice.toPrecision(4)} ×${p.gridCount} (${p.mode})`, { level: 'success' });
   }

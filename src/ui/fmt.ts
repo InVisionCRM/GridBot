@@ -22,12 +22,13 @@ export const pxShort = (x: number | null | undefined, sig = 6) => {
 };
 export const num = (x: number | null | undefined, d = 2) => (x == null || !Number.isFinite(x) ? '—' : x.toLocaleString(undefined, { maximumFractionDigits: d }));
 export const pct = (x: number | null | undefined, d = 2, sign = false) =>
-  x == null || !Number.isFinite(x) ? '—' : `${sign && x > 0 ? '+' : ''}${(x * 100).toFixed(d)}%`;
+  x == null || !Number.isFinite(x) ? '—' : `${x < 0 ? '−' : sign && x > 0 ? '+' : ''}${Math.abs(x * 100).toFixed(d)}%`;
 /**
- * A percent for display (Kyle): "—" when it would round to zero at the digits shown (0.0%, +0.0%, −0.0%), since a
- * zero there only says "too small to show". Display only: sorting, APR and every other sum keep the exact value.
+ * A percent for display (Kyle): two decimals, so a small move reads as a number ("−0.03%"), and "—" when it would still
+ * round to zero at the digits shown (0.00%, +0.00%, −0.00%), since a zero there only says "too small to show". Display
+ * only: sorting, APR and every other sum keep the exact value.
  */
-export const pctShown = (x: number | null | undefined, d = 1, sign = false) =>
+export const pctShown = (x: number | null | undefined, d = 2, sign = false) =>
   x == null || !Number.isFinite(x) || Number((x * 100).toFixed(d)) === 0 ? '—' : pct(x, d, sign);
 export const usd = (x: number | null | undefined, sign = false) => {
   if (x == null || !Number.isFinite(x)) return '—';
@@ -36,17 +37,20 @@ export const usd = (x: number | null | undefined, sign = false) => {
   return `${x < 0 ? '−' : sign && x > 0 ? '+' : ''}$${s}`;
 };
 export const qty = (x: number | null | undefined, sym: string, sig = 5, sign = true) =>
-  x == null || !Number.isFinite(x) ? '—' : `${sign ? (x >= 0 ? '+' : '−') : x < 0 ? '−' : ''}${Number(Math.abs(x).toPrecision(sig)).toLocaleString(undefined, { maximumFractionDigits: 10 })} ${sym}`;
+  x == null || !Number.isFinite(x) ? '—' : `${x > 0 ? (sign ? '+' : '') : x < 0 ? '−' : ''}${Number(Math.abs(x).toPrecision(sig)).toLocaleString(undefined, { maximumFractionDigits: 10 })} ${sym}`;
 /**
  * An amount with its trailing zeros kept to the same significant digits as `qty` ("3.5000 ETH", not "3.5 ETH"): an exact
  * amount such as what was put in reads as exact, not as a rounded figure that could be the value beside it.
  */
+/** Coins put in, each as an exact amount: "1,000.0 USDG + 0.20000 ETH". */
+export const bagFixed = (coins: Record<string, number> | null | undefined, sig = 5): string =>
+  (coins == null || !Object.keys(coins).length ? '—' : Object.entries(coins).map(([sym, v]) => qtyFixed(v, sym, sig)).join(' + '));
 export const qtyFixed = (x: number | null | undefined, sym: string, sig = 5, sign = false): string => {
   if (x == null || !Number.isFinite(x)) return '—';
   const p = Math.abs(x).toPrecision(sig);
   if (/e/i.test(p)) return qty(x, sym, sig, sign);
   const d = p.includes('.') ? p.split('.')[1].length : 0;
-  return `${sign ? (x >= 0 ? '+' : '−') : x < 0 ? '−' : ''}${Number(p).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })} ${sym}`;
+  return `${x > 0 ? (sign ? '+' : '') : x < 0 ? '−' : ''}${Number(p).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })} ${sym}`;
 };
 export const cls = (x: number | null | undefined) => (x == null ? '' : x > 0 ? 'pos' : x < 0 ? 'neg' : '');
 export const ago = (ms: number | null | undefined, now = Date.now()) => {
@@ -74,5 +78,6 @@ export function shownNumber(text: string): { v: number; tol: number } | null {
  */
 export function sameShown(a: string, b: string): boolean {
   const x = shownNumber(a), y = shownNumber(b);
-  return !!x && !!y && x.v !== 0 && Math.abs(x.v - y.v) <= Math.max(x.tol, y.tol) + 1e-12;
+  // a printed zero is a rounded-away amount, not a figure: it is never "the same" as a figure that prints
+  return !!x && !!y && x.v !== 0 && y.v !== 0 && Math.abs(x.v - y.v) <= Math.max(x.tol, y.tol) + 1e-12;
 }

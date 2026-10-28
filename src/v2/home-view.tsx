@@ -1,15 +1,14 @@
 import { motion } from 'motion/react';
 import { useState } from 'react';
 import { CoinMark } from './coin-mark';
-import { EquityCurve, Spark } from './equity-curve';
+import { Spark } from './equity-curve';
 import { cardReadout, estimatesVisible, investedLine, uniqueTape, type CardReadout } from './figures';
-import { formatBag, formatQuotePx, formatTokenLine, pct } from './format';
+import { formatBag, formatQuotePx, pct } from './format';
 import type { BotDesk, BotStatus, PortfolioSnapshot, TapePrice, TokenQty } from './metrics';
 import { sheetRows } from './figures';
 import { useReducedMotion } from './motion';
 import { PairLabel, PairTitle } from './pair-label';
 import { press } from './press';
-import { RangeSelect, type RangeKey } from './range-tabs';
 import { RangeTrack } from './range-track';
 import { StatusMark } from './status-mark';
 import { TokenHeadline, TokenLine } from './tokens';
@@ -72,8 +71,7 @@ function shownPairParts(pair: string): { base: string; quote: string } {
 interface CardModel {
   bot: BotDesk;
   readout: CardReadout;
-  invested: string | null;
-  covered: string;
+  invested: string;
 }
 
 function countsInTotal(bot: BotDesk): boolean {
@@ -87,30 +85,19 @@ function sumBags(rows: TokenQty[][]): TokenQty[] {
 }
 
 export function HomeView({
-  portfolio, bots, prices = [], onOpen,
+  portfolio, bots, onOpen,
 }: {
   portfolio: PortfolioSnapshot;
   bots: BotDesk[];
-  prices?: TapePrice[];
   onOpen: (id: string) => void;
 }) {
-  const [span, setSpan] = useState<RangeKey>('ALL');
   const live = bots.filter((b) => b.metrics.mode === 'live');
   const paperBots = bots.filter((b) => b.metrics.mode === 'paper');
-  const series = span === 'ALL' ? portfolio.madeSeries : [];
   const liveInvested = sumBags(live.filter(countsInTotal).map((b) => b.metrics.invested));
   const paperInvested = sumBags(paperBots.filter(countsInTotal).map((b) => b.metrics.invested));
-  const cardOf = (bot: BotDesk, tokens: TokenQty[], invested: TokenQty[], scope: 'live' | 'paper'): CardModel => {
-    const ownFigures = bot.archived || bot.metrics.status === 'closed';
-    return {
-      bot,
-      readout: cardReadout(bot.metrics, ownFigures ? [] : tokens, scope),
-      invested: investedLine(bot.metrics.invested, ownFigures ? [] : invested, scope),
-      covered: `${formatTokenLine(tokens)} ${formatBag(invested)} ${uniqueTape(prices).map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' ')}`,
-    };
-  };
-  const liveCards = live.map((bot) => cardOf(bot, portfolio.tokens, liveInvested, 'live'));
-  const paperCards = paperBots.map((bot) => cardOf(bot, portfolio.paperTokens, paperInvested, 'paper'));
+  const cardOf = (bot: BotDesk): CardModel => ({ bot, readout: cardReadout(bot.metrics), invested: investedLine(bot.metrics.invested) });
+  const liveCards = live.map(cardOf);
+  const paperCards = paperBots.map(cardOf);
   return (
     <div className="home">
       <section className="hero glass">
@@ -129,10 +116,6 @@ export function HomeView({
         <p className="muted small">Estimate, not a forecast.</p>
         <div className="hero-meta">
           <p className="hero-stat"><span>Running</span> <b>{portfolio.botsRunning}/{portfolio.botsTotal}</b></p>
-        </div>
-        <div className="hero-curve">
-          <RangeSelect value={span} onChange={setSpan} timed={false} />
-          {series.length > 1 ? <EquityCurve points={series} /> : <p className="curve-empty">Chart fills in as history builds</p>}
         </div>
       </section>
       <ModeSection title="Live" cards={liveCards} onOpen={onOpen} />
@@ -155,7 +138,7 @@ function ModeSection({
   const closed = cards.filter(parked);
   if (!open.length && !closed.length) return null;
   const item = (card: CardModel) => (
-    <BotCard key={card.bot.metrics.botId} bot={card.bot} readout={card.readout} invested={card.invested} covered={card.covered} onOpen={onOpen} />
+    <BotCard key={card.bot.metrics.botId} bot={card.bot} readout={card.readout} invested={card.invested} onOpen={onOpen} />
   );
   return (
     <section>
@@ -216,16 +199,15 @@ function CardMade({ readout }: { readout: CardReadout }) {
 }
 
 function BotCard({
-  bot, readout, invested, covered, onOpen,
+  bot, readout, invested, onOpen,
 }: {
   bot: BotDesk;
   readout: CardReadout;
-  invested: string | null;
-  covered: string;
+  invested: string;
   onOpen: (id: string) => void;
 }) {
   const open = () => { press(); onOpen(bot.metrics.botId); };
-  const rows = sheetRows(bot.metrics, shownPairParts(bot.pair), covered, true);
+  const rows = sheetRows(bot.metrics, shownPairParts(bot.pair), '', true);
   return (
     <li>
       <motion.div
@@ -254,7 +236,7 @@ function BotCard({
           {bot.spark.length > 1 && <Spark points={bot.spark} />}
           <RangeTrack range={bot.metrics.range} tone={bot.tone} />
         </div>
-        {invested && <p className="card-made"><span>Invested</span> {invested}</p>}
+        <p className="card-made"><span>Invested</span> {invested}</p>
         <CardMade readout={readout} />
         <details className="card-details" onClick={(e) => e.stopPropagation()}>
           <summary>Details</summary>

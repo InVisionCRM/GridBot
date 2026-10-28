@@ -115,7 +115,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(lp.status().owed).toEqual({ base: 0, quote: 0 });
     expect(value(lp)).toBeLessThan(v0);
     expect(value(lp)).toBeGreaterThan(v0 * 0.8);
-    expect(Math.max(...lp.status().equity.map(([, v]: [number, number]) => v))).toBeLessThan(v0 * 1.01);
+    expect(Math.max(...lp.status().equityHist.map(([, v]: [number, number]) => v))).toBeLessThan(v0 * 1.01);
   });
 
   it("earns the pool's fees only while the price is inside the range", async () => {
@@ -786,7 +786,8 @@ describe('LP bot funded with coins already in the wallet', () => {
     const share = p.baseShare(t.tickLower, t.tickUpper, v);
     // 600 DAI + 400 DAI worth of PLS: only ~76 DAI (share × 1000 − 400) is swapped to PLS, not ~476
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 600, baseAmount: 400 / PRICE });
-    expect(lp.status().equity[0][1]).toBeCloseTo(1000, 6);
+    expect(lp.status().equityHist[0][1]).toBeCloseTo(1000, 6);
+    expect(lp.status()).not.toHaveProperty('equity'); // the home series reads equityHist from every engine
     await lp.tick();
     const s = lp.status();
     expect(s.position).not.toBeNull();
@@ -866,13 +867,13 @@ describe('LP bot in the app: API, status, restart, money split', () => {
     try {
       const st = (id: string) => again.bot.status().lps.find((x: { id: string }) => x.id === id)!;
       expect(st(paper.id).position!.paper).toEqual({ g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0' });
-      expect(st(paper.id).equity).toEqual([]);
-      expect(st('lp-live').equity).toEqual([[1, 2000], [2, 2001]]);
+      expect(st(paper.id).equityHist).toEqual([]);
+      expect(st('lp-live').equityHist).toEqual([[1, 2000], [2, 2001]]);
       await again.bot.tickAll(); // first reading: starts earning from here
       expect(st(paper.id).owed).toEqual({ base: 0, quote: 0 });
-      expect(st(paper.id).equity).toHaveLength(1);
-      expect(st(paper.id).equity[0][1]).toBeGreaterThan(990);
-      expect(st(paper.id).equity[0][1]).toBeLessThan(1000);
+      expect(st(paper.id).equityHist).toHaveLength(1);
+      expect(st(paper.id).equityHist[0][1]).toBeGreaterThan(990);
+      expect(st(paper.id).equityHist[0][1]).toBeLessThan(1000);
     } finally { await again.close(); }
   });
 
@@ -903,10 +904,10 @@ describe('LP bot in the app: API, status, restart, money split', () => {
     try {
       const st = (id: string) => again.bot.status().lps.find((x: { id: string }) => x.id === id)!;
       expect(st(bad.id).position!.paper).toEqual({ g0: '0', g1: '0', inRange: false, owed0: '0', owed1: '0' });
-      expect(st(bad.id).equity).toEqual([]);
+      expect(st(bad.id).equityHist).toEqual([]);
       expect(st(good.id).position!.paper).toEqual(good.position.paper);
-      expect(st(good.id).equity).toEqual([[1, 1000], [2, 1001]]);
-      expect(st('lp-live').equity).toEqual([[1, 2000], [2, 2001]]);
+      expect(st(good.id).equityHist).toEqual([[1, 1000], [2, 1001]]);
+      expect(st('lp-live').equityHist).toEqual([[1, 2000], [2, 2001]]);
     } finally { await again.close(); }
   });
 

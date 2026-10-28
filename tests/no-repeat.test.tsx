@@ -38,17 +38,11 @@ function sectionRepeats(html: string): string[] {
   if (heroAt >= 0) {
     problems.push(...repeatedFigures(textOf(html.slice(heroAt, groupAt === -1 ? undefined : groupAt))));
   }
-  for (const [index, part] of html.split('class="group-title"').slice(1).entries()) {
+  for (const part of html.split('class="group-title"').slice(1)) {
     const [openHtml, closedHtml = ''] = part.split('class="closed-group"');
+    // a card may equal its section total (both are labelled); it must not repeat itself
     const cards = openHtml.split(/class="bot-card/);
-    const scope = new Set(figureAtoms(textOf(index === 0 && heroAt >= 0 ? html.slice(heroAt, groupAt) : cards[0])).map(normFigure));
-    for (const card of cards.slice(1)) {
-      const cardText = textOf(card);
-      problems.push(...repeatedFigures(cardText));
-      for (const fig of figureAtoms(cardText).map(normFigure)) {
-        if (scope.has(fig)) problems.push(fig);
-      }
-    }
+    for (const card of cards.slice(1)) problems.push(...repeatedFigures(textOf(card)));
     for (const card of closedHtml.split(/class="bot-card/).slice(1)) {
       problems.push(...repeatedFigures(textOf(card)));
     }
@@ -81,7 +75,7 @@ function home(desk: DeskSnapshot, width: number) {
   return (
     <>
       <Ticker prices={desk.prices} />
-      <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={desk.prices} onOpen={() => {}} />
+      <HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} />
       {width >= 1280 && <ActivityTape items={desk.activity} />}
     </>
   );
@@ -196,19 +190,18 @@ describe('no money or token figure is repeated on a screen', () => {
     expect(repeatedFigures('Invested 14.00M PLS and the card 14.00M PLS')).toContain(normFigure('14.00M PLS'));
   });
 
-  it('does not restate a sole invested coin from the built-in desk', () => {
+  it('a card shows its figure even when it is the whole section; the header keeps the total', () => {
     const sample = adaptStatus(sanitizedStatus, sanitizedActivity, sanitizedStatus.spotsAt, 'fixture');
-    const text = renderAt(<HomeView portfolio={sample.portfolio} bots={sample.bots} prices={sample.prices} onOpen={() => {}} />, 390);
-    expect(repeatedFigures(text), text).toEqual([]);
-    expect(text.match(/1\.00 ETH/g)).toHaveLength(1);
-    expect(text).toContain('All live ETH');
-    expect(text).toContain('All live USDC + ETH');
-    expect(text).toContain('+20.00 USDC');
-    expect(text.match(/\+20\.00 USDC/g)).toHaveLength(1);
+    const html = renderToStaticMarkup(<HomeView portfolio={sample.portfolio} bots={sample.bots} onOpen={() => {}} />);
+    const text = textOf(html);
+    expect(sectionRepeats(html), text).toEqual([]);
+    expect(text).not.toMatch(/All (live|paper)/);
+    expect(text.match(/1\.00 ETH/g)!.length).toBeGreaterThanOrEqual(2); // the header and the card
+    expect(text.match(/\+20\.00 USDC/g)!.length).toBeGreaterThanOrEqual(2);
     expect(text).not.toContain('+2 more');
   });
 
-  it('keeps the same invested amount on different bots and names a coin that is the whole section', () => {
+  it('keeps the same invested amount on different bots, and a coin that is the whole section keeps its figure', () => {
     const now = 1_700_000_000_000;
     const shared = {
       mode: 'paper', status: 'running', chainId: 1, base: 'ETH', quoteSym: 'ETH', usdPerQuote: 2000, price: 2000,
@@ -243,8 +236,8 @@ describe('no money or token figure is repeated on a screen', () => {
       ],
     }, [], now);
     const live = renderAt(<HomeView portfolio={sole.portfolio} bots={sole.bots} onOpen={() => {}} />, 390);
-    expect(live.match(/14\.00M PLS/g)).toHaveLength(1);
-    expect(live).toContain('All live PLS');
+    expect(live.match(/14\.00M PLS/g)).toHaveLength(2); // the hero and the card
+    expect(live).not.toContain('All live');
     expect(live).toContain('3.50 ETH');
   });
 
@@ -257,7 +250,7 @@ describe('no money or token figure is repeated on a screen', () => {
     }
   });
 
-  it('a single live contributor does not restate the hero', () => {
+  it('a single live contributor shows its figure under the hero that sums it', () => {
     const now = 1_700_000_000_000;
     const one = adaptStatus({
       spotsAt: now,
@@ -280,8 +273,8 @@ describe('no money or token figure is repeated on a screen', () => {
     }, [], now);
     for (const width of widths) {
       const text = screen(home(one, width), width, 'one contributor');
-      expect(text).toContain('All live USDC');
-      expect(text.match(/\+63\.24 USDC/g)).toHaveLength(1);
+      expect(text).not.toContain('All live');
+      expect(text.match(/\+63\.24 USDC/g)).toHaveLength(2); // the hero and the card
       expect(repeatedFigures(text), text).not.toContain(normFigure('0 USDC'));
       expect(text).not.toContain('Paper $');
     }

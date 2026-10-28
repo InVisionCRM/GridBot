@@ -42,6 +42,8 @@ describe('close', () => {
     const journal = bot.journal({ mode: 'paper' }).length;
     expect(journal).toBeGreaterThan(0);
     const before = reads.n;
+    const ovBefore = bot.overview('paper');
+    expect(ovBefore.totals.capitalUsd).toBeGreaterThan(0);
     const out = bot.closeAll();
     expect(reads.n).toBe(before);
     expect(out.closing).toBe(0);
@@ -54,6 +56,14 @@ describe('close', () => {
     const rows = bot.overview('paper').bots;
     expect(rows.map((r) => r.id).sort()).toEqual([g1, g2, ...st.trends.map((t) => t.id)].sort());
     expect(rows.every((r) => r.status === 'closed')).toBe(true);
+    // closed bots gave their coins back: nothing is held or allocated now; their trades stay in the all-time sums
+    const tot = bot.overview('paper').totals;
+    expect(tot.capitalUsd).toBe(0);
+    expect(tot.equityUsd).toBe(0);
+    expect(tot.unrealizedUsd).toBe(0);
+    expect(bot.overview('paper').allocation).toEqual([]);
+    // closing moves nothing: All-time is every bot's equity − capital, a closed bot's being its final P&L
+    expect(bot.overview('paper').periods.all.equityChange).toBeCloseTo(ovBefore.periods.all.equityChange!, 9);
     // Stop all is still only a pause: a fresh running bot is not archived.
     const still = await bot.add({ mode: 'paper', stable: 'USDT', ...base });
     bot.stopAll();
@@ -231,5 +241,20 @@ describe('close', () => {
     expect(st).toMatchObject({ status: 'closed', position: null, step: null, closing: false });
     expect(st.archivedAt).not.toBeNull();
     expect(bot.overview('paper').bots.some((r) => r.id === id && r.status === 'closed')).toBe(true);
+  });
+
+  it('All-time is since the bots started, not since the first portfolio snapshot', async () => {
+    const { chain, bot } = make();
+    await bot.add({ mode: 'paper', stable: 'DAI', ...base });
+    chain.setPrice(P0 * 0.975);
+    await bot.tickAll();
+    const ov0 = bot.overview('paper');
+    const pnl = ov0.totals.equityUsd - ov0.totals.capitalUsd;
+    expect(pnl).not.toBe(0);
+    // a first snapshot taken with that P&L already in it (as after a state migration) must not hide it
+    (bot as unknown as { multi: MultiState }).multi.portfolio.paper.push([Date.now() - 1, ov0.totals.equityUsd, 0, ov0.totals.capitalUsd]);
+    const ov = bot.overview('paper');
+    expect(ov.periods.all.equityChange).toBeCloseTo(pnl, 9);
+    expect(ov.periods.all.partial).toBe(false);
   });
 });

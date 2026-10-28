@@ -7,8 +7,9 @@
  *
  * What counts as a number: anything with a decimal point or a thousands separator ("63.24", "$8,014", "0.68%"),
  * compared without sign, "$" and commas, so "+63.24 USDC" and "$63.24" are the same figure. Zero is not a figure.
- * Out of scope: the chart (its units line names the pool fee), the grid's level ladder (each level's top is the
- * next one's bottom) and the fills table.
+ * A time span is not a figure either ("1.6d" of age and "1.6d ago" of the last move are two facts that can coincide,
+ * not one result shown twice). Out of scope: the chart (its units line names the pool fee), the grid's level ladder
+ * (each level's top is the next one's bottom) and the fills table.
  */
 import { readFileSync } from 'node:fs';
 import { createElement, type ReactElement } from 'react';
@@ -60,7 +61,7 @@ export function region(html: string, id: string): string {
 
 /** The figures in some HTML, normalized (no sign, "$" or commas); zero dropped. */
 export function figures(html: string): string[] {
-  const text = html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&amp;|&quot;|&lt;|&gt;/g, ' ');
+  const text = html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&amp;|&quot;|&lt;|&gt;/g, ' ').replace(/\b\d+(?:\.\d+)?(?:ms|[smhdwy])\b/g, ' ');
   return (text.match(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+/g) ?? [])
     .map((t) => t.replace(/,/g, ''))
     .filter((t) => Number(t) !== 0);
@@ -120,6 +121,9 @@ describe('no number twice on a bot page', () => {
   it('the checker catches the case Kyle saw', () => {
     expect(repeats(['<b>+63.24 USDC</b>', '<span>Fees earned +63.24 USDC</span>'])).toEqual(['63.24 ×2']);
     expect(repeats(['<b>−$0.56</b> $0.00', '<i>$0.00</i> +$0.56'])).toEqual(['0.56 ×2']);
+    // a time span is not a figure: the age and the last move can read the same
+    expect(repeats(['<td>1.6d</td>', '<span>Last move 1.6d ago</span>'])).toEqual([]);
+    expect(repeats(['<td>1.6d</td>', '<span>+1.6 USDC</span> <i>1.6 USDC</i>'])).toEqual(['1.6 ×2']);
     expect(region('<p><div data-testid="x"><div>a</div>b</div>c</p>', 'x')).toBe('<div data-testid="x"><div>a</div>b</div>');
   });
 });

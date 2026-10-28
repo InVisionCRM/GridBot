@@ -6,7 +6,7 @@ import { Chart } from './Chart';
 import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { MoneyDetails, type DetailRow } from './MoneyDetails';
-import { ago, cls, dur, num, pct, px, qty, qtyFixed, sameShown } from './fmt';
+import { ago, bagFixed, cls, dur, num, pct, px, qty, sameShown } from './fmt';
 import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -14,7 +14,7 @@ import { BotLog } from './GridDetail';
 import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { draftFrom, LpPolicyFields, payloadFrom, type PolicyDraft } from './LpPolicyFields';
 import { L } from './Tip';
-import { type AnyObj, type Nav } from './model';
+import { lpName, type AnyObj, type Nav } from './model';
 import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
 import { metricsOf, unitsText } from './deskStats';
@@ -101,7 +101,7 @@ function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boo
   const outFor = b.outSince ? Math.max(0, Math.round((Date.now() - b.outSince) / 60_000)) : 0;
   const widen = b.hold?.suggestedBand as number | undefined;
   const compound = () => act(async () => {
-    if (b.mode === 'live' && !confirm(`Add the waiting fees back into the ${b.label} position? It collects them and increases this range. Gas applies.`)) return;
+    if (b.mode === 'live' && !confirm(`Add the waiting fees back into the ${lpName(b)} position? It collects them and increases this range. Gas applies.`)) return;
     await botApi(`lps/${b.id}/compound`, 'POST');
   });
   const doWiden = () => act(async () => {
@@ -182,11 +182,13 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
  * the page shows once already (Pace, or the stat table under a day): then it says so instead of a second age.
  */
 /**
- * A coin's waiting fees, or "all of Generated" when they print the same as that coin's Generated in the headline (no
- * cost taken in that coin yet): the figure is on the screen once already (Kyle).
+ * A coin's waiting fees to 4 decimals; a fee too small for that prints in significant digits, never as "0". When they
+ * print the same as that coin's Generated in the headline (no cost taken in that coin yet), the page says so: the
+ * figure is on the screen once already (Kyle).
  */
 function waitingText(owed: number | null | undefined, sym: string, gen: Record<string, number> | null | undefined): string {
-  const txt = `${num(owed, 4)} ${sym}`;
+  const small = owed != null && owed !== 0 && num(owed, 4) === '0';
+  const txt = `${small ? Number(owed.toPrecision(3)) : num(owed, 4)} ${sym}`;
   const g = gen?.[sym];
   return g != null && owed != null && sameShown(qty(g, sym, 5), txt) ? `${sym}: all of Generated` : txt;
 }
@@ -271,10 +273,10 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const running = b.status === 'running', closed = b.status === 'closed';
   const closing = !!b.closing || step?.action === 'close';
   const close = () => {
-    if (b.mode === 'live' && !confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
+    if (b.mode === 'live' && !confirm(`Take the ${lpName(b)} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
     act(() => botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close'));
   };
-  const remove = () => act(async () => { if (confirm(`Remove the ${b.label} liquidity bot and its history?`)) { await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' }); } });
+  const remove = () => act(async () => { if (confirm(`Remove the ${lpName(b)} liquidity bot and its history?`)) { await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' }); } });
 
   return (
     <main className="stack">
@@ -282,7 +284,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="detail-head">
         <div className="detail-id">
           <StatusDot beat={b.priceAt} state={closing ? 'closing' : b.lastError ? 'error' : b.status} />
-          <h2>{b.label}</h2>
+          <h2>{lpName(b)}</h2>
           <ChainBadge c={chainOf(s, b.chainId)} testnet={false} />
           <span className="tag">Liquidity</span>
           {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
@@ -310,8 +312,8 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="kpi-row detail-stats" data-testid="top-strip">
         {/* Kyle: the headline is Invested + Generated, in the bot's own coins (the server's capital in) */}
         <div className="kpi" data-testid="invested">
-          <span><L tip={`What was put into this bot at the start, in ${m?.quote.symbol ?? 'the quote coin'}.`}>Invested</L></span>
-          <div className="kpi-v coins2"><b>{m?.quote.capitalIn != null && m.quote.symbol ? qtyFixed(m.quote.capitalIn, m.quote.symbol, 5) : '—'}</b></div>
+          <span><L tip="What was put into this bot at the start, coin by coin.">Invested</L></span>
+          <div className="kpi-v coins2"><b>{bagFixed(m?.capitalCoins)}</b></div>
           <span className="sub">put in at the start</span>
         </div>
         <div className="kpi">
@@ -344,13 +346,14 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
               <p className="muted small">{openedText(b, pos)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>
             </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
             {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
+            {(b.aside?.base > 0 || b.aside?.quote > 0) && <p className="muted small">Set aside: {num(b.aside.base, 6)} {base} + {num(b.aside.quote, 6)} {q} (kept out so the position stays under 10% of the pool's active liquidity; it is counted in Value and goes back to your wallet when the bot closes)</p>}
           </div>
           <LpSettings key={`${b.profits?.mode}-${b.profits?.to ?? ''}`} b={b} act={act} busy={busy} />
         </div>
       </div>
 
       <div className="split">
-        <ValueOverTime q={q} note="after gas, with fees sent out counted" data={b.equity ?? []} />
+        <ValueOverTime q={q} note="after gas, with fees sent out counted" data={b.equityHist ?? []} />
         <div className="card"><h3>Log</h3><BotLog events={events} botId={b.id} /></div>
       </div>
     </main>

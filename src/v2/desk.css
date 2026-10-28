@@ -190,10 +190,6 @@
 }
 .v2 .token-headline.is-open,
 .v2 .token-headline.is-fold { white-space: normal; }
-.v2 .hero-curve { display: flex; align-items: center; flex-wrap: nowrap; gap: 8px 12px; min-height: 0; }
-.v2 .hero-curve .curve-empty { margin: 0; min-height: 0; font-family: var(--font); font-size: 13px; white-space: nowrap; }
-.v2 .hero-curve .seg { flex: none; }
-.v2 .hero-curve .seg button { padding: 2px 7px; font-size: 11px; min-height: 0; }
 .v2 .eyebrow { margin: 0; color: var(--label); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
 .v2 .hero-num, .v2 .hero-gen {
   font-family: var(--mono);
@@ -268,7 +264,6 @@
 .v2 .muted { color: var(--label); }
 .v2 .closed-group { margin-top: 8px; }
 .v2 .closed-group summary { cursor: pointer; color: var(--label); font-size: 13px; padding: 8px 0; }
-.v2 .curve-empty { margin: 8px 0; color: var(--label); font-family: var(--mono); font-size: 22px; min-height: 36px; }
 .v2 .small { font-size: 12px; }
 .v2 .equity { width: 100%; height: auto; display: block; margin-top: 4px; }
 .v2 .equity circle { filter: drop-shadow(0 0 6px currentColor); }
@@ -349,14 +344,6 @@
 .v2 .range-track.tone-near i { background: rgba(240, 185, 11, 0.55); }
 .v2 .range-track.tone-out i { background: rgba(246, 70, 93, 0.45); }
 .v2 .range-empty { color: var(--label); font-size: 12px; }
-.v2 .chart-frame { position: relative; margin: 12px 0; padding: 12px 12px 28px; border-radius: 16px; background: rgba(22, 26, 30, 0.55); border: 1px solid var(--line); }
-.v2 .chart-frame.is-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; }
-.v2 .chart-frame.is-empty .curve-empty { margin: 0; min-height: 0; font-family: var(--font); font-size: 13px; flex: 1 1 180px; }
-.v2 .chart-frame.is-empty .range-on-chart { position: static; flex: 1 1 140px; width: 100%; min-width: 120px; }
-.v2 .chart-frame.is-empty .range-track { margin: 0; width: 100%; }
-.v2 .chart-frame .candle-host { margin: 8px 0 0; }
-.v2 .range-on-chart { position: absolute; left: 12px; right: 12px; bottom: 10px; }
-.v2 .range-on-chart .range-track { margin: 0; background: rgba(11, 14, 17, 0.72); }
 
 .v2 .roll.up { color: var(--profit); }
 .v2 .roll.down { color: var(--loss); }
@@ -373,8 +360,6 @@
 .v2 .bot-feed { margin-top: 8px; }
 .v2 .bot-feed header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 
-.v2 .candle-host { position: relative; height: 340px; margin: 12px 0; border-radius: 16px; overflow: hidden; background: rgba(22, 26, 30, 0.55); border: 1px solid var(--line); }
-.v2 .candle-el { position: absolute; inset: 0; }
 .v2 .lp-band { position: absolute; left: 0; right: 56px; background: rgba(240, 185, 11, 0.08); pointer-events: none; }
 .v2 .fill-ripple {
   position: absolute; left: 42%; width: 14px; height: 14px; margin: -7px 0 0 -7px;
@@ -544,11 +529,7 @@
   .v2 .hero.glass { padding: 18px 14px 16px; gap: 12px; }
   .v2 .hero-units { font-size: 28px; line-height: 1.15; white-space: normal; }
   .v2 .hero-rate { font-size: 15px; margin: 0; white-space: normal; }
-  .v2 .hero-curve { flex-wrap: wrap; }
-  .v2 .hero-curve .seg button,
-  .v2 .chart-frame .seg button,
   .v2 .slot .seg button { min-height: 44px; min-width: 44px; padding: 0 8px; font-size: 12px; }
-  .v2 .hero-curve .curve-empty { font-size: 12px; }
   .v2 .hero-gen { font-size: 20px; }
   .v2 .ests { grid-template-columns: 1fr; }
   .v2 .tape-who { flex-direction: column; align-items: flex-start; gap: 2px; }
@@ -562,10 +543,6 @@
   .v2-body.is-wide { grid-template-columns: minmax(0, 1fr); }
   .v2 .tabbar { display: none; }
   .v2 .bot-feed { display: none; }
-  .v2 .bot-page .chart-frame { min-height: 48vh; display: flex; flex-direction: column; }
-  .v2 .bot-page .chart-frame.is-empty { align-items: stretch; }
-  .v2 .bot-page .chart-frame.is-empty .range-on-chart { align-self: stretch; width: 100%; flex: 0 0 auto; }
-  .v2 .bot-page .chart-frame .curve-empty { flex: 1; display: flex; align-items: center; }
   .v2 .side-tape { min-height: calc(100vh - 140px); }
 }
 @media (max-width: 1279px) {
@@ -581,3 +558,6 @@
   .v2 .live-dot { animation: none !important; }
   .v2 .spark path { stroke-dashoffset: 0; }
 }
+
+.v2 .range-slot { margin: 12px 0; padding: 12px; border-radius: 16px; background: rgba(22, 26, 30, 0.55); border: 1px solid var(--line); }
+.v2 .range-slot .range-track { margin: 0; }

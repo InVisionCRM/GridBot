@@ -37,7 +37,7 @@ import { gridMetrics, lpMetrics, trendMetrics } from '../src/metrics/botMetrics'
 import { BotRow } from '../src/ui/botRow';
 import { DeskTable } from '../src/ui/DeskTable';
 import { deskItems, sortItems } from '../src/ui/deskTableModel';
-import { pctShown, qtyFixed } from '../src/ui/fmt';
+import { pctShown, qty, qtyFixed, sameShown } from '../src/ui/fmt';
 import { readFileSync } from 'node:fs';
 import { Bots } from '../src/ui/Bots';
 import { GridDetail } from '../src/ui/GridDetail';
@@ -281,10 +281,25 @@ describe('LP pace card: Est. a day / 7 days / 365 days from botMetrics, hidden u
 
 describe('a percent that rounds to 0.0% reads "—" (display only; sort and APR keep the exact value)', () => {
   it('pctShown', () => {
-    expect(pctShown(0.00004, 1, true)).toBe('—');
-    expect(pctShown(-0.0004, 1, true)).toBe('—');
-    expect(pctShown(0.0005, 1, true)).toBe('+0.1%');
-    expect(pctShown(0.00004, 2)).toBe('—');
+    // two decimals: a small move is a number, and only what still rounds to 0.00% is a dash
+    expect(pctShown(0.00004, 2, true)).toBe('—');
+    expect(pctShown(-0.0004, 2, true)).toBe('−0.04%');
+    expect(pctShown(0.0005, 2, true)).toBe('+0.05%');
+    expect(pctShown(-0.00004)).toBe('—');
+    expect(pctShown(0.1234, undefined, true)).toBe('+12.34%');
+    // a zero amount carries no sign: "0 DAI", never "+0 DAI"
+    expect(qty(0, 'DAI')).toBe('0 DAI');
+    expect(qty(1.5, 'DAI')).toBe('+1.5 DAI');
+    expect(qty(-1.5, 'DAI')).toBe('−1.5 DAI');
+    expect(qtyFixed(0, 'DAI', 5, true)).toBe('0.0000 DAI');
+  });
+  it('sameShown: the precision shown, and a printed zero is never the same as a figure', () => {
+    expect(sameShown('+26.415 USDC', '26.4153 USDC')).toBe(true);
+    expect(sameShown('+26.415 USDC', '26.42 USDC')).toBe(true);
+    expect(sameShown('+26.415 USDC', '27 USDC')).toBe(false);
+    // the LP page said "ETH: all of Generated" for a waiting fee of 0.00005 ETH printed as "0 ETH"
+    expect(sameShown('+0.00005 ETH', '0 ETH')).toBe(false);
+    expect(sameShown('0 ETH', '+0.00005 ETH')).toBe(false);
     expect(pctShown(null)).toBe('—');
   });
   it('the Bots row and the Details: "—" for a tiny % (desktop and phone), and the sort still orders by the exact value', () => {

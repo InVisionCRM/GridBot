@@ -6,9 +6,9 @@ import { chainOf, RefreshCtx } from './chains';
 import { botFacts, EST_HINT, metricsOf, unitsText } from './deskStats';
 import { isShortRun } from './runRate';
 import type { FeesToday } from '../metrics/feesToday';
-import { cls, dur, pctShown, px, qty, qtyFixed } from './fmt';
+import { bagFixed, cls, dur, pctShown, px, qty } from './fmt';
 import { ChainMark, TokenMark } from './icons';
-import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
+import { botView, gridName, lpName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { botSpark } from './series';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
@@ -31,7 +31,7 @@ function pairOf(b: AnyObj): { base: string; quote: string; title: string } {
   const quote = String(quoteSym(b) ?? '');
   const base = String(b.base ?? '');
   if (b.kind === 'grid') return { base, quote, title: gridName(b) };
-  if (b.kind === 'lp') return { base, quote, title: b.label ? String(b.label) : `${base}/${quote}` };
+  if (b.kind === 'lp') return { base, quote, title: lpName(b) };
   if (b.kind === 'trader' || b.kind === 'sniper') {
     const name = String(b.label || b.name || '');
     return { base: String(b.token || b.base || name), quote: String(b.spend || quote), title: name || 'Token trader' };
@@ -39,6 +39,9 @@ function pairOf(b: AnyObj): { base: string; quote: string; title: string } {
   const name = String(b.name ?? '');
   return { base: base || name.split('/')[0] || name, quote, title: name || `${base}/${quote}` };
 }
+
+/** A pair name may wrap after its slash on a narrow phone ("ETH/" then "USDG"), never inside a coin's name. */
+const wrappable = (title: string) => title.replace('/', '/\u200B');
 
 function kindWord(b: AnyObj) {
   if (b.kind === 'sniper') return 'Sniper';
@@ -110,9 +113,11 @@ export function feesTodayOf(s: AnyObj, bots: AnyObj[]): FeesTodayView {
   const all = Object.keys(ft.byBot ?? {}).every((id) => ids.has(id));
   let liveEarnedUsd = 0, paperEarnedUsd = 0, livePaidUsd = 0;
   const add = (to: Record<string, number>, sym: string | null | undefined, v: number | undefined) => { if (sym && v) to[sym] = (to[sym] ?? 0) + v; };
+  // the live headline names every live bot's coin, so a day with no fees reads "0 USDG" and no live bots reads "—"
+  const name = (to: Record<string, number>, sym: string | null | undefined, v: number | undefined) => { if (sym) to[sym] = (to[sym] ?? 0) + (v ?? 0); };
   for (const [id, r] of Object.entries(ft.byBot ?? {})) {
     if (!ids.has(id)) continue;
-    if (r.mode === 'live') { liveEarnedUsd += r.earnedUsd; livePaidUsd += r.paidUsd; add(liveEarned, r.sym, r.earned); add(livePaid, r.sym, r.paid); }
+    if (r.mode === 'live') { liveEarnedUsd += r.earnedUsd; livePaidUsd += r.paidUsd; name(liveEarned, r.sym, r.earned); add(livePaid, r.sym, r.paid); }
     else { paperEarnedUsd += r.earnedUsd; add(paperEarned, r.sym, r.earned); }
   }
   return { liveEarnedUsd, paperEarnedUsd, livePaidUsd, liveSeries: all ? ft.liveSeries : [0, liveEarnedUsd], liveEarned, paperEarned, livePaid };
@@ -323,7 +328,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   const m = metricsOf(b);
   // Crypto units only: the value and fees in the bot's quote coin
   const value = m?.quote.currentValue ?? null;
-  const invested = m?.quote.capitalIn ?? null; // Kyle: each row shows Invested and Generated
+  const invested = m?.capitalCoins ?? null; // Kyle: each row shows Invested and Generated; a liquidity bot funded with both coins lists both
   const feesEarned = m?.quote.feesEarned ?? null;
   const facts = metrics ? botFacts(b) : null;
   const gen = generatedParts(b);
@@ -339,7 +344,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
               {chain && <span className="chain-coin"><ChainMark short={chain.short} color={chain.color} size={14} /></span>}
             </span>
             <span className="desk-id">
-              <span className="bot-title">{pair.title}</span>
+              <span className="bot-title">{wrappable(pair.title)}</span>
               <span className="bot-meta">
                 <i className={`status-dot${on ? ' on' : ''}${bad ? ' bad' : ''}`} />
                 {[chain?.short, kindWord(b), statusWord(b), b.mode === 'paper' ? 'paper' : ''].filter(Boolean).join(' · ')}
@@ -348,7 +353,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           </button>
           <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
           <span className="desk-range"><BotRange b={b} fills={fills} /></span>
-          {metrics && <span className="desk-inv" title="Invested: what was put into this bot at the start, in its quote coin">{invested == null ? '—' : qtyFixed(invested, pair.quote, 5)}<small className="inv-label"> invested</small></span>}
+          {metrics && <span className="desk-inv" title="Invested: what was put into this bot at the start, in its quote coin">{bagFixed(invested)}<small className="inv-label"> invested</small></span>}
           <span className="desk-val">{value == null ? '—' : qty(value, pair.quote, 5, false)}</span>
           {metrics && facts ? <>
             <span className="desk-gen" title={m?.calc ?? undefined}>
@@ -357,12 +362,12 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
             <span className="desk-pnl" title={m?.calc ?? undefined}>
               <b className={cls(pnl.quote)}>{money}</b>
             </span>
-            <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pctShown(facts.pnlPct, 1, true)}</span></span>
+            <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pctShown(facts.pnlPct, 2, true)}</span></span>
             <span className="desk-fees">{feesEarned == null ? '—' : qty(feesEarned, pair.quote, 4, false)}</span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
             <span className="desk-apr" title={isShortRun(facts.ageMs) ? `Est. APR ${EST_HINT}. Until then P&L % is the figure for the run, and Age its length.` : facts.aprPct == null ? facts.estHint.d365 ?? undefined : m?.calc ?? undefined}>{
               // under a day: no yearly rate, and not the run's % again (it is one column to the left): a dash only (pr-72 MED 1)
-              isShortRun(facts.ageMs) || facts.aprPct == null ? '—' : pctShown(facts.aprPct, 1, true)}</span>
+              isShortRun(facts.ageMs) || facts.aprPct == null ? '—' : pctShown(facts.aprPct, 2, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
           </> : (
             <span className="desk-pnl" title={m?.calc ?? undefined}>
@@ -386,7 +391,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
             <TokenMark symbol={pair.quote} size={22} />
           </span>
           <span className="bot-mid">
-            <span className="bot-title">{pair.title}</span>
+            <span className="bot-title">{wrappable(pair.title)}</span>
             <span className="bot-meta">
               <i className={`status-dot${on ? ' on' : ''}${bad ? ' bad' : ''}`} />
               {statusWord(b)} · {kindWord(b)}{chain ? ` · ${chain.short}` : ''}

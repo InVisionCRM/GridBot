@@ -49,6 +49,8 @@ export const botView = (kind: BotKind, id: string): View => ({ v: kind, id });
 
 /** 'PLS/DAI', 'ETH/USDC' (chain suffix dropped: the chain badge shows it). */
 export const gridName = (g: AnyObj) => String(g.label ?? `PLS/${g.stable}`).replace(/·.*/, '');
+/** A liquidity bot's name on screen: the pair, without the chain suffix the server's label carries (the chain has its own badge). */
+export const lpName = (b: AnyObj) => String(b.label ?? `${b.base ?? ''}/${quoteSym(b) ?? ''}`).replace(/·.*/, '');
 /** The bot's quote coin symbol; a market key ('robinhood:ETH/USDG') is never shown as a unit (src/lib/marketKey.ts). */
 export const quoteSym = (b: AnyObj) => unitOf(b.quoteSym) ?? unitOf(b.stable) ?? unitOf(b.quote) ?? b.quoteSym ?? b.stable ?? b.quote;
 
