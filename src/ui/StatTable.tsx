@@ -32,6 +32,7 @@ export function StatTable({ b, s }: { b: AnyObj; s: AnyObj }) {
   });
   const range = f.range ? `${px(f.range.lower)} – ${px(f.range.upper)}` : '—';
   const spacing = f.spacingFrac != null ? `${(f.spacingFrac * 100).toFixed(3)}%` : f.bandPct != null ? `±${(f.bandPct * 100).toFixed(2)}%` : '—';
+  const hide = b.kind === 'lp' ? new Set(['Realized', 'Unrealized', 'Moves']) : new Set<string>();
   const rows: [string, string][] = [
     ['Age', f.ageMs == null ? '—' : dur(f.ageMs)],
     ['Invested', f.investedUsd == null ? '—' : usd(f.investedUsd)],
@@ -58,7 +59,7 @@ export function StatTable({ b, s }: { b: AnyObj; s: AnyObj }) {
       <p className="stat-note">Est. 24h, 7d, and 365d extrapolate performance so far. They are not a forecast.</p>
       <table>
         <tbody>
-          {rows.map(([k, v]) => (
+          {rows.filter(([k]) => !hide.has(k)).map(([k, v]) => (
             <tr key={k}><th>{k}</th><td className="mono">{v}</td></tr>
           ))}
         </tbody>
