@@ -364,7 +364,11 @@ export class GridEngine {
       paperStartStable: paperReset ? p.totalCapitalQuote : this.state.paperStartStable,
       lastPrice: price, lastPriceAt: this.now(),
       spacingWarn: warn, econ,
-      startedAt: this.now(), startPrice: price, equity: [[this.now(), p.totalCapitalQuote]],
+      // a live restart (Change range, start again) continues the same bot: its trades stay, so its age and its equity
+      // history stay too, or every rate and the APR would restart from zero time on a lifetime of profit
+      startedAt: paperReset ? this.now() : this.state.startedAt ?? this.now(),
+      startPrice: price,
+      equity: paperReset ? [[this.now(), p.totalCapitalQuote]] : [...(this.state.equity ?? []), [this.now(), p.totalCapitalQuote]],
       recenter: { enabled: p.recenter ?? this.state.recenter?.enabled ?? false, aboveSince: null, lastAt: this.state.recenter?.lastAt ?? null, count: this.state.recenter?.count ?? 0 },
       profits, closing: false, archivedAt: null, halt: null, startOverride: override,
       ...(paperReset ? { payoutPending: 0, payoutInFlight: null, payouts: this.state.payouts.filter((x) => !x.paper) } : {}),

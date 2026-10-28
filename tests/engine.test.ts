@@ -235,6 +235,19 @@ describe('Levels above the start price get coins at the start (#5)', () => {
     expect(chain.sent).toHaveLength(2); // nothing bought again
   });
 
+  it("a live restart keeps the bot's age and equity history: its trades stay, so its rates must not restart", async () => {
+    const { engine } = make();
+    await engine.start({ mode: 'live', ...mid });
+    await engine.tick();
+    const t0 = engine.state.startedAt!, first = engine.state.equity![0];
+    engine.stop();
+    await engine.start({ mode: 'live', ...mid, lowerPrice: mid.lowerPrice * 1.01 });
+    expect(engine.state.startedAt).toBe(t0);
+    expect(engine.state.equity![0]).toEqual(first);
+    expect(engine.state.equity!.length).toBeGreaterThan(1);
+    expect(engine.status().startedAt).toBe(t0);
+  });
+
   it('if the start-up buy can\'t happen, those levels wait to buy like any other level', async () => {
     const { chain, engine } = make();
     chain.faults = ['sendThrow', 'sendThrow'];
