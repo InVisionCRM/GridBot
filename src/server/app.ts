@@ -30,6 +30,7 @@ import { fetchJson } from './fetchJson';
 import { StatusFeed } from './statusFeed';
 import { holdingsSnapshot } from './holdings/read';
 import { requestStore, type HaltOrigin } from './bot/audit';
+import type { LpCompoundPolicy, LpRangePolicy } from '../market/lpPolicy';
 import { redact } from './bot/logger';
 
 export interface AppOpts {
@@ -150,7 +151,8 @@ export function createApp(o: AppOpts) {
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     return {
       mode, stable: b.stable as string | undefined,
-      lowerPrice: Number(b.lowerPrice), upperPrice: Number(b.upperPrice), gridCount: Number(b.gridCount), totalCapitalUsd: Number(b.totalCapitalUsd),
+      lowerPrice: Number(b.lowerPrice), upperPrice: Number(b.upperPrice), gridCount: Number(b.gridCount), // totalCapitalUsd: the old name (it was always quote coin), still accepted
+      totalCapitalQuote: Number(b.totalCapitalQuote ?? b.totalCapitalUsd),
       limits: b.limits as never,
       recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined,
       profits: profitsBody(b.profits),
@@ -187,9 +189,16 @@ export function createApp(o: AppOpts) {
   app.get('/api/bot/econ', wrap(async (req) => {
     const lower = Number(req.query.lower), upper = Number(req.query.upper), n = Number(req.query.grids), cap = Number(req.query.capital);
     if (!(lower > 0) || !(upper > lower) || !(n >= 2) || !(cap > 0)) throw new Error('need lower, upper, grids, capital');
-    return bot.economics(String(req.query.quote ?? net.defaultQuote), { lowerPrice: lower, upperPrice: upper, gridCount: n, totalCapitalUsd: cap });
+    return bot.economics(String(req.query.quote ?? net.defaultQuote), { lowerPrice: lower, upperPrice: upper, gridCount: n, totalCapitalQuote: cap });
   }));
   app.get('/api/bot/status', wrap(async () => bot.status()));
+  // One bot's money figures (BotMetrics, src/metrics/botMetrics.ts); "token-trader" is the token trader.
+  app.get('/api/bot/:id/metrics', wrap(async (req, res) => {
+    const id = String(req.params.id);
+    const m = id === 'token-trader' && o.tokenTrader ? o.tokenTrader.status().metrics : bot.metricsFor(id);
+    if (!m) { res.status(404).json({ error: `No bot ${id}` }); return; }
+    return m;
+  }));
   app.get('/api/bot/prices', wrap(async () => ({ prices: await bot.prices() })));
   app.get('/api/bot/presets', (_req, res) => res.json({ presets: listPresets() }));
   app.get('/api/bot/presets/:id/preview', wrap(async (req) => bot.previewPreset(req.params.id, {
@@ -318,7 +327,10 @@ export function createApp(o: AppOpts) {
     const id = await bot.addLp({
       mode: b.mode === 'live' ? 'live' : 'paper', market: String(b.market ?? ''), bandPct: Number(b.bandPct), capital: Number(b.capital ?? 0),
       baseAmount: b.baseAmount == null ? undefined : Number(b.baseAmount),
-      rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined, profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
+      rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined,
+      range: b.range && typeof b.range === 'object' ? b.range as Partial<LpRangePolicy> : undefined,
+      compound: b.compound && typeof b.compound === 'object' ? b.compound as Partial<LpCompoundPolicy> : undefined,
+      profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
       startAnyway: b.startAnyway === true,
     });
     void bot.tickAll();
@@ -328,6 +340,20 @@ export function createApp(o: AppOpts) {
   app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
   app.post('/api/bot/lps/:id/close', wrap((req) => bot.closeLp(req.params.id)));
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
+  app.put('/api/bot/lps/:id/policy', wrap((req) => {
+    const b = req.body ?? {};
+    bot.setLpPolicy(req.params.id, {
+      ...(b.range && typeof b.range === 'object' ? { range: b.range as Partial<LpRangePolicy> } : {}),
+      ...(b.compound && typeof b.compound === 'object' ? { compound: b.compound as Partial<LpCompoundPolicy> } : {}),
+      ...(b.bandPct == null ? {} : { bandPct: Number(b.bandPct) }),
+    });
+    return { ok: true };
+  }));
+  app.post('/api/bot/lps/:id/compound', wrap(async (req) => {
+    await bot.compoundLp(req.params.id);
+    void bot.tickAll();
+    return { ok: true };
+  }));
   // { bandPct? }: move the range to the price now (a new width, or the same one)
   app.post('/api/bot/lps/:id/move', wrap(async (req) => {
     const b = req.body?.bandPct;
@@ -406,6 +432,9 @@ export function createApp(o: AppOpts) {
     if (b.risk === 'safe' || b.risk === 'medium' || b.risk === 'any') patch.risk = b.risk;
     if (typeof b.enforceWashAndAge === 'boolean') patch.enforceWashAndAge = b.enforceWashAndAge;
     if (typeof b.v3LpLockCheck === 'boolean') patch.v3LpLockCheck = b.v3LpLockCheck;
+    if (typeof b.v3LpLockCacheEnabled === 'boolean') patch.v3LpLockCacheEnabled = b.v3LpLockCacheEnabled;
+    if (b.v3LpLockCacheTtlMs != null) patch.v3LpLockCacheTtlMs = Number(b.v3LpLockCacheTtlMs);
+    if (b.v3LpLockCallBudget != null) patch.v3LpLockCallBudget = Number(b.v3LpLockCallBudget);
     if (typeof b.lpUnlockCheck === 'boolean') patch.lpUnlockCheck = b.lpUnlockCheck;
     if (typeof b.enforceHolderCheck === 'boolean') patch.enforceHolderCheck = b.enforceHolderCheck;
     if (Array.isArray(b.chains)) patch.chains = b.chains.map(Number);

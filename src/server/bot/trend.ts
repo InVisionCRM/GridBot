@@ -10,7 +10,7 @@ import type { LiveNetwork } from '../../live/networks';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { Hub } from '../chains/hub';
-import type { LiveTrade } from '../../live/ledger';
+import { legacyTradeNames, upgradeQuoteNames, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
 import { TF_SEC, bucketStart, closedOnly, fillGaps, isTF, type Candle, type TF } from '../../market/candles';
 import { DEFAULT_COSTS, type CostModel } from '../../market/costs';
@@ -187,7 +187,7 @@ export class TrendEngine {
   constructor(private readonly d: TrendDeps) {
     this.now = d.now ?? Date.now;
     this.hub = d.hub ?? Hub.single(d.net, d.reader, d.signer, { gate: d.txGate, nonce: d.sharedNonce });
-    const loaded = d.store.load();
+    const loaded = upgradeQuoteNames(d.store.load());
     const base = freshTrend(d.net, d.id);
     const accept = loaded && (isLegacyKey(loaded.quote ?? d.net.defaultQuote) ? loaded.network === d.net.key : true);
     this.state = accept ? { ...base, ...loaded!, cfg: { ...DEFAULT_TREND, ...loaded!.cfg } } : base;
@@ -393,8 +393,8 @@ export class TrendEngine {
     s.cash += quote;
     s.trades.push({
       id: `paper-close-${this.now().toString(36)}`, network: this.netKey, side: 'sell', intervalIndex: -1, stable: s.quote,
-      plsAmount: pls, stableAmount: quote, price, gasPls: 0, gasUsd: 0, txHash: `paper-close-${s.id}`, timestamp: this.now(),
-      realizedPnlUsd: realized, paper: true, reason: 'manual', triggerPrice: price, quotedPrice: price, execPrice: price,
+      plsAmount: pls, stableAmount: quote, price, gasPls: 0, gasQuote: 0, txHash: `paper-close-${s.id}`, timestamp: this.now(),
+      realizedPnlQuote: realized, paper: true, reason: 'manual', triggerPrice: price, quotedPrice: price, execPrice: price,
       slippagePct: 0, fromReceipt: false, feeQuote: gross * fee, lotCost: pos.cost, roundTripNet: realized,
       entryPrice: pos.entryPrice, holdMs: Math.max(0, this.now() - pos.entryAt), outSource: 'paper',
     });
@@ -705,8 +705,8 @@ export class TrendEngine {
     const gasQuote = gasPls * price;
     this.state.trades.push({
       id: hash ?? `fail-${this.now()}`, network: this.netKey, side: job.side, intervalIndex: -1, stable: this.state.quote,
-      plsAmount: 0, stableAmount: 0, price: 0, gasPls, gasUsd: gasQuote, txHash: hash ?? '', timestamp: this.now(),
-      realizedPnlUsd: -gasQuote, failed: true, paper: this.state.mode === 'paper', note, reason: job.reason,
+      plsAmount: 0, stableAmount: 0, price: 0, gasPls, gasQuote, txHash: hash ?? '', timestamp: this.now(),
+      realizedPnlQuote: -gasQuote, failed: true, paper: this.state.mode === 'paper', note, reason: job.reason,
     });
   }
 
@@ -720,7 +720,7 @@ export class TrendEngine {
     const slippagePct = quotedPrice > 0 ? (job.side === 'buy' ? execPrice / quotedPrice - 1 : 1 - execPrice / quotedPrice) : 0;
     const base = {
       id: f.txHash, network: this.netKey, side: job.side, intervalIndex: -1, stable: s.quote, plsAmount: pls, stableAmount: quote,
-      price: execPrice, gasPls: f.gasPls, gasUsd: gasQuote, txHash: f.txHash, approvalTxHash: f.approvalTxHash, timestamp: this.now(),
+      price: execPrice, gasPls: f.gasPls, gasQuote, txHash: f.txHash, approvalTxHash: f.approvalTxHash, timestamp: this.now(),
       paper: s.mode === 'paper', triggerPrice: job.triggerPrice, quotedPrice, execPrice, slippagePct, fromReceipt: f.fromReceipt, reason: job.reason,
       ...(f.taxPct ? { taxPct: f.taxPct } : {}), ...(f.outSource ? { outSource: f.outSource } : {}), ...(f.expectedOutHuman != null ? { expectedOut: f.expectedOutHuman } : {}),
       ...(this.def ? { dex: this.def.pool.dex, feeBps: this.def.pool.feeBps, ...(this.def.pool.feeTier != null ? { feeTier: this.def.pool.feeTier } : {}) } : {}),
@@ -730,7 +730,7 @@ export class TrendEngine {
       // Stops/TP live in the same sell-side units as the poll price and the backtester (exec price includes the fee).
       const risk = openRisk(s.lastPrice ?? execPrice, job.atr ?? 0, s.cfg);
       s.position = { pls, cost: quote + gasQuote, entryPrice: execPrice, entryAt: this.now(), risk, bars: 0, txHash: f.txHash };
-      s.trades.push({ ...base, realizedPnlUsd: 0, feeQuote: quote * fee, lotCost: quote + gasQuote });
+      s.trades.push({ ...base, realizedPnlQuote: 0, feeQuote: quote * fee, lotCost: quote + gasQuote });
       this.log('info', `FILLED buy ${pls.toPrecision(6)} ${this.baseSym} for ${quote.toPrecision(6)} ${this.quoteSym} @ ${execPrice.toPrecision(6)} | stop ${risk.stop.toPrecision(6)}${risk.tp ? ` tp ${risk.tp.toPrecision(6)}` : ''} | gas ${gasQuote.toPrecision(3)} | tx ${f.txHash}`);
       this.emit('filled', `${s.name}: BOUGHT ${pls.toPrecision(6)} ${this.baseSym} @ ${execPrice.toPrecision(6)} — stop ${risk.stop.toPrecision(6)}`, { level: 'success', notify: true, data: { side: 'buy', price: execPrice, pls, stop: risk.stop, tp: risk.tp } });
     } else {
@@ -738,7 +738,7 @@ export class TrendEngine {
       const realized = quote - gasQuote - pos.cost;
       s.cash += quote;
       s.trades.push({
-        ...base, realizedPnlUsd: realized, feeQuote: (quote * fee) / (1 - fee), lotCost: pos.cost, roundTripNet: realized,
+        ...base, realizedPnlQuote: realized, feeQuote: (quote * fee) / (1 - fee), lotCost: pos.cost, roundTripNet: realized,
         entryPrice: pos.entryPrice, holdMs: this.now() - pos.entryAt,
       });
       s.position = null;
@@ -775,9 +775,9 @@ export class TrendEngine {
   status() {
     const s = this.state, price = s.lastPrice ?? 0;
     const trades = this.modeTrades();
-    const realized = trades.reduce((a, t) => a + t.realizedPnlUsd, 0);
+    const realized = trades.reduce((a, t) => a + t.realizedPnlQuote, 0);
     const unrealized = s.position ? s.position.pls * price - s.position.cost : 0;
-    const closed = trades.filter((t) => t.side === 'sell' && !t.failed).map((t) => ({ pnl: t.realizedPnlUsd, t: t.timestamp, holdMs: t.holdMs }));
+    const closed = trades.filter((t) => t.side === 'sell' && !t.failed).map((t) => ({ pnl: t.realizedPnlQuote, t: t.timestamp, holdMs: t.holdMs }));
     const equity = s.capital + realized + unrealized;
     const tfSec = TF_SEC[s.tf];
     const inMarketMs = trades.filter((t) => t.side === 'sell' && t.holdMs).reduce((a, t) => a + (t.holdMs ?? 0), 0) + (s.position ? this.now() - s.position.entryAt : 0);
@@ -793,8 +793,8 @@ export class TrendEngine {
       queue: s.queue, inFlight: s.inFlight, price: s.lastPrice, priceAt: s.lastPriceAt,
       signals: s.signals.slice(-30).reverse(), lastNote: s.lastNote, ind: this.ind, warm: this.warm,
       nextCloseAt: (bucketStart(Math.floor(this.now() / 1000), s.tf) + tfSec) * 1000,
-      trades: trades.slice(-100).reverse(),
-      pnl: { realized, unrealized, equity, returnPct: s.capital ? equity / s.capital - 1 : 0, gas: trades.reduce((a, t) => a + t.gasUsd, 0), fees: trades.reduce((a, t) => a + (t.feeQuote ?? 0), 0) },
+      trades: trades.slice(-100).reverse().map(legacyTradeNames),
+      pnl: { realized, unrealized, equity, returnPct: s.capital ? equity / s.capital - 1 : 0, gas: trades.reduce((a, t) => a + t.gasQuote, 0), fees: trades.reduce((a, t) => a + (t.feeQuote ?? 0), 0) },
       stats: { ...tradeStats(closed), maxDrawdown: drawdown(s.equity).max, timeInMarket: s.startedAt ? inMarketMs / Math.max(1, this.now() - s.startedAt) : 0 },
       moveCount: trades.filter((t) => !t.failed).length,
       lastMoveAt: trades.reduce((m, t) => (!t.failed ? Math.max(m, t.timestamp || 0) : m), 0) || null,

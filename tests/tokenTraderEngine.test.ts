@@ -11,6 +11,10 @@ import { shownMinLiquidityUsd } from '../src/market/liquidityFloor';
 import { MemoryStore } from '../src/server/bot/store';
 import { TokenTrader, type TraderState } from '../src/server/bot/tokenTrader';
 import type { PoolSniper, SnipeHit } from '../src/server/market/sniper';
+import { setEthUsdSource } from '../src/lib/ethUnits';
+
+// screen text shows dollar-only figures in ETH; pin the price so the wording is fixed (gates stay in USD)
+setEthUsdSource(() => 2500);
 
 const clean = (o: Partial<GateInput> = {}): GateInput => ({
   mode: 'paper', risk: 'safe', honeypot: false, sellSimOk: true, paused: false, decimals: 18,
@@ -247,6 +251,27 @@ describe('token trader engine', () => {
     expect(anyFail.t.status().positions).toHaveLength(1);
   });
 
+  it('wash and age on: a snipe skips only the wash leg, never the age leg, at safe and medium', async () => {
+    const now = 1_700_000_000_000;
+    const snipeRun = async (risk: 'safe' | 'medium', volumeUsd: number) => {
+      const fresh = pool({ createdAt: null, liquidityUsd: 20_000, volumeUsd, tokenSymbol: 'SNIPE', source: 'snipe' });
+      const hit: SnipeHit = { chainId: 1, dex: 'uni-v3', kind: 'v3', pool: fresh.pool, token0: fresh.token, token1: fresh.spend, fee: 3000, blockNumber: 10, at: now, skip: null };
+      const sn = trader({ now: () => now, hits: [hit], resolve: async () => fresh });
+      sn.t.configure({ risk, enforceWashAndAge: true, minPoolAgeSec: 24 * 3600, sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null } });
+      sn.t.turnOn();
+      await sn.t.tick();
+      return sn.t;
+    };
+    for (const risk of ['safe', 'medium'] as const) {
+      const ok = await snipeRun(risk, 0);
+      expect(ok.status().positions).toHaveLength(1);
+      expect(ok.status().positions[0].source).toBe('snipe');
+      const wash = await snipeRun(risk, 20_000 * 21);
+      expect(wash.status().positions).toHaveLength(0);
+      expect(wash.status().feed.map((f) => f.why).join(' | ')).toMatch(/volume is 21× liquidity/);
+    }
+  });
+
   it('the API round-trips the wash-and-age flag, default off', async () => {
     const store = new MemoryStore<TraderState>();
     const { t } = trader({ store, discover: async () => [] });
@@ -379,7 +404,8 @@ describe('token trader engine', () => {
     await t.tick();
     expect(t.status().positions.map((p) => p.label)).toEqual(['OK/WETH']);
     const why = t.status().feed.map((f) => f.why).join(' | ');
-    expect(why).toMatch(/\$10,000/);
+    expect(why).toMatch(/under the ≈ 4 ETH minimum/); // the $10,000 gate, in ETH at 2,500 a coin
+    expect(why).not.toMatch(/\$/);
     expect(why).toMatch(/under the/);
   });
 
@@ -407,7 +433,7 @@ describe('token trader engine', () => {
     on.t.turnOn();
     await on.t.tick();
     expect(on.t.status().positions.map((p) => p.label)).toEqual(['FAT/WETH']);
-    expect(on.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/\$50,000/);
+    expect(on.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/≈ 20 ETH/); // the $50,000 floor
   });
 
   it('does not let the $50,000 flag lower a higher sniper minimum', async () => {
@@ -426,7 +452,8 @@ describe('token trader engine', () => {
     t.turnOn();
     await t.tick();
     expect(t.status().positions.map((p) => p.label)).toEqual(['FAT/WETH']);
-    expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/\$80,000/);
+    expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/liquidity under ≈ 32 ETH/); // the $80,000 sniper minimum
+    expect(t.status().feed.map((f) => f.why).join(' | ')).not.toMatch(/\$/);
   });
 
   it('the API reports the floor in force, which is what the panel shows', async () => {

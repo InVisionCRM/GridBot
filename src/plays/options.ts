@@ -5,6 +5,7 @@
  * (regular and launchpad) until resume. Exits keep running unless `offMode` is `full`.
  * Live dollar limits are null until someone sets them. The proposal constant is not applied.
  */
+import { usdAsEth } from '../lib/ethUnits';
 import { HARD_CAPS } from '../live/limits';
 import { DEFAULT_PLAYS_CHAIN, playsChain, quoteTokens } from './chainConfig';
 import { LAUNCHPADS, type LaunchpadId } from './types';
@@ -180,11 +181,11 @@ export function validatePlaysOptions(options: PlaysOptions): string[] {
   if (options.offMode !== 'exits' && options.offMode !== 'full') e.push('Off mode must be exits or full.');
   if (options.mode === 'live') {
     const live = options.liveLimits;
-    if (!live) e.push('Live mode needs dollar limits. They are unset on purpose until they are approved.');
-    else if (![live.perPlayUsd, live.maxOpenUsd, live.dailyLossUsd, live.weeklyLossUsd].every(pos)) e.push('Live dollar limits must each be above 0.');
+    if (!live) e.push('Live mode needs spending limits. They are unset on purpose until they are approved.');
+    else if (![live.perPlayUsd, live.maxOpenUsd, live.dailyLossUsd, live.weeklyLossUsd].every(pos)) e.push('Live spending limits must each be above 0.');
   } else if (options.liveLimits) {
     const live = options.liveLimits;
-    if (![live.perPlayUsd, live.maxOpenUsd, live.dailyLossUsd, live.weeklyLossUsd].every(pos)) e.push('Live dollar limits must each be above 0.');
+    if (![live.perPlayUsd, live.maxOpenUsd, live.dailyLossUsd, live.weeklyLossUsd].every(pos)) e.push('Live spending limits must each be above 0.');
   }
   if (!Array.isArray(options.chains) || options.chains.length === 0) e.push('Pick at least one chain.');
   else {
@@ -205,7 +206,7 @@ export function validatePlaysOptions(options: PlaysOptions): string[] {
   if (!(options.maxImpact > 0) || options.maxImpact > impactCap) e.push('Price-impact cap must be above 0% and at most 1%.');
   if (!unit(options.maxSellTax) || options.maxSellTax > DEFAULT_PLAYS.maxSellTax) e.push('Sell-tax cap must be from 0% to 3%.');
   if (!(options.maxBuySellTax > 0) || options.maxBuySellTax > DEFAULT_PLAYS.maxBuySellTax) e.push('Buy-plus-sell tax reject must be above 0% and at most 5%.');
-  if (!(options.minLiquidityUsd >= DEFAULT_PLAYS.minLiquidityUsd)) e.push('Liquidity floor must be at least $50,000.');
+  if (!(options.minLiquidityUsd >= DEFAULT_PLAYS.minLiquidityUsd)) e.push(`Liquidity floor must be at least ${usdAsEth(DEFAULT_PLAYS.minLiquidityUsd)}.`);
   if (!(options.minPoolAgeH >= DEFAULT_PLAYS.minPoolAgeH)) e.push('Pool age must be at least 24 hours.');
   if (!(options.tokenCooldownH >= DEFAULT_PLAYS.tokenCooldownH)) e.push('Per-token cooldown must be at least 24 hours.');
   if (!(options.lossCooldownH >= DEFAULT_PLAYS.lossCooldownH)) e.push('Per-token cooldown after a loss must be at least 2 hours.');
@@ -224,7 +225,7 @@ function validateLaunchpad(lp: LaunchpadOptions | undefined): string[] {
   if (lp.mode === 'live') e.push('Launchpad live mode is not enabled.');
   if (!(lp.paperEth > 0) || lp.paperEth > DEFAULT_PLAYS.launchpad.paperEth) e.push('Launchpad paper size must be above 0 and at most 0.25 ETH.');
   if (!Number.isInteger(lp.maxOpen) || lp.maxOpen < 1 || lp.maxOpen > DEFAULT_PLAYS.launchpad.maxOpen) e.push('Launchpad open plays must be from 1 to 2.');
-  if (!(lp.minLiquidityUsd >= DEFAULT_PLAYS.launchpad.minLiquidityUsd)) e.push('Launchpad post-migration liquidity must be at least $20,000.');
+  if (!(lp.minLiquidityUsd >= DEFAULT_PLAYS.launchpad.minLiquidityUsd)) e.push(`Launchpad post-migration liquidity must be at least ${usdAsEth(DEFAULT_PLAYS.launchpad.minLiquidityUsd)}.`);
   if (!Array.isArray(lp.venues) || lp.venues.length === 0) e.push('Launchpad needs at least one venue.');
   else {
     const allowed = new Set<string>(LAUNCHPADS);

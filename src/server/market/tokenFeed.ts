@@ -9,7 +9,7 @@ import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
 import { applyLpUnlock, cachedTokenLp, LP_CHECK_TIMEOUT_MS, tokenLpKey, unverifiedLpUnlock, type TokenLpSnapshot } from '../../market/lpUnlock';
-import { unverifiedV3Lp } from '../../market/v3LpLock';
+import { unverifiedV3Lp, V3_LP_LOCK_CACHE_TTL_MS } from '../../market/v3LpLock';
 import { readLiveLpUnlock } from './lpUnlockRead';
 import { readV3LpLock, type V3LockReader } from './v3LpLockRead';
 import { ERC20, ROUTER } from '../dex/abis';
@@ -100,12 +100,20 @@ export function createTokenTrader(o: {
   dataDir?: string;
 }): TokenTrader {
   const sniper = new PoolSniper({ chains: sniperChains(o.hub), source: logSource(o.hub) });
-  const flags = { v3LpLockCheck: () => false, lpUnlockCheck: () => false };
+  const flags = {
+    v3LpLockCheck: () => false,
+    lpUnlockCheck: () => false,
+    v3LpLockCacheEnabled: () => false,
+    v3LpLockCacheTtlMs: () => V3_LP_LOCK_CACHE_TTL_MS,
+    v3LpLockCallBudget: () => 0,
+  };
   const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
-    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flags.v3LpLockCheck(), flags.lpUnlockCheck()),
+    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flags.v3LpLockCheck(), flags.lpUnlockCheck(), {
+      cacheEnabled: flags.v3LpLockCacheEnabled(), cacheTtlMs: flags.v3LpLockCacheTtlMs(), callBudget: flags.v3LpLockCallBudget(),
+    }),
     // Called only when the holder check is on. Flag off never reaches this, so a scan makes no explorer calls.
     holders: (pool) => {
       const rt = o.hub.rt(pool.chainId);
@@ -153,6 +161,13 @@ export function createTokenTrader(o: {
     },
     // dynamic-fee pools: the fee at quote time (never cached)
     feeNow: (p) => readV3FeeBps(o.hub.rt(p.chainId).reader, p.pool),
+    // Generated only: is the spend coin the chain's own (wrapped or not), so its gas comes out of Generated
+    coinInfo: (chainId, spend) => {
+      try {
+        const cfg = o.hub.rt(chainId).cfg, a = spend.toLowerCase();
+        return { native: [cfg.wrappedNative.address, NATIVE_ZERO, NATIVE_EEEE].some((x) => x.toLowerCase() === a), nativeSymbol: cfg.nativeSymbol };
+      } catch { return null; } // a chain not on in this app: gas stays apart
+    },
     rejects: o.dataDir ? new PlayRejectLog(o.dataDir) : undefined,
     live: {
       buy: async (pool, spend, limits) => {
@@ -173,6 +188,9 @@ export function createTokenTrader(o: {
   });
   flags.v3LpLockCheck = () => trader.status().options.v3LpLockCheck === true;
   flags.lpUnlockCheck = () => trader.status().options.lpUnlockCheck === true;
+  flags.v3LpLockCacheEnabled = () => trader.status().options.v3LpLockCacheEnabled === true;
+  flags.v3LpLockCacheTtlMs = () => trader.status().options.v3LpLockCacheTtlMs;
+  flags.v3LpLockCallBudget = () => trader.status().options.v3LpLockCallBudget;
   return trader;
 }
 
@@ -276,7 +294,7 @@ export async function withPoolFees(
   return read.filter((p): p is NonNullable<typeof p> => !!p);
 }
 
-async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', v3LpLockCheck = false, lpUnlockCheck = false): Promise<GateInput> {
+async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', v3LpLockCheck = false, lpUnlockCheck = false, v3Bounds: { cacheEnabled: boolean; cacheTtlMs: number; callBudget: number } = { cacheEnabled: false, cacheTtlMs: V3_LP_LOCK_CACHE_TTL_MS, callBudget: 0 }): Promise<GateInput> {
   const r = await hub.inspect({ chainId: pool.chainId, address: pool.token, quote: pool.spend, pool: pool.pool });
   const s = r.safety;
   let canMint: boolean | null = null;
@@ -296,7 +314,7 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
   // This read runs only from assess, which the trader calls on the buy path. Exits do not come through here.
   if (!lpUnlockCheck && (!v3LpLockCheck || pool.kind !== 'v3')) return gate;
   const kind = pool.kind === 'v3' ? 'v3' : pool.kind === 'v2' ? 'v2' : 'other';
-  const snap = await cachedTokenLp(tokenLpKey(pool.chainId, pool.token), () => lpSnapshot(hub, pool, v3LpLockCheck, lpUnlockCheck), {
+  const snap = await cachedTokenLp(tokenLpKey(pool.chainId, pool.token), () => lpSnapshot(hub, pool, v3LpLockCheck, lpUnlockCheck, v3Bounds), {
     timeoutMs: LP_CHECK_TIMEOUT_MS,
     fallback: () => ({
       ...(v3LpLockCheck && pool.kind === 'v3' ? { v3: unverifiedV3Lp(pool.pool, '', 'lp check timed out') } : {}),
@@ -308,10 +326,14 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
   return gate;
 }
 
-async function lpSnapshot(hub: Hub, pool: FreshPool, v3LpLockCheck: boolean, lpUnlockCheck: boolean): Promise<TokenLpSnapshot> {
+async function lpSnapshot(hub: Hub, pool: FreshPool, v3LpLockCheck: boolean, lpUnlockCheck: boolean, v3Bounds: { cacheEnabled: boolean; cacheTtlMs: number; callBudget: number }): Promise<TokenLpSnapshot> {
   const timing = () => {
     const rt = hub.rt(pool.chainId);
-    return { rt, nowSec: Math.floor(Date.now() / 1000), blockTimeSec: rt.cfg.blockTimeSec, logChunk: rt.cfg.logChunk };
+    return {
+      rt, nowSec: Math.floor(Date.now() / 1000), blockTimeSec: rt.cfg.blockTimeSec, logChunk: rt.cfg.logChunk,
+      ...(v3Bounds.cacheEnabled ? { cacheEnabled: true as const, cacheTtlMs: v3Bounds.cacheTtlMs } : {}),
+      ...(v3Bounds.callBudget > 0 ? { callBudget: v3Bounds.callBudget } : {}),
+    };
   };
   const snap: TokenLpSnapshot = {};
   if (v3LpLockCheck && pool.kind === 'v3') {

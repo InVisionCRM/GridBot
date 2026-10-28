@@ -2,7 +2,7 @@ import { analyzeEconomics, type EconReport } from '../../live/economics';
 import { DEFAULT_COSTS, type CostModel } from '../../market/costs';
 import type { MarketSnapshot, Quoter } from './chain';
 
-export interface EconCfg { lowerPrice: number; upperPrice: number; gridCount: number; totalCapitalUsd: number }
+export interface EconCfg { lowerPrice: number; upperPrice: number; gridCount: number; totalCapitalQuote: number }
 
 /** Compact economics for status/preview (drops the per-interval table). */
 export type EconSummary = Omit<EconReport, 'intervals' | 'worst' | 'best'> & {
@@ -36,7 +36,7 @@ export function costModelOf(m: MarketSnapshot | null, feeBps: number, approval: 
 
 export function econFromMarket(m: MarketSnapshot, cfg: EconCfg, approval: 'exact' | 'max'): EconReport {
   return analyzeEconomics({
-    lowerPrice: cfg.lowerPrice, upperPrice: cfg.upperPrice, gridCount: cfg.gridCount, capital: cfg.totalCapitalUsd,
+    lowerPrice: cfg.lowerPrice, upperPrice: cfg.upperPrice, gridCount: cfg.gridCount, capital: cfg.totalCapitalQuote,
     spot: m.spot, pool: { quoteReserve: m.quoteReserve, plsReserve: m.plsReserve },
     gasPricePls: m.gasPricePls, approval,
     feeBps: m.feeBps, gasUnits: m.gasUnits, extraPlsPerSwap: m.extraPlsPerSwap,

@@ -63,6 +63,7 @@ describe('router settings', () => {
     expect(s.cooldownMin).toBe(360);
     expect(s.maxMovesPerDay).toBe(2);
     expect(s.minConfidence).toBe(0.5);
+    expect(s.receiptTimeoutMs).toBe(120_000);
     expect(s.autoClaim).toBe(false);
     expect(s.halt).toBeNull();
     expect(s.configured).toEqual({ across: false, relay: false, lifi: false });
@@ -136,6 +137,8 @@ describe('router settings', () => {
     expect(router.update({ maxPriorityFeeWei: { '369': MAX_GAS_PRICE_WEI_CAP.toString() + '0' } }).maxPriorityFeeWei['369']).toBe(MAX_GAS_PRICE_WEI_CAP.toString());
     expect(() => router.update({ maxPriorityFeeWei: { '999': '1' } })).toThrow(/Unknown chain/);
     expect(s.autoClaim).toBe(true);
+    expect(router.update({ receiptTimeoutMs: 999_999 }).receiptTimeoutMs).toBe(ROUTER_HARD_CAPS.receiptTimeoutMs);
+    expect(router.update({ receiptTimeoutMs: 30_000 }).receiptTimeoutMs).toBe(30_000);
     expect(router.update({ maxPerMoveUsd: 100, maxSlippageBps: 0, maxPerMoveUsdByChain: { '369': 1_000 } }).maxPerMoveUsdByChain).toEqual({ '369': 100 });
     expect(router.status().maxSlippageBps).toBe(1);
     expect(() => router.update({ allowedBridges: ['nope'] })).toThrow(/Unknown bridge/);

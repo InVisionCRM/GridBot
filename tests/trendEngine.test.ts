@@ -65,8 +65,8 @@ describe('TrendEngine', () => {
     const t = s.bot.status().trends[0];
     expect(t.position).toBeNull();
     expect(t.trades[0]).toMatchObject({ side: 'sell', reason: 'stop' });
-    expect(t.trades[0].realizedPnlUsd).toBeLessThan(0);
-    expect(t.cash).toBeCloseTo(100 + t.trades[0].realizedPnlUsd + t.trades[0].gasUsd + t.trades[1].gasUsd, 6);
+    expect(t.trades[0].realizedPnlQuote).toBeLessThan(0);
+    expect(t.cash).toBeCloseTo(100 + t.trades[0].realizedPnlQuote + t.trades[0].gasQuote + t.trades[1].gasQuote, 6);
     expect(t.pnl.equity).toBeCloseTo(100 + t.pnl.realized, 9);
     // new cross right after: inside cooldown → ignored
     s.closeBar(T0 + H, { o: P, h: P, l: 0.9 * P, c: 0.9 * P });
@@ -86,7 +86,7 @@ describe('TrendEngine', () => {
     setMid(s.chain, 1.25 * P);
     await s.bot.tickAll();
     expect(s.bot.status().trends[0].trades[0]).toMatchObject({ side: 'sell', reason: 'tp' });
-    expect(s.bot.status().trends[0].trades[0].realizedPnlUsd).toBeGreaterThan(0);
+    expect(s.bot.status().trends[0].trades[0].realizedPnlQuote).toBeGreaterThan(0);
 
     const u = setup();
     await u.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: { ...CFG, tpR: 0, trailAtr: 1 }, capital: 100 });
@@ -140,7 +140,7 @@ describe('TrendEngine', () => {
 
   it('inventory: trend bot sells only its own PLS and spends only its own cash; grids are untouched', async () => {
     const s = setup();
-    const gid = await s.bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.5 * P, upperPrice: 1.5 * P, gridCount: 10, totalCapitalUsd: 200 });
+    const gid = await s.bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.5 * P, upperPrice: 1.5 * P, gridCount: 10, totalCapitalQuote: 200 });
     await s.bot.tickAll();
     const gridTradesBefore = s.bot.status().grids[0].trades.length;
     await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: { ...CFG, sizePct: 40 }, capital: 50 });
@@ -175,7 +175,7 @@ describe('TrendEngine', () => {
 
   it('KILL ALL stops grids and trend bots; nothing trades afterwards', async () => {
     const s = setup();
-    await s.bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.5 * P, upperPrice: 1.5 * P, gridCount: 10, totalCapitalUsd: 200 });
+    await s.bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.5 * P, upperPrice: 1.5 * P, gridCount: 10, totalCapitalQuote: 200 });
     await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: CFG, capital: 100 });
     s.bot.stopAll();
     const st = s.bot.status();

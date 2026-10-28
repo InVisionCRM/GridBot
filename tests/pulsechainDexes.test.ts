@@ -186,7 +186,7 @@ describe('Pool discovery + best-pool selection across PulseX V1 / V2 / 9mm', () 
 
 describe('DEX/version on fills, grids and pool switches (MultiBot)', () => {
   const P0 = 0.00001;
-  const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 30 };
+  const base = { lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 30 };
 
   it('every fill records dex + fee; grid status carries dexName', async () => {
     const chain = new MockChain(P0);
@@ -210,7 +210,7 @@ describe('DEX/version on fills, grids and pool switches (MultiBot)', () => {
     expect(d.pool.dex).toBe('pulsex-v2');
     expect(bot.activity.recent(5, 0).some((e) => /PulseX V1 0\.29% → PulseX V2 0\.29% \(manual\)/.test(e.msg))).toBe(true);
     // simulate an in-flight tx on a DAI grid
-    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.000027, upperPrice: 0.000033, gridCount: 10, totalCapitalUsd: 30 });
+    const id = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.000027, upperPrice: 0.000033, gridCount: 10, totalCapitalQuote: 30 });
     const st = (bot as unknown as { engines: Map<string, { state: { inFlight: unknown } }> }).engines.get(id)!.state;
     st.inFlight = { nonce: 0, hash: '0x1' };
     await expect(bot.setMarketPool('DAI', { auto: true })).rejects.toThrow(/in flight/);
