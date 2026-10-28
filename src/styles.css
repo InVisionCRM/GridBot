@@ -1236,7 +1236,7 @@ label.wide input { min-width: 180px; }
 .bot-menu-empty { margin: 8px; color: var(--muted); font-size: 13px; }
 .desk.desk-book { min-width: 0; }
 .desk.desk-book .desk-head, .desk.desk-book .desk-row {
-  grid-template-columns: minmax(0, 1.5fr) 80px minmax(0, 0.8fr) 84px 92px 64px 56px 72px 48px 64px 36px;
+  grid-template-columns: minmax(0, 1.5fr) 80px minmax(0, 0.8fr) 104px 92px 64px 56px 72px 48px 84px 36px; /* value and fees read in the coin ("34,000 USDG") */
 }
 .desk.desk-book .desk-head > *, .desk.desk-book .desk-row > * { min-width: 0; }
 .desk.desk-book .desk-spark .sparkline { width: 72px; height: 28px; }
@@ -1277,6 +1277,7 @@ label.wide input { min-width: 180px; }
 .net-table th { color: var(--muted); width: 55%; }
 .net-table td { text-align: right; color: var(--text); }
 .stat-table .usd, .desk-val .usd, .desk-fees .usd { margin-left: 2px; }
+.desk.desk-book .desk-val, .desk.desk-book .desk-fees { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat-table { margin-top: 8px; }
 .stat-note { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
 .stat-table table { width: 100%; border-collapse: collapse; }

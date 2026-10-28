@@ -215,7 +215,7 @@ const shown = (text: string, v: number) => figures(text).filter((f) => f.unit ==
 describe('LP page: one headline net (gate findings on #72 and #73)', () => {
   const p = stonkd.pnl;
   const parts = {
-    'costs paid': -(p.gas + p.swapCost), 'lost to range moves': -p.moveLoss, 'net with the price move': p.net + p.price, 'the price move': p.price,
+    'gas paid': -p.gas, 'swap costs paid': -p.swapCost, 'lost to range moves': -p.moveLoss, 'net with the price move': p.net + p.price, 'the price move': p.price,
   };
   for (const view of ['desktop', 'phone'] as View[]) {
     it(`shows the net once and nothing else net-looking until Details is opened (${view})`, () => {
@@ -231,8 +231,8 @@ describe('LP page: one headline net (gate findings on #72 and #73)', () => {
       expect(shown(text, p.net)).toHaveLength(1);
       for (const [what, v] of Object.entries(parts)) expect(shown(text, v), what).toHaveLength(1);
       // plain labels saying what each one is (labels are <th>, not figures, so read from the markup)
-      for (const label of ['Fees earned', 'Costs paid: gas and swaps', 'Lost to range moves (0 moves)', 'Net as a share of what you put in', 'Price move of the SPY and USDG held (not in the net)', 'Net including that price move']) {
-        expect(html).toContain(`<th>${label.replace(/&/g, '&amp;')}</th>`);
+      for (const label of ['Fees earned', 'Costs paid: gas', 'Costs paid: swaps to the range&#x27;s mix (pool fee and price impact)', 'Lost to range moves (0 moves)', 'Net as a share of what you put in', 'Price move of the SPY and USDG held (not in the net)', 'Net including that price move']) {
+        expect(html).toContain(`<th>${label}</th>`);
       }
       expect(text).toMatch(/[−-]2\.55%/);
     });

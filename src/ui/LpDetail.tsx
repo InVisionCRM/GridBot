@@ -167,7 +167,9 @@ function NetDetails({ b, pnl, q, base, k, runMs }: { b: AnyObj; pnl: AnyObj; q: 
   const rows: [string, ReactNode][] = [
     ['Fees earned', <><b className={cls(pnl.feeCoins.base)}>{qty(pnl.feeCoins.base, base, 5, false)}</b> + <b className={cls(pnl.feeCoins.quote)}>{qty(pnl.feeCoins.quote, q, 5, false)}</b><Usd v={pnl.fees} k={k} /></>],
     ['Of those, still waiting in the position', `${num(b.owed?.base, 6)} ${base} + ${num(b.owed?.quote, 6)} ${q}`],
-    ['Costs paid: gas and swaps', <>{qty(-(pnl.gas + pnl.swapCost), q, 4)} <span className="muted">(gas {qty(pnl.gas, q, 3, false)} · swaps {qty(pnl.swapCost, q, 3, false)})</span><Usd v={-(pnl.gas + pnl.swapCost)} k={k} /></>],
+    // the two costs on their own rows: a total beside them repeats whichever one is most of it
+    ['Costs paid: gas', <>{qty(-pnl.gas, q, 4)}<Usd v={-pnl.gas} k={k} /></>],
+    [`Costs paid: swaps to the range's mix (pool fee and price impact)`, <>{qty(-pnl.swapCost, q, 4)}<Usd v={-pnl.swapCost} k={k} /></>],
     [`Lost to range moves (${b.reranges} move${b.reranges === 1 ? '' : 's'})`, <>{qty(-pnl.moveLoss, q, 4)}<Usd v={-pnl.moveLoss} k={k} /></>],
     ['Net as a share of what you put in', b.startValue ? pct(pnl.net / b.startValue, 2, true) : '—'],
     ...(isShortRun(runMs) ? [] : [['Net per day so far', qty(pnl.net / (runMs! / 86_400_000), q, 3)] as [string, ReactNode]]),
