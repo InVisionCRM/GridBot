@@ -1,35 +1,67 @@
 import { describe, expect, it } from 'vitest';
 import { adaptStatus } from '../src/v2/adapt-status';
-import { deskStatusPill, formatAmt, formatClockEt, formatPx, formatTokenLine, formatUsd, formatWhen, showsNoFills } from '../src/v2/format';
+import { gridMetrics, lpMetrics, trendMetrics } from '../src/metrics/botMetrics';
+import { deskStatusPill, formatAmt, formatClockEt, formatPx, formatTokenLine, formatWhen, showsNoFills } from '../src/v2/format';
 import { HEADLINE_FLOOR_PX, headlinePx } from '../src/v2/tokens';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
+
+function units(generated: Record<string, number> | null) {
+  return Object.entries(generated ?? {})
+    .filter(([, amount]) => amount !== 0)
+    .map(([symbol, amount]) => ({ symbol, amount }));
+}
 
 const AS_OF = sanitizedStatus.spotsAt;
 
 describe('adaptStatus', () => {
   const desk = adaptStatus(sanitizedStatus, sanitizedActivity, AS_OF, 'fixture');
 
-  it('keeps grid generated equal to realized, without subtracting fees again', () => {
+  it('copies grid generated from botMetrics', () => {
     const grid = desk.bots.find((b) => b.metrics.botId === 'grid-paper');
-    expect(grid?.metrics.generated).toEqual([{ symbol: 'USDC', amount: 15.5, usd: 15.5 }]);
-    expect(grid?.metrics.generatedUsd).toBe(15.5);
-    expect(grid?.metrics.feesCollectedUsd).toBe(0.8);
-    expect(grid?.metrics.tokenTaxesUsd).toBeNull();
-    expect(grid?.metrics.swapCostUsd).toBeNull();
-    expect(grid?.metrics.aprPct).toBeCloseTo(15.5 / 1000);
+    const server = gridMetrics(sanitizedStatus.grids[0], AS_OF);
+    expect(grid?.metrics.generated.map((t) => ({ symbol: t.symbol, amount: t.amount }))).toEqual(units(server.generated));
+    expect(grid?.metrics.generatedUsd).toBe(server.generatedUsd);
+    expect(grid?.metrics.feesCollectedUsd).toBe(server.feesCollectedUsd);
+    expect(grid?.metrics.swapCostUsd).toBe(server.swapCostUsd);
+    expect(grid?.metrics.tokenTaxesUsd).toBe(server.tokenTaxesUsd);
+    expect(grid?.metrics.aprPct).toBe(server.aprPct);
+    expect(grid?.metrics.invested).toEqual([{ symbol: 'USDC', amount: 1000, usd: null }]);
+    expect(grid?.metrics.grossFees).toEqual([]);
+    expect(grid?.metrics.feesPaid).toEqual([]);
   });
 
-  it('nets LP costs out of the quote leg and uses engine net for dollars', () => {
+  it('copies LP generated from botMetrics', () => {
     const lp = desk.bots.find((b) => b.metrics.botId === 'lp-live');
-    const usdc = lp?.metrics.generated.find((t) => t.symbol === 'USDC');
-    const eth = lp?.metrics.generated.find((t) => t.symbol === 'ETH');
-    expect(usdc?.amount).toBe(20);
-    // quote fees 0.004 − gas 0.0011 − swap 0.002 − rebalance 0.0029
-    expect(eth?.amount).toBeCloseTo(-0.002);
-    expect(lp?.metrics.generatedUsd).toBeCloseTo(0.02 * 2000);
-    expect(lp?.metrics.aprPct).toBeCloseTo(40 / 2000);
-    expect(lp?.metrics.tokenTaxesUsd).toBeNull();
-    expect(lp?.metrics.realizedRebalanceLossUsd).toBeCloseTo(0.0029 * 2000);
+    const server = lpMetrics(sanitizedStatus.lps[0], AS_OF);
+    expect(lp?.metrics.generated.map((t) => ({ symbol: t.symbol, amount: t.amount }))).toEqual(units(server.generated));
+    expect(lp?.metrics.generatedUsd).toBe(server.generatedUsd);
+    expect(lp?.metrics.aprPct).toBe(server.aprPct);
+    expect(lp?.metrics.tokenTaxesUsd).toBe(server.tokenTaxesUsd);
+    expect(lp?.metrics.realizedRebalanceLossUsd).toBe(server.realizedRebalanceLossUsd);
+    expect(lp?.metrics.est.d1?.map((t) => t.amount)).toEqual(units(server.generatedRate.d1).map((t) => t.amount));
+    expect(lp?.metrics.est.d365).toBeNull();
+    expect(server.generatedRate.d365).toBeNull();
+    expect(lp?.metrics.grossFees).toEqual([]);
+    expect(lp?.metrics.feesPaid).toEqual([]);
+    expect(lp?.metrics.moveLoss).toEqual([]);
+    expect(formatTokenLine([
+      { symbol: 'USDC', amount: 63.23957 },
+      { symbol: 'ETH', amount: 0.00173066 },
+    ])).toBe('+63.24 USDC + 0.001731 ETH');
+    const qa = {
+      id: 'qa-lp', mode: 'live' as const, status: 'running', base: 'USDC', quote: 'ETH',
+      usdPerQuote: 2000, price: 1 / 2342, startedAt: AS_OF - 3 * 86_400_000,
+      startValue: 3.5,
+      pnl: {
+        feeCoins: { base: 63.23957, quote: 0.00173066 },
+        fees: 1, gas: 0, swapCost: 0, moveLoss: 0, net: 1, price: 0, equity: 1,
+      },
+      totals: { gas: 0, swapCost: 0, moveLoss: 0 },
+    };
+    const qaDesk = adaptStatus({ spotsAt: AS_OF, lps: [qa] }, [], AS_OF);
+    const qaServer = lpMetrics(qa, AS_OF);
+    expect(qaDesk.bots[0].metrics.generated.map((t) => t.amount)).toEqual(units(qaServer.generated).map((t) => t.amount));
+    expect(formatTokenLine(qaDesk.bots[0].metrics.generated)).toBe('+63.24 USDC + 0.001731 ETH');
   });
 
   it('leaves a closed bot without a pnl reading as unknown', () => {
@@ -42,9 +74,10 @@ describe('adaptStatus', () => {
   });
 
   it('sums live dollars and does not fold paper into the headline', () => {
-    expect(desk.portfolio.generatedUsd).toBeCloseTo(40);
-    expect(desk.portfolio.generatedPerDayUsd).toBeCloseTo(20);
-    expect(desk.portfolio.generatedPerDay?.find((t) => t.symbol === 'USDC')?.amount).toBeCloseTo(10);
+    const live = lpMetrics(sanitizedStatus.lps[0], AS_OF);
+    expect(desk.portfolio.generatedUsd).toBe(live.generatedUsd);
+    expect(desk.portfolio.generatedPerDayUsd).toBe(live.est.d1);
+    expect(desk.portfolio.generatedPerDay?.find((t) => t.symbol === 'USDC')?.amount).toBe(live.generatedRate.d1?.USDC);
     expect(desk.bots.find((b) => b.metrics.botId === 'lp-live')?.pair).toBe('ETH/USDC');
     expect(desk.portfolio.paperGeneratedUsd).toBeCloseTo(15.5);
     expect(desk.portfolio.tokens.map((t) => t.symbol).sort()).toEqual(['ETH', 'USDC']);
@@ -71,13 +104,21 @@ describe('adaptStatus', () => {
       grids: [{
         id: 'young', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
         usdPerQuote: 1, price: 1, startedAt: now - 20 * 60_000,
-        config: { totalCapitalUsd: 100 },
+        config: { totalCapitalQuote: 100 },
         pnl: { realized: 3, unrealized: 0, gasUsd: 0 },
         stats: { roundTrips: 1, totalFees: 0.1 },
       }],
     }, [], now);
+    const youngServer = gridMetrics(young.bots[0] ? {
+      id: 'young', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
+      usdPerQuote: 1, price: 1, startedAt: now - 20 * 60_000,
+      config: { totalCapitalQuote: 100 },
+      pnl: { realized: 3, unrealized: 0, gasUsd: 0 },
+      stats: { roundTrips: 1, totalFees: 0.1 },
+    } : {}, now);
     const m = young.bots[0].metrics;
-    expect(m.est.d1).toBeNull();
+    expect(m.est.d1).toBe(youngServer.generatedRate.d1 == null ? null : expect.anything());
+    expect(youngServer.generatedRate.d1).toBeNull();
     expect(m.est.d7).toBeNull();
     expect(m.est.d365).toBeNull();
 
@@ -86,23 +127,32 @@ describe('adaptStatus', () => {
       grids: [{
         id: 'day', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
         usdPerQuote: 1, price: 1, startedAt: now - 4 * 3600_000,
-        config: { totalCapitalUsd: 100 },
+        config: { totalCapitalQuote: 100 },
         pnl: { realized: 3, unrealized: 0, gasUsd: 0 },
         stats: { roundTrips: 1, totalFees: 0.1 },
       }],
     }, [], now);
+    const dayRaw = {
+      id: 'day', mode: 'live' as const, status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
+      usdPerQuote: 1, price: 1, startedAt: now - 4 * 3600_000,
+      config: { totalCapitalQuote: 100 },
+      pnl: { realized: 3, unrealized: 0, gasUsd: 0 },
+      stats: { roundTrips: 1, totalFees: 0.1 },
+    };
+    const dayServer = gridMetrics(dayRaw, now);
     const d = day.bots[0].metrics;
-    expect(d.est.d1).toBeNull();
-    expect(d.est.d7).toBeNull();
+    expect(d.est.d1?.[0].amount).toBe(dayServer.generatedRate.d1?.USDC);
+    expect(d.est.d7?.[0].amount).toBe(dayServer.generatedRate.d7?.USDC);
+    expect(dayServer.generatedRate.d1).not.toBeNull();
     expect(d.est.d365).toBeNull();
-    expect(d.aprPct).toBeNull();
+    expect(d.aprPct).toBe(dayServer.aprPct);
 
     const week = adaptStatus({
       spotsAt: now,
       grids: [{
         id: 'week', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
         usdPerQuote: 1, price: 1, startedAt: now - 8 * 86_400_000,
-        config: { totalCapitalUsd: 100 },
+        config: { totalCapitalQuote: 100 },
         pnl: { realized: 3, unrealized: 0, gasUsd: 0 },
         stats: { roundTrips: 2, totalFees: 0 },
       }],
@@ -116,7 +166,7 @@ describe('adaptStatus', () => {
       grids: [{
         id: 'month', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
         usdPerQuote: 1, price: 1, startedAt: now - 30 * 86_400_000,
-        config: { totalCapitalUsd: 100 },
+        config: { totalCapitalQuote: 100 },
         pnl: { realized: 3, unrealized: 0, gasUsd: 0 },
         stats: { roundTrips: 2, totalFees: 0 },
       }],
@@ -124,22 +174,23 @@ describe('adaptStatus', () => {
     expect(month.bots[0].metrics.est.d365?.[0].amount).toBeCloseTo(3 * 365 / 30);
   });
 
-  it('rounds each live bot to cents before the home total', () => {
+  it('sums botMetrics generated dollars with no second rounding', () => {
     const now = 1_700_000_000_000;
     const row = (id: string, realized: number) => ({
       id, mode: 'live', status: 'running', label: `${id}/USDC`, base: id, quoteSym: 'USDC',
       usdPerQuote: 1, price: 1, startedAt: now - 86_400_000,
-      config: { totalCapitalUsd: 10 },
+      config: { totalCapitalQuote: 10 },
       pnl: { realized, unrealized: 0, gasUsd: 0 },
       stats: { roundTrips: 2, totalFees: 0 },
     });
     const mixed = adaptStatus({ spotsAt: now, grids: [row('AAA', 1.006), row('BBB', 1.006)] }, [], now);
     const cards = mixed.bots.map((b) => b.metrics.generatedUsd);
     const sum = (cards[0] ?? 0) + (cards[1] ?? 0);
-    expect(cards).toEqual([1.01, 1.01]);
-    expect(mixed.portfolio.generatedUsd).toBeCloseTo(sum, 10);
-    expect(formatUsd(mixed.portfolio.generatedUsd, true)).toBe(formatUsd(sum, true));
-    expect(formatUsd(mixed.portfolio.generatedUsd, true)).toBe('+$2.02');
+    expect(cards).toEqual([
+      gridMetrics(row('AAA', 1.006), now).generatedUsd,
+      gridMetrics(row('BBB', 1.006), now).generatedUsd,
+    ]);
+    expect(mixed.portfolio.generatedUsd).toBe(sum);
   });
 
   it('dashes APR on a one-minute bot with one fill, and on an older bot with one fill', () => {
@@ -147,7 +198,7 @@ describe('adaptStatus', () => {
     const bot = (id: string, ageMs: number, trips: number) => ({
       id, mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
       usdPerQuote: 1, price: 1, startedAt: now - ageMs,
-      config: { totalCapitalUsd: 10 },
+      config: { totalCapitalQuote: 10 },
       pnl: { realized: 1, unrealized: 0, gasUsd: 0 },
       stats: { roundTrips: trips, totalFees: 0 },
       trades: [{ side: 'sell', failed: false, timestamp: now - 30_000, realizedPnlUsd: 1 }],
@@ -161,8 +212,10 @@ describe('adaptStatus', () => {
     const oneFill = adaptStatus({ spotsAt: now, grids: [bot('one', 2 * 86_400_000, 1)] }, [], now);
     expect(oneFill.bots[0].metrics.aprPct).toBeNull();
 
-    const ready = adaptStatus({ spotsAt: now, grids: [bot('two', 2 * 86_400_000, 2)] }, [], now);
-    expect(ready.bots[0].metrics.aprPct).toBeCloseTo(1 / 10);
+    const readyRaw = bot('two', 8 * 86_400_000, 2);
+    const ready = adaptStatus({ spotsAt: now, grids: [readyRaw] }, [], now);
+    expect(ready.bots[0].metrics.aprPct).toBe(gridMetrics(readyRaw, now).aprPct);
+    expect(ready.bots[0].metrics.aprPct).not.toBeNull();
   });
 
   it('flips a stable base under one dollar and leaves PLS/DAI alone', () => {
@@ -199,7 +252,8 @@ describe('adaptStatus', () => {
     expect(range!.current).toBeCloseTo(2000);
     expect(range!.lower).toBeCloseTo(1 / 0.0006);
     expect(range!.upper).toBeCloseTo(1 / 0.0004);
-    expect(lp?.metrics.calc).toContain('taken out of ETH');
+    expect(lp?.metrics.calc).toContain('per coin');
+    expect(lp?.metrics.calc).not.toMatch(/\bAPR\b/);
     const grid = desk.bots.find((b) => b.metrics.botId === 'grid-paper');
     expect(grid?.metrics.range?.lower).toBe(10);
     expect(grid?.metrics.range?.current).toBeCloseTo(12.5);
@@ -208,7 +262,7 @@ describe('adaptStatus', () => {
     expect(grid!.metrics.range!.current).toBeLessThanOrEqual(grid!.metrics.range!.upper);
   });
 
-  it('maps a trend bot through generatedTokens and names the chain', () => {
+  it('maps a trend bot from botMetrics and names the chain', () => {
     const now = 1_700_000_000_000;
     const desk = adaptStatus({
       spotsAt: now,
@@ -228,7 +282,16 @@ describe('adaptStatus', () => {
     expect(bot?.chainName).toBe('Ethereum');
     expect(bot?.dex).toBe('Uniswap V3');
     expect(bot?.metrics.mode).toBe('paper');
-    expect(bot?.metrics.generated).toEqual([{ symbol: 'USDC', amount: 4.5, usd: 4.5 }]);
+    const server = trendMetrics({
+      id: 'trend-paper', mode: 'paper', status: 'running', label: 'ETH/USDC',
+      base: 'ETH', quoteSym: 'USDC', chainId: 1, dexName: 'Uniswap V3',
+      usdPerQuote: 1, price: 2300, startedAt: now - 3 * 86_400_000,
+      capital: 100,
+      pnl: { realized: 4.5, unrealized: 1, equity: 105.5, gas: 0.2, fees: 0.1 },
+      stats: { count: 2 },
+      moveCount: 2,
+    }, now);
+    expect(bot?.metrics.generated.map((t) => ({ symbol: t.symbol, amount: t.amount }))).toEqual(units(server.generated));
     expect(bot?.metrics.est.d1?.[0].amount).toBeCloseTo(4.5 / 3);
     expect(bot?.metrics.invested).toEqual([{ symbol: 'USDC', amount: 100, usd: null }]);
   });

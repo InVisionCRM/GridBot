@@ -12,7 +12,7 @@ export const sanitizedStatus = {
     {
       id: 'grid-paper', mode: 'paper', status: 'running', chainId: 1, label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC', stable: 'USDC',
       dexName: 'Example', usdPerQuote: 1, price: 12.5, startedAt: 1_700_000_000_000 - 8 * 86_400_000,
-      config: { lowerPrice: 10, upperPrice: 15, totalCapitalUsd: 1000, gridCount: 4 },
+      config: { lowerPrice: 10, upperPrice: 15, totalCapitalQuote: 1000, totalCapitalUsd: 1000, gridCount: 4 },
       pnl: { realized: 15.5, unrealized: 2, gasUsd: 0.4, plsHeld: 1, costUsd: 40 },
       stats: { roundTrips: 2, totalFees: 0.8, totalGas: 0.4, totalNet: 15.5, wins: 2 },
       moveCount: 2,

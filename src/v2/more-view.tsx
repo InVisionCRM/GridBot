@@ -12,7 +12,7 @@ const LINKS: { label: string; view: View }[] = [
   { label: 'New LP', view: { v: 'new', kind: 'lp' } },
   { label: 'New trend', view: { v: 'new', kind: 'trend' } },
   { label: 'Analytics', view: { v: 'tools', tab: 'analytics' } },
-  { label: 'Alerts', view: { v: 'tools', tab: 'alerts' } },
+  { label: 'Alerts', view: { v: 'alerts' } },
   { label: 'Chart', view: { v: 'tools', tab: 'chart' } },
   { label: 'Backtest', view: { v: 'tools', tab: 'backtest' } },
   { label: 'Markets', view: { v: 'tools', tab: 'markets' } },

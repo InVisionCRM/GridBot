@@ -203,7 +203,7 @@ describe('no money or token figure is repeated on a screen', () => {
     const now = 1_700_000_000_000;
     const shared = {
       mode: 'paper', status: 'running', chainId: 1, base: 'ETH', quoteSym: 'ETH', usdPerQuote: 2000, price: 2000,
-      startedAt: now - 3 * 86_400_000, config: { totalCapitalUsd: 3.5 },
+      startedAt: now - 3 * 86_400_000, config: { totalCapitalQuote: 3.5 },
       pnl: { realized: 1, unrealized: 0, gasUsd: 0 }, stats: { roundTrips: 1, totalFees: 0 },
     };
     const desk = adaptStatus({
@@ -222,13 +222,13 @@ describe('no money or token figure is repeated on a screen', () => {
         {
           id: 'hex', mode: 'live', status: 'running', chainId: 369, label: 'HEX/PLS', base: 'HEX', quoteSym: 'PLS',
           usdPerQuote: 0.0001, price: 0.00002, startedAt: now - 3 * 86_400_000,
-          config: { totalCapitalUsd: 14_000_000, lowerPrice: 0.00001, upperPrice: 0.00003 },
+          config: { totalCapitalQuote: 14_000_000, lowerPrice: 0.00001, upperPrice: 0.00003 },
           pnl: { realized: 10, unrealized: 0, gasUsd: 0 }, stats: { roundTrips: 1, totalFees: 0 },
         },
         {
           id: 'eth', mode: 'live', status: 'running', chainId: 1, label: 'ETH/USDC', base: 'ETH', quoteSym: 'ETH',
           usdPerQuote: 2000, price: 2000, startedAt: now - 3 * 86_400_000,
-          config: { totalCapitalUsd: 3.5 },
+          config: { totalCapitalQuote: 3.5 },
           pnl: { realized: 1, unrealized: 0, gasUsd: 0 }, stats: { roundTrips: 1, totalFees: 0 },
         },
       ],
@@ -256,14 +256,14 @@ describe('no money or token figure is repeated on a screen', () => {
         {
           id: 'only', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
           usdPerQuote: 1, price: 2, startedAt: now - 2 * 86_400_000,
-          config: { totalCapitalUsd: 100, lowerPrice: 1, upperPrice: 3 },
+          config: { totalCapitalQuote: 100, lowerPrice: 1, upperPrice: 3 },
           pnl: { realized: 63.24, unrealized: 0, gasUsd: 0 },
           stats: { roundTrips: 2, totalFees: 0 },
         },
         {
           id: 'quiet', mode: 'live', status: 'running', label: 'BBB/USDC', base: 'BBB', quoteSym: 'USDC',
           usdPerQuote: 1, price: 3, startedAt: now - 86_400_000,
-          config: { totalCapitalUsd: 10, lowerPrice: 1, upperPrice: 4 },
+          config: { totalCapitalQuote: 10, lowerPrice: 1, upperPrice: 4 },
           pnl: { realized: 0, unrealized: 0, gasUsd: 0 },
           stats: { roundTrips: 0, totalFees: 0 },
         },

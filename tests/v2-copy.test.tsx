@@ -215,8 +215,11 @@ describe('v2 copy stays in token units', () => {
           expect(overPrecise(amount[0]), `${bot.metrics.botId} ${row.label} ${amount[0]}`).toBe(false);
         }
       }
-      if (rows.some((r) => r.label === 'Trade profit before gas' || r.label.endsWith(' fees earned'))) {
+      if (rows.some((r) => (r.label === 'Trade profit before gas' || r.label.endsWith(' fees earned')) && /\d/.test(r.value))) {
         expect(rows.some((r) => r.value === 'Rows are rounded to add up exactly.'), bot.metrics.botId).toBe(true);
+      }
+      if (!bot.metrics.grossFees.length && !bot.metrics.feesPaid.length && (bot.metrics.kind === 'lp' || bot.metrics.kind === 'grid')) {
+        expect(rows.find((r) => r.label === 'Gas + swap fees')?.value, bot.metrics.botId).toBe('—');
       }
     }
   });
@@ -231,6 +234,7 @@ describe('v2 copy stays in token units', () => {
           dexName: 'Example', usdPerQuote: 2000, price: 0.00005, startedAt: now - 3 * 86_400_000,
           inRange: true, startValue: 1, config: { capital: 1 },
           position: { lower: 0.00004, upper: 0.00006 },
+          totals: { gas: 0.02051, swapCost: 0, moveLoss: 0 },
           pnl: {
             net: 0, price: 0, fees: 0, gas: 0.02051, swapCost: 0, moveLoss: 0, equity: 1,
             feeCoins: { base: 233.06, quote: 0.01 },

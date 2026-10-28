@@ -4,11 +4,8 @@
  * Headline is token units generated, net of costs (`generated`), with `generatedUsd` under it.
  * Home's headline is live `generatedUsd` plus per-token chips. Paper is separate.
  * Price change and value versus capital are breakdown context, not the hero.
- * est.d1 / d7 / d365 are pace in token units. Null until the window has enough history:
- * about 28 minutes, 3.2 hours, and 30 days. The bot screen prints a dash for D7 and D365.
- * Those pace figures open only from the Breakdown projected toggle. APR is generatedUsd / capitalInUsd once the bot
- * is at least ~28 minutes old and, when a fill count exists, has at least two fills.
- * Otherwise APR is null. Not compounded and not annualized.
+ * est.d1 / d7 / d365 are botMetrics generatedRate, in token units. Null until that module fills the window.
+ * The screen prints a dash for a null window. APR is copied from botMetrics and is not rendered.
  * Percents are fractions. Null means the snapshot did not carry the figure.
  */
 

@@ -66,7 +66,7 @@ function get(port: number, path: string): Promise<{ status: number; body: string
   });
 }
 
-const PAPER = { mode: 'paper' as const, stable: 'DAI', lowerPrice: 0.9e-5, upperPrice: 1.1e-5, gridCount: 10, totalCapitalUsd: 30 };
+const PAPER = { mode: 'paper' as const, stable: 'DAI', lowerPrice: 0.9e-5, upperPrice: 1.1e-5, gridCount: 10, totalCapitalQuote: 30 };
 
 describe('v2 desk stream', () => {
   it('does not copy wallet fields out of status', () => {
@@ -127,7 +127,9 @@ describe('v2 desk stream', () => {
 
       const metrics = await get(port, `/api/bot/${id}/metrics`);
       expect(metrics.status).toBe(200);
-      expect(JSON.parse(metrics.body).metrics.botId).toBe(id);
+      const body = JSON.parse(metrics.body);
+      expect(body.botId).toBe(id);
+      expect(body.headline).toBe('generated');
       expect((await get(port, '/api/bot/missing/metrics')).status).toBe(404);
 
       const denied = await stream(port, () => false, { host: 'evil.example' });

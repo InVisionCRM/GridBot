@@ -581,11 +581,6 @@ export function createApp(o: AppOpts) {
   // ── v2 desk (read-only). Friend copies run this same app on their own bot, so they see
   //    only what /api/bot/status already returns for that process. No wallet fields are copied.
   const v2Desk = () => deskFromStatus(bot.status() as unknown as Record<string, unknown>, bot.activity.recent(80));
-  app.get('/api/bot/:id/metrics', wrap((req, res) => {
-    const row = v2Desk().bots.find((b) => b.metrics.botId === req.params.id);
-    if (!row) { res.status(404).json({ error: 'no such bot' }); return; }
-    return { metrics: row.metrics };
-  }));
   app.get('/api/v2/stream', (req, res) => {
     res.writeHead(200, {
       'content-type': 'text/event-stream',

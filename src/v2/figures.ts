@@ -3,7 +3,6 @@
  * Cards that would restate the hero or the section total say so in words.
  */
 import type { BotMetrics, RangeBlock, TapePrice, TokenQty } from './metrics';
-import { estimates } from '../shared/generated';
 import { apportion, displayedValue, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, showsNoFills, standardUnit, tokenLineParts } from './format';
 
 const SUBSCRIPT_PRICE = /\$0\.0[₀₁₂₃₄₅₆₇₈₉]+\d+/g;
@@ -64,7 +63,7 @@ export function generatedCardLine(bot: TokenQty[], section: TokenQty[], scope: '
  * The whole hero line, and only that, reads `All of the live total`.
  */
 export function investedLine(bot: TokenQty[], total: TokenQty[], scope: 'live' | 'paper'): string | null {
-  if (!bot.length) return null;
+  if (!bot.length) return '—';
   const whole = normFigure(formatBag(bot)) === normFigure(formatBag(total));
   if (whole) return `All of the ${scope} total`;
   const all = new Map(total.map((t) => [t.symbol, normFigure(formatBag([t]))]));
@@ -107,11 +106,11 @@ export function uniqueTape(prices: TapePrice[]): TapePrice[] {
 
 export function heroFigureText(m: BotMetrics): string {
   if (showsNoFills(m)) return '';
-  const day = estimates(m.generated, m.ageSec).perDay;
+  const day = m.est?.d1;
   return [
     ledgerLines(m)?.generated || formatTokenLine(m.generated),
     formatBagSafe(m.invested),
-    day ? formatTokenLine(day) : '',
+    day?.length ? formatTokenLine(day) : '',
   ].join(' ');
 }
 
@@ -263,10 +262,21 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
   if (!details && rows.length > beforeParts && !(m.kind === 'grid' && m.fillCount === 0)) {
     rows.push({ label: 'Round', value: 'Rows are rounded to add up exactly.' });
   }
+  if (!ledger && (m.kind === 'lp' || m.kind === 'grid')) {
+    const labels = m.kind === 'grid'
+      ? ['Trade profit before gas', 'Gas + swap fees']
+      : ['Fees earned', 'Gas + swap fees', 'Range-move loss'];
+    for (const label of labels) rows.push({ label, value: '—' });
+    if (!details) {
+      const shown = m.generated.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
+      const text = shown.length ? formatTokenLine(shown) : (m.kind === 'grid' && m.fillCount === 0 ? '0' : '');
+      if (text) rows.push({ label: 'Generated', value: text });
+    }
+  }
   if (ledger?.untouched) add('Note', ledger.untouched);
-  const est = estimates(m.generated, m.ageSec);
-  add('Est. 7d', est.d7 == null ? '—' : est.d7.length ? formatTokenLine(est.d7) : '—', true);
-  add('Est. 365d', est.d365 == null ? '—' : est.d365.length ? formatTokenLine(est.d365) : '—', true);
+  const pace = (tokens: TokenQty[] | null | undefined) => (tokens == null ? '—' : tokens.length ? formatTokenLine(tokens) : '0');
+  rows.push({ label: 'Est. 7d', value: pace(m.est?.d7) });
+  rows.push({ label: 'Est. 365d', value: pace(m.est?.d365) });
   add('Age', formatAge(m.ageSec));
   add('Moves', m.moveCount == null ? '—' : String(m.moveCount));
   add('Fills', m.fillCount == null ? '—' : String(m.fillCount));
