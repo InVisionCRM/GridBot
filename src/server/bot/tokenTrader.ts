@@ -12,6 +12,7 @@ import { chainById } from '../../live/chains';
 import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, DEFAULT_MIN_HOLDER_COVERAGE, clampHolderCoverage, clampHolderShare } from '../../market/holders';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
+import { unverifiedOwnerReport, type OwnerReport } from '../../market/ownerPowers';
 import {
   decideExit, filterFresh, gateToken, sizeBuy, splitSell, EXIT, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SIZE_IMPACT_CAP, DEFAULT_SNIPER_MIN_LIQ_USD,
   type FreshPool, type GateInput,
@@ -59,6 +60,11 @@ export interface TraderOptions {
   risk: 'safe' | 'medium' | 'any';
   maxImpact: number;
   maxPoolShare: number;
+  /**
+   * When on, safe and medium skip a non-renounced owner who can mint, blacklist, pause, or set tax or limits,
+   * and a proxy a live admin can upgrade. Off: the gate ignores this and the trader makes no extra reads.
+   */
+  enforceOwnerPowers: boolean;
   /**
    * Read Uniswap V3 position NFTs and attach the lock/burn report to the gate.
    * Off unless set: the gate then behaves exactly as it does without the field.
@@ -274,7 +280,7 @@ const TRADE_MAX = 200;
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   minLiquidityUsd: DEFAULT_MIN_LIQUIDITY_USD, enforceLiquidityFloor: false,
-  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
+  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE, enforceOwnerPowers: false,
   v3LpLockCheck: false,
   v3LpLockCacheEnabled: false,
   v3LpLockCacheTtlMs: 10 * 60_000,
@@ -361,6 +367,11 @@ export class TokenTrader {
     feeNow?: (p: { chainId: number; pool: string }) => Promise<number>;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
+    /**
+     * Owner / proxy-admin / setter scan. Called only when enforceOwnerPowers is on.
+     * A throw, or a missing callback while the flag is on, is unverified.
+     */
+    ownerPowers?: (pool: FreshPool) => Promise<OwnerReport>;
     /**
      * For Generated only: whether a spend coin is the chain's own coin (or its wrapped form), and that coin's symbol.
      * Missing = not native (gas is reported apart, never price-converted).
@@ -842,8 +853,8 @@ export class TokenTrader {
     if (this.state.feed.length > FEED_MAX) this.state.feed.length = FEED_MAX;
   }
 
-  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null }> {
-    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null, warn: null };
+  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null; note: string | null }> {
+    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null, warn: null, note: null };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
     let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: this.gateFloor(pool, g.minLiquidityUsd) };
     if (this.state.options.enforceHolderCheck) {
@@ -874,8 +885,21 @@ export class TokenTrader {
         maxTop10Share: this.state.options.maxTop10Share,
       };
     }
+    let note: string | null = null;
+    if (this.state.options.enforceOwnerPowers) {
+      let report: OwnerReport;
+      try {
+        report = this.d.ownerPowers ? await this.d.ownerPowers(pool) : unverifiedOwnerReport('owner powers could not be verified');
+      } catch {
+        report = unverifiedOwnerReport('owner powers could not be verified');
+      }
+      gate.enforceOwnerPowers = true;
+      gate.ownerPowersUnverified = report.unverified;
+      gate.ownerPowersWhy = report.why;
+      note = report.note;
+    }
     const r = gateToken(gate);
-    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate, warn: r.warn ?? null };
+    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate, warn: r.warn ?? null, note: r.ok ? note : null };
   }
 
   private reject(o: { chainId: number; pool: string; token: string; signal: string; source: string; reason: string; price: number | null; feeBps: number | null; spendSymbol?: string }) {
@@ -967,7 +991,7 @@ export class TokenTrader {
     }
   }
 
-  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput, warn: string | null) {
+  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput, warn: string | null, note: string | null) {
     const o = this.state.options;
     const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
     const skip = (why: string) => {
@@ -1037,7 +1061,8 @@ export class TokenTrader {
     };
     this.state.positions.push(pos);
     this.bookBuy(pos, gasNative ?? 0);
-    const why = warn ? `buy ${sized.why}; ${warn}` : `buy ${sized.why}`;
+    const extra = [warn, note].filter((s): s is string => !!s).join('; ');
+    const why = extra ? `buy ${sized.why}; ${extra}` : `buy ${sized.why}`;
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode: o.mode } : { mode: o.mode });
@@ -1059,7 +1084,7 @@ export class TokenTrader {
     if (this.entriesStopped(pool.chainId)) { skip('new buys are stopped (Stop all)'); return; }
     const a = await this.assess(pool);
     if (!a.ok || !a.gate) { skip(a.reason ?? 'safety'); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
-    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate, a.warn);
+    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate, a.warn, a.note);
   }
 
   private async scanEntries() {
@@ -1094,7 +1119,7 @@ export class TokenTrader {
         this.say(`skipped ${label}: ${a.reason}`, 'warn');
         continue;
       }
-      await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn);
+      await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn, a.note);
     }
   }
 
