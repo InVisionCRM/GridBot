@@ -95,9 +95,20 @@ export interface BotDesk {
   flashLevel: number | null;
   price: number | null;
   change24h: number | null;
+  /** Pool fee in basis points, when the snapshot has one. */
+  feeBps: number | null;
+  /** When this bot's price was read. Used to pick one tape row per pool. */
+  priceAt: number | null;
 }
 
-export interface TapePrice { symbol: string; chain: string; price: number | null; change24h: number | null }
+export interface TapePrice {
+  symbol: string;
+  chain: string;
+  price: number | null;
+  change24h: number | null;
+  /** Set only when this pair has another pool on the same chain. */
+  fee: string | null;
+}
 
 export interface ActivityItem {
   id: string;

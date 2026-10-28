@@ -3,7 +3,7 @@
  * Dollars are only emitted when usdPerQuote is present. Token units stay in the coin they were earned in.
  * Missing figures stay null. This file does not read the network or a wallet.
  */
-import type { ActivityItem, BotDesk, BotKind, BotMetrics, BotMode, BotStatus, DeskSnapshot, EstimateBlock, PortfolioSnapshot, RangeBlock, TokenQty } from './metrics';
+import type { ActivityItem, BotDesk, BotKind, BotMetrics, BotMode, BotStatus, DeskSnapshot, EstimateBlock, PortfolioSnapshot, RangeBlock, TapePrice, TokenQty } from './metrics';
 
 const DAY = 86_400;
 /** 24h needs ~28 min, 7d ~3.2h, 365d 30 days. A week of history is not a year. */
@@ -212,7 +212,7 @@ function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
     asOf,
     calc: blankCalc('grid'),
   }, num(stats?.roundTrips) ?? (trades.length ? trades.map(rec).filter((t) => t && t.failed !== true).length : null));
-  return desk(metrics, str(g.label) || `${base}/${quote}`, base, quote, chain, str(g.dexName), price, spark);
+  return desk(metrics, str(g.label) || `${base}/${quote}`, base, quote, chain, str(g.dexName), price, spark, num(g.feeBps), num(g.priceAt));
 }
 
 function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
@@ -302,7 +302,7 @@ function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
     asOf,
     calc: blankCalc('lp'),
   }, null);
-  return desk(metrics, str(lp.label) || `${base}/${quote}`, base, quote, chain, str(lp.dexName), price, []);
+  return desk(metrics, str(lp.label) || `${base}/${quote}`, base, quote, chain, str(lp.dexName), price, [], num(lp.feeBps), num(lp.priceAt));
 }
 
 const STABLES = new Set(['USDC', 'USDG', 'USDT', 'DAI', 'USD']);
@@ -318,14 +318,14 @@ function shownPair(base: string, quote: string, price: number | null, label: str
   return label.split('·')[0]?.trim() || label || '—';
 }
 
-function desk(metrics: BotMetrics, label: string, base: string, quote: string, chain: ChainInfo, dex: string, price: number | null, spark: number[]): BotDesk {
+function desk(metrics: BotMetrics, label: string, base: string, quote: string, chain: ChainInfo, dex: string, price: number | null, spark: number[], feeBps: number | null, priceAt: number | null): BotDesk {
   const tone = metrics.status !== 'running' ? 'idle'
     : metrics.range == null ? 'idle'
     : metrics.range.inRange ? 'in' : 'out';
   return {
     metrics, pair: shownPair(base, quote, price, label), base, quote, chain: chain.short, chainColor: chain.color, dex: dex || '—',
     tone, spark: spark.length > 1 ? spark : [], levels: [], candles: [], fills: [], flashLevel: null,
-    price, change24h: null,
+    price, change24h: null, feeBps, priceAt,
   };
 }
 
@@ -404,12 +404,50 @@ function portfolio(bots: BotDesk[], asOf: number): PortfolioSnapshot {
 }
 
 /** Engine price is quote per 1 base. The pair text is already conventional; only the price flips. */
-function tapeOf(b: BotDesk): { symbol: string; chain: string; price: number | null; change24h: null } {
+function shownPrice(b: BotDesk): number | null {
   const px = b.price;
+  if (px == null) return null;
   const base = b.base.toUpperCase();
   const quote = b.quote.toUpperCase();
-  const flip = px != null && px > 0 && px < 1 && STABLES.has(base) && !STABLES.has(quote);
-  return { symbol: b.pair, chain: b.chain === '—' ? '' : b.chain, price: flip && px ? 1 / px : px, change24h: null };
+  const flip = px > 0 && px < 1 && STABLES.has(base) && !STABLES.has(quote);
+  return flip ? 1 / px : px;
+}
+
+function feeText(bps: number): string {
+  return `${(bps / 100).toFixed(2).replace(/\.?0+$/, '')}%`;
+}
+
+/**
+ * One row per pool. Several bots on the same pair, chain, fee, and DEX share a price:
+ * a running bot beats a stopped one, live beats paper, and a newer read wins a tie.
+ * A second pool on that pair is labeled with its fee, or the DEX when the fees match.
+ */
+function deskPrices(bots: BotDesk[]): TapePrice[] {
+  type Cand = { symbol: string; chain: string; price: number; feeBps: number | null; dex: string; rank: number; priceAt: number };
+  const best = new Map<string, Cand>();
+  for (const b of bots) {
+    const price = shownPrice(b);
+    if (price == null) continue;
+    const symbol = b.pair;
+    const chain = b.chain === '—' ? '' : b.chain;
+    const dex = b.dex === '—' ? '' : b.dex;
+    const key = `${symbol}|${chain}|${b.feeBps ?? ''}|${dex}`;
+    const rank = (b.metrics.status === 'running' ? 2 : 0) + (b.metrics.mode === 'live' ? 1 : 0);
+    const priceAt = b.priceAt ?? 0;
+    const prev = best.get(key);
+    if (prev && (rank < prev.rank || (rank === prev.rank && priceAt < prev.priceAt))) continue;
+    best.set(key, { symbol, chain, price, feeBps: b.feeBps, dex, rank, priceAt });
+  }
+  const rows = [...best.values()];
+  return rows.map((row) => {
+    const siblings = rows.filter((r) => r.symbol === row.symbol && r.chain === row.chain);
+    let fee: string | null = null;
+    if (siblings.length > 1) {
+      const fees = new Set(siblings.map((s) => s.feeBps));
+      fee = fees.size > 1 && row.feeBps != null ? feeText(row.feeBps) : (row.dex || null);
+    }
+    return { symbol: row.symbol, chain: row.chain, price: row.price, change24h: null, fee };
+  });
 }
 
 /** Log lines say `USDC/ETH·ETH`. The chain already has a badge, so the suffix comes off. */
@@ -455,7 +493,7 @@ export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = nu
     source,
     portfolio: portfolio(bots, asOf),
     bots,
-    prices: bots.filter((b) => b.price != null).map(tapeOf),
+    prices: deskPrices(bots),
     activity: activityOf(events, new Map(bots.map((b) => [b.metrics.botId, { pair: b.pair, chain: b.chain }]))),
   };
 }

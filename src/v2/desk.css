@@ -47,6 +47,7 @@
 .v2 .ticker-track .up em { color: var(--profit); font-style: normal; }
 .v2 .ticker-track .down em { color: var(--loss); font-style: normal; }
 .v2 .ticker-track .px { color: var(--label); }
+.v2 .tape-fee { font-style: normal; color: var(--label); font-size: 10px; letter-spacing: 0.02em; }
 .v2 .ticker-static { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-right: 8px; }
 .v2 .ticker-static .ticker-track { animation: none; width: auto; flex: 1; min-width: 0; overflow: hidden; }
 .v2 .ticker-pages { display: flex; align-items: center; gap: 4px; flex: none; }
@@ -307,7 +308,7 @@
   line-height: 1.35;
 }
 .v2 .card-made > span:first-child { flex: none; font-family: var(--font); font-size: 12px; color: var(--label); letter-spacing: 0.06em; text-transform: uppercase; }
-.v2 .card-made > .token-headline { flex: 1 1 auto; width: auto; }
+.v2 .card-made > .token-headline { flex: 1 1 auto; width: auto; min-width: 0; }
 .v2 .card-chart { position: relative; }
 
 .v2 .status-mark { display: inline-flex; align-items: center; gap: 6px; flex: none; font-size: 12px; }

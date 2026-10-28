@@ -4,8 +4,14 @@ import type { DeskDelta, DeskSnapshot } from './metrics';
 
 const WAIT_MS = 8_000;
 
+/** A heartbeat lists no bot, price, or activity edits. It must not move the data time. */
+export function isHeartbeat(d: DeskDelta): boolean {
+  return d.bots.length === 0 && (d.removedIds?.length ?? 0) === 0 && d.prices.length === 0 && d.activity.length === 0;
+}
+
 /** Merge a delta by bot id. An empty bot list keeps the current bots. removedIds drops them. */
 export function applyDelta(cur: DeskSnapshot, d: DeskDelta): DeskSnapshot {
+  if (isHeartbeat(d)) return cur;
   const removed = new Set(d.removedIds ?? []);
   const incoming = new Map(d.bots.map((b) => [b.metrics.botId, b]));
   const seen = new Set<string>();

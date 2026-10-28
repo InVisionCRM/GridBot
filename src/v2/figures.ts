@@ -75,7 +75,7 @@ export function uniqueTape(prices: TapePrice[]): TapePrice[] {
   const seen = new Set<string>();
   const out: TapePrice[] = [];
   for (const p of prices) {
-    const key = `${p.symbol}|${p.chain}|${p.price}`;
+    const key = `${p.symbol}|${p.chain}|${p.fee ?? ''}|${p.price}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(p);

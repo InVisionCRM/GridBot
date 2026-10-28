@@ -185,6 +185,32 @@ describe('adaptStatus', () => {
     expect(row?.symbol).toBe('PLS/DAI');
     expect(row?.chain).not.toContain('·');
     expect(row?.price).toBeCloseTo(5.093e-6);
+    expect(row?.fee).toBeNull();
+  });
+
+  it('keeps one price per pool and labels a second fee tier', () => {
+    const now = 1_700_000_000_000;
+    const grid = (id: string, extra: Record<string, unknown>) => ({
+      id, mode: 'paper', status: 'running', label: 'ETH/USDC', base: 'ETH', quoteSym: 'USDC',
+      chainId: 1, dexName: 'Uniswap V3', usdPerQuote: 1, startedAt: now - 86_400_000,
+      config: { totalCapitalUsd: 1 },
+      pnl: { realized: 0, unrealized: 0 },
+      stats: { roundTrips: 0 },
+      ...extra,
+    });
+    const two = adaptStatus({
+      spotsAt: now,
+      chains: [{ id: 1, short: 'ETH', color: '#000' }],
+      grids: [
+        grid('stale', { price: 2300, feeBps: 5, priceAt: 1, status: 'stopped' }),
+        grid('live', { price: 2342.18, feeBps: 5, priceAt: 2, status: 'running', mode: 'live' }),
+        grid('wide', { price: 2400, feeBps: 30, priceAt: 3, status: 'running' }),
+      ],
+    }, [], now);
+    const rows = two.prices.filter((p) => p.symbol === 'ETH/USDC');
+    expect(rows.map((p) => p.fee).sort()).toEqual(['0.05%', '0.3%']);
+    expect(rows.find((p) => p.fee === '0.05%')?.price).toBeCloseTo(2342.18);
+    expect(rows.find((p) => p.fee === '0.3%')?.price).toBeCloseTo(2400);
   });
 });
 

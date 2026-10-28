@@ -17,6 +17,7 @@ function TapeItem({ p }: { p: TapePrice }) {
   return (
     <span className={p.change24h == null ? '' : p.change24h >= 0 ? 'up' : 'down'}>
       <PairLabel pair={p.symbol} chain={p.chain} />
+      {p.fee && <i className="tape-fee">{p.fee}</i>}
       <em className="px">{formatPx(p.price)}</em>
       {p.change24h != null && <em>{pct(p.change24h, 2, true)}</em>}
     </span>
@@ -159,7 +160,7 @@ function CardMade({ readout }: { readout: CardReadout }) {
     <>
       <p className="card-made">
         <span>Generated</span>
-        {readout.tokens.length > 0 && <TokenLine tokens={readout.tokens} />}
+        {readout.tokens.length > 0 && <TokenHeadline tokens={readout.tokens} />}
       </p>
       {readout.usd && <p className="usd-under">≈ {readout.usd}</p>}
     </>
