@@ -75,5 +75,6 @@ export function shownNumber(text: string): { v: number; tol: number } | null {
  */
 export function sameShown(a: string, b: string): boolean {
   const x = shownNumber(a), y = shownNumber(b);
-  return !!x && !!y && x.v !== 0 && Math.abs(x.v - y.v) <= Math.max(x.tol, y.tol) + 1e-12;
+  // a printed zero is a rounded-away amount, not a figure: it is never "the same" as a figure that prints
+  return !!x && !!y && x.v !== 0 && y.v !== 0 && Math.abs(x.v - y.v) <= Math.max(x.tol, y.tol) + 1e-12;
 }

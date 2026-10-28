@@ -37,7 +37,7 @@ import { gridMetrics, lpMetrics, trendMetrics } from '../src/metrics/botMetrics'
 import { BotRow } from '../src/ui/botRow';
 import { DeskTable } from '../src/ui/DeskTable';
 import { deskItems, sortItems } from '../src/ui/deskTableModel';
-import { pctShown, qty, qtyFixed } from '../src/ui/fmt';
+import { pctShown, qty, qtyFixed, sameShown } from '../src/ui/fmt';
 import { readFileSync } from 'node:fs';
 import { Bots } from '../src/ui/Bots';
 import { GridDetail } from '../src/ui/GridDetail';
@@ -292,6 +292,14 @@ describe('a percent that rounds to 0.0% reads "—" (display only; sort and APR 
     expect(qty(1.5, 'DAI')).toBe('+1.5 DAI');
     expect(qty(-1.5, 'DAI')).toBe('−1.5 DAI');
     expect(qtyFixed(0, 'DAI', 5, true)).toBe('0.0000 DAI');
+  });
+  it('sameShown: the precision shown, and a printed zero is never the same as a figure', () => {
+    expect(sameShown('+26.415 USDC', '26.4153 USDC')).toBe(true);
+    expect(sameShown('+26.415 USDC', '26.42 USDC')).toBe(true);
+    expect(sameShown('+26.415 USDC', '27 USDC')).toBe(false);
+    // the LP page said "ETH: all of Generated" for a waiting fee of 0.00005 ETH printed as "0 ETH"
+    expect(sameShown('+0.00005 ETH', '0 ETH')).toBe(false);
+    expect(sameShown('0 ETH', '+0.00005 ETH')).toBe(false);
     expect(pctShown(null)).toBe('—');
   });
   it('the Bots row and the Details: "—" for a tiny % (desktop and phone), and the sort still orders by the exact value', () => {
