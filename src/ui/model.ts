@@ -3,6 +3,7 @@ import type { TF } from '../market/candles';
 import type { TrendConfig } from '../market/strategy';
 import { gasReserve, type GasReserveCfg } from '../live/gasReserve';
 import { mk } from './chains';
+import { unitOf } from '../lib/marketKey';
 
 export type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -48,7 +49,8 @@ export const botView = (kind: BotKind, id: string): View => ({ v: kind, id });
 
 /** 'PLS/DAI', 'ETH/USDC' (chain suffix dropped: the chain badge shows it). */
 export const gridName = (g: AnyObj) => String(g.label ?? `PLS/${g.stable}`).replace(/·.*/, '');
-export const quoteSym = (b: AnyObj) => b.quoteSym ?? b.stable ?? b.quote;
+/** The bot's quote coin symbol; a market key ('robinhood:ETH/USDG') is never shown as a unit (src/lib/marketKey.ts). */
+export const quoteSym = (b: AnyObj) => unitOf(b.quoteSym) ?? unitOf(b.stable) ?? unitOf(b.quote) ?? b.quoteSym ?? b.stable ?? b.quote;
 
 export function rangeState(g: AnyObj): 'in' | 'below' | 'above' | null {
   if (!g.config || g.price == null) return null;

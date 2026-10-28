@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { FetchRequest, JsonRpcProvider, Wallet } from 'ethers';
 import { getNetwork, type NetworkKey } from '../live/networks';
 import { REDACT_FLOOR, registerSecret } from './bot/logger';
+import { isQuoteKey } from './bridge/http';
 import { ownerLoginFrom, parsePassHash, type OwnerConfig } from './friends/owner';
 import { vapidSubjectFrom } from './push/send';
 
@@ -77,6 +78,8 @@ export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boole
  */
 type BridgeName = 'across' | 'relay' | 'lifi';
 let bridgeKeys: Record<BridgeName, string | null> = { across: null, relay: null, lifi: null };
+/** 4 lowercase hex characters, no 0x. Null when attribution is off or the value was refused. */
+let integratorId: string | null = null;
 /** Names only. A refused key is not stored here, and the value is never in this list. */
 let shortQuoteWarnings: string[] = [];
 
@@ -90,7 +93,7 @@ function takeOne(name: 'ACROSS_API_KEY' | 'RELAY_API_KEY' | 'LIFI_API_KEY'): str
   delete process.env[name];
   if (!raw || !raw.trim()) return null;
   const v = raw.trim();
-  if (v.length < REDACT_FLOOR) {
+  if (!isQuoteKey(v)) {
     shortQuoteWarnings.push(`${name} was refused`);
     return null;
   }
@@ -118,7 +121,26 @@ export function bridgeQuoteRequest(provider: BridgeName, url: string, init: { he
 export function takeBridgeKeys(): BridgeConfigured {
   shortQuoteWarnings = [];
   bridgeKeys = { across: takeOne('ACROSS_API_KEY'), relay: takeOne('RELAY_API_KEY'), lifi: takeOne('LIFI_API_KEY') };
+  integratorId = takeIntegratorId();
   return bridgeConfigured();
+}
+
+/** Across integrator id for the quote clients. Absent when unset. */
+export function acrossIntegratorId(): string | undefined {
+  return integratorId ?? undefined;
+}
+
+function takeIntegratorId(): string | null {
+  const raw = process.env.ACROSS_INTEGRATOR_ID;
+  delete process.env.ACROSS_INTEGRATOR_ID;
+  if (!raw || !raw.trim()) return null;
+  const trimmed = raw.trim();
+  const hex = trimmed.replace(/^0x/i, '');
+  if (!/^[0-9a-fA-F]{4}$/.test(hex) || (trimmed !== hex && !/^0x/i.test(trimmed))) {
+    shortQuoteWarnings.push('ACROSS_INTEGRATOR_ID was refused');
+    return null;
+  }
+  return hex.toLowerCase();
 }
 
 /** Whether a quote key was accepted. A refused key is false. The value is not in this object. */

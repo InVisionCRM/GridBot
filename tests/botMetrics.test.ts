@@ -218,16 +218,17 @@ describe('every surface shows the server figure', () => {
   });
 });
 
-describe('rates: linear, capped at 365/7 × the history', () => {
-  it('a 2.65-day-old bot gets per-day and per-week units but a dash and a hint for the year and APR', () => {
+describe("rates (Kyle's rule): Generated ÷ age in days × 1 / 7 / 30 / 365 per token, null under a day", () => {
+  it('a 2.65-day-old bot has every window, the year and APR included', () => {
     const x = m('lp-eth');
     const days = (now - lpLive.startedAt) / DAY_MS;
     expect(x.generatedRate.d1!.ETH).toBeCloseTo(x.generated!.ETH / days, 12);
     expect(x.generatedRate.d7!.USDC).toBeCloseTo((x.generated!.USDC / days) * 7, 9);
-    expect(x.generatedRate.d365).toBeNull();
-    expect(x.est.d365).toBeNull();
-    expect(x.aprPct).toBeNull();
-    expect(x.est.needs).toEqual({ d1: null, d7: null, d30: null, d365: 'needs 7d of history' });
+    expect(x.generatedRate.d30!.USDC).toBeCloseTo((x.generated!.USDC / days) * 30, 9);
+    expect(x.generatedRate.d365!.USDC).toBeCloseTo((x.generated!.USDC / days) * 365, 9);
+    expect(x.est.d365).toBeCloseTo((x.generatedUsd! / days) * 365, 6);
+    expect(x.aprPct).not.toBeNull();
+    expect(x.est.needs).toEqual({ d1: null, d7: null, d30: null, d365: null });
   });
 });
 

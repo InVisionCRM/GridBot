@@ -1038,16 +1038,17 @@ describe('live calldata and the guard', () => {
     expect(BRIDGE_CAPTURED_AT).toBe('2026-10-27T23:53:36.000Z');
     const h = harness(undefined, BRIDGE_CAPTURED_AT_MS);
     const cases: Array<{ file: string; provider: 'across' | 'relay' | 'lifi'; leg: Leg; sameAsset: boolean; pass: boolean; error?: RegExp }> = [
-      { file: 'across-usdc-1-4663.json', provider: 'across', leg: LEGS[2], sameAsset: false, pass: true },
-      { file: 'across-usdc-4663-1.json', provider: 'across', leg: LEGS[3], sameAsset: false, pass: true },
-      { file: 'across-weth-1-4663.json', provider: 'across', leg: LEGS[0], sameAsset: false, pass: false, error: /deposit message is not empty|deposit calldata is not decodable/ },
-      { file: 'across-weth-4663-1.json', provider: 'across', leg: LEGS[1], sameAsset: false, pass: false, error: /deposit message is not empty|deposit calldata is not decodable/ },
+      // Live /swap/approval SpokePool.deposit ends in 73c0de. That is not the 1dc0de integrator suffix.
+      { file: 'across-usdc-1-4663.json', provider: 'across', leg: LEGS[2], sameAsset: false, pass: false, error: /deposit calldata is not canonical/ },
+      { file: 'across-usdc-4663-1.json', provider: 'across', leg: LEGS[3], sameAsset: false, pass: false, error: /deposit calldata is not canonical/ },
+      { file: 'across-weth-1-4663.json', provider: 'across', leg: LEGS[0], sameAsset: false, pass: false, error: /deposit calldata is not canonical/ },
+      { file: 'across-weth-4663-1.json', provider: 'across', leg: LEGS[1], sameAsset: false, pass: false, error: /deposit calldata is not canonical/ },
       { file: 'relay-usdc-1-4663.json', provider: 'relay', leg: LEGS[2], sameAsset: false, pass: true },
       { file: 'relay-usdc-4663-1.json', provider: 'relay', leg: LEGS[3], sameAsset: false, pass: true },
-      // Relay's live WETH multicall names the solver as refundTo and nftRecipient, even when the
-      // quote request sends refundTo = sender. Those fields have to be the sender, so this route is rejected.
-      { file: 'relay-weth-1-4663.json', provider: 'relay', leg: LEGS[0], sameAsset: true, pass: false, error: /refund recipient does not match/ },
-      { file: 'relay-weth-4663-1.json', provider: 'relay', leg: LEGS[1], sameAsset: true, pass: false, error: /refund recipient does not match/ },
+      // The live WETH multicall has 32 extra bytes after the ABI encoding, so it is rejected
+      // before the refundTo check. Re-encoding without that word is covered in the Relay guard tests.
+      { file: 'relay-weth-1-4663.json', provider: 'relay', leg: LEGS[0], sameAsset: true, pass: false, error: /deposit calldata is not canonical/ },
+      { file: 'relay-weth-4663-1.json', provider: 'relay', leg: LEGS[1], sameAsset: true, pass: false, error: /deposit calldata is not canonical/ },
       { file: 'lifi-usdc-1-4663.json', provider: 'lifi', leg: LEGS[2], sameAsset: false, pass: true },
       { file: 'lifi-usdc-4663-1.json', provider: 'lifi', leg: LEGS[3], sameAsset: false, pass: true },
       { file: 'lifi-weth-1-4663.json', provider: 'lifi', leg: LEGS[0], sameAsset: true, pass: true },
@@ -1072,8 +1073,6 @@ describe('live calldata and the guard', () => {
       passed.push(row.file);
     }
     expect(passed).toEqual([
-      'across-usdc-1-4663.json',
-      'across-usdc-4663-1.json',
       'relay-usdc-1-4663.json',
       'relay-usdc-4663-1.json',
       'lifi-usdc-1-4663.json',

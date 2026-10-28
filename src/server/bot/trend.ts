@@ -27,6 +27,7 @@ import type { Store } from './store';
 import type { SharedNonce, TxGate } from './txGate';
 import type { Mode, Status } from './engine';
 import { noKey } from '../words';
+import { keySymbols, unitOf } from '../../lib/marketKey';
 
 export type TrendReason = 'entry' | ExitReason;
 
@@ -211,8 +212,9 @@ export class TrendEngine {
   get def(): MarketDef | null { return this.hub.has(this.state.quote) ? this.hub.def(this.state.quote) : null; }
   get chainId(): number { return this.def?.chainId ?? this.d.net.chainId; }
   get label() { return this.hub.label(this.state.quote); }
-  get baseSym() { return this.def?.base.symbol ?? 'PLS'; }
-  get quoteSym() { return this.def?.quote.symbol ?? this.state.quote; }
+  // market not loaded: the symbols in its key, never the key itself (src/lib/marketKey.ts)
+  get baseSym() { return this.def?.base.symbol ?? keySymbols(this.state.quote)?.base ?? 'PLS'; }
+  get quoteSym() { return this.def?.quote.symbol ?? unitOf(this.state.quote) ?? this.state.quote; }
   get signer(): TxSender | null { const m = this.def; return m ? this.hub.rt(m.chainId).signer : this.d.signer; }
   get hasSigner() { return !!this.signer; }
   private get gate() { const m = this.def; return m ? this.hub.rt(m.chainId).gate : this.d.txGate; }

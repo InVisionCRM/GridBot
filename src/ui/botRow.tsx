@@ -4,6 +4,7 @@ import { botApi } from './api';
 import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
 import { botFacts, metricsOf, unitsText } from './deskStats';
+import { isShortRun } from './runRate';
 import type { FeesToday } from '../metrics/feesToday';
 import { cls, dur, pct, px, qty } from './fmt';
 import { ChainMark, TokenMark } from './icons';
@@ -345,7 +346,9 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
             <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
             <span className="desk-fees">{feesEarned == null ? '—' : qty(feesEarned, pair.quote, 4, false)}</span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
-            <span className="desk-apr" title={facts.aprPct == null ? facts.estHint.d365 ?? undefined : m?.calc ?? undefined}>{facts.aprPct == null ? '—' : pct(facts.aprPct, 1, true)}</span>
+            <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'Est. APR shows once the bot has run a day. Until then P&L % is the figure for the run, and Age its length.' : facts.aprPct == null ? facts.estHint.d365 ?? undefined : m?.calc ?? undefined}>{
+              // under a day: no yearly rate, and not the run's % again (it is one column to the left): a dash only (pr-72 MED 1)
+              isShortRun(facts.ageMs) || facts.aprPct == null ? '—' : pct(facts.aprPct, 1, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
           </> : (
             <span className="desk-pnl" title={m?.calc ?? undefined}>

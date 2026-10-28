@@ -10,10 +10,11 @@
  * cleanupErc20sViaCall is not on that list. R11b deposits amountIn and has no value
  * self-call, and it is still rejected. A wei self-call is never treated as an ERC-20 payment.
  *
- * A read-only recapture on 2026-10-28 with refundTo set to the placeholder still named the
- * solver as refundTo and nftRecipient. Those fields have to be the sender, so the unmodified
- * WETH captures are rejected. The control below rewrites only those two fields to the sender
- * and the live four-call sequence then passes.
+ * The unmodified WETH captures carry 32 bytes after the ABI encoding, so they are rejected
+ * as non-canonical before refundTo is read. A read-only recapture on 2026-10-28 with refundTo
+ * set to the placeholder still named the solver as refundTo and nftRecipient. The control
+ * re-encodes the multicall (which drops that tail) and rewrites only those two fields to the
+ * sender. The four-call sequence then passes.
  *
  * These rejections are load-bearing:
  * - "exact approval to an attacker" fails if the Relay spender check is removed.
@@ -34,7 +35,7 @@ import {
   ACROSS_PERIPHERY, ACROSS_SPOKE, RELAY_DEPOSITORY, RELAY_PROXY_V3, RELAY_PROXY_V32, RELAY_ROUTER_V32, decodeDeposit,
 } from '../src/server/bridge/allow';
 import { BRIDGE_CAPTURED_AT_MS } from './fixtures/bridge/captured';
-import { ETH_IN, LEGS, SENDER, USDC_IN, relayQuote, requestOf } from './fixtures/bridgeFixtures';
+import { ETH_IN, LEGS, SENDER, USDC_IN, acrossSwap, relayQuote, requestOf } from './fixtures/bridgeFixtures';
 
 const ATTACKER = getAddress(`0x${'99'.repeat(20)}`);
 const MAX = 2n ** 256n - 1n;
@@ -513,20 +514,21 @@ describe('Relay sequences and hostile approvals', () => {
     await expect(relayQuoteOf(body, LEGS[2])).rejects.toThrow(/approval spender/);
   });
 
-  it('rejects an Across approval whose spender is the spoke while the deposit target differs', async () => {
+  it('rejects an Across approval whose spender is the periphery while the deposit target is the spoke', async () => {
     const h = harness();
-    const body = live('across-usdc-1-4663.json') as { swapTx: { to: string } };
-    body.swapTx.to = ACROSS_PERIPHERY;
+    const body = acrossSwap(LEGS[2]) as { swapTx: { to: string } };
+    body.swapTx.to = ACROSS_SPOKE[1];
     h.queue.push(body);
-    const req = { ...requestOf(LEGS[2]), recipient: SENDER, sameAsset: false };
-    await expect(h.clients.across.quote(req)).rejects.toThrow(/approval spender/);
+    await expect(h.clients.across.quote(requestOf(LEGS[2]))).rejects.toThrow(/approval spender/);
     expect(ACROSS_SPOKE[1]).not.toBe(ACROSS_PERIPHERY);
   });
 
   it('rewrites an Across maximum approval to the exact pull', async () => {
     const h = harness();
-    h.queue.push(live('across-usdc-1-4663.json'));
-    const req = { ...requestOf(LEGS[2]), recipient: SENDER, sameAsset: false };
+    const body = acrossSwap(LEGS[2]) as { approvalTxns: Array<{ data: string }> };
+    body.approvalTxns[0].data = APPROVE.encodeFunctionData('approve', [ACROSS_PERIPHERY, MAX]);
+    h.queue.push(body);
+    const req = requestOf(LEGS[2]);
     const quote = await h.clients.across.quote(req);
     const decoded = decodeDeposit('across', quote.deposit.data, req, quote.deposit.to);
     const [spender, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);

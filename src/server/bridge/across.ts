@@ -54,7 +54,7 @@ export class AcrossClient implements BridgeProvider {
     const key = quoteKey(this.id, norm);
     return loadQuote(this.d.cache, this.inflight, key, async () => {
       const quote = norm.sameAsset ? await this.fromSuggestedFees(norm) : await this.fromSwap(norm);
-      assertQuoteMatches(norm, quote, this.d.now());
+      assertQuoteMatches(norm, quote, this.d.now(), this.d.integratorId);
       return quote;
     });
   }
@@ -148,7 +148,10 @@ export class AcrossClient implements BridgeProvider {
       exclusivityDeadline,
       '0x',
     ]).toLowerCase();
-    const deposit: UnsignedTx = { chainId: req.srcChain, to: spoke, data, value: 0n };
+    // Direct depositV3 attributes volume by appending 1dc0de and the raw 2-byte id.
+    // /swap/approval uses the integratorId query parameter instead of this suffix.
+    const attributed = this.d.integratorId ? `${data}1dc0de${this.d.integratorId}` : data;
+    const deposit: UnsignedTx = { chainId: req.srcChain, to: spoke, data: attributed, value: 0n };
     assertDepositTarget(P, req.srcChain, deposit.to);
     const approval = exactApproval(P, encodeApprove(req.tokenIn.address, spoke, req.amountIn, req.srcChain), req.tokenIn.address, req.amountIn, req.amountIn);
     return {
@@ -190,6 +193,7 @@ export class AcrossClient implements BridgeProvider {
       recipient: req.recipient,
       slippage: bpsFraction(req.slippageBps ?? 50),
     });
+    if (this.d.integratorId) params.set('integratorId', `0x${this.d.integratorId}`);
     const body = asObj(await this.get(`/swap/approval?${params}`));
     // Live /swap/approval bodies have no top-level recipient. When one is present it still
     // has to name the requested recipient. The address that is paid is the one in the calldata.
@@ -217,7 +221,7 @@ export class AcrossClient implements BridgeProvider {
     };
     if (gas != null) deposit.gasLimit = gas;
     assertDepositTarget(P, req.srcChain, deposit.to);
-    const decoded = decodeDeposit(P, deposit.data, req, deposit.to);
+    const decoded = decodeDeposit(P, deposit.data, req, deposit.to, this.d.integratorId);
     if (decoded.outputAmount != null && decoded.outputAmount !== amountOut) bad(P, 'amountOut does not match');
     const pull = quotedPull(body, req, decoded.amount, decoded.pullAmount);
     const rawApproval = readApproval(body.approvalTxns, req);

@@ -18,6 +18,7 @@ import { type AnyObj, type Nav } from './model';
 import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
 import { metricsOf, unitsText } from './deskStats';
+import { isShortRun } from './runRate';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -173,8 +174,8 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
 
 /**
  * The bot's pace: Generated so far carried to a day, a week and a month (Generated ÷ age × the days, per coin, in
- * units), straight from the server's metrics (generatedRate). Same min-history rule as every estimate (window ÷ 365/7): a day needs ~28 min, a week ~3.2h,
- * a month ~13.8h; until then a dash and "needs … of history". No client-side extrapolation.
+ * units), straight from the server's metrics (generatedRate). Same rule as every estimate: nothing until the bot is a day old, then
+ * Generated ÷ age × the days; until then a dash and "needs 1 day". No client-side extrapolation.
  */
 /**
  * Figures the LP page already shows elsewhere, left out of the chart's stat table so no number appears twice:
@@ -218,7 +219,10 @@ function lpBreakdown(b: AnyObj): DetailRow[] {
 function GeneratedPace({ b }: { b: AnyObj }) {
   const m = metricsOf(b);
   if (!m || !m.generated) return null;
-  const rows = [['A day', m.generatedRate.d1, m.generatedRate.needs.d1], ['A week', m.generatedRate.d7, m.generatedRate.needs.d7], ['A month', m.generatedRate.d30, m.generatedRate.needs.d30]] as const;
+  const all = [['A day', m.generatedRate.d1, m.generatedRate.needs.d1], ['A week', m.generatedRate.d7, m.generatedRate.needs.d7], ['A month', m.generatedRate.d30, m.generatedRate.needs.d30]] as const;
+  // under a day: no pace scaled up from a few hours (runRate.ts, #72)
+  const short = isShortRun(m.ageSec != null ? m.ageSec * 1000 : null);
+  const rows = short ? all.map(([label]) => [label, null, 'shows after a day'] as const) : all;
   return (
     <div className="card pace" data-testid="generated-pace">
       <div className="card-head">
