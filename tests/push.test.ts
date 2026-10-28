@@ -19,7 +19,8 @@ import { classifyPush } from '../src/server/push/classify';
 import { DIGEST_HOLD_CAP, FillDigester } from '../src/server/push/digest';
 import { LpWatch, type LpSnap } from '../src/server/push/lpWatch';
 import { buildPayload, pushTopic, serializePayload, testPayload, urgencyFor } from '../src/server/push/payload';
-import { PushService } from '../src/server/push/service';
+import { PushService, tryStartPush } from '../src/server/push/service';
+import { dailySummary } from '../src/server/push/summary';
 import { PushStore, pushStoreFile } from '../src/server/push/store';
 import { retryAfterMs, VAPID_SUBJECT, vapidSubjectFrom, type PushTransport } from '../src/server/push/send';
 import { loadOrCreateVapid, vapidFile } from '../src/server/push/vapid';
@@ -586,6 +587,77 @@ describe('vapid subject and saved view', () => {
     expect(normalizeView({ v: 'tools', tab: 'alerts' })).toEqual({ v: 'alerts' });
     expect(normalizeView({ v: 'tools', tab: 'chart' })).toMatchObject({ v: 'tools', tab: 'chart' });
     expect(normalizeView(null)).toBeNull();
+  });
+});
+
+describe('daily summary text', () => {
+  it('separates live and paper generated amounts in token units', () => {
+    const both = dailySummary({
+      chains: [{ id: 369, name: 'PulseChain' }],
+      grids: [
+        { mode: 'live', chainId: 369, quoteSym: 'DAI', pnl: { realized: 1.5 }, stats: { roundTrips: 2 } },
+        { mode: 'paper', chainId: 369, quoteSym: 'DAI', pnl: { realized: 9 }, stats: { roundTrips: 1 } },
+      ],
+      trends: [
+        { mode: 'live', chainId: 369, quoteSym: 'HEX', pnl: { realized: -0.25 }, stats: { count: 1 } },
+      ],
+      lps: [
+        { mode: 'paper', chainId: 369, quote: 'DAI', pnl: { net: 0.5, price: 100 } },
+      ],
+    });
+    expect(both.body.startsWith('Generated')).toBe(true);
+    expect(both.body.indexOf('Generated')).toBeLessThan(both.body.indexOf('Paper'));
+    expect(both.body).toContain('PulseChain +1.5 DAI');
+    expect(both.body).toContain('PulseChain −0.25 HEX');
+    expect(both.body).toContain('PulseChain +9.5 DAI');
+    expect(both.body).not.toContain('100');
+    expect(both.body).not.toMatch(/\$|Realized|Unrealized/);
+
+    const liveOnly = dailySummary({
+      chains: [{ id: 369, name: 'PulseChain' }],
+      grids: [{ mode: 'live', chainId: 369, quoteSym: 'DAI', pnl: { realized: 2 }, stats: { roundTrips: 1 } }],
+    });
+    expect(liveOnly.body).toContain('Generated');
+    expect(liveOnly.body).not.toContain('Paper');
+    expect(liveOnly.body).not.toMatch(/\$|Realized|Unrealized/);
+  });
+});
+
+describe('push init', () => {
+  it('starts the app when push init throws', async () => {
+    const logs: string[] = [];
+    const log = (level: 'info' | 'warn', msg: string) => logs.push(`${level}:${msg}`);
+    const badKey = mkdtempSync(join(tmpdir(), 'gridbot-push-key-'));
+    writeFileSync(join(badKey, 'push-vapid.json'), '{not json');
+    expect(tryStartPush({ dir: badKey, log, transport: { async send() { throw new Error('no send'); } } })).toBeNull();
+
+    const badStore = mkdtempSync(join(tmpdir(), 'gridbot-push-store-'));
+    writeFileSync(join(badStore, 'push.json'), '{');
+    expect(tryStartPush({ dir: badStore, log, transport: { async send() { throw new Error('no send'); } } })).toBeNull();
+    expect(logs.join('\n')).toMatch(/push: off/);
+    expect(logs.join('\n')).not.toMatch(/privateKey|not json/);
+
+    const bot = new MultiBot({ net: NET, reader: new MockChain(1e-5), signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true) });
+    bot.startLoop(60_000);
+    const app = createApp({ bot, net: NET, heartbeatMs: 60_000, statusThrottleMs: 60_000 });
+    const server = http.createServer(app);
+    try {
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+      const port = (server.address() as AddressInfo).port;
+      const get = (path: string) => new Promise<number>((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, path, method: 'GET', headers: { host: `127.0.0.1:${port}` } }, (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      expect(await get('/api/alerts')).toBe(200);
+      expect(await get('/api/push/status')).toBe(404);
+    } finally {
+      bot.stopLoop();
+      server.close();
+    }
   });
 });
 

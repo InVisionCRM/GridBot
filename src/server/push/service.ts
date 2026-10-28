@@ -28,6 +28,22 @@ export interface PushDeps {
 
 const GONE = new Set([404, 410]);
 
+/**
+ * Start lock-screen push, or leave it off. A bad key file, a subscription file that cannot be
+ * read, or any other init throw is logged and swallowed. The caller keeps the server and the bots up.
+ */
+export function tryStartPush(o: PushDeps): PushService | null {
+  try {
+    const svc = new PushService(o);
+    svc.view();
+    return svc;
+  } catch (e) {
+    const msg = e instanceof Error && e.message ? e.message : 'could not start';
+    o.log?.('warn', `push: off (${msg})`);
+    return null;
+  }
+}
+
 export class PushService {
   private readonly now: () => number;
   private readonly store: PushStore;

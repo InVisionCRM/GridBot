@@ -25,7 +25,7 @@ import { FriendsHost } from './friends/host';
 import { GeckoRelay, hostScan, relayFetch } from './friends/relay';
 import { Autopilot, type AutopilotState, type ScanView } from './bot/autopilot';
 import { createTokenTrader, tokenTraderStore } from './market/tokenFeed';
-import { PushService } from './push/service';
+import { tryStartPush } from './push/service';
 import { lpSnapsFromStatus } from './push/lpWatch';
 import { dailySummary } from './push/summary';
 
@@ -122,19 +122,19 @@ const tokenTrader = copy ? undefined : createTokenTrader({
 });
 // Stop all / STOP chain: the token trader and sniper make no new buys there; exits of positions it holds keep running.
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));
-const push = new PushService({
+const push = tryStartPush({
   dir: dataDir,
   subject: cfg.vapidSubject,
   log: (level, msg) => log[level](msg),
   positions: () => { try { return lpSnapsFromStatus(bot.status()); } catch { return []; } },
-  summary: () => { try { return dailySummary(bot.status()); } catch { return { title: 'GridBot · daily summary', body: 'No priced realized profit to report.' }; } },
+  summary: () => { try { return dailySummary(bot.status()); } catch { return { title: 'GridBot · daily summary', body: 'No generated profit to report.' }; } },
 });
-activity.on('activity', (ev) => { void push.onActivity(ev).catch(() => log.warn('push: event was not sent')); });
+if (push) activity.on('activity', (ev) => { void push.onActivity(ev).catch(() => log.warn('push: event was not sent')); });
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
   lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader, copy: !!copy, push,
+  friends, autopilot, tokenTrader, copy: !!copy, ...(push ? { push } : {}),
 });
 if (isProd) {
   app.get('/sw.js', (_req, res) => {
@@ -159,8 +159,10 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   dailyScan?.start();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
-  pushTimer = setInterval(() => { void push.tick().catch(() => log.warn('push: tick failed')); }, 15_000);
-  log.info('Web push ready');
+  if (push) {
+    pushTimer = setInterval(() => { void push.tick().catch(() => log.warn('push: tick failed')); }, 15_000);
+    log.info('Web push ready');
+  }
   if (friends instanceof FriendsHost) {
     for (const rt of hub.runtimes()) if (rt.signer) hostAddresses.push(await rt.signer.getAddress());
     await friends.start().catch((e: Error) => { log.error(e.message); process.exit(1); });

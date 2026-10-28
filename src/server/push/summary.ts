@@ -1,4 +1,7 @@
-/** Daily summary text from a status snapshot. Read-only: it does not start, stop, or resize a bot. */
+/**
+ * Daily summary text from a status snapshot. Read-only: it does not start, stop, or resize a bot.
+ * Live and paper stay apart. Amounts are token units. The P&L word is Generated.
+ */
 
 function asObj(v: unknown): Record<string, unknown> | null {
   return v && typeof v === 'object' ? v as Record<string, unknown> : null;
@@ -12,15 +15,40 @@ function num(v: unknown): number {
 function chainId(v: unknown): number | null {
   return typeof v === 'number' && Number.isInteger(v) ? v : null;
 }
-
-function money(n: number): string {
-  const sign = n < 0 ? '−' : n > 0 ? '+' : '';
-  const a = Math.abs(n);
-  const s = a >= 100 ? a.toLocaleString('en-US', { maximumFractionDigits: 0 }) : a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${sign}$${s}`;
+function symbol(v: unknown): string | null {
+  return typeof v === 'string' && /^[A-Za-z0-9]{1,12}$/.test(v) ? v : null;
 }
 
-/** Realized grid and trend profit, plus liquidity net, in dollars per chain. Cumulative, not "today". */
+/** Token units. No dollar sign. */
+function qty(n: number): string {
+  const sign = n < 0 ? '−' : n > 0 ? '+' : '';
+  const a = Math.abs(n);
+  const digits = a >= 100 ? 2 : 4;
+  const s = a.toLocaleString('en-US', { maximumFractionDigits: digits });
+  return `${sign}${s}`;
+}
+
+interface Row { chain: string; symbol: string; amount: number }
+
+function add(rows: Map<string, Row>, id: number | null, chain: string, sym: string | null, amount: number) {
+  if (id == null || !sym || !Number.isFinite(amount) || amount === 0) return;
+  const key = `${id}:${sym}`;
+  const cur = rows.get(key);
+  if (cur) cur.amount += amount;
+  else rows.set(key, { chain, symbol: sym, amount });
+}
+
+function section(label: string, rows: Map<string, Row>, trips: number): string | null {
+  if (!rows.size) return null;
+  const parts = [...rows.values()].map((r) => `${r.chain} ${qty(r.amount)} ${r.symbol}`);
+  const tripText = trips ? ` ${trips} round trip${trips === 1 ? '' : 's'}.` : '';
+  return `${label} — ${parts.join(' · ')}.${tripText}`;
+}
+
+/**
+ * Live first, then paper labeled Paper. When nothing is paper, the paper line is left out.
+ * Cumulative, not "today".
+ */
 export function dailySummary(status: unknown): { title: string; body: string } {
   const s = asObj(status) ?? {};
   const names = new Map<number, string>();
@@ -28,31 +56,36 @@ export function dailySummary(status: unknown): { title: string; body: string } {
     const id = chainId(c.id);
     if (id != null && typeof c.name === 'string') names.set(id, c.name);
   }
-  const usd = new Map<number, number>();
-  let trips = 0;
-  const add = (id: number | null, amount: number) => {
-    if (id == null || !Number.isFinite(amount) || amount === 0) return;
-    usd.set(id, (usd.get(id) ?? 0) + amount);
+  const live = new Map<string, Row>();
+  const paper = new Map<string, Row>();
+  let liveTrips = 0;
+  let paperTrips = 0;
+  const book = (mode: unknown, id: number | null, sym: string | null, amount: number, trips = 0) => {
+    const chain = id == null ? 'chain' : names.get(id) ?? `chain ${id}`;
+    if (mode === 'paper') {
+      add(paper, id, chain, sym, amount);
+      paperTrips += trips;
+    } else {
+      add(live, id, chain, sym, amount);
+      liveTrips += trips;
+    }
   };
   for (const g of asArr(s.grids)) {
-    const k = g.usdPerQuote;
-    if (typeof k === 'number') add(chainId(g.chainId), num(asObj(g.pnl)?.realized) * k);
-    trips += num(asObj(g.stats)?.roundTrips);
+    const sym = symbol(g.quoteSym) ?? symbol(g.stable);
+    book(g.mode, chainId(g.chainId), sym, num(asObj(g.pnl)?.realized), num(asObj(g.stats)?.roundTrips));
   }
   for (const t of asArr(s.trends)) {
-    const k = t.usdPerQuote;
-    if (typeof k === 'number') add(chainId(t.chainId), num(asObj(t.pnl)?.realized) * k);
-    trips += num(asObj(t.stats)?.count);
+    const sym = symbol(t.quoteSym) ?? symbol(t.quote);
+    book(t.mode, chainId(t.chainId), sym, num(asObj(t.pnl)?.realized), num(asObj(t.stats)?.count));
   }
   for (const lp of asArr(s.lps)) {
-    const k = lp.usdPerQuote;
     const net = asObj(lp.pnl)?.net;
-    if (typeof k === 'number' && typeof net === 'number') add(chainId(lp.chainId), net * k);
+    if (typeof net !== 'number') continue;
+    book(lp.mode, chainId(lp.chainId), symbol(lp.quote), net);
   }
-  const parts = [...usd.entries()].map(([id, n]) => `${names.get(id) ?? `chain ${id}`}: ${money(n)}`);
-  const tripText = trips ? ` ${trips} round trip${trips === 1 ? '' : 's'}.` : '';
-  const body = parts.length
-    ? `Realized so far — ${parts.join(' · ')}.${tripText}`
-    : 'No priced realized profit to report.';
-  return { title: 'GridBot · daily summary', body };
+  const lines = [section('Generated', live, liveTrips), section('Paper', paper, paperTrips)].filter((x): x is string => !!x);
+  return {
+    title: 'GridBot · daily summary',
+    body: lines.length ? lines.join(' ') : 'No generated profit to report.',
+  };
 }

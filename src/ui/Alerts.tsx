@@ -49,7 +49,7 @@ const RULES: { type: PushType; feed: FeedKey | null; title: string; detail: stri
   { type: 'tx_failed', feed: 'errors', mark: 'fail', title: 'Failed transaction', detail: 'Reverts, skipped sells, and a profit send that did not land. The in-tab feed is shared with Bot halted.' },
   { type: 'gas_low', feed: 'gas', mark: 'gas', title: 'Gas low', detail: 'Below that chain’s own threshold.' },
   { type: 'sniper', feed: 'sniper', mark: 'snipe', title: 'Sniper hit', detail: 'A new pool passed checks. Paper or live still follows the token trader; this only notifies.' },
-  { type: 'daily_summary', feed: null, mark: 'day', title: 'Daily summary', detail: 'Realized profit per chain, 21:00 ET. Off until you turn it on.' },
+  { type: 'daily_summary', feed: null, mark: 'day', title: 'Daily summary', detail: 'Generated per chain, in the coin, at 21:00 ET. Paper is labeled. Off until you turn it on.' },
 ];
 
 function Switch({ on, label, disabled, onClick }: { on: boolean; label: string; disabled?: boolean; onClick: () => void }) {
