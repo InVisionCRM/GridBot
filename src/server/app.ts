@@ -387,6 +387,7 @@ export function createApp(o: AppOpts) {
     if (typeof b.enforceSizeImpact === 'boolean') patch.enforceSizeImpact = b.enforceSizeImpact;
     if (b.risk === 'safe' || b.risk === 'medium' || b.risk === 'any') patch.risk = b.risk;
     if (typeof b.v3LpLockCheck === 'boolean') patch.v3LpLockCheck = b.v3LpLockCheck;
+    if (typeof b.lpUnlockCheck === 'boolean') patch.lpUnlockCheck = b.lpUnlockCheck;
     if (typeof b.enforceHolderCheck === 'boolean') patch.enforceHolderCheck = b.enforceHolderCheck;
     if (Array.isArray(b.chains)) patch.chains = b.chains.map(Number);
     if (b.sniper && typeof b.sniper === 'object') patch.sniper = b.sniper;

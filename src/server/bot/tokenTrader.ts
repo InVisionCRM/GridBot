@@ -52,6 +52,11 @@ export interface TraderOptions {
    */
   v3LpLockCheck: boolean;
   /**
+   * Fill lpUnlocked from the pool (V2 burn share, or the V3 position-NFT check).
+   * Off unless set: assess leaves lpUnlocked null and the gate output is unchanged.
+   */
+  lpUnlockCheck: boolean;
+  /**
    * Read holder concentration and let the gate use it. Default off: assess still passes unknown concentration,
    * and the gate output matches a build that does not know about this flag.
    */
@@ -150,6 +155,7 @@ export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
   v3LpLockCheck: false,
+  lpUnlockCheck: false,
   enforceHolderCheck: false, maxHolderShare: DEFAULT_MAX_HOLDER_SHARE, maxTop10Share: DEFAULT_MAX_TOP10_SHARE,
   minHolderCoverage: DEFAULT_MIN_HOLDER_COVERAGE,
   enforceSizeImpact: false, sizeImpactCap: DEFAULT_SIZE_IMPACT_CAP,
@@ -160,7 +166,10 @@ const fresh = (): TraderState => ({ version: 1, on: false, options: structuredCl
 
 export class TokenTrader {
   private state: TraderState;
-  private busy = false;
+  /** Held only while exits run, so a buy-path LP check cannot block the next stop. */
+  private exitBusy = false;
+  /** In-flight buy path (snipes and the entry scan). The next tick still runs exits. */
+  private entryTask: Promise<void> | null = null;
   /** Spend coin of a live buy that has started and not yet landed or failed. Not persisted. */
   private pendingBuy: { chainId: number; address: string; amount: number } | null = null;
   lastError: string | null = null;
@@ -273,6 +282,7 @@ export class TokenTrader {
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
     const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
     if ('v3LpLockCheck' in o) n.v3LpLockCheck = o.v3LpLockCheck === true;
+    if ('lpUnlockCheck' in o) n.lpUnlockCheck = o.lpUnlockCheck === true;
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
@@ -348,18 +358,37 @@ export class TokenTrader {
   }
 
   async tick() {
-    if (this.busy || !this.state.on) return;
-    this.busy = true;
+    if (!this.state.on || this.exitBusy) return;
+    this.exitBusy = true;
+    let exitsOk = true;
+    try {
+      await this.exits();
+      this.lastError = null;
+    } catch (e) {
+      this.lastError = (e as Error).message;
+      exitsOk = false;
+    } finally {
+      this.save();
+      this.exitBusy = false;
+    }
+    // Buys, including LP checks, never share this lock. A tick that arrives while they run still exits.
+    if (!exitsOk || this.entryTask) return;
+    let task!: Promise<void>;
+    task = this.runEntries().finally(() => { if (this.entryTask === task) this.entryTask = null; });
+    this.entryTask = task;
+    await task;
+  }
+
+  /** Snipes and the entry scan. LP reads happen in here, on the buy path only. */
+  private async runEntries() {
     try {
       await this.takeSnipes();
-      await this.exits();
       await this.scanEntries();
       this.lastError = null;
     } catch (e) {
       this.lastError = (e as Error).message;
     } finally {
       this.save();
-      this.busy = false;
     }
   }
 
@@ -509,7 +538,21 @@ export class TokenTrader {
     const pools = await this.d.discover();
     const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: 0 });
     for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
-    for (const p of keep) await this.consider(p, 'scan');
+    const eligible: FreshPool[] = [];
+    for (const p of keep) {
+      const label = `${p.tokenSymbol}/${p.spendSymbol}`;
+      if (!this.wantChain(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'chain is off' }); continue; }
+      if (p.kind === 'v4') { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); continue; }
+      if (this.entriesStopped(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); continue; }
+      eligible.push(p);
+    }
+    // Safety reads, including LP checks, overlap. Each check has its own timeout, so one pool cannot stall the rest.
+    const checked = await Promise.all(eligible.map(async (p) => ({ p, a: await this.assess(p) })));
+    for (const { p, a } of checked) {
+      const label = `${p.tokenSymbol}/${p.spendSymbol}`;
+      if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); continue; }
+      await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn);
+    }
   }
 
   private hourRoom() {
