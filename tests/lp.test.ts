@@ -33,7 +33,7 @@ describe('DEX registry: every DEX the scan reads has a verified LP fee share', (
     const shares = Object.fromEntries(CHAINS.flatMap((c) => c.dexes.map((d) => [`${c.key}:${d.id}`, d.kind === 'v2' ? d.lpShare ?? null : d.protocolFee ?? null])));
     expect(shares).toEqual({
       'pulsechain:pulsex-v2': 22 / 29, 'pulsechain:pulsex-v1': 0, 'pulsechain:9mm-v2': null, 'pulsechain:9mm-v3': 'pancake',
-      'robinhood:uniswap-v3': 'uniswap', 'robinhood:uniswap-v2': 5 / 6, 'robinhood:pancakeswap-v3': 'pancake',
+      'robinhood:uniswap-v3': 'uniswap', 'robinhood:uniswap-v2': 5 / 6, 'robinhood:pancakeswap-v3': 'pancake', 'robinhood:uniswap-v4': null,
       'ethereum:uniswap-v3': 'uniswap', 'ethereum:uniswap-v2': 5 / 6,
     });
   });

@@ -283,7 +283,7 @@ export class DailyScanner {
       else o.gridWhy = `no grid earned from its trades this week (price ${pct(movePct)})`;
     }
     if (d.pool.kind !== 'v3' || !c.lpDexes.includes(d.pool.dex)) {
-      o.lpWhy = d.pool.kind === 'v3' ? "A liquidity bot can't open positions on this DEX yet (no verified position manager)." : 'A liquidity bot needs a V3 pool; this one is V2.';
+      o.lpWhy = d.pool.kind === 'v3' ? "A liquidity bot can't open positions on this DEX yet (no verified position manager)." : d.pool.kind === 'v4' ? 'A liquidity bot needs a V3 pool; this one is V4.' : 'A liquidity bot needs a V3 pool; this one is V2.';
       return o;
     }
     let candles = week;
