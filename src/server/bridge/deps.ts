@@ -12,4 +12,6 @@ export interface BridgeDeps {
   secrets: readonly string[];
   log?: BridgeLog;
   key?: string;
+  /** Across integrator id, 4 lowercase hex characters, no 0x prefix. */
+  integratorId?: string;
 }

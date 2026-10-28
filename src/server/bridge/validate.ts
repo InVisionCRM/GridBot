@@ -24,7 +24,7 @@ function txOk(provider: string, tx: UnsignedTx, label: string, chainId: number) 
  * Reject a quote that does not describe the request: wrong chain, token, or recipient,
  * a same-asset output above the 1 bp tolerance, a minOut above amountOut, or a required hole.
  */
-export function assertQuoteMatches(req: BridgeQuoteRequest, quote: BridgeQuote, nowMs: number) {
+export function assertQuoteMatches(req: BridgeQuoteRequest, quote: BridgeQuote, nowMs: number, integratorId?: string) {
   const p = quote.provider;
   if (p !== 'across' && p !== 'relay' && p !== 'lifi') bad('bridge', 'provider is missing');
   if ((p === 'lifi') !== quote.discoveryOnly) bad(p, 'discovery flag does not match the provider');
@@ -67,5 +67,5 @@ export function assertQuoteMatches(req: BridgeQuoteRequest, quote: BridgeQuote, 
       throw new BridgeError(p, 'invalid', `${p}: approval is not an ERC-20 approve`);
     }
   }
-  assertGuarded(p, req, quote.deposit, quote.approval);
+  assertGuarded(p, req, quote.deposit, quote.approval, integratorId);
 }
