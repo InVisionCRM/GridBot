@@ -11,6 +11,7 @@ type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-
 export interface MarketInfo {
   key: string; label: string; chainId: number; base: string; quote: string; quoteKind: string; dex: string; kind: 'v2' | 'v3';
   feeBps: number; feeTier: number | null; pool: string | null; legacy: boolean; custom: boolean; risk: string | null; riskWhy?: string | null;
+  safetyAt?: number | null; safetyStale?: { since: number; lastTry: number; why: string } | null;
   liveAllowed: boolean; tradable: boolean; spot: number | null; usdPerQuote: number | null;
   buyTaxPct?: number | null; sellTaxPct?: number | null; transferTaxPct?: number | null; taxMode?: string | null;
   dexName?: string; poolMode?: 'default' | 'auto' | 'manual';
@@ -26,7 +27,16 @@ export interface ChainInfo {
   nativeSymbol: string; explorer: string; hasSigner: boolean; address: string | null; gasNative: number | null; lowGas: boolean;
   lowGasNative: number; nativeUsd: number | null; walletError: string | null; txBusy: boolean; rpc: string | null; bots: number;
   dexes: { id: string; name: string; kind: string }[];
+  /** Per-chain RPC health (server: FallbackReader.health) */
+  rpcHealth?: RpcHealth | null;
 }
+export interface RpcHealth {
+  state: 'ok' | 'degraded' | 'down'; failingSince: number | null; lastFailAt: number | null; lastOkAt: number | null;
+  failures: number; lastError: string | null; alerted: boolean; current: string; switches: number;
+  endpoints: { url: string; ok: boolean; failsInRow: number; lastError: string | null; lastOkAt: number | null; lastFailAt: number | null; coolUntil: number | null }[];
+}
+/** Chains whose RPCs have kept failing long enough to alert (the server decides; see RPC_ALERT_MINUTES). */
+export const rpcAlerts = (s: AnyObj): ChainInfo[] => chains(s).filter((c) => c.rpcHealth?.alerted);
 
 /** 'all' or a chain id */
 export type ChainFilter = 'all' | number;
@@ -129,6 +139,9 @@ export function ChainBar({ s, busy, onStop }: { s: AnyObj; busy: boolean; onStop
                 {c.tradable ? (c.hasSigner ? <>{nf(c.gasNative, c.gasNative != null && c.gasNative < 1 ? 5 : 1)} {c.nativeSymbol}</> : <span className="muted">paper</span>) : <span className="muted">unavailable</span>}
               </span>
               {c.lowGas && <span className="neg small" title={gasTitle}>⚠ gas</span>}
+              {c.rpcHealth && c.rpcHealth.state !== 'ok' && (
+                <span className={c.rpcHealth.state === 'down' ? 'neg small' : 'muted small'} title={`${c.name} RPC ${c.rpcHealth.state}${c.rpcHealth.lastError ? `: ${c.rpcHealth.lastError}` : ''}`}>⚠ rpc</span>
+              )}
               {c.txBusy && <span className="busy-pill">tx</span>}
               {c.bots ? <span className="muted small">{c.bots}</span> : null}
             </button>

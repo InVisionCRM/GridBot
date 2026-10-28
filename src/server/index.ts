@@ -1,17 +1,19 @@
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MultiBot, type MultiState } from './bot/multi';
+import { MultiBot, multiUrgentKey, type MultiState } from './bot/multi';
 import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
+import { DurableJsonStore } from './bot/durableStore';
 import { ActivityBus } from './bot/activity';
-import { createSigners, loadEnv, readCopy, readSettings, takeFriendsSecret, takeHostAuth } from './env';
+import { createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, shortQuoteKeyWarnings, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
+import { Router, type RouterFile } from './router/router';
 import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
 import { CandleSync, geckoBackfill, onchainBackfill } from './market/backfill';
 import { VersionCheck } from './system/version';
-import { DailyScanner, scanDepsFromHub, type ScanFile } from './market/scanner';
+import { DailyScanner, localScan, scanDepsFromHub, type ScanFile } from './market/scanner';
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
@@ -28,26 +30,32 @@ import { createTokenTrader, tokenTraderStore } from './market/tokenFeed';
 loadEnv();
 const friendsSecret = takeFriendsSecret();
 const hostAuth = takeHostAuth();
+// Before anything copies process.env (a friend's copy must not inherit quote keys).
+const bridgeKeyStatus = takeBridgeKeys();
 const cfg = readSettings();
 const isProd = process.env.NODE_ENV === 'production';
 const log = new Logger();
+for (const msg of shortQuoteKeyWarnings()) log.warn(msg);
 // A friend's copy (started by the host app, friends/copies.ts) shares the host's candles budget and daily scan.
 const copy = readCopy();
 
 // Every configured chain gets a fallback RPC reader; signers come from PRIVATE_KEY / PRIVATE_KEY_<SLUG> (env.ts only).
 const dataDir = path.dirname(cfg.stateFile);
 log.attach(path.join(dataDir, 'server.log'));
+// A friend's copy gets its key from the host over IPC (never through its environment).
+const friendKey = copy ? await receiveFriendKey() : undefined;
 const { hub, readers } = buildHub({
-  net: cfg.net, env: process.env, signerFactory: createSigners,
+  net: cfg.net, env: process.env, signerFactory: (chains) => (copy ? createSigners(chains, { friendKey }) : createSigners(chains)),
   custom: new JsonStore<CustomFile>(path.join(dataDir, 'custom.json')),
 });
 const legacyReader = readers.get(cfg.net.chainId)!;
 const activity = new ActivityBus(400, Date.now, path.join(dataDir, 'activity.log'));
 const candles = new CandleStore(path.join(dataDir, 'candles'), 5000);
 const bot = new MultiBot({
-  net: cfg.net, reader: legacyReader, signer: hub.rt(cfg.net.chainId).signer, store: new JsonStore<MultiState>(cfg.stateFile), log,
+  net: cfg.net, reader: legacyReader, signer: hub.rt(cfg.net.chainId).signer, store: new DurableJsonStore<MultiState>(cfg.stateFile, { urgentKey: multiUrgentKey, onError: (e) => log.warn(`state.json: ${e.message}`) }), log,
   approval: cfg.approval, maxRetries: cfg.maxRetries, retryDelayMs: cfg.retryDelayMs, candles, activity, hub,
   copy: copy && { friend: copy.friend, host: copy.host },
+  rpcAlertAfterMs: Number(process.env.RPC_ALERT_MINUTES) > 0 ? Number(process.env.RPC_ALERT_MINUTES) * 60_000 : undefined,
 });
 const gecko = new GeckoSource(copy ? relayFetch(copy.hostUrl) : undefined);
 const sync: CandleSync = new CandleSync(gecko, () => hub.candleSources(), candles, {
@@ -88,7 +96,8 @@ const backfill = async (pair: string, source: 'gecko' | 'onchain', days: number)
 const dailyScan: DailyScanner | undefined = !copy && sync.enabled ? new DailyScanner(scanDepsFromHub(hub, candles, {
   gecko, store: new JsonStore<ScanFile>(path.join(dataDir, 'picks.json')), approval: cfg.approval, emit: activity.emitEvent,
 })) : undefined;
-const scanner = copy ? hostScan(copy.hostUrl, copy.host) : dailyScan;
+const scanSource = copy ? hostScan(copy.hostUrl, copy.host) : dailyScan;
+const scanner = scanSource ? localScan(hub, scanSource) : undefined;
 
 const version = copy ? null : await VersionCheck.start(process.cwd(), process.env.NODE_ENV !== 'production');
 const entry = fileURLToPath(import.meta.url);
@@ -117,11 +126,21 @@ const tokenTrader = copy ? undefined : createTokenTrader({
 });
 // Stop all / STOP chain: the token trader and sniper make no new buys there; exits of positions it holds keep running.
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));
+// ROUTER HOOK: host only (a friend's copy has readCopy() set). Stop all calls router.halt.
+const router = new Router({
+  store: new JsonStore<RouterFile>(path.join(dataDir, 'router.json')),
+  host: copy == null,
+  configured: bridgeKeyStatus,
+  chainIds: hub.runtimes().map((r) => r.cfg.id),
+  emit: activity.emitEvent,
+  log,
+});
+bot.routerHalt = (halt) => router.halt(halt);
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
   lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader, copy: !!copy,
+  friends, autopilot, tokenTrader, router, copy: !!copy,
 });
 if (isProd) {
   app.use(express.static(clientDir));
@@ -139,6 +158,8 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   bot.startLoop(cfg.pollMs);
   sync.start();
   dailyScan?.start();
+  // A first check at once: its prices and unconfirmed swaps are read now, not a minute after a restart
+  void autopilot.tick();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
   if (friends instanceof FriendsHost) {
@@ -160,6 +181,7 @@ const shutdown = () => {
   if (autopilotTimer) clearInterval(autopilotTimer);
   if (tokenTimer) clearInterval(tokenTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
+  try { bot.flush(); } catch { /* logged by the store */ }
   if (friends instanceof FriendsHost) friends.stop();
   process.exit(0);
 };

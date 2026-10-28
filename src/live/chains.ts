@@ -23,8 +23,13 @@ export interface DexConfig {
   quoter?: string;
   /** V2 only: LP fee in bps (verified against getAmountsOut). */
   feeBps?: number;
-  /** V3 only: fee tiers in hundredths of a bip (100 = 0.01 %). */
+  /** V3 only: fee tiers in hundredths of a bip (100 = 0.01 %). Used to find pools; a pool's own fee() is its fee. */
   feeTiers?: number[];
+  /**
+   * V3 only: pools can change fee() between blocks (Aerodrome Slipstream style). Quotes read fee() every time instead
+   * of using the tier the pool was found at. No DEX configured today sets it (Uniswap/PancakeSwap/9mm fees are fixed).
+   */
+  dynamicFee?: boolean;
   source: string;
   note?: string;
   /** GeckoTerminal DEX id on this chain (verified 2026-10-17 against /networks/{slug}/dexes and a known pool) */
@@ -220,7 +225,9 @@ export const CHAINS: ChainConfig[] = [
       { symbol: 'USDT', name: 'Tether USD', address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6, kind: 'stable' },
       { symbol: 'DAI', name: 'Dai Stablecoin', address: '0x6B175474E89094C44Da98b954EedeAC495271d0F', decimals: 18, kind: 'stable' },
     ],
-    rpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org', 'https://cloudflare-eth.com'],
+    // cloudflare-eth.com was dropped 2026-10-27: it answers eth_call / eth_getBalance / eth_blockNumber with JSON-RPC
+    // errors (-32603 "Internal error", -32046 "Cannot fulfill request"); only eth_chainId still works.
+    rpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org', 'https://eth-mainnet.public.blastapi.io'],
     explorer: 'https://etherscan.io', geckoSlug: 'eth', screener: 'ethereum', status: 'live', trading: { enabled: true },
     // lists a wallet's ERC-20s; an empty list for a wallet holding none (checked 2026-10-22)
     tokenApi: 'https://eth.blockscout.com/api/v2',
