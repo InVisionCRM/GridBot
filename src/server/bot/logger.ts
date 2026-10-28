@@ -23,8 +23,40 @@ export function registerSecret(s: string, minLength = 16) {
   const alt = v.startsWith('0x') ? v.slice(2) : `0x${v}`;
   if (alt.length >= 16 && !secrets.includes(alt)) secrets.push(alt);
 }
+/** Origins (scheme://host[:port]) of RPC URLs that carry a key in their path, query or userinfo, and how to show them. */
+const keyedUrls: { key: string; shown: string; re: RegExp }[] = [];
+/**
+ * After a keyed origin, anything up to a space, quote or backslash is the URL's path, query or fragment. It is cut,
+ * even when a message was truncated in the middle of the key (then the key is not whole and no secret matches it).
+ */
+const REST = String.raw`[^\s"'<>\\]*`;
+/** user:password@ in any URL. */
+const USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@"'<>]+@/gi;
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function addUrlRule(key: string, re: RegExp, shown: string) {
+  if (keyedUrls.some((x) => x.key === key)) return;
+  keyedUrls.push({ key, shown, re });
+}
+/** Register the origin of a keyed RPC URL. From then on every log line shows that URL as its origin only. */
+export function registerUrlOrigin(origin: string) {
+  const o = origin.trim().replace(/\/+$/, '').toLowerCase();
+  if (!/^[a-z][a-z0-9+.-]*:\/\/[^\s/?#@]+$/.test(o)) return;
+  addUrlRule(`o ${o}`, new RegExp(`${esc(o)}(?![a-z0-9.:-])(?:[/?#]${REST})?`, 'gi'), o);
+}
+/**
+ * Register the start of a keyed URL with userinfo (scheme://user: or scheme://user@). Everything after it, up to a
+ * space or quote, is shown as `shown` (the origin), even when the message was cut inside the password.
+ */
+export function registerUrlPrefix(prefix: string, shown: string) {
+  const p = prefix.trim();
+  if (!/^[a-z][a-z0-9+.-]*:\/\/[^\s/?#]*[:@]$/i.test(p)) return;
+  addUrlRule(`p ${p}`, new RegExp(`${esc(p)}${REST}`, 'gi'), shown);
+}
 export function redact(msg: string): string {
   let out = msg;
+  for (const u of keyedUrls) if (u.key.startsWith('p ')) out = out.replace(u.re, u.shown);
+  out = out.replace(USERINFO, '$1');
+  for (const u of keyedUrls) if (u.key.startsWith('o ')) out = out.replace(u.re, u.shown);
   for (const s of secrets) out = out.split(s).join('[REDACTED]');
   return out;
 }

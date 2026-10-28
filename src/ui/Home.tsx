@@ -13,6 +13,7 @@ import type { Opportunity } from '../market/scan';
 import { isSafe, tryIt, useOpportunities, wayOf } from './Opportunities';
 import { bookUsd, equitySpan, portfolioSeries, seriesChange, type DeskRange } from './series';
 import type { AnyObj, Nav } from './model';
+import { SafetyChecking } from './SafetyChecking';
 
 const GEN_CALC = 'Generated: what your live bots made, net of costs, per coin (liquidity fees after gas, swap fees and range-move losses; grid and trend round-trip profit after fees and gas). Paper bots are shown under it, never added in. Price moves on coins held are not in it; they are in P&L (live bots, per quote coin).';
 const FEES_TODAY_CALC = 'Fees your live liquidity bots earned since local midnight (collected + still in the position), per quote coin, worked out on the server. Paper bots and pool fees grid/trend trades paid are shown under it, never added in.';
@@ -59,7 +60,7 @@ function botsByToken(bots: AnyObj[]): { sym: string; amount: number }[] {
 
 export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings: HoldingsSnapshot | null; act: (fn: () => Promise<unknown>) => void }) {
   const { chain } = useChainFilter();
-  const { err, pause, close } = useRowActions();
+  const { err, pause, close, checking } = useRowActions();
   const [range, setRange] = useState<DeskRange>('1D');
   const bots = listBots(s, chain).sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
   const running = bots.filter((b) => b.status === 'running').length;
@@ -189,6 +190,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
         </div>
       </section>
 
+      {checking && <SafetyChecking what="Checking safety before resuming…" />}
       {err && <p className="note bad">{err}</p>}
       <section className="desk" aria-label="Bots">
         {!!bots.length && (

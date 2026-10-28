@@ -62,7 +62,8 @@ describe('no dollar formatting in server-side strings', () => {
         const rel = f.slice(ROOT.length);
         if (INTERNAL.has(rel)) continue;
         readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
-          const code = line.replace(/\/\/.*$/, '').replace(/\/\*.*?\*\//g, '');
+          // a bare '$1' literal is a regex replacement back-reference, not money
+          const code = line.replace(/\/\/.*$/, '').replace(/\/\*.*?\*\//g, '').replace(/(['"`])\$\d\1/g, '');
           if (/^\s*\*/.test(line)) return;
           if (DOLLAR.test(code)) hits.push(`${rel}:${i + 1}: ${code.trim().slice(0, 140)}`);
         });

@@ -1,0 +1,341 @@
+{
+  "requestId": "0x17931452632fd30be4c2ceb2492b526882e497855da708db7ca9fc24cb10c9fc",
+  "steps": [
+    {
+      "id": "approve",
+      "action": "Confirm transaction in your wallet",
+      "description": "Sign an approval for USDC",
+      "kind": "transaction",
+      "items": [
+        {
+          "status": "incomplete",
+          "data": {
+            "from": "0x1111111111111111111111111111111111111111",
+            "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "data": "0x095ea7b30000000000000000000000004cd00e387622c35bddb9b4c962c136462338bc310000000000000000000000000000000000000000000000000000000000989680",
+            "value": "0",
+            "chainId": 1,
+            "gas": "73269",
+            "maxFeePerGas": "59343600",
+            "maxPriorityFeePerGas": "5628508"
+          }
+        }
+      ],
+      "requestId": "0x17931452632fd30be4c2ceb2492b526882e497855da708db7ca9fc24cb10c9fc"
+    },
+    {
+      "id": "deposit",
+      "action": "Confirm transaction in your wallet",
+      "description": "Depositing funds to the relayer to execute the swap for USDG",
+      "kind": "transaction",
+      "items": [
+        {
+          "status": "incomplete",
+          "data": {
+            "from": "0x1111111111111111111111111111111111111111",
+            "to": "0x4cd00e387622c35bddb9b4c962c136462338bc31",
+            "data": "0xe80179520000000000000000000000001111111111111111111111111111111111111111000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000000000000000000000000000000000000000000000000000000989680bbbf9419b614987115a9897ae22c41017c1ab2f459a2a17252ff10a9c2670099",
+            "value": "0",
+            "chainId": 1,
+            "gas": "76352",
+            "maxFeePerGas": "59343600",
+            "maxPriorityFeePerGas": "5628508"
+          },
+          "check": {
+            "endpoint": "/intents/status?requestId=0x17931452632fd30be4c2ceb2492b526882e497855da708db7ca9fc24cb10c9fc",
+            "method": "GET"
+          }
+        }
+      ],
+      "requestId": "0x17931452632fd30be4c2ceb2492b526882e497855da708db7ca9fc24cb10c9fc",
+      "depositAddress": ""
+    }
+  ],
+  "fees": {
+    "gas": {
+      "currency": {
+        "chainId": 1,
+        "address": "0x0000000000000000000000000000000000000000",
+        "symbol": "ETH",
+        "name": "Ether",
+        "decimals": 18
+      },
+      "amount": "4531002547200",
+      "amountFormatted": "0.0000045310025472",
+      "amountUsd": "0.010634",
+      "minimumAmount": "4531002547200"
+    },
+    "relayer": {
+      "currency": {
+        "chainId": 1,
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6
+      },
+      "amount": "26439",
+      "amountFormatted": "0.026439",
+      "amountUsd": "0.026431",
+      "minimumAmount": "26439"
+    },
+    "relayerGas": {
+      "currency": {
+        "chainId": 1,
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6
+      },
+      "amount": "4436",
+      "amountFormatted": "0.004436",
+      "amountUsd": "0.004435",
+      "minimumAmount": "4436"
+    },
+    "relayerService": {
+      "currency": {
+        "chainId": 1,
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6
+      },
+      "amount": "22003",
+      "amountFormatted": "0.022003",
+      "amountUsd": "0.021997",
+      "minimumAmount": "22003"
+    },
+    "app": {
+      "currency": {
+        "chainId": 1,
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6
+      },
+      "amount": "0",
+      "amountFormatted": "0.0",
+      "amountUsd": "0",
+      "minimumAmount": "0"
+    },
+    "subsidized": {
+      "currency": {
+        "chainId": 1,
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6
+      },
+      "amount": "0",
+      "amountFormatted": "0.0",
+      "amountUsd": "0",
+      "minimumAmount": "0"
+    }
+  },
+  "details": {
+    "operation": "swap",
+    "sender": "0x1111111111111111111111111111111111111111",
+    "recipient": "0x1111111111111111111111111111111111111111",
+    "currencyIn": {
+      "currency": {
+        "chainId": 1,
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6
+      },
+      "amount": "10000000",
+      "amountFormatted": "10.0",
+      "amountUsd": "9.997080",
+      "minimumAmount": "10000000"
+    },
+    "currencyOut": {
+      "currency": {
+        "chainId": 4663,
+        "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+        "symbol": "USDG",
+        "name": "Global Dollar",
+        "decimals": 6
+      },
+      "amount": "9971931",
+      "amountFormatted": "9.971931",
+      "amountUsd": "9.969418",
+      "minimumAmount": "9922072"
+    },
+    "refundCurrency": {
+      "currency": {
+        "chainId": 1,
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6
+      },
+      "amount": "10000000",
+      "amountFormatted": "10.0",
+      "amountUsd": "9.997080",
+      "minimumAmount": "10000000"
+    },
+    "totalImpact": {
+      "usd": "-0.027662",
+      "percent": "-0.28"
+    },
+    "swapImpact": {
+      "usd": "-0.001231",
+      "percent": "-0.01"
+    },
+    "expandedPriceImpact": {
+      "swap": {
+        "usd": "-0.002230"
+      },
+      "execution": {
+        "usd": "-0.024434"
+      },
+      "relay": {
+        "usd": "-0.000999"
+      },
+      "app": {
+        "usd": "0"
+      },
+      "sponsored": {
+        "usd": "0"
+      }
+    },
+    "rate": "0.9971930999999999",
+    "slippageTolerance": {
+      "total": "50",
+      "origin": {
+        "usd": "0.000000",
+        "value": "0",
+        "percent": "0.00"
+      },
+      "destination": {
+        "usd": "0.048850",
+        "value": "49859",
+        "percent": "0.49"
+      }
+    },
+    "timeEstimate": 1,
+    "userBalance": "0",
+    "isFixedRate": false,
+    "route": {
+      "origin": {
+        "inputCurrency": {
+          "currency": {
+            "chainId": 1,
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "symbol": "USDC",
+            "name": "USD Coin",
+            "decimals": 6
+          },
+          "amount": "10000000",
+          "amountFormatted": "10.0",
+          "amountUsd": "9.997080",
+          "minimumAmount": "10000000"
+        },
+        "outputCurrency": {
+          "currency": {
+            "chainId": 1,
+            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "symbol": "USDC",
+            "name": "USD Coin",
+            "decimals": 6
+          },
+          "amount": "10000000",
+          "amountFormatted": "10.0",
+          "amountUsd": "9.997080",
+          "minimumAmount": "10000000"
+        },
+        "router": "relay"
+      },
+      "destination": {
+        "inputCurrency": {
+          "currency": {
+            "chainId": 4663,
+            "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+            "symbol": "USDG",
+            "name": "Global Dollar",
+            "decimals": 6
+          },
+          "amount": "9971931",
+          "amountFormatted": "9.971931",
+          "amountUsd": "9.969418",
+          "minimumAmount": "9922072"
+        },
+        "outputCurrency": {
+          "currency": {
+            "chainId": 4663,
+            "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+            "symbol": "USDG",
+            "name": "Global Dollar",
+            "decimals": 6
+          },
+          "amount": "9971931",
+          "amountFormatted": "9.971931",
+          "amountUsd": "9.969418",
+          "minimumAmount": "9922072"
+        },
+        "router": "relay"
+      }
+    }
+  },
+  "protocol": {
+    "v2": {
+      "orderId": "0xbbbf9419b614987115a9897ae22c41017c1ab2f459a2a17252ff10a9c2670099",
+      "hubType": "onchain",
+      "orderData": {
+        "version": "v1",
+        "solverChainId": "base",
+        "solver": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+        "salt": "0x8acaf7f2ae5fd9e4662134dc978378523e14b9a0fc7534716b16f2675a9416f6",
+        "inputs": [
+          {
+            "payment": {
+              "chainId": "ethereum",
+              "currency": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+              "amount": "10000000",
+              "weight": "1"
+            },
+            "refunds": [
+              {
+                "chainId": "ethereum",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                "minimumAmount": "0",
+                "deadline": 1793750063,
+                "extraData": "0x0000000000000000000000000729e2a4716d9f7dd17858d5d504426d228697f7"
+              },
+              {
+                "chainId": "robinhood",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+                "minimumAmount": "0",
+                "deadline": 1793750063,
+                "extraData": "0x0000000000000000000000000729e2a4716d9f7dd17858d5d504426d228697f7"
+              }
+            ]
+          }
+        ],
+        "output": {
+          "chainId": "robinhood",
+          "payments": [
+            {
+              "recipient": "0x1111111111111111111111111111111111111111",
+              "currency": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+              "minimumAmount": "9922072",
+              "expectedAmount": "9971931"
+            }
+          ],
+          "calls": [],
+          "deadline": 1793750063,
+          "extraData": "0x0000000000000000000000000729e2a4716d9f7dd17858d5d504426d228697f7"
+        },
+        "fees": []
+      },
+      "paymentDetails": {
+        "chainId": "ethereum",
+        "depository": "0x4cd00e387622c35bddb9b4c962c136462338bc31",
+        "currency": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "amount": "10000000"
+      }
+    }
+  }
+}

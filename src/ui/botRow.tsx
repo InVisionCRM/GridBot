@@ -186,11 +186,16 @@ function stem(b: AnyObj) {
 export function useRowActions() {
   const refresh = useContext(RefreshCtx);
   const [err, setErr] = useState<string | null>(null);
+  /** A LIVE resume runs a fresh safety check first (a few seconds): the row list shows "Checking safety…" meanwhile. */
+  const [checking, setChecking] = useState(0);
   const pause = (b: AnyObj) => {
     const running = b.status === 'running';
     const path = `${stem(b)}/${b.id}/${running ? 'stop' : 'resume'}`;
+    const check = !running && b.mode === 'live';
     setErr(null);
-    void botApi(path, 'POST', undefined, running ? 'row-stop' : undefined).then(() => refresh()).catch((e: Error) => setErr(e.message));
+    if (check) setChecking((n) => n + 1);
+    void botApi(path, 'POST', undefined, running ? 'row-stop' : undefined).then(() => refresh()).catch((e: Error) => setErr(e.message))
+      .finally(() => { if (check) setChecking((n) => n - 1); });
   };
   const close = (b: AnyObj) => {
     const name = pairOf(b).title;
@@ -198,7 +203,7 @@ export function useRowActions() {
     setErr(null);
     void botApi(`${stem(b)}/${b.id}/close`, 'POST', undefined, 'row-close').then(() => refresh()).catch((e: Error) => setErr(e.message));
   };
-  return { err, pause, close };
+  return { err, pause, close, checking: checking > 0 };
 }
 
 function RowMenu({ b, nav, pause, close }: { b: AnyObj; nav: Nav; pause: (b: AnyObj) => void; close: (b: AnyObj) => void }) {

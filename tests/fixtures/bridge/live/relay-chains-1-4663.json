@@ -1,0 +1,28 @@
+[
+  {
+    "id": 1,
+    "name": "ethereum",
+    "protocolKeys": [
+      "v2"
+    ],
+    "protocol": {
+      "v2": {
+        "chainId": "ethereum",
+        "depository": "0x4cd00e387622c35bddb9b4c962c136462338bc31"
+      }
+    }
+  },
+  {
+    "id": 4663,
+    "name": "robinhood",
+    "protocolKeys": [
+      "v2"
+    ],
+    "protocol": {
+      "v2": {
+        "chainId": "robinhood",
+        "depository": "0x4cd00e387622c35bddb9b4c962c136462338bc31"
+      }
+    }
+  }
+]

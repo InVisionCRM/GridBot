@@ -30,8 +30,11 @@ import { createTokenTrader, tokenTraderStore } from './market/tokenFeed';
 import { tryStartPush } from './push/service';
 import { lpSnapsFromStatus } from './push/lpWatch';
 import { dailySummary } from './push/summary';
+import { chainBootLine, registerRpcUrls } from './chains/rpcUrl';
 
 loadEnv();
+// RPC URLs can hold an API key: register them before anything can log one (logs and the API show the host only).
+registerRpcUrls(process.env);
 const friendsSecret = takeFriendsSecret();
 const hostAuth = takeHostAuth();
 // Before anything copies process.env (a friend's copy must not inherit quote keys).
@@ -52,6 +55,7 @@ const { hub, readers } = buildHub({
   net: cfg.net, env: process.env, signerFactory: (chains) => (copy ? createSigners(chains, { friendKey }) : createSigners(chains)),
   custom: new JsonStore<CustomFile>(path.join(dataDir, 'custom.json')),
 });
+registerRpcUrls(process.env, readers.values());
 const legacyReader = readers.get(cfg.net.chainId)!;
 const activity = new ActivityBus(400, Date.now, path.join(dataDir, 'activity.log'));
 const candles = new CandleStore(path.join(dataDir, 'candles'), 5000);
@@ -178,7 +182,7 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   log.info(`API on http://127.0.0.1:${cfg.port} · legacy chain ${cfg.net.label} (${cfg.net.chainId})`);
   for (const rt of hub.runtimes()) {
     const addr = rt.signer ? await rt.signer.getAddress().catch(() => null) : null;
-    log.info(`  ${rt.cfg.name} (${rt.cfg.id})${rt.cfg.status === 'testnet' ? ' TESTNET' : ''} · ${rt.tradable ? rt.cfg.dexes.map((d) => d.name).join(', ') : `trading unavailable — ${rt.cfg.trading.reason ?? 'no DEX'}`} · RPC ${rt.reader.currentUrl ?? '?'} · ${addr ? `signer ${addr}` : 'paper only'}`);
+    log.info(chainBootLine(rt, addr));
   }
   bot.address = hub.rt(cfg.net.chainId).signer ? await hub.rt(cfg.net.chainId).signer!.getAddress() : null;
   log.info(`State file ${cfg.stateFile} · poll ${cfg.pollMs}ms · approvals ${cfg.approval} · ${hub.list().length} markets (${hub.customMarkets().length} custom)`);

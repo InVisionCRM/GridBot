@@ -30,6 +30,7 @@ import { fetchJson } from './fetchJson';
 import { StatusFeed } from './statusFeed';
 import { holdingsSnapshot } from './holdings/read';
 import { requestStore, type HaltOrigin } from './bot/audit';
+import { redact } from './bot/logger';
 
 export interface AppOpts {
   bot: MultiBot;
@@ -87,6 +88,14 @@ export function createApp(o: AppOpts) {
   const { bot, net } = o;
   const app = express();
   app.disable('x-powered-by');
+  // Every JSON answer goes through log redaction: a provider error can embed a keyed RPC URL, or a registered secret.
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.json = (body?: unknown) => {
+      if (!res.get('Content-Type')) res.type('json');
+      return res.send(redact(JSON.stringify(body) ?? 'null'));
+    };
+    next();
+  });
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (!LOCAL_HOST.test(req.headers.host ?? '')) return res.status(403).json({ error: 'forbidden host' });
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -111,7 +120,13 @@ export function createApp(o: AppOpts) {
       const out = await fn(req, res);
       if (!res.headersSent) res.json(out ?? { ok: true });
     } catch (e) {
-      if (!res.headersSent) res.status(400).json({ error: (e as Error).message });
+      // A live start's safety block carries a code: SAFETY_BLOCKED (completed and failed, no bypass) or SAFETY_INCOMPLETE
+      // (couldn't complete; canStartAnyway says whether the page may offer Start anyway).
+      const x = e as Error & { code?: unknown; canStartAnyway?: unknown; blockedBy?: unknown };
+      const safety = x.code === 'SAFETY_BLOCKED' || x.code === 'SAFETY_INCOMPLETE'
+        ? { code: x.code, canStartAnyway: x.canStartAnyway === true, ...(typeof x.blockedBy === 'string' ? { blockedBy: x.blockedBy } : {}) }
+        : {};
+      if (!res.headersSent) res.status(400).json({ error: x.message, ...safety });
     }
   };
   const num = (v: unknown) => (v == null || v === '' ? undefined : Number(v));
@@ -140,6 +155,7 @@ export function createApp(o: AppOpts) {
       limits: b.limits as never,
       recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined,
       profits: profitsBody(b.profits),
+      startAnyway: b.startAnyway === true,
     };
   }
   /** { mode: 'reinvest' } | { mode: 'send', to } — checked by the grid (checkProfitMode); omitted = keep. */
@@ -191,13 +207,13 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     if (mode === 'live' && !bot.hasSigner) throw new Error(noKey());
-    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined, profits: profitsBody(b.profits) });
+    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined, profits: profitsBody(b.profits), startAnyway: b.startAnyway === true });
     void bot.tickAll();
     return { ok: true, ...out };
   }));
   app.post('/api/bot/grids', wrap(async (req) => { const id = await bot.add(startBody(req.body ?? {})); void bot.tickAll(); return { ok: true, id }; }));
   app.post('/api/bot/grids/:id/start', wrap(async (req) => { await bot.start(req.params.id, startBody(req.body ?? {})); void bot.tickAll(); }));
-  app.post('/api/bot/grids/:id/resume', wrap((req) => { bot.resume(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/grids/:id/resume', wrap(async (req) => { await bot.resume(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/grids/:id/stop', wrap((req) => bot.stop(req.params.id)));
   app.post('/api/bot/grids/:id/close', wrap((req) => bot.closeGrid(req.params.id)));
   app.put('/api/bot/grids/:id/limits', wrap((req) => bot.setLimits(req.params.id, limitsBody(req.body ?? {}))));
@@ -280,10 +296,10 @@ export function createApp(o: AppOpts) {
     if (typeof b.id === 'string' && b.id) return { ok: true, stopped: bot.stopById(b.id) };
     throw new Error('Send { "id": "<bot id>" } to stop one bot, or { "all": true } to stop every bot.');
   }));
-  app.post('/api/bot/resume', wrap(() => {
+  app.post('/api/bot/resume', wrap(async () => {
     const g = bot.status().grids.find((x) => x.config && x.status !== 'running');
     if (!g) throw new Error('No stopped grid to resume');
-    bot.resume(g.id);
+    await bot.resume(g.id);
     void bot.tickAll();
   }));
 
@@ -292,11 +308,11 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     const quote = String(b.quote ?? net.defaultQuote);
-    const id = await bot.addTrend({ mode, quote, tf: String(b.tf ?? '1h') as never, cfg: b.cfg ?? {}, capital: num(b.capital) ?? 0, name: b.name, limits: b.limits });
+    const id = await bot.addTrend({ mode, quote, tf: String(b.tf ?? '1h') as never, cfg: b.cfg ?? {}, capital: num(b.capital) ?? 0, name: b.name, limits: b.limits, startAnyway: b.startAnyway === true });
     void bot.tickAll();
     return { ok: true, id };
   }));
-  app.post('/api/bot/trends/:id/resume', wrap((req) => { bot.resumeTrend(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/trends/:id/resume', wrap(async (req) => { await bot.resumeTrend(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/trends/:id/stop', wrap((req) => bot.stopTrend(req.params.id)));
   app.post('/api/bot/trends/:id/sell', wrap((req) => bot.sellTrend(req.params.id)));
   app.post('/api/bot/trends/:id/close', wrap((req) => bot.closeTrend(req.params.id)));
@@ -311,11 +327,12 @@ export function createApp(o: AppOpts) {
       mode: b.mode === 'live' ? 'live' : 'paper', market: String(b.market ?? ''), bandPct: Number(b.bandPct), capital: Number(b.capital ?? 0),
       baseAmount: b.baseAmount == null ? undefined : Number(b.baseAmount),
       rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined, profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
+      startAnyway: b.startAnyway === true,
     });
     void bot.tickAll();
     return { ok: true, id };
   }));
-  app.post('/api/bot/lps/:id/resume', wrap((req) => { bot.resumeLp(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/lps/:id/resume', wrap(async (req) => { await bot.resumeLp(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
   app.post('/api/bot/lps/:id/close', wrap((req) => bot.closeLp(req.params.id)));
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
@@ -404,7 +421,8 @@ export function createApp(o: AppOpts) {
     return plain(tt().status());
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
-  app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
+  // { mode: 'exits' } (default): off for new buys, exits keep running. { mode: 'full' }: off completely, no exits.
+  app.post('/api/token-trader/off', wrap((req) => { tt().turnOff(req.body?.mode === 'full' ? 'full' : 'exits'); return plain(tt().status()); }));
   app.get('/api/plays/scorecard', wrap(() => tt().scorecard()));
 
   // ── Capital router (settings only; this does not move funds) ──
@@ -549,7 +567,7 @@ export function createApp(o: AppOpts) {
   app.get('/api/bot/stream', (req, res) => {
     const v2 = String(req.query.v ?? '') === '2';
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
-    const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${redact(JSON.stringify(data))}\n\n`);
     const since = Number(req.headers['last-event-id'] ?? req.query.since ?? 0) || 0;
     const hbMs = o.heartbeatMs ?? (v2 ? 5_000 : 15_000);
     if (v2) {

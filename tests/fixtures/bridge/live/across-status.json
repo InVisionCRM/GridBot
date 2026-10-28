@@ -1,0 +1,4 @@
+{
+  "error": "DepositNotFoundException",
+  "message": "Deposit not found given the provided constraints"
+}
