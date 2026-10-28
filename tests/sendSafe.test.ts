@@ -151,7 +151,136 @@ async function withClock<T>(run: () => Promise<T>): Promise<T> {
     const budget = RECEIPT_TIMEOUT_CAP_MS + GATE_SLACK_MS + 1_000;
     // Step so a fast RPC rejection is seen before its budget timer.
     for (let left = budget; left > 0 && !settled; left -= 20) await vi.advanceTimersByTimeAsync(Math.min(20, left));
+    if (!settled) throw new Error('send did not finish inside the gate budget');
     return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+type HangStage = 'assess' | 'nonce' | 'receipt' | 'wait' | 'block' | 'blockParent' | 'scanGate' | 'parentGate' | 'broadcastRaw' | 'broadcastNext' | 'hasTx';
+
+/** Fake clock. RPCs answer until `stage`, then hang. The gate must open again inside the budget. */
+async function hangStage(stage: HangStage, outcome: 'nothing' | 'pending') {
+  vi.useFakeTimers();
+  const start = 1_000_000_000_000;
+  vi.setSystemTime(start);
+  try {
+    let held = false;
+    const inner = new TxGate();
+    const gate = {
+      get busy() { return inner.busy; },
+      run<T>(fn: () => Promise<T>) { return inner.run(() => { held = true; return fn(); }); },
+    } as TxGate;
+    const hang = () => new Promise(() => undefined);
+    let blockReads = 0;
+    const receiptMs = 5_000;
+    const budget = receiptMs + GATE_SLACK_MS;
+    const fullBudget = stage === 'assess' || stage === 'nonce' || stage === 'hasTx';
+    const reader: SafeReader = {
+      async send(method: string, params: unknown[] = []) {
+        const fullBlock = method === 'eth_getBlockByNumber' && params[1] === true;
+        if (held && stage === 'assess' && method === 'eth_call') return hang();
+        if (held && stage === 'receipt' && method === 'eth_getTransactionReceipt') return hang();
+        if (held && stage === 'wait' && method === 'eth_getTransactionReceipt' && Date.now() >= start + receiptMs) return hang();
+        if (held && stage === 'block' && fullBlock) return hang();
+        if (held && (stage === 'blockParent' || stage === 'parentGate') && fullBlock) {
+          blockReads++;
+          if (blockReads === 1 && stage === 'parentGate') {
+            await new Promise((r) => setTimeout(r, receiptMs));
+            return { number: '0x20', baseFeePerGas: toQuantity(40n), transactions: [] };
+          }
+          if (blockReads >= 2) return hang();
+        }
+        if (held && stage === 'scanGate' && fullBlock) return hang();
+        if (method === 'eth_call') return '0x';
+        if (method === 'eth_estimateGas') return toQuantity(100_000n);
+        if (method === 'eth_getBlockByNumber') return { number: '0x20', baseFeePerGas: toQuantity(40n), transactions: [] };
+        if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+        if (method === 'eth_getTransactionReceipt' || method === 'eth_getTransactionByHash') return null;
+        throw new Error(method);
+      },
+      async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
+      async getTransactionCount(_address: string, tag: 'pending' | 'latest') {
+        if (held && stage === 'nonce' && tag === 'pending') return hang();
+        if (tag === 'latest' && stage === 'scanGate') {
+          await new Promise((r) => setTimeout(r, receiptMs));
+          return 10;
+        }
+        if (tag === 'latest') return stage === 'block' || stage === 'blockParent' || stage === 'parentGate' || stage === 'scanGate' ? 10 : 0;
+        return 4;
+      },
+      async broadcastRaw() {
+        if (stage === 'broadcastRaw') return hang();
+        if (stage === 'broadcastNext' || stage === 'hasTx') throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+        return '0x01';
+      },
+      async broadcastNext() {
+        if (stage === 'broadcastNext') return hang();
+        throw Object.assign(new Error('no further endpoint'), { code: 'NO_ENDPOINT' });
+      },
+      async hasTx() {
+        if (stage === 'hasTx') return hang();
+        return false;
+      },
+    };
+    const signer = new Signer();
+    let settled = false;
+    let failure: unknown;
+    const run = sendSafe({
+      tx: { from: FROM, to: TO, data: '0x1234', value: 0n }, kind: 'bridge', chainId: 1, reader, signer,
+      gate, nonce: new SharedNonce(),
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      receiptTimeoutMs: receiptMs, halted: () => false,
+    }).then((r) => { settled = true; return r; }, (e) => { settled = true; failure = e; return undefined; });
+    const mark = fullBudget ? budget : receiptMs;
+    await vi.advanceTimersByTimeAsync(mark - 1);
+    expect(settled, stage).toBe(false);
+    expect(gate.busy, stage).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    if (!settled) throw new Error(`send did not finish inside the budget (${stage})`);
+    await run;
+    if (outcome === 'nothing') {
+      expect(failure).toMatchObject({ name: 'SendSafeAbort', message: 'nothing sent' });
+    } else {
+      const result = await run;
+      expect(result?.status).toBe('pending');
+      expect(result?.hash).toBe(hashOf(signer));
+      expect(result?.hash).not.toBe('0x' + '00'.repeat(32));
+    }
+    expect(gate.busy, stage).toBe(false);
+    expect(Date.now() - start).toBeLessThanOrEqual(budget);
+    if (stage === 'assess') {
+      held = false;
+      let tookGate = false;
+      let followError: unknown;
+      const follow = sendSafe({
+        tx: { from: FROM, to: TO, data: '0x1234', value: 0n }, kind: 'bridge', chainId: 1,
+        reader: {
+          async send(method: string) {
+            if (!held && method === 'eth_call') return '0x';
+            if (!held && method === 'eth_estimateGas') return toQuantity(100_000n);
+            if (!held && method === 'eth_getBlockByNumber') return { number: '0x20', baseFeePerGas: toQuantity(40n) };
+            if (!held && method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+            tookGate = true;
+            return hang();
+          },
+          async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
+          async getTransactionCount() { return 4; },
+          async broadcastRaw() { return '0x01'; },
+        },
+        signer: new Signer(), gate, nonce: new SharedNonce(),
+        gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+        receiptTimeoutMs: receiptMs, halted: () => false,
+      }).then((r) => r, (e) => { followError = e; return undefined; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(tookGate).toBe(true);
+      expect(gate.busy).toBe(true);
+      await vi.advanceTimersByTimeAsync(budget);
+      await follow;
+      expect(followError).toMatchObject({ message: 'nothing sent' });
+      expect(gate.busy).toBe(false);
+    }
   } finally {
     vi.useRealTimers();
   }
@@ -1067,8 +1196,16 @@ describe('sendSafe', () => {
       },
       async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
       async getTransactionCount() { return 4; },
-      async broadcastRaw() { sends++; throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); },
-      async broadcastNext() { sends++; throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); },
+      async broadcastRaw() {
+        sends++;
+        if (sends > 10) throw new Error('rebroadcast cap missing');
+        throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+      },
+      async broadcastNext() {
+        sends++;
+        if (sends > 10) throw new Error('rebroadcast cap missing');
+        throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+      },
       async hasTx() { return false; },
     };
     const out = await withClock(() => sendSafe({
@@ -1102,13 +1239,14 @@ describe('sendSafe', () => {
       return { r, hits, blockFails };
     };
     const drain = async (r: FallbackReader) => {
-      for (;;) {
+      for (let n = 0; n < 10; n++) {
         try { await r.broadcastNext('0xabc'); }
         catch (e) {
           expect((e as { code?: string }).code).toBe('NO_ENDPOINT');
           return;
         }
       }
+      throw new Error('broadcastNext did not stop');
     };
 
     // A read leaves the cursor on C. The broadcast starts there. A later read walks the cursor
@@ -1131,88 +1269,89 @@ describe('sendSafe', () => {
     expect(forward.r.currentUrl).toBe('https://rpc.example/b');
     await drain(forward.r);
     expect(forward.hits).toEqual([1, 1, 1]);
-  });
+  }, 5_000);
 
-  it('releases the gate and returns pending when every in-gate RPC hangs', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000_000_000_000);
-    try {
-      let held = false;
-      const inner = new TxGate();
-      const gate = {
-        get busy() { return inner.busy; },
-        run<T>(fn: () => Promise<T>) { return inner.run(() => { held = true; return fn(); }); },
-      } as TxGate;
-      const hang = () => new Promise(() => undefined);
-      const reader: SafeReader = {
-        async send(method: string) {
-          if (held) return hang();
-          if (method === 'eth_call') return '0x';
-          if (method === 'eth_estimateGas') return toQuantity(100_000n);
-          if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
-          if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
-          return hang();
-        },
-        async getFeeData() { return held ? hang() : { gasPrice: 100n, maxFeePerGas: 100n }; },
-        async getTransactionCount() { return held ? hang() : 4; },
-        async broadcastRaw() { return hang(); },
-        async broadcastNext() { return hang(); },
-        async hasTx() { return hang(); },
-      };
-      const opts = {
-        tx: { from: FROM, to: TO, data: '0x1234', value: 0n }, kind: 'bridge' as const, chainId: 1, reader,
-        signer: new Signer(), gate, nonce: new SharedNonce(),
-        gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
-        receiptTimeoutMs: 1_000_000, halted: () => false,
-      };
-      const budget = RECEIPT_TIMEOUT_CAP_MS + GATE_SLACK_MS;
-      let done = false;
-      const first = sendSafe(opts).then((r) => { done = true; return r; });
-      await vi.advanceTimersByTimeAsync(budget - 1);
-      expect(done).toBe(false);
-      expect(gate.busy).toBe(true);
-      await vi.advanceTimersByTimeAsync(1);
-      const pending = await first;
-      expect(pending.status).toBe('pending');
-      expect(pending.state).toBe('source_sent');
-      expect(pending.reason).toMatch(/time budget/);
-      expect(pending.reason).toMatch(/mempool/);
-      expect(gate.busy).toBe(false);
+  it('a deadline before signing throws nothing sent and the next send can take the gate', async () => {
+    await hangStage('assess', 'nothing');
+  }, 5_000);
 
-      let started = false;
-      held = false;
-      const again = sendSafe({
-        ...opts,
-        signer: new Signer(),
-        nonce: new SharedNonce(),
-        reader: {
-          async send(method: string) {
-            started = true;
-            if (!held) {
-              if (method === 'eth_call') return '0x';
-              if (method === 'eth_estimateGas') return toQuantity(100_000n);
-              if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
-              if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
-            }
-            return hang();
-          },
-          async getFeeData() { return held ? hang() : { gasPrice: 100n, maxFeePerGas: 100n }; },
-          async getTransactionCount() { return held ? hang() : 4; },
-          async broadcastRaw() { return hang(); },
-          async broadcastNext() { return hang(); },
-          async hasTx() { return hang(); },
-        },
-      });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(started).toBe(true);
-      expect(gate.busy).toBe(true);
-      await vi.advanceTimersByTimeAsync(budget);
-      const next = await again;
-      expect(next.status).toBe('pending');
-      expect(gate.busy).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
+  it('a hung nonce read before signing throws nothing sent', async () => {
+    await hangStage('nonce', 'nothing');
+  }, 5_000);
+
+  it('a hung receipt read releases the gate with pending inside the receipt budget', async () => {
+    await hangStage('receipt', 'pending');
+  }, 5_000);
+
+  it('the receipt loop stops at the receipt deadline instead of polling forever', async () => {
+    await hangStage('wait', 'pending');
+  }, 5_000);
+
+  it('a hung block scan releases the gate with pending', async () => {
+    await hangStage('block', 'pending');
+  }, 5_000);
+
+  it('a hung parent-block read in the scan releases the gate with pending', async () => {
+    await hangStage('blockParent', 'pending');
+  }, 5_000);
+
+  it('does not start a block read after the receipt deadline', async () => {
+    await hangStage('scanGate', 'pending');
+  }, 5_000);
+
+  it('does not start the parent block read after the receipt deadline', async () => {
+    await hangStage('parentGate', 'pending');
+  }, 5_000);
+
+  it('a hung broadcastRaw releases the gate with pending for the signed hash', async () => {
+    await hangStage('broadcastRaw', 'pending');
+  }, 5_000);
+
+  it('a hung broadcastNext releases the gate with pending', async () => {
+    await hangStage('broadcastNext', 'pending');
+  }, 5_000);
+
+  it('a hung hasTx releases the gate with pending inside the gate budget', async () => {
+    await hangStage('hasTx', 'pending');
+  }, 5_000);
+
+  it('reuses the nonce after an unknown timed-out broadcast when the known-check takes 5–50ms', async () => {
+    const chainPending = 6;
+    const lag = 30;
+    const pause = () => new Promise((r) => setTimeout(r, lag));
+    let pendingReads = 0;
+    const reader: SafeReader = {
+      async send(method: string) {
+        await pause();
+        if (method === 'eth_call') return '0x';
+        if (method === 'eth_estimateGas') return toQuantity(100_000n);
+        if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+        if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+        if (method === 'eth_getTransactionReceipt' || method === 'eth_getTransactionByHash') return null;
+        throw new Error(method);
+      },
+      async getFeeData() { await pause(); return { gasPrice: 100n, maxFeePerGas: 100n }; },
+      async getTransactionCount(_address: string, tag: 'pending' | 'latest') {
+        await pause();
+        if (tag === 'pending') pendingReads++;
+        return chainPending;
+      },
+      async broadcastRaw() { await pause(); throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); },
+      async broadcastNext() { await pause(); throw Object.assign(new Error('no further endpoint'), { code: 'NO_ENDPOINT' }); },
+      async hasTx() { await pause(); return false; },
+    };
+    const nonce = new SharedNonce();
+    const gate = new TxGate();
+    const send = (signer: Signer) => sendSafe({
+      tx: { from: FROM, to: TO, data: '0x1234', value: 0n }, kind: 'bridge', chainId: 1, reader, signer, gate, nonce,
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      receiptTimeoutMs: 80, halted: () => false,
+    });
+    const first = await send(new Signer());
+    expect(first).toMatchObject({ status: 'pending', nonce: chainPending });
+    const second = await send(new Signer());
+    expect(second.nonce).toBe(chainPending);
+    expect(pendingReads).toBe(2);
   }, 5_000);
 
   it('no bot calls sendSafe or broadcastNext', () => {
