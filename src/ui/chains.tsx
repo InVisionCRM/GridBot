@@ -9,7 +9,7 @@ export { flipKey, isFlipKey, orientedKey, unflipKey };
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 export interface MarketInfo {
-  key: string; label: string; chainId: number; base: string; quote: string; quoteKind: string; dex: string; kind: 'v2' | 'v3';
+  key: string; label: string; chainId: number; base: string; quote: string; quoteKind: string; dex: string; kind: 'v2' | 'v3' | 'v4';
   feeBps: number; feeTier: number | null; pool: string | null; legacy: boolean; custom: boolean; risk: string | null; riskWhy?: string | null;
   safetyAt?: number | null; safetyStale?: { since: number; lastTry: number; why: string } | null;
   liveAllowed: boolean; tradable: boolean; spot: number | null; usdPerQuote: number | null;

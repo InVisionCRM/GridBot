@@ -9,6 +9,7 @@ import { ARB_NODE_INTERFACE, ARB_NODE_INTERFACE_ADDR, ERC20 } from '../dex/abis'
 import type { DexAdapter } from '../dex/types';
 import { V2Adapter } from '../dex/v2';
 import { V3Adapter } from '../dex/v3';
+import { V4Adapter } from '../dex/v4';
 import type { ChainRpcHealth, HealthChange, RpcStatus } from './fallback';
 
 /** Reader surface the runtime may use (FallbackReader implements all; test mocks may omit the optional ones). */
@@ -39,7 +40,7 @@ export class ChainRuntime {
     this.gate = o.gate ?? new TxGate();
     this.nonce = o.nonce ?? new SharedNonce();
     const adapters = o.adapters;
-    for (const a of adapters ?? cfg.dexes.map((d) => (d.kind === 'v2' ? new V2Adapter(reader, d, cfg.wrappedNative.address) : new V3Adapter(reader, d, cfg.wrappedNative.address)))) {
+    for (const a of adapters ?? cfg.dexes.map((d) => (d.kind === 'v2' ? new V2Adapter(reader, d, cfg.wrappedNative.address) : d.kind === 'v4' ? new V4Adapter(reader, d, cfg.wrappedNative.address) : new V3Adapter(reader, d, cfg.wrappedNative.address)))) {
       this.adapters.set(a.cfg.id, a);
     }
   }
