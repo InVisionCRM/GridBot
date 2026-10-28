@@ -30,6 +30,7 @@ import { fetchJson } from './fetchJson';
 import { StatusFeed } from './statusFeed';
 import { holdingsSnapshot } from './holdings/read';
 import { requestStore, type HaltOrigin } from './bot/audit';
+import { redact } from './bot/logger';
 
 export interface AppOpts {
   bot: MultiBot;
@@ -87,6 +88,14 @@ export function createApp(o: AppOpts) {
   const { bot, net } = o;
   const app = express();
   app.disable('x-powered-by');
+  // Every JSON answer goes through log redaction: a provider error can embed a keyed RPC URL, or a registered secret.
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.json = (body?: unknown) => {
+      if (!res.get('Content-Type')) res.type('json');
+      return res.send(redact(JSON.stringify(body) ?? 'null'));
+    };
+    next();
+  });
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (!LOCAL_HOST.test(req.headers.host ?? '')) return res.status(403).json({ error: 'forbidden host' });
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -549,7 +558,7 @@ export function createApp(o: AppOpts) {
   app.get('/api/bot/stream', (req, res) => {
     const v2 = String(req.query.v ?? '') === '2';
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
-    const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${redact(JSON.stringify(data))}\n\n`);
     const since = Number(req.headers['last-event-id'] ?? req.query.since ?? 0) || 0;
     const hbMs = o.heartbeatMs ?? (v2 ? 5_000 : 15_000);
     if (v2) {

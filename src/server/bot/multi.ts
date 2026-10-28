@@ -37,6 +37,7 @@ import { simBuy, simSell, type CostModel, DEFAULT_COSTS } from '../../market/cos
 import { DEFAULT_TREND, type DrawnLine, type TrendConfig } from '../../market/strategy';
 import { runGridBacktest, runTrendBacktest, sweepTrend, SWEEP_AXES, type BtResult, type SweepKey } from '../../market/backtest';
 import { drawdown, pushCapped, tradeStats } from '../../market/stats';
+import { rpcHost, safeRpcHealth, safeRpcStatus } from '../chains/rpcUrl';
 
 /** A LIVE resume whose safety check was still running when Stop all / STOP chain / Stop landed: the stop won. */
 export class ResumeCancelled extends Error { readonly code = 'RESUME_CANCELLED'; }
@@ -1706,8 +1707,9 @@ export class MultiBot {
         dexes: c.dexes.map((x) => ({ id: x.id, name: x.name, kind: x.kind })),
         hasSigner: !!rt.signer, address: w?.address ?? rt.gas.address, gasNative: w?.native ?? rt.gas.native, lowGas: rt.gas.low,
         lowGasNative: c.lowGasNative, nativeUsd: this.hub.nativeUsd(c.id), walletError: w?.error ?? rt.gas.error ?? null,
-        txBusy: rt.gate.busy, rpc: rt.reader.currentUrl ?? null, rpcStatus: rt.reader.status ?? null,
-        rpcHealth: rt.reader.health?.() ?? null, bots,
+        // RPC URLs can hold an API key: the status shows scheme://host[:port] only (chains/rpcUrl.ts).
+        txBusy: rt.gate.busy, rpc: rpcHost(rt.reader.currentUrl ?? null), rpcStatus: safeRpcStatus(rt.reader.status),
+        rpcHealth: safeRpcHealth(rt.reader.health?.()), bots,
       };
     });
   }

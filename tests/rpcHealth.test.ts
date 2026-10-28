@@ -187,6 +187,6 @@ describe('MultiBot: RPC health in the status and the Activity log', async () => 
     expect(ev.map((e) => [e.level, e.notify])).toEqual([['error', true], ['success', true]]);
     expect(ev[0].msg).toMatch(/RPC failing for 4 min \(24 failed reads on every endpoint\): RPC error -32603 Internal error/);
     expect(ev[1].msg).toMatch(/RPC recovered after 6 min/);
-    expect(bot.chainsStatus()[0].rpcHealth).toBe(health);
+    expect(bot.chainsStatus()[0].rpcHealth).toEqual(health);
   });
 });
