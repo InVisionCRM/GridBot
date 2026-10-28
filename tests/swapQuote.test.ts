@@ -277,4 +277,32 @@ describe('swap quotes', () => {
     expect(['pulsex-v1', 'pulsex-v2']).toContain(q.route.id);
     expect(m.sent).toEqual([]);
   });
+
+  it('never quotes or routes a V4 adapter', async () => {
+    const TOK: Tok = { address: '0xc50C3c7a92E1b512Ec982770Abe91948F20356d0', symbol: 'TOK', decimals: 18, name: 'Tok' };
+    const m = world({ v2: { weth: 100, usdg: 300_000 } });
+    m.addToken(TOK);
+    m.v2Pair('uniswap-v2', USDG, 100_000, TOK, 1_000);
+    const rt = new ChainRuntime(RH, m, null);
+    const v4 = rt.adapter('uniswap-v4');
+    const seen: string[] = [];
+    const tempting = {
+      dex: 'uniswap-v4', kind: 'v4' as const, address: '0x' + 'ab'.repeat(32), feeBps: 1,
+      v4: {
+        currency0: USDG.address, currency1: TOK.address, fee: 100, tickSpacing: 1,
+        hooks: '0x' + '00'.repeat(20), poolId: '0x' + 'ab'.repeat(32), dynamicFee: false,
+      },
+    };
+    v4.findPools = async () => { seen.push('find'); return [tempting]; };
+    v4.quote = async () => { seen.push('quote'); return { amountOut: 10n ** 30n, impact: 0 }; };
+    v4.buildSwap = () => { seen.push('build'); throw new Error('V4 build must not run'); };
+    const service = new SwapService({ runtime: () => rt, allocations: () => [], nowSec: () => 1_700_000_000 });
+    const q = await service.quote({
+      chainId: 4663, tokenIn: USDG.address, tokenOut: TOK.address, amountIn: 1_000n * E6, owner: OWNER, mode: 'paper',
+    });
+    expect(seen).toEqual([]);
+    expect(q.route.kind).toBe('v2');
+    expect(q.route.id).toBe('uniswap-v2');
+    expect(q.routes.some((r) => r.kind === 'v4')).toBe(false);
+  });
 });

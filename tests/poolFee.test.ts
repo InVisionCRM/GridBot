@@ -43,6 +43,7 @@ describe('pool fee from the pool', () => {
     const c = chain({});
     expect(await poolFeeBps(c, A(9), { kind: 'v2', feeBps: 29 })).toBe(29);
     expect(await poolFeeBps(c, A(9), { kind: 'v3' })).toBeNull();
+    expect(await poolFeeBps(c, A(9), { kind: 'v4' })).toBeNull();
   });
 });
 
@@ -56,8 +57,8 @@ describe('discovery: withPoolFees', () => {
   it('each V3 pool gets its own fee (not the DEX first tier); V2 the DEX fee; unreadable or unknown DEX pools are dropped', async () => {
     const c = chain({ [A(1)]: 100, [A(2)]: 500, [A(3)]: 3000, [A(4)]: 10000 });
     const pools = [1, 2, 3, 4].map((i) => fresh({ pool: A(i) }));
-    pools.push(fresh({ pool: A(5), dex: 'uniswap_v2', kind: 'v3' }), fresh({ pool: A(6) }), fresh({ pool: A(7), dex: 'mystery' }));
-    const out = await withPoolFees(pools, () => c, (p) => (p.dex === 'mystery' ? null : p.dex === 'uniswap_v2' ? { kind: 'v2', feeBps: 30 } : uni));
+    pools.push(fresh({ pool: A(5), dex: 'uniswap_v2', kind: 'v3' }), fresh({ pool: A(6) }), fresh({ pool: A(7), dex: 'mystery' }), fresh({ pool: A(8), dex: 'uniswap-v4', kind: 'v4' }));
+    const out = await withPoolFees(pools, () => c, (p) => (p.dex === 'mystery' ? null : p.dex === 'uniswap_v2' ? { kind: 'v2', feeBps: 30 } : p.dex === 'uniswap-v4' ? { kind: 'v4' } : uni));
     expect(out.map((p) => [p.pool, p.kind, p.feeBps])).toEqual([[A(1), 'v3', 1], [A(2), 'v3', 5], [A(3), 'v3', 30], [A(4), 'v3', 100], [A(5), 'v2', 30]]);
   });
 
