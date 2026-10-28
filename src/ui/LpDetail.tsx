@@ -4,7 +4,7 @@ import { botApi } from './api';
 import { StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
 import { StatTable } from './StatTable';
-import { ago, cls, dur, num, pct, px, qty } from './fmt';
+import { ago, cls, num, pct, px, qty } from './fmt';
 import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -13,11 +13,11 @@ import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewB
 import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
-import { formatTokens, generatedOf, generatedPct, investedOf } from './generatedView';
+import { formatTokenSum, formatTokens, generatedOf, generatedPct, generatedPctNote, investedOf } from './generatedView';
 import { showHalt } from './haltText';
 import { isShortRun, runSpan } from './runRate';
 import { estimates } from '../shared/generated';
-import { sameFigure, type StatKey } from './StatTable';
+import { type StatKey } from './StatTable';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -101,10 +101,6 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
   );
 }
 
-/**
- * What the open position earns at its own pace: its fees since it opened (collected + waiting), per hour, carried to a
- * day, a week and a month. Only this position's history; the time it spent out of range is in the pace.
- */
 /** Two moments that are the same event (within 2 minutes): the position opening and the run starting or the last move. */
 const sameTime = (a: number | null | undefined, c: number | null | undefined) => typeof a === 'number' && typeof c === 'number' && Math.abs(a - c) < 120_000;
 /**
@@ -117,34 +113,33 @@ function openedWhen(b: AnyObj, at: number, words: [start: string, move: string],
   return opened(at);
 }
 
-function PositionPace({ b }: { b: AnyObj }) {
-  const pf = b.positionFees, base = b.base, q = b.quote;
-  if (!b.position || !pf) return null;
-  // its fees so far are all the bot's fees (the Fees earned card): say so rather than repeat the coins
-  const allFees = b.pnl?.feeCoins && sameFigure(pf.coins.base, b.pnl.feeCoins.base) && sameFigure(pf.coins.quote, b.pnl.feeCoins.quote);
-  const ms = Date.now() - pf.since;
-  const coins = [{ symbol: base, amount: pf.coins.base }, { symbol: q, amount: pf.coins.quote }];
-  // per token ÷ days open × 1, 7, 365 (shared estimates); none under a day. Crypto units only.
-  const est = estimates(coins, ms / 1000);
+/**
+ * The bot's pace (Kyle, #73): "So far" is Generated, net of costs — the same tokens as the headline and the Bots list's
+ * Generated column (shared generatedTokens) — and the estimates are the shared estimates(): each token ÷ days run × 1, 7,
+ * 365, hidden until it has run a day. Crypto units only.
+ */
+function BotPace({ b }: { b: AnyObj }) {
+  const gen = generatedOf({ ...b, kind: 'lp' });
+  const runMs = typeof b.startedAt === 'number' ? Date.now() - b.startedAt : null;
+  if (!gen || runMs == null || !(runMs > 0)) return null;
+  const est = estimates(gen.tokens, runMs / 1000);
   const pace = est.h24 && est.d7 && est.d365 ? { d1: est.h24, d7: est.d7, d365: est.d365 } : null;
   return (
     <div className="card pace">
       <div className="card-head">
-        <h3><L tip={`Fees this position has earned since it opened (collected plus waiting), in each coin, carried forward at the same pace: an estimate, not a forecast. It counts only this position: a range move starts a new one. Time the price spent outside the range is in the pace, so a pace from a calm stretch can run high.`}>This position's pace</L></h3>
-        <span className="muted small">open {openedWhen(b, pf.since, ['since the start', 'since the last move'], () => dur(ms))}</span>
+        <h3><L tip="Generated, net of costs, in each coin, carried forward at the pace it has had since the bot started: an estimate, not a forecast. Time the price spent outside the range is in the pace.">This bot's pace</L></h3>
+        <span className="muted small">since the start</span>
       </div>
-      {allFees
-        ? <p className="small">So far: the fees in Generated and Details above (this is the bot's first position).</p>
-        : <p className="small">So far: <b>{formatTokens(coins, false, 4)}</b></p>}
+      <p className="small pace-so-far">So far: <b>{gen.tokens.length ? formatTokenSum(gen.tokens, 5) : `0 ${b.quote}`}</b></p>
       {!pace
-        ? <p className="small muted">The estimate (a day, 7 days, 365 days) shows once the position has been open a day.</p>
+        ? <p className="small muted">The estimate (a day, 7 days, 365 days) shows once the bot has run a day.</p>
         : <div className="pace-rows">{([['Est. a day', pace.d1], ['Est. 7 days', pace.d7], ['Est. 365 days', pace.d365]] as const).map(([label, x]) => (
             <div key={label} className="pace-row">
               <span className="k">{label}</span>
-              <b className="pos">{formatTokens(x, false, 4)}</b>
+              <b className={x.every((t) => t.amount >= 0) ? 'pos' : x.every((t) => t.amount <= 0) ? 'neg' : ''}>{formatTokenSum(x, 4)}</b>
             </div>
           ))}</div>}
-      <p className="muted small">If it keeps earning as it has since it opened{b.inRange === false ? '. It is out of range now, so it earns nothing until the price is back inside or the range moves' : ''}.</p>
+      <p className="muted small">If it keeps generating as it has since it started{b.inRange === false ? '. It is out of range now, so it earns nothing until the price is back inside or the range moves' : ''}.</p>
     </div>
   );
 }
@@ -169,7 +164,7 @@ function NetDetails({ b, pnl, q, base }: { b: AnyObj; pnl: AnyObj; q: string; ba
     ['Costs paid: gas', qty(-pnl.gas, q, 4)],
     [`Costs paid: swaps to the range's mix (pool fee and price impact)`, qty(-pnl.swapCost, q, 4)],
     [`Lost to range moves (${b.reranges} move${b.reranges === 1 ? '' : 's'})`, qty(-pnl.moveLoss, q, 4)],
-    ['Generated as a share of what you put in', share == null ? '—' : pct(share, 2, true)],
+    ['Generated as a share of what you put in', share == null ? '—' : <span title={generatedPctNote(b)}>{pct(share, 2, true)}</span>],
   ];
   return (
     <details className="card net-details">
@@ -198,7 +193,8 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const runMs = b.startedAt ? Date.now() - b.startedAt : null;
   // Each figure once per screen: the cards above have Invested and Generated, Details the fees, costs and moves, the range
   // card the range and width.
-  const omit: StatKey[] = ['invested', 'net', 'feesEarned', 'feesPaid', 'moves', 'range', 'spacing', 'lastMove'];
+  // the pace card has the estimates (24h, 7d, 365d): not again in the table
+  const omit: StatKey[] = ['invested', 'net', 'est', 'feesEarned', 'feesPaid', 'moves', 'range', 'spacing', 'lastMove'];
   // the headline cards have the run length under a day ("over 8.8h")
   if (isShortRun(runMs)) omit.push('age');
   const close = () => {
@@ -257,7 +253,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
       {pnl?.feeCoins && <NetDetails b={lpb} pnl={pnl} q={q} base={base} />}
 
-      <PositionPace b={b} />
+      <BotPace b={b} />
 
       <div className="split wide-left">
         <div className="card">

@@ -1,10 +1,10 @@
 /** The UI's reading of Generated (src/ui/generatedView.ts) over the shared module (src/shared/generated.ts, from #48). */
 import { describe, expect, it } from 'vitest';
-import { formatTokens, generatedInQuote, generatedOf, generatedPct, investedOf, quoteSymbolOf, sharedTotals, sumTokens } from '../src/ui/generatedView';
+import { formatTokenSum, formatTokens, generatedInQuote, generatedOf, generatedPct, generatedPctNote, generatedValueInQuote, investedOf, quoteSymbolOf, sharedTotals, sumTokens } from '../src/ui/generatedView';
 import { estimates } from '../src/shared/generated';
 
 const lp = {
-  kind: 'lp', base: 'SPY', quote: 'USDG', startValue: 34_000, config: { capital: 34_000 },
+  kind: 'lp', base: 'SPY', quote: 'USDG', price: 771.33, startValue: 34_000, config: { capital: 34_000 },
   pnl: { feeCoins: { base: 0.0531, quote: 22.37 }, gas: 0.05, swapCost: 32.97, moveLoss: 874.18, net: -866, price: -12.4 },
 };
 const grid = { kind: 'grid', quoteSym: 'USDG', config: { totalCapitalUsd: 2_000 }, pnl: { realized: 0.0925, unrealized: -0.0177 } };
@@ -42,8 +42,15 @@ describe('investedOf / generatedPct / quoteSymbolOf', () => {
     expect(investedOf(lp)).toEqual({ symbol: 'USDG', amount: 34_000 });
     expect(investedOf({ kind: 'trader', stable: 'PLS', spent: 1e6 })).toEqual({ symbol: 'PLS', amount: 1e6 });
   });
-  it('share: LP from the engine net, grid and trend from realized', () => {
-    expect(generatedPct(lp)).toBeCloseTo(-866 / 34_000, 12);
+  it('share: from the Generated tokens (LP base part at the pool price), never the engine net; grid and trend from realized', () => {
+    const genQuote = 0.0531 * 771.33 + (22.37 - (0.05 + 32.97 + 874.18));
+    expect(generatedValueInQuote(lp)).toBeCloseTo(genQuote, 9);
+    expect(generatedPct(lp)).toBeCloseTo(genQuote / 34_000, 12);
+    // a stale or different engine net does not move it (the NVDA LP still: net +412 on ~−1.4 USDG generated)
+    expect(generatedPct({ ...lp, pnl: { ...lp.pnl, net: 412 } })).toBeCloseTo(genQuote / 34_000, 12);
+    // no pool price: no share rather than a guess
+    expect(generatedPct({ ...lp, price: null })).toBeNull();
+    expect(generatedPctNote(lp)).toMatch(/SPY part of Generated is valued in USDG at the pool's price now/);
     expect(generatedPct(trend)).toBeCloseTo(0.0615, 12);
     expect(generatedPct({ ...trend, capital: 0 })).toBeNull();
   });
@@ -67,6 +74,10 @@ describe('sums and text', () => {
     expect(formatTokens([{ symbol: 'SPY', amount: 0.0531 }, { symbol: 'USDG', amount: -884.83 }])).toBe('+0.0531 SPY · −884.83 USDG');
     expect(formatTokens([{ symbol: 'USDG', amount: 34_000 }], false)).toBe('34,000 USDG');
     expect(formatTokens([])).toBe('—');
+    expect(formatTokenSum([{ symbol: 'SPY', amount: 0.02 }, { symbol: 'USDG', amount: 26.1 }])).toBe('0.02 SPY + 26.1 USDG');
+    expect(formatTokenSum([{ symbol: 'NVDA', amount: 0.00016568 }, { symbol: 'USDG', amount: -1.4052 }], 5)).toBe('0.00016568 NVDA − 1.4052 USDG');
+    expect(formatTokenSum([{ symbol: 'USDG', amount: -3 }])).toBe('−3 USDG');
+    expect(formatTokenSum([])).toBe('—');
   });
   it('the shared module is framework-free: no imports at all', async () => {
     const { readFileSync } = await import('node:fs');

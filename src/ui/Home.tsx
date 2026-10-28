@@ -1,12 +1,12 @@
 /** Home: net worth, the book chart, a joined strip, the bots, then the two cards that used to live only under More. */
 import { useEffect, useMemo, useState } from 'react';
 import { http } from './api';
-import { BotRow, listBots, pnlParts, startOfDay, todaySeries, useRowActions } from './botRow';
+import { BotRow, listBots, startOfDay, todaySeries, useRowActions } from './botRow';
 import { AreaChart, Donut, Meter, Sparkline } from './charts';
 import { chainOf, chains, useChainFilter } from './chains';
 import { cls, pct } from './fmt';
 import type { HoldingsSnapshot } from '../live/holdingsMath';
-import { formatTokens, generatedOf, sharedTotals, sumTokens, type TokenQty } from './generatedView';
+import { formatTokens, generatedOf, generatedPct, generatedValueInQuote, sharedTotals, sumTokens, type TokenQty } from './generatedView';
 import { quoteSym } from './model';
 import type { Opportunity } from '../market/scan';
 import { isSafe, tryIt, useOpportunities, wayOf } from './Opportunities';
@@ -72,8 +72,14 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
   const genSign = generated.length === 1 ? generated[0].amount : null;
   const fees = feesToday(bots);
   const feesLine = useMemo(() => feeSeries(bots), [bots]);
-  const best = bots.slice().sort((a, b) => (pnlParts(b).usd ?? pnlParts(b).pct ?? -Infinity) - (pnlParts(a).usd ?? pnlParts(a).pct ?? -Infinity))[0];
-  const bestPnl = best ? pnlParts(best) : null;
+  // Best bot: by the Generated its row shows (an LP's base part at the pool price), across coins in dollars for ordering
+  // only, else by Gen. %; never the engine's separate pnl.net, which can disagree with the row
+  const score = (b: AnyObj) => {
+    const q = generatedValueInQuote(b), k = typeof b.usdPerQuote === 'number' && b.usdPerQuote > 0 ? b.usdPerQuote : null;
+    return (q != null && k != null ? q * k : generatedPct(b)) ?? -Infinity;
+  };
+  const best = bots.slice().sort((a, b) => score(b) - score(a))[0];
+  const bestPnl = best ? { usd: Number.isFinite(score(best)) ? score(best) : null, pct: generatedPct(best) } : null;
   const slices = useMemo(() => {
     if (holdings?.hasSigner) {
       return holdings.chains

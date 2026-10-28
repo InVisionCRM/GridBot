@@ -71,14 +71,39 @@ export function generatedInQuote(g: Generated | null): number | null {
 }
 
 /**
- * Generated as a share of what was put in. Grid and trend: generated ÷ invested (both in the quote coin). LP: the engine's
- * own net (pnl.net, the same fees-minus-costs with the base fee coin valued at the pool price) ÷ invested.
+ * The Generated figure (the same tokens the Generated column and the LP headline show) as one amount in the quote coin,
+ * for Gen. %, Est. APR and sorting. Grid and trend: already one quote-coin amount. LP: the quote part plus the base part
+ * valued at the pool's price now (`b.price`, quote per base); without a price, null when there is a base part.
+ * Never the engine's separate pnl.net, so a share can't disagree with the tokens beside it.
  */
+export function generatedValueInQuote(b: AnyObj): number | null {
+  const g = generatedOf(b);
+  if (!g) return null;
+  if (b.kind !== 'lp') return generatedInQuote(g);
+  const base = sym(b.base, 'base');
+  const price = n(b.price);
+  let v = 0;
+  for (const t of g.tokens) {
+    if (t.symbol === base && t.symbol !== quoteSymbolOf(b)) {
+      if (price == null || !(price > 0)) return null;
+      v += t.amount * price;
+    } else v += t.amount;
+  }
+  return v;
+}
+
+/** What Gen. % says about how it is worked out (a tooltip): an LP's base coin is valued at today's pool price. */
+export function generatedPctNote(b: AnyObj): string {
+  return b.kind === 'lp'
+    ? `Generated ÷ Invested. The ${sym(b.base, 'base')} part of Generated is valued in ${quoteSymbolOf(b)} at the pool's price now.`
+    : 'Generated ÷ Invested, both in the same coin.';
+}
+
+/** Generated as a share of what was put in: generatedValueInQuote ÷ invested (both in the quote coin). */
 export function generatedPct(b: AnyObj): number | null {
   const inv = investedOf(b);
   if (!inv || !(inv.amount > 0)) return null;
-  const g = generatedOf(b);
-  const v = b.kind === 'lp' ? n(b.pnl?.net) : generatedInQuote(g);
+  const v = generatedValueInQuote(b);
   return v == null ? null : v / inv.amount;
 }
 
@@ -107,4 +132,13 @@ const fmtAmt = (x: number, sig: number) => Number(Math.abs(x).toPrecision(sig)).
 export function formatTokens(tokens: readonly TokenQty[] | null | undefined, sign = true, sig = 5): string {
   if (!tokens || !tokens.length) return '—';
   return tokens.map((t) => `${sign ? (t.amount >= 0 ? '+' : '−') : t.amount < 0 ? '−' : ''}${fmtAmt(t.amount, sig)} ${t.symbol}`).join(sign ? ' · ' : ' + ');
+}
+
+/**
+ * A sum in words: "0.02 SPY + 26.1 USDG", "0.0001657 NVDA − 1.405 USDG" (a minus instead of "+ −"); the first amount
+ * carries a sign only when it is negative. Empty list: "—".
+ */
+export function formatTokenSum(tokens: readonly TokenQty[] | null | undefined, sig = 4): string {
+  if (!tokens || !tokens.length) return '—';
+  return tokens.map((t, i) => `${i === 0 ? (t.amount < 0 ? '−' : '') : t.amount < 0 ? ' − ' : ' + '}${fmtAmt(t.amount, sig)} ${t.symbol}`).join('');
 }

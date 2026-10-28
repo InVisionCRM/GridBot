@@ -11,6 +11,9 @@
  * "Seen on a desktop": the stat table's `in-row` cells are hidden (the row's columns show them). "Seen on a phone": the
  * row's value/% /age/APR/moves/fees columns are hidden (styles.css, max-width 860px) and the `in-row` cells show.
  * A closed <details> shows only its summary (a label); the LP page's net breakdown is checked closed and open.
+ * One figure repeats by Kyle's own rule: the LP pace card's "So far" is Generated, net of costs (rule 4, "So far: 0.02 SPY
+ * + 26.1 USDG"), the same tokens as the headline. It is left out of the repeat check here, and the tests below assert it
+ * equals the headline and the Bots list's Generated column.
  */
 import { createElement as h, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -138,6 +141,8 @@ export function repeats(figs: Fig[]): string[] {
 const wrap = (el: ReactElement, usdOn: boolean) => h(ShowUsdCtx.Provider, { value: { on: usdOn, set: () => undefined } }, el);
 const noop = () => undefined;
 const desk = (open: string | null, usdOn: boolean) => renderToStaticMarkup(wrap(h(DeskTable, { s, bots, nav: noop, pause: noop, close: noop, initialOpen: open }), usdOn));
+/** The pace card's "So far" line (Generated again by Kyle's rule 4): out of the repeat check, asserted equal below. */
+const noSoFar = (html: string) => html.replace(/<p class="small pace-so-far">[\s\S]*?<\/p>/g, '');
 const lpPage = (id: string, usdOn: boolean) => renderToStaticMarkup(wrap(h(LpDetail, { s, id, events: [], ticks: null, nav: noop, act: noop, busy: false }), usdOn));
 /** The same page with its collapsed Details opened. */
 const opened = (html: string) => html.replace(/<details(?![^>]*\sopen)/g, '<details open=""');
@@ -187,12 +192,12 @@ describe('each figure once per screen', () => {
       });
       for (const id of ['lp-stonkd', 'lp-nvda']) {
         it(`LP page ${id} (${tag})`, () => {
-          const text = visibleText(lpPage(id, usdOn), view);
+          const text = visibleText(noSoFar(lpPage(id, usdOn)), view);
           expect(text).toMatch(/Generated, net of costs/);
           expect(repeats(figures(text))).toEqual([]);
         });
         it(`LP page ${id}, Details opened (${tag})`, () => {
-          const html = opened(lpPage(id, usdOn));
+          const html = noSoFar(opened(lpPage(id, usdOn)));
           expect(html).toMatch(/Costs paid/);
           const text = visibleText(html, view);
           expect(repeats(figures(text))).toEqual([]);
@@ -238,20 +243,31 @@ describe('LP page: headline Invested + Generated, the parts in Details (Kyle, #7
       expect(html).not.toMatch(/Price move of|including that price move|coin price move/i);
       expect(shown(text, p.price), 'the price move').toHaveLength(0);
       expect(shown(text, p.net + p.price), 'net with the price move').toHaveLength(0);
-      expect(text).toMatch(/[−-]2\.55%/);
+      // Generated ÷ Invested: (0.0531 SPY × 771.33 − 884.83 USDG) ÷ 34,000, not the engine net −866 (−2.55%)
+      expect(text).toMatch(/[−-]2\.48%/);
+      expect(text).not.toMatch(/[−-]2\.55%/);
     });
   }
-  it('the pace card reads in coins: "So far: 0.41 NVDA + 88.2 USDG", no dollars', () => {
+  it('the pace card reads in coins: "So far:" is Generated, net of costs (1.1 NVDA + 172.4 USDG), not the position\'s gross fees', () => {
     const text = visibleText(lpPage('lp-nvda', true), 'desktop');
-    expect(text).toMatch(/So far: 0\.41 NVDA \+ 88\.2 USDG /);
+    expect(text).toMatch(/So far: 1\.1 NVDA \+ 172\.4 USDG /);
+    expect(text).not.toMatch(/0\.41 NVDA|88\.2 USDG/); // positionFees: gross, this position only
+    // a negative quote side reads as a minus, never "+ −"
+    expect(visibleText(lpPage('lp-stonkd', true), 'desktop')).toMatch(/So far: 0\.0531 SPY − 884\.83 USDG /);
   });
-  it('the pace estimates show from a day, per token, labeled as estimates', () => {
-    const html = lpPage('lp-nvda', true);
-    // NVDA LP position open 19h: under a day, so no pace rows
-    expect(html).toMatch(/The estimate \(a day, 7 days, 365 days\) shows once the position has been open a day/);
-    const older = { ...nvdaLp, positionFees: { since: NOW - 2 * D, coins: { base: 0.4, quote: 88 } } };
-    const html2 = renderToStaticMarkup(wrap(h(LpDetail, { s: { ...s, lps: [stonkd, older] }, id: 'lp-nvda', events: [], ticks: null, nav: noop, act: noop, busy: false }), true));
-    expect(visibleText(html2, 'desktop')).toMatch(/Est\. a day 0\.2 NVDA \+ 44 USDG Est\. 7 days 1\.4 NVDA \+ 308 USDG Est\. 365 days 73 NVDA \+ 16,060 USDG/);
+  it('the pace estimates are Generated ÷ days run × 1, 7, 365 (shared estimates), hidden under a day', () => {
+    // STONKD has run 8.8h: no estimates
+    expect(lpPage('lp-stonkd', true)).toMatch(/The estimate \(a day, 7 days, 365 days\) shows once the bot has run a day/);
+    // NVDA LP has run 3.2d: 1.1 NVDA and 172.4 USDG ÷ 3.2 × 1, 7, 365
+    const text = visibleText(lpPage('lp-nvda', true), 'desktop');
+    expect(text).toMatch(/Est\. a day 0\.34\d* NVDA \+ 53\.88 USDG Est\. 7 days 2\.406 NVDA \+ 377\.1 USDG Est\. 365 days 125\.5 NVDA \+ 19,660 USDG/);
+  });
+  it('the LP page has no Est. 24h / 7d / 365d table rows: the pace card is the one place for them', () => {
+    for (const id of ['lp-stonkd', 'lp-nvda']) {
+      const html = opened(lpPage(id, true));
+      expect(html, id).not.toMatch(/Est\. (24h|7d|365d)/);
+      expect(html, id).not.toMatch(/Estimates \(24h, 7d, 365d\)|carried over 24h, 7d and 365d/); // nor the note about those rows
+    }
   });
 });
 
@@ -342,9 +358,95 @@ describe('Est. APR comes from Generated, never from a value change that includes
     expect(m?.[1]).toBe('+449.0%'); // 61.5 / 1,000 / 5 × 365 = 4.4895
     expect(html).not.toMatch(/\bAPY\b/);
   });
-  it('the NVDA LP row: the engine net (fees − costs, no price move) ÷ put in, carried over a year', () => {
+  it('the NVDA LP row: Generated (1.1 NVDA at the pool price + 172.4 USDG) ÷ put in, carried over a year', () => {
     const html = desk(null, true);
     const m = /NVDA LP<\/span>[\s\S]*?<span class="desk-apr"[^>]*>([\s\S]*?)<\/span>/.exec(html);
-    expect(m?.[1]).toBe(`+${((412 / 5_000 / 3.2) * 365 * 100).toFixed(1)}%`);
+    const gen = 1.1 * 217.97 + (216.3 - (0.6 + 1.43 + 41.87));
+    expect(m?.[1]).toBe(`+${((gen / 5_000 / 3.2) * 365 * 100).toFixed(1)}%`);
+  });
+});
+
+/**
+ * One Generated figure per bot, everywhere (gate finding on #73's stills, desktop-lp-3.2d and desktop-bots): for the same
+ * fixture the pace card's "So far", the LP headline Generated and the Bots list's Generated column are the same tokens,
+ * and Gen. % and Est. APR are worked out from those tokens (an LP's base part at the pool price), never from the engine's
+ * separate pnl.net or the open position's gross positionFees.
+ */
+describe('So far == Generated column == LP headline; Gen. % and Est. APR from the same Generated (gate finding, #73)', () => {
+  // the NVDA LP still: tiny fee coins, so ~−1.4 USDG generated, while pnl.net (+412) and positionFees (1.1 NVDA + 230 USDG) say otherwise
+  const still = {
+    ...nvdaLp, id: 'lp-nvda-still', label: 'NVDA LP still', price: 217.82, startedAt: NOW - 3.2 * D,
+    pnl: { feeCoins: { base: 0.00016568, quote: 0.0748 }, fees: 455, gas: 0.08, swapCost: 1.4, moveLoss: 0, net: 412, price: -4.2 },
+    position: { id: 'paper-3', lower: 196.2, upper: 240.12, openedAt: NOW - 3.2 * D },
+    positionFees: { since: NOW - 3.2 * D, coins: { base: 1.1, quote: 230 } }, lastRerangeAt: null, reranges: 0,
+  };
+  const cases = [stonkd, nvdaLp, still];
+  type Amt = { v: number; tol: number };
+  /** Coin amounts in a piece of visible text, by coin: "+0.0531 SPY", "− 884.83 USDG", "0.00016568 NVDA". */
+  const coins = (text: string): Map<string, Amt> => {
+    const m = new Map<string, Amt>();
+    for (const x of text.matchAll(new RegExp(`([+\\-−]?)\\s?(\\d[\\d,]*(?:\\.\\d+)?)\\s(${SYMS.join('|')})(?![/\\w-])`, 'g'))) {
+      const d = x[2].includes('.') ? x[2].split('.')[1].length : 0;
+      m.set(x[3], { v: neg(x[1]) * parseNum(x[2]), tol: 0.5 * 10 ** -d });
+    }
+    return m;
+  };
+  const between = (text: string, a: RegExp, b: RegExp) => {
+    const i = text.search(a); expect(i, `${a}`).toBeGreaterThanOrEqual(0);
+    const rest = text.slice(i).replace(a, ''); const j = rest.search(b);
+    return j < 0 ? rest : rest.slice(0, j);
+  };
+  const sOf = (b: typeof stonkd) => ({ ...s0, lps: [b] });
+  const page = (b: typeof stonkd) => visibleText(renderToStaticMarkup(wrap(h(LpDetail, { s: sOf(b), id: b.id, events: [], ticks: null, nav: noop, act: noop, busy: false }), false)), 'desktop');
+  const row = (b: typeof stonkd) => {
+    const html = renderToStaticMarkup(wrap(h(DeskTable, { s: sOf(b), bots: [b], nav: noop, pause: noop, close: noop, initialOpen: null }), false));
+    const cell = (c: string) => new RegExp(`<span class="${c}"[^>]*>([\\s\\S]*?)</span>(?=<span class="desk-|<span class="desk-|$)`).exec(html.slice(html.indexOf(`>${b.label}<`)))?.[1] ?? '';
+    return { pnl: visibleText(cell('desk-pnl'), 'desktop'), pct: visibleText(cell('desk-pct'), 'desktop'), apr: visibleText(cell('desk-apr'), 'desktop') };
+  };
+  const pctOf = (t: string) => { const x = /([+\-−]?)(\d[\d,]*(?:\.\d+)?)%/.exec(t); expect(x, t).not.toBeNull(); return { v: neg(x![1]) * parseNum(x![2]) / 100, tol: 0.5 * 10 ** -(decs(x![2]) + 2) }; };
+  /** Generated as the engine fields define it (#48): base fee coins, quote fee coins − gas − swap cost − range-move loss. */
+  const truth = (b: typeof stonkd) => new Map([[b.base, b.pnl.feeCoins.base], ['USDG', b.pnl.feeCoins.quote - (b.pnl.gas + b.pnl.swapCost + b.pnl.moveLoss)]]);
+  const same = (got: Map<string, Amt>, want: Map<string, number>, what: string) => {
+    expect([...got.keys()].sort(), what).toEqual([...want.keys()].sort());
+    for (const [k, v] of want) expect(Math.abs(got.get(k)!.v - v), `${what} ${k}: ${got.get(k)!.v} vs ${v}`).toBeLessThanOrEqual(got.get(k)!.tol + 1e-12);
+  };
+
+  for (const b of cases) {
+    it(`${b.label}: pace "So far" == LP headline Generated == the Bots list's Generated column`, () => {
+      const text = page(b);
+      const soFar = coins(between(text, /So far:/, /The estimate|Est\. a day|If it keeps/));
+      const headline = coins(between(text, /Generated, net of costs i/, /Liquidity provided/));
+      const column = coins(row(b).pnl);
+      const want = truth(b);
+      same(headline, want, 'headline');
+      same(soFar, want, 'So far');
+      same(column, want, 'Generated column');
+    });
+    it(`${b.label}: Gen. % == the Generated column ÷ Invested (base part at the pool price), and Est. APR from it`, () => {
+      const r = row(b);
+      const column = coins(r.pnl);
+      const valued = [...column].reduce((a, [k, x]) => a + (k === 'USDG' ? x.v : x.v * b.price), 0);
+      const tolV = [...column].reduce((a, [k, x]) => a + (k === 'USDG' ? x.tol : x.tol * b.price), 0);
+      const inv = b.startValue;
+      const shown = pctOf(r.pct);
+      expect(Math.abs(shown.v - valued / inv), `${r.pct} vs ${valued}/${inv}`).toBeLessThanOrEqual(shown.tol + tolV / inv + 1e-12);
+      // and never the engine net when that disagrees
+      if (Math.abs(b.pnl.net - valued) / inv > 0.001) expect(Math.abs(shown.v - b.pnl.net / inv)).toBeGreaterThan(shown.tol);
+      const days = (NOW - b.startedAt) / D;
+      if (days >= 1) {
+        const apr = pctOf(r.apr);
+        expect(Math.abs(apr.v - (valued / inv / days) * 365), `${r.apr}`).toBeLessThanOrEqual(apr.tol + (tolV / inv / days) * 365 + 1e-12);
+      } else expect(r.apr.trim()).toBe('—');
+    });
+  }
+  it('Home names the best bot from the same Generated: the trend (+61.5 USDG), not the NVDA LP still (−1.4 USDG, engine net +412)', () => {
+    const html = renderToStaticMarkup(wrap(h(Home, { s: { ...s0, trends: [trend], lps: [still] }, nav: noop, holdings: null, act: noop }), false));
+    expect(visibleText(html, 'desktop')).toMatch(/Best bot EMA NVDA\/USDG-HOOD 1h/);
+  });
+  it('the NVDA LP still reads about 0.0% Gen. % and a small negative Est. APR, not +8.2% and +939.9%', () => {
+    const r = row(still);
+    expect(r.pct.trim()).toMatch(/^[−-]?0\.0%$/);
+    expect(r.apr.trim()).toMatch(/^[−-]3\.\d%$/);
+    expect(page(still)).toMatch(/So far: 0\.00016568 NVDA − 1\.4052 USDG /);
   });
 });

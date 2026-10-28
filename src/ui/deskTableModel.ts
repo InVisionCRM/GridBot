@@ -1,5 +1,5 @@
 /** Group, filter, and sort the bots table. Presentation only. */
-import { generatedInQuote, generatedOf, generatedPct } from './generatedView';
+import { generatedPct, generatedValueInQuote } from './generatedView';
 import { estYearly } from './runRate';
 import { rangeState, type AnyObj } from './model';
 import { botFacts, type DeskFacts } from './deskStats';
@@ -92,7 +92,7 @@ function sortValue(it: DeskItem, key: DeskSort): number | string | null {
   if (key === 'value') return f.investedUsd;
   if (key === 'pnl') {
     const k = typeof it.b.usdPerQuote === 'number' && it.b.usdPerQuote > 0 ? it.b.usdPerQuote : null;
-    const q = it.b.kind === 'lp' ? (typeof it.b.pnl?.net === 'number' ? it.b.pnl.net : null) : generatedInQuote(generatedOf(it.b));
+    const q = generatedValueInQuote(it.b); // the Generated column's tokens (an LP's base part at the pool price), as Gen. %
     return q == null || k == null ? null : q * k;
   }
   if (key === 'pnlPct') return generatedPct(it.b);

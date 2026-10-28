@@ -111,9 +111,10 @@ export function StatTable({ b, s, inRow = false, omit = [] }: { b: AnyObj; s: An
   ];
   return (
     <div className="stat-table">
-      <p className="stat-note">{short
+      {/* the note explains the Est. rows: none when they're left out (the LP page's pace card has them) */}
+      {!skip.has('est') && <p className="stat-note">{short
         ? 'Estimates (24h, 7d, 365d) show once the bot has run a day. Until then: what it generated over the run.'
-        : 'Estimates: what it generated so far, per token, carried over 24h, 7d and 365d at the same pace. Not a forecast.'}</p>
+        : 'Estimates: what it generated so far, per token, carried over 24h, 7d and 365d at the same pace. Not a forecast.'}</p>}
       <table>
         <tbody>
           {rows.filter((r) => !r.id || !skip.has(r.id)).map((r) => (
