@@ -47,6 +47,7 @@ import { requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type
 import type { Logger } from './logger';
 import type { Store } from './store';
 import { noKey } from '../words';
+import { keySymbols } from '../../lib/marketKey';
 
 export interface LpPosition {
   /** NFT id (live) or a paper id */
@@ -364,8 +365,9 @@ export class LpEngine {
   get def(): MarketDef | null { return this.hub.has(this.state.market) ? this.hub.def(this.state.market) : null; }
   get chainId() { return this.def?.chainId ?? this.d.net.chainId; }
   get label() { return this.hub.label(this.state.market); }
-  get baseSym() { return this.def?.base.symbol ?? '?'; }
-  get quoteSym() { return this.def?.quote.symbol ?? '?'; }
+  // market not loaded: the symbols in its key (src/lib/marketKey.ts)
+  get baseSym() { return this.def?.base.symbol ?? keySymbols(this.state.market)?.base ?? '?'; }
+  get quoteSym() { return this.def?.quote.symbol ?? keySymbols(this.state.market)?.quote ?? '?'; }
   get signer(): TxSender | null { const m = this.def; return m ? this.hub.rt(m.chainId).signer : null; }
   private get gate() { const m = this.def; return m ? this.hub.rt(m.chainId).gate : undefined; }
   private log(level: 'info' | 'warn' | 'error', msg: string) { this.d.log[level](`[${this.state.id}] ${msg}`); }

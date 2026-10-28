@@ -3,7 +3,7 @@ import { analyzeSpacing } from '../live/spacing';
 import type { AnyObj } from './model';
 
 // Estimate rules live with the server's metrics (one definition); re-exported for callers and tests.
-export { ageMs, DAY_MS, estHint, estNeedMs, extrapolate, historyEnd, MAX_SCALE, MIN_AGE_MS } from '../metrics/botMetrics';
+export { ageMs, DAY_MS, EST_HINT, estHint, estNeedMs, extrapolate, historyEnd, MIN_AGE_MS } from '../metrics/botMetrics';
 import type { BotMetrics } from '../metrics/botMetrics';
 
 export interface Extrapolation { amount: number; pct: number | null }
@@ -61,7 +61,7 @@ export interface DeskFacts {
   pnlPct: number | null;
   /** Generated (the headline) scaled to 24h / 7d / 365d, in dollars; pct only on 365d (= APR). */
   est: { h24: Extrapolation | null; d7: Extrapolation | null; d365: Extrapolation | null };
-  /** Why an estimate is a dash: "needs 7d of history". */
+  /** Why an estimate is a dash: "shows after a day" (EST_HINT). */
   estHint: { h24: string | null; d7: string | null; d365: string | null };
   aprPct: number | null;
   /** Headline: units generated per token, and their dollar value at today's mid price. */

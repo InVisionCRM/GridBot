@@ -29,13 +29,14 @@ describe('desk stat math', () => {
     expect(extrapolate(10, 100, 30_000, DAY_MS)).toBeNull();
   });
 
-  it('refuses to stretch a short sample over a long window', () => {
-    // one minute of a −$1 swap cost must not become a −$525,600 yearly estimate
+  it('nothing under a day of history; from a day on, amount ÷ age in days × the window (no other cap)', () => {
+    // one minute of a −1 swap cost must not become a −525,600 yearly estimate
     expect(extrapolate(-1, 100, 60_000, 365 * DAY_MS)).toBeNull();
     expect(extrapolate(-1, 100, 60_000, DAY_MS)).toBeNull();
-    expect(extrapolate(10, 100, 2 * DAY_MS, 365 * DAY_MS)).toBeNull();
+    expect(extrapolate(1, 100, 0.48 * DAY_MS, DAY_MS)).toBeNull();
+    expect(extrapolate(10, 100, 2 * DAY_MS, 365 * DAY_MS)?.amount).toBe(1825);
     expect(extrapolate(10, 100, 7 * DAY_MS, 365 * DAY_MS)?.amount).toBeCloseTo(521.43, 2);
-    expect(extrapolate(1, 100, 30 * 60_000, DAY_MS)?.amount).toBe(48);
+    expect(extrapolate(1, 100, DAY_MS, DAY_MS)?.amount).toBe(1);
   });
 
   it('counts fills and re-centers from stored fields, and leaves a hole when they are absent', () => {
@@ -68,7 +69,7 @@ describe('desk stat math', () => {
     expect(f.unrealizedUsd).toBe(6);
     expect(f.est.h24).toEqual({ amount: 2, pct: null }); // Generated (realized 4 over 2 days), not total P&L
     expect(f.generated).toEqual({ quote: 4 });
-    expect(f.est.d365).toBeNull(); // two days of history is too short for a year
+    expect(f.est.d365).toEqual({ amount: 730, pct: 7.3 }); // 4 over 2 days × 365, on 100 in (a day of history is enough)
     expect(f.feesPaidUsd).toBeCloseTo(0.5);
     expect(f.feesEarnedUsd).toBeNull();
     expect(f.timeInRange).toBeNull();
@@ -150,13 +151,14 @@ describe('grid capital is in the quote coin', () => {
 });
 
 describe('estimate hint for a dash', () => {
-  it('says how much history each window needs', () => {
-    expect(estNeedMs(365 * DAY_MS)).toBe(7 * DAY_MS);
-    expect(estHint(2 * DAY_MS, 365 * DAY_MS)).toBe('needs 7d of history');
-    expect(estHint(60_000, 7 * DAY_MS)).toBe('needs 3.2h of history');
-    expect(estHint(60_000, DAY_MS)).toBe('needs 28 min of history');
-    expect(estHint(null, DAY_MS)).toBe('needs 28 min of history');
-    expect(estHint(8 * DAY_MS, 365 * DAY_MS)).toBeNull();
+  it('every window needs one day of history, and says so', () => {
+    for (const w of [DAY_MS, 7 * DAY_MS, 30 * DAY_MS, 365 * DAY_MS]) {
+      expect(estNeedMs(w)).toBe(DAY_MS);
+      expect(estHint(0.48 * DAY_MS, w)).toBe('shows after a day');
+      expect(estHint(DAY_MS, w)).toBeNull();
+    }
+    expect(estHint(null, DAY_MS)).toBe('shows after a day');
+    expect(estHint(2 * DAY_MS, 365 * DAY_MS)).toBeNull();
   });
   it('puts the hint on the facts exactly where the estimate is a dash', () => {
     const lp = {
@@ -165,14 +167,16 @@ describe('estimate hint for a dash', () => {
       pnl: { net: 120, price: -20, fees: 129.7, feeCoins: { base: 0.01, quote: 109.7 } },
     };
     const f = botFacts(lp, now);
-    expect(f.est.d365).toBeNull();
-    expect(f.aprPct).toBeNull();
-    expect(f.estHint.d365).toBe('needs 7d of history');
-    expect(f.est.d7).not.toBeNull();
-    expect(f.estHint.d7).toBeNull();
-    expect(f.estHint.h24).toBeNull();
-    expect(f.generatedRate?.d365).toBeNull();
+    // two days old: every window has its figure, no hint
+    expect(f.est.d365).not.toBeNull();
+    expect(f.aprPct).not.toBeNull();
+    expect(f.estHint).toEqual({ h24: null, d7: null, d365: null });
+    expect(f.generatedRate?.d365?.USDC).toBeCloseTo(54.85 * 365, 9);
     expect(f.generatedRate?.d1).toEqual({ ETH: 0.005, USDC: 54.85 });
+    // under a day: all dashes, each with the hint
+    const young = botFacts({ ...lp, startedAt: now - 0.48 * DAY_MS }, now);
+    expect([young.est.h24, young.est.d7, young.est.d365, young.aprPct]).toEqual([null, null, null, null]);
+    expect(young.estHint).toEqual({ h24: 'shows after a day', d7: 'shows after a day', d365: 'shows after a day' });
   });
   it('writes units per token', () => {
     expect(unitsText({ ETH: 0.0062605, USDC: 41.455 })).toBe('+0.00626 ETH · +41.46 USDC');

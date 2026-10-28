@@ -14,16 +14,19 @@
  * so Generated + Price change = Total P&L by construction; tests recompute both sides from raw inputs.
  *
  * Quote-coin figures are converted once with usdPerQuote (grid capital is in the quote coin despite its legacy name
- * `totalCapitalQuote`). No rate → the dollar fields are null, never quote-as-dollars. Estimates need the history to be at
- * least window / MAX_SCALE long (365d needs 7d, 7d ~3.2h, 24h ~28 min); until then they are null with a `needs` hint.
+ * `totalCapitalQuote`). No rate → the dollar fields are null, never quote-as-dollars. Estimates (Kyle's rule): Generated
+ * per token ÷ age in days × 1 / 7 / 30 / 365, all of them null with "shows after a day" until the bot is a day old; no other
+ * cap or minimum history. Age is historyEnd-aware (a stopped bot's age ends at its stop).
  */
 
 import { isCloseOut } from '../live/ledger';
+import { keySymbols, unitOf } from '../lib/marketKey';
 
-export const MIN_AGE_MS = 60_000;
 export const DAY_MS = 86_400_000;
-/** Never stretch the sample more than this many times: 365d needs a week of history, 7d ~3.2h, 24h ~28 min. */
-export const MAX_SCALE = 365 / 7;
+/** Kyle's rule: every estimate (day, 7d, 30d, 365d, APR) needs one day of history, and nothing else. */
+export const MIN_AGE_MS = DAY_MS;
+/** The one hint every screen shows for an estimate that isn't there yet (StatTable, LP pace, desk APR title). */
+export const EST_HINT = 'shows after a day';
 
 export type MetricsKind = 'grid' | 'trend' | 'lp' | 'token';
 export type Headline = 'generated';
@@ -125,33 +128,25 @@ export function bridgeCostsOf(b: Obj): BotMetrics['bridgeCosts'] {
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
-/** Linear (simple, not compounded) extrapolation; null when the sample is too short for the window. */
+/** Linear (simple, not compounded): amount ÷ age × the window; null under a day of history (MIN_AGE_MS). */
 export function extrapolate(amount: number, invested: number, age: number, windowMs: number): { amount: number; pct: number | null } | null {
   if (!(age >= MIN_AGE_MS) || !(windowMs > 0) || !Number.isFinite(amount)) return null;
-  if (windowMs / age > MAX_SCALE) return null;
   const out = amount * (windowMs / age);
   if (!Number.isFinite(out)) return null;
   const pct = invested > 0 && Number.isFinite(invested) ? (amount / invested) * (windowMs / age) : null;
   return { amount: out, pct: pct != null && Number.isFinite(pct) ? pct : null };
 }
 
-/** Shortest history an estimate over `windowMs` needs: 365d → 7d, 7d → ~3.2h, 24h → ~28 min (never under a minute). */
+/** Shortest history any estimate needs: one day, whatever the window (Kyle's rule). */
 export function estNeedMs(windowMs: number): number {
-  return Math.max(MIN_AGE_MS, windowMs / MAX_SCALE);
+  void windowMs;
+  return MIN_AGE_MS;
 }
 
-function fmtNeed(ms: number): string {
-  const trim = (x: number) => x.toFixed(1).replace(/\.0$/, '');
-  if (ms >= DAY_MS) return `${trim(ms / DAY_MS)}d`;
-  if (ms >= 3_600_000) return `${trim(ms / 3_600_000)}h`;
-  return `${Math.round(ms / 60_000)} min`;
-}
-
-/** "needs 7d of history" while the bot is too young for the window; null once there is enough. */
+/** "shows after a day" (the wording every screen uses) while the bot is under a day old; null from then on (every window alike). */
 export function estHint(age: number | null, windowMs: number): string | null {
-  const need = estNeedMs(windowMs);
-  if (age != null && age >= need) return null;
-  return `needs ${fmtNeed(need)} of history`;
+  if (age != null && age >= estNeedMs(windowMs)) return null;
+  return EST_HINT;
 }
 
 /** Milliseconds since start. Null when the start time is missing or in the future. */
@@ -182,7 +177,7 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
   return now - startedAt;
 }
 
-const RATES = 'The 24h/7d/30d/365d estimates are Generated ÷ age × the days, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; they need 28 min / 3.2h / 13.8h / 7d of history.';
+const RATES = 'The day, 7d and 365d estimates are Generated ÷ age in days × 1, 7 or 365, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; all of them show after a day.';
 const GENERATED_CALC: Record<MetricsKind, string> = {
   lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin), swap fees (in the coin swapped in) and range-move losses (in the coin the move sold, locked in at each move).',
   grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown under Open positions. A close / stop cash-out sale is not a round trip; its result is in Price change.',
@@ -304,7 +299,7 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   const lo = num(b.config?.lowerPrice), hi = num(b.config?.upperPrice), price = num(b.price);
   // Round-trip profit lands in the quote coin: engine.ts applySell → realized; reinvest adds it to the level's next buy
   // and send mode pays it out, both in the quote. The base the grid "stacks" is inventory (Unrealized).
-  const sym = String(b.quoteSym ?? b.stable ?? 'quote');
+  const sym = String(unitOf(b.quoteSym) ?? unitOf(b.stable) ?? 'quote'); // never a market key as the unit
   // Generated = completed round trips (minus gas lost on failed / manual trades). A close / stop cash-out sale is a
   // liquidation at the day's price, so it is in Total P&L (price change) but not here. Older payloads: realized.
   const gen = num(b.stats?.generated) ?? realized;
@@ -326,7 +321,7 @@ export function trendMetrics(b: Obj, now = Date.now()): BotMetrics {
   const realized = num(b.pnl?.realized), unrealized = num(b.pnl?.unrealized);
   const equity = num(b.pnl?.equity) ?? (cap == null ? null : cap + (realized ?? 0) + (unrealized ?? 0));
   const n = num(b.moveCount);
-  const sym = String(b.quoteSym ?? b.quote ?? 'quote');
+  const sym = String(unitOf(b.quoteSym) ?? unitOf(b.quote) ?? 'quote'); // never a market key as the unit
   return finish({
     kind: 'trend', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'trend' }, now),
     capitalIn: cap, currentValue: equity, paidOut: 0, extraCost: 0,
@@ -350,7 +345,7 @@ const coinsOf = (c: unknown): Coins | null => {
  * charged to the quote coin.
  */
 export function lpGenerated(b: Obj): { generated: Record<string, number> | null; px: Record<string, number | null> } {
-  const baseSym = String(b.base ?? 'base'), quoteSym = String(b.quote ?? 'quote');
+  const baseSym = String(unitOf(b.base) ?? keySymbols(b.market)?.base ?? 'base'), quoteSym = String(unitOf(b.quote) ?? keySymbols(b.market)?.quote ?? 'quote');
   const k = rate(b), price = num(b.price);
   const px: Record<string, number | null> = { [baseSym]: price != null && k != null ? price * k : null, [quoteSym]: k };
   // A closed bot has no reading (pnl null) and nothing owed: its fees are what it collected.
@@ -403,7 +398,7 @@ export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
     gas, swapCost: num(b.totals?.swapCost) ?? num(p?.swapCost),
     moveCount: n, fillCount: null,
     range: lo != null && hi != null && hi > lo ? { lower: lo, upper: hi, current: price, inRange: typeof b.inRange === 'boolean' ? b.inRange : inside(lo, hi, price) } : null,
-    k: rate(b), symbol: b.quote ?? null,
+    k: rate(b), symbol: unitOf(b.quote) ?? keySymbols(b.market)?.quote ?? null,
     ...lpGenerated(b), dollarsMade: num(p?.net), rebalanceLoss: num(b.totals?.moveLoss) ?? num(p?.moveLoss), taxes: null,
     bridge: bridgeCostsOf(b),
   }, now);

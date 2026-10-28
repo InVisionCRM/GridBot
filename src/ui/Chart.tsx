@@ -19,6 +19,7 @@ import { px, num, ago } from './fmt';
 import type { Ticks } from './useStream';
 import { ChainBadge, MarketOptions, chainOf, feeLabel, flipKey, isFlipKey, mk, orientedKey, unflipKey, type MarketInfo } from './chains';
 import { IND, T, alpha, chartBase } from './theme';
+import { quoteSym } from './model';
 
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 const C = { up: T.profit, down: T.loss, fast: IND.fast, slow: IND.slow, dc: IND.band, bb: IND.band, grid: alpha(T.muted, 0.45), stop: T.loss, tp: T.profit, entry: T.text, flat: alpha(T.muted, 0.35), lp: IND.signal };
@@ -248,7 +249,7 @@ export function Chart(p: ChartProps) {
     const out: ChartBot[] = [];
     for (const g of (s.grids ?? []) as AnyObj[]) {
       if (g.stable !== pair || !g.config) continue;
-      out.push({ id: g.id, name: String(g.label || `${g.base ?? ''}/${g.quoteSym ?? ''}`), kind: 'Grid', chain: chain(g.chainId, g.chainShort) });
+      out.push({ id: g.id, name: String(g.label || `${g.base ?? ''}/${quoteSym(g) ?? ''}`), kind: 'Grid', chain: chain(g.chainId, g.chainShort) });
     }
     for (const t of (s.trends ?? []) as AnyObj[]) {
       if (t.quote !== pair) continue;

@@ -25,6 +25,7 @@ import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, shouldRecenter, type RecenterState } from '../../live/recenter';
 import { noKey } from '../words';
 import { isHalt, requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
+import { keySymbols, unitOf } from '../../lib/marketKey';
 
 export type Mode = 'paper' | 'live';
 export type Status = 'idle' | 'running' | 'stopped';
@@ -254,7 +255,9 @@ export class GridEngine {
   get chainCfg(): ChainConfig | null { const m = this.def; return m ? this.hub.chain(m.chainId) : null; }
   get chainId(): number { return this.def?.chainId ?? this.d.net.chainId; }
   get label() { return this.hub.label(this.state.stable); }
-  get baseSym() { return this.def?.base.symbol ?? 'PLS'; }
+  // market not loaded: the symbols in its key, never the key itself (src/lib/marketKey.ts)
+  get baseSym() { return this.def?.base.symbol ?? keySymbols(this.state.stable)?.base ?? 'PLS'; }
+  get quoteSym() { return this.def?.quote.symbol ?? unitOf(this.state.stable) ?? this.state.stable; }
   /** Per-chain signer (PRIVATE_KEY_<SLUG> or the shared key). */
   get signer(): TxSender | null {
     const m = this.def;
@@ -1072,8 +1075,8 @@ export class GridEngine {
       id: this.state.id,
       mode: this.state.mode, network: this.netKey, chainId: this.chainId, explorer: c?.explorer ?? this.d.net.explorer,
       chainKey: c?.key ?? this.d.net.key, chainShort: c?.short ?? 'PLS', label: this.label,
-      base: this.baseSym, quoteSym: m?.quote.symbol ?? this.state.stable, feeBps: m?.pool.feeBps ?? FEE_BPS,
-      flipped: !!m?.flipped, pairKey: m?.flipOf ?? this.state.stable, spends: m?.quote.symbol ?? this.state.stable, stacks: this.baseSym,
+      base: this.baseSym, quoteSym: this.quoteSym, feeBps: m?.pool.feeBps ?? FEE_BPS,
+      flipped: !!m?.flipped, pairKey: m?.flipOf ?? this.state.stable, spends: this.quoteSym, stacks: this.baseSym,
       gasReserve: m?.quote.native && this.state.config ? gasReserve(this.state.config.totalCapitalQuote, reserveCfg(this.state.limits)) : null,
       dex: m?.pool.dex ?? null, dexName: m ? (c?.dexes.find((x) => x.id === m.pool.dex)?.name ?? m.pool.dex) : null, feeTier: m?.pool.feeTier ?? null, poolMode: m?.poolMode ?? null, custom: !!m?.custom, risk: m?.safety?.risk ?? null, available: !(this.executor instanceof UnavailableExecutor),
       quotes: this.d.net.quotes.map((s) => s.symbol), stables: this.d.net.quotes.map((s) => s.symbol), stable: this.state.stable,

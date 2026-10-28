@@ -1,6 +1,6 @@
 /** The figures under a chart. A dash is a figure the stored bot does not have. */
 import { chainOf, mk } from './chains';
-import { botFacts, figuresOf, unitsText } from './deskStats';
+import { botFacts, EST_HINT, figuresOf, unitsText } from './deskStats';
 import { ago, dur, pct, px, qty } from './fmt';
 import type { AnyObj } from './model';
 import { isShortRun } from './runRate';
@@ -16,7 +16,7 @@ function poolText(pool: string | null) {
  */
 /** Rows a page can leave out because it shows the same figure elsewhere (no number twice on a screen). */
 export type StatRow = 'Generated' | 'APR' | 'Age'
-  | 'Est. 24h' | 'Est. 7d' | 'Est. 30d' | 'Est. 365d' | 'Moves' | 'Win rate' | 'Fees paid' | 'Fees earned' | 'Time in range' | 'Range' | 'Spacing' | 'Last move';
+  | 'Est. 24h' | 'Est. 7d' | 'Est. 365d' | 'Moves' | 'Win rate' | 'Fees paid' | 'Fees earned' | 'Time in range' | 'Range' | 'Spacing' | 'Last move';
 
 export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: readonly StatRow[] }) {
   const key = (b.stable || b.market || b.quote) as string | undefined;
@@ -32,19 +32,18 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   const calc = f.calc ?? undefined;
   // under a day: no Est. rows scaled up from a few hours (runRate.ts, #72); Generated above is the run's figure
   const short = isShortRun(f.ageMs);
-  const rate = (r: Record<string, number> | null | undefined, hint: string | null | undefined) => (short ? '— (shows after a day)' : r ? unitsText(r) : hint ? `— (${hint})` : '—');
+  const rate = (r: Record<string, number> | null | undefined, hint: string | null | undefined) => (short ? `— (${EST_HINT})` : r ? unitsText(r) : hint ? `— (${hint})` : '—');
   const gr = f.generatedRate;
   const sym = f.quoteSym ?? '';
-  // Est. = Generated ÷ age × the window, per token (the server's generatedRate); a dash and "needs …" until the history is long enough
+  // Est. = Generated ÷ age × the window, per token (the server's generatedRate); a dash and "shows after a day" until the history is long enough
   // a liquidity bot has no move count of its own here (main: hidden for lp); #43 has no Realized/Unrealized rows
   const hidden: readonly string[] = b.kind === 'lp' ? [...hide, 'Moves'] : hide;
   const rows: [string, string, string?][] = [
     ['Generated', unitsText(f.generated), calc],
     ['Est. 24h', rate(gr?.d1, gr?.needs.d1), calc],
     ['Est. 7d', rate(gr?.d7, gr?.needs.d7), calc],
-    ['Est. 30d', rate(gr?.d30, gr?.needs.d30), calc],
     ['Est. 365d', rate(gr?.d365, gr?.needs.d365), calc],
-    ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pct(f.aprPct, 1, true), calc],
+    ['APR', f.aprPct == null ? (f.estHint.d365 || short ? `— (${f.estHint.d365 ?? EST_HINT})` : '—') : pct(f.aprPct, 1, true), calc],
     ['Age', f.ageMs == null ? '—' : dur(f.ageMs)],
     ['Moves', f.moves.text ?? '—'],
     ['Win rate', f.winRate == null ? '—' : pct(f.winRate, 0)],
@@ -69,7 +68,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   });
   return (
     <div className="stat-table" data-testid="stat-table">
-      <p className="stat-note">Generated leads. Est. 24h/7d/30d/365d = Generated ÷ age × the days, per coin, and APR scales it the same way; not a forecast.{short && ' They show once the bot has run a day.'}{calc && <> <abbr className="calc-hint" title={calc}>How it's calculated</abbr></>}</p>
+      <p className="stat-note">Generated leads. Est. 24h/7d/365d = Generated ÷ age × the days, per coin, and APR scales it the same way; not a forecast.{short && ` They ${EST_HINT}.`}{calc && <> <abbr className="calc-hint" title={calc}>How it's calculated</abbr></>}</p>
       <table>
         <tbody>
           {shown.map(([k, v, t]) => (
