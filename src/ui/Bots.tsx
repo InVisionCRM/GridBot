@@ -6,11 +6,12 @@ import { listBots, useRowActions } from './botRow';
 import { DeskTable } from './DeskTable';
 import { RefreshCtx, chains, useChainFilter } from './chains';
 import type { AnyObj, Nav } from './model';
+import { SafetyChecking } from './SafetyChecking';
 
 export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: boolean; onStopAll: () => void }) {
   const { chain } = useChainFilter();
   const refresh = useContext(RefreshCtx);
-  const { err, pause, close } = useRowActions();
+  const { err, pause, close, checking } = useRowActions();
   const [rowErr, setRowErr] = useState<string | null>(null);
   const [hide, setHide] = useState<Set<string>>(new Set());
   const [trader, setTrader] = useState<AnyObj | null>(null);
@@ -76,6 +77,7 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
       </div>
       {short && <p className="note bad">{short}. Stop a bot or add funds.</p>}
       {low.map((c) => <p key={c.id} className="note">Low gas on {c.name}.</p>)}
+      {checking && <SafetyChecking what="Checking safety before resuming…" />}
       {(err || rowErr) && <p className="note bad">{err || rowErr}</p>}
       {(bots.length > 0 || traders.length > 0)
         ? <DeskTable s={s} bots={[...bots, ...traders]} nav={nav} pause={pause} close={close} />
