@@ -62,6 +62,15 @@ export interface AppOpts {
   statusThrottleMs?: number;
   /** Version check + self-test (server only: needs the git checkout and the build stamp; a friend's copy has no version check) */
   system?: { version: VersionCheck | null; pollMs: number };
+  /** Lock-screen Web Push. Absent in tests that don't build a push service. */
+  push?: {
+    publicKey(): string;
+    view(): unknown;
+    setPrefs(body: unknown): unknown;
+    subscribe(body: unknown, ua: string | null): unknown;
+    unsubscribe(endpoint: string): unknown;
+    test(endpoint?: string): Promise<unknown>;
+  };
   /** This process is a friend's copy. Its requests are labeled as such even if a via header says otherwise. */
   copy?: boolean;
 }
@@ -493,6 +502,27 @@ export function createApp(o: AppOpts) {
   app.post('/api/alerts', wrap((req) => bot.addAlert(req.body ?? {})));
   app.put('/api/alerts/:id', wrap((req) => bot.updateAlert(req.params.id, req.body ?? {})));
   app.delete('/api/alerts/:id', wrap((req) => bot.removeAlert(req.params.id)));
+  if (o.push) {
+    const push = o.push;
+    // A friend's copy, and a request the gateway marked as a friend, never subscribe or read the owner's phones.
+    const ownerOnly = (req: Request, res: Response, next: NextFunction) => {
+      if (o.copy || headerOne(req.headers['x-gridbot-via']) === 'friend') {
+        res.status(403).json({ error: 'Push is only available on the owner login.' });
+        return;
+      }
+      next();
+    };
+    app.get('/api/push/vapid', ownerOnly, wrap(() => ({ publicKey: push.publicKey() })));
+    app.get('/api/push/status', ownerOnly, wrap(() => push.view()));
+    app.put('/api/push/prefs', ownerOnly, wrap((req) => push.setPrefs(req.body ?? {})));
+    app.post('/api/push/subscribe', ownerOnly, wrap((req) => push.subscribe(req.body ?? {}, headerOne(req.headers['user-agent']))));
+    app.post('/api/push/unsubscribe', ownerOnly, wrap((req) => push.unsubscribe(String(req.body?.endpoint ?? ''))));
+    app.post('/api/push/test', ownerOnly, wrap((req) => {
+      const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : '';
+      if (!endpoint) throw new Error('Send the test from the phone that should receive it.');
+      return push.test(endpoint);
+    }));
+  }
   app.get('/api/activity', wrap((req) => ({ events: bot.activity.recent(Math.min(400, num(req.query.n) ?? 100), num(req.query.since) ?? 0) })));
 
   // ── SSE: activity + ticks + status pushes ────────────────────────────

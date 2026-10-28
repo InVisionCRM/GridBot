@@ -234,8 +234,9 @@ export class TokenTrader {
 
   private now() { return (this.d.now ?? Date.now)(); }
   private save() { this.d.store.save(this.state); }
-  private say(msg: string, level: 'info' | 'warn' | 'success' = 'info') {
-    this.d.emit?.({ type: 'info', kind: 'system', level, msg });
+  private say(msg: string, level: 'info' | 'warn' | 'success' = 'info', extra?: { notify?: boolean; data?: Record<string, unknown>; mode?: 'paper' | 'live' }) {
+    const { mode, ...rest } = extra ?? {};
+    this.d.emit?.({ type: 'info', kind: 'system', level, msg, ...rest, ...(mode ? { mode } : {}) });
   }
 
   /**
@@ -488,7 +489,7 @@ export class TokenTrader {
     const why = warn ? `buy ${sized.why}; ${warn}` : `buy ${sized.why}`;
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
-    this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success');
+    this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode: o.mode } : { mode: o.mode });
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
   }
 
@@ -580,7 +581,7 @@ export class TokenTrader {
       const usd = quote * p.usdPerSpend;
       const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
       this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why: d.why, pnlUsd: usd - cost });
-      this.say(`sold ${p.label}: ${d.why}`, usd - cost >= 0 ? 'success' : 'warn');
+      this.say(`sold ${p.label}: ${d.why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
       if (d.why.startsWith('take profit') && !p.tp1Done) p.tp1Done = true;
       else if (d.why.startsWith('take profit')) p.tp2Done = true;
       if (p.tokens > p.entryTokens * 1e-8) left.push(p);

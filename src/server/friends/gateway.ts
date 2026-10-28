@@ -41,7 +41,7 @@ export interface GatewayDeps {
   now?: () => number;
 }
 
-const PUBLIC = ['/favicon.svg', '/manifest.webmanifest', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png'];
+const PUBLIC = ['/favicon.svg', '/manifest.webmanifest', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png', '/sw.js'];
 /** Never passed on: the gateway's cookie, where the request came from, and hop-by-hop headers. */
 const DROP_IN = /^(cookie|origin|referer|forwarded|x-forwarded-.*|x-real-ip|tailscale-.*|x-gridbot-via|connection|keep-alive|proxy-.*|upgrade)$/i;
 const DROP_OUT = /^(connection|keep-alive|transfer-encoding|set-cookie)$/i;
@@ -130,7 +130,10 @@ export function createGateway(d: GatewayDeps) {
 
   if (d.publicDir) {
     const dir = d.publicDir;
-    app.get(PUBLIC, (req, res) => res.sendFile(join(dir, req.path), (e) => { if (e && !res.headersSent) res.status(404).end(); }));
+    app.get(PUBLIC, (req, res) => {
+      if (req.path === '/sw.js') res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(join(dir, req.path), (e) => { if (e && !res.headersSent) res.status(404).end(); });
+    });
   }
 
   // ── Log in / out ─────────────────────────────────────────────────────
@@ -214,6 +217,10 @@ export function createGateway(d: GatewayDeps) {
     const owner = res.locals.owner === true;
     const f = res.locals.friend as Friend | null;
     if (!owner && !f) return req.path.startsWith('/api/') ? res.status(401).json({ error: 'Please log in again.', login: true }) : res.redirect(303, '/login');
+    // Lock-screen push is the owner's phones only. A friend session is not proxied to their copy or to the host app.
+    if (!owner && (req.path === '/api/push' || req.path.startsWith('/api/push/'))) {
+      return res.status(403).json({ error: 'Push is only available on the owner login.' });
+    }
     const port = owner ? d.hostPort : f!.port;
     if (!port) {
       return req.path.startsWith('/api/')
