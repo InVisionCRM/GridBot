@@ -20,7 +20,7 @@ const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 // The copy side: ask for the key, build the signers from it, report what it saw (hashes only, never the key).
 const entrySrc = join(tmp, 'entry.ts');
 writeFileSync(entrySrc, `
-import { writeFileSync, readFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, renameSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createSigners, receiveFriendKey } from ${JSON.stringify(join(__dirname, '..', 'src', 'server', 'env.ts'))};
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -31,11 +31,14 @@ const env = JSON.stringify(process.env);
 let procEnv = '';
 try { procEnv = readFileSync('/proc/self/environ', 'latin1'); } catch { /* not Linux */ }
 const body = key ? key.slice(2).toLowerCase() : '';
-writeFileSync('report.json', JSON.stringify({
+// Write-then-rename: report.json only ever appears complete. A plain writeFileSync creates the file before the bytes
+// land, and the test's SIGTERM (copies.stop) could kill the copy in between and leave it empty.
+writeFileSync('report.json.tmp', JSON.stringify({
   keySha: key ? sha(key) : null, address: w ? await w.getAddress() : null,
   envHasKey: !!body && env.toLowerCase().includes(body), procEnvHasKey: !!body && procEnv.toLowerCase().includes(body),
   envNames: Object.keys(process.env).filter((k) => /KEY|SECRET|PASSWORD/i.test(k)),
 }));
+renameSync('report.json.tmp', 'report.json');
 process.exit(0);
 `);
 const entry = join(tmp, 'entry.mjs');
@@ -44,10 +47,29 @@ buildSync({ entryPoints: [entrySrc], outfile: entry, bundle: true, platform: 'no
 async function runCopy(spec: CopySpec) {
   const copies = new Copies({ root: tmp, entry, hostEnv: { PRIVATE_KEY: '0x' + '1'.repeat(64), CHAINS: 'ethereum' }, host: () => ({ name: 'Kyle', url: 'http://127.0.0.1:1' }), say: () => undefined });
   copies.start(spec);
-  const report = join(copies.dir(spec.id), 'report.json');
-  for (let i = 0; i < 200 && !existsSync(report); i++) await new Promise((r) => setTimeout(r, 50));
-  await copies.stop(spec.id);
-  return JSON.parse(readFileSync(report, 'utf8')) as { keySha: string | null; address: string | null; envHasKey: boolean; procEnvHasKey: boolean; envNames: string[] };
+  try {
+    return await readReport(join(copies.dir(spec.id), 'report.json'));
+  } finally {
+    await copies.stop(spec.id);
+  }
+}
+
+type Report = { keySha: string | null; address: string | null; envHasKey: boolean; procEnvHasKey: boolean; envNames: string[] };
+
+/**
+ * Waits for a complete report before the copy is stopped: the file must exist AND parse. The old loop stopped at
+ * existsSync, so on a slow disk (macOS CI) it could stop the copy mid-write and read '' ('Unexpected end of JSON input').
+ * The report holds hashes and flags only, and a failure here never echoes the file's contents.
+ */
+async function readReport(file: string, timeoutMs = 10_000): Promise<Report> {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    if (existsSync(file)) {
+      try { return JSON.parse(readFileSync(file, 'utf8')) as Report; } catch { /* partly written: keep waiting */ }
+    }
+    if (Date.now() >= until) throw new Error(`no complete copy report after ${timeoutMs} ms`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 describe("a friend's key reaches the copy over IPC, never its environment", () => {
