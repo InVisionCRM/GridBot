@@ -1,6 +1,5 @@
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
 import type { OwnerReport } from '../src/market/ownerPowers';
