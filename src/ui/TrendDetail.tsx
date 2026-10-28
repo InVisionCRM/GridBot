@@ -14,7 +14,8 @@ import { strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
 import { T } from './theme';
 import { quoteSym, type AnyObj, type Nav } from './model';
-import { Amt, Usd } from './money';
+import { formatTokens, generatedOf, investedOf } from './generatedView';
+import { isShortRun, runSpan } from './runRate';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -40,9 +41,11 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   useEffect(() => { const i = setInterval(() => tick((x) => x + 1), 30_000); return () => clearInterval(i); }, []);
   if (!t) return null;
 
-  const k: number | null = t.usdPerQuote ?? null;
   const q = quoteSym(t), base = t.base ?? 'PLS';
-  const profit: number = t.pnl.equity - t.capital;
+  // Headline: Invested + Generated, net of costs, in tokens (generated.ts): closed trades only, no open trade's price move.
+  const gen = generatedOf({ ...t, kind: 'trend' }), inv = investedOf({ ...t, kind: 'trend' });
+  const profit: number | null = gen?.tokens[0]?.amount ?? null;
+  const runMs = t.startedAt ? Date.now() - t.startedAt : null;
   const running = t.status === 'running';
   const closing = !!t.closing;
   const pos = t.position;
@@ -84,10 +87,11 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="kpi-row detail-stats">
-        <div className="kpi"><span>Profit</span><div className={`kpi-v ${cls(profit)}`}><AnimatedNumber value={profit} format={(x) => qty(x, q, 5)} /></div><span className="sub">{pct(t.pnl.returnPct, 2, true)}<Usd v={profit} k={k} /> · <Amt v={t.pnl.realized} sym={q} k={null} sig={4} /> banked</span></div>
+        <div className="kpi"><span>Invested</span><div className="kpi-v">{inv ? formatTokens([inv], false) : '—'}</div><span className="sub">{isShortRun(runMs) ? runSpan(runMs) : 'since it started'}</span></div>
+        <div className="kpi"><span>Generated, net of costs</span><div className={`kpi-v ${cls(profit)}`}>{profit == null ? '—' : <AnimatedNumber value={profit} format={(x) => qty(x, q, 5)} />}</div><span className="sub">closed trades, after pool fees and gas</span></div>
         <div className="kpi"><span>Trades</span><div className="kpi-v">{t.stats.count}</div><span className="sub">{t.stats.count ? `${pct(t.stats.winRate, 0)} profitable` : 'none closed yet'} · {t.blocked} skipped by the cost check</span></div>
         <div className="kpi"><span>Worst drop</span><div className="kpi-v">{pct(t.stats.maxDrawdown, 1)}</div><span className="sub">from the bot's peak value</span></div>
-        <div className="kpi"><span>Fees + gas</span><div className="kpi-v"><Amt v={-(t.pnl.fees + t.pnl.gas)} sym={q} k={k} sig={4} /></div><span className="sub">paid so far</span></div>
+        <div className="kpi"><span>Fees + gas</span><div className="kpi-v">{qty(-(t.pnl.fees + t.pnl.gas), q, 4)}</div><span className="sub">paid so far</span></div>
       </div>
 
       <div className="split wide-left">
@@ -98,14 +102,14 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
             : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact desk height={480}
                 emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
           <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
-          {/* the cards have Profit (net, %, banked), the win rate and fees + gas; the position line the open P&L */}
-          <StatTable b={t} s={s} omit={['net', 'realized', 'unrealized', 'winRate', 'feesPaid']} />
+          {/* the cards have Invested, Generated, the win rate and fees + gas */}
+          <StatTable b={{ ...t, kind: 'trend' }} s={s} omit={['invested', 'net', 'winRate', 'feesPaid', ...(isShortRun(runMs) ? ['age' as const] : [])]} />
         </div>
         <div className="stack">
           <div className="card">
             <h3>{pos ? `Holding ${base}` : 'Waiting for a signal'}</h3>
             {pos ? <>
-              <p className="small">{num(pos.pls, pos.pls < 10 ? 6 : 2)} {base} bought at {px(pos.entryPrice)} · {pos.bars} candles ago · open <Amt v={pos.unrealized} sym={q} k={k} sig={4} /> ({pct(pos.unrealizedPct, 2, true)})</p>
+              <p className="small">{num(pos.pls, pos.pls < 10 ? 6 : 2)} {base} bought at {px(pos.entryPrice)} · {pos.bars} candles ago</p>
               <StopGauge pos={pos} price={t.price} />
               <p className="muted small">Stop {px(pos.risk.stop)}{pos.risk.stop > pos.risk.initialStop ? ' (trailing)' : ''} · entry {px(pos.risk.entry)}{pos.risk.tp ? ` · take-profit ${px(pos.risk.tp)}` : ''} · price {px(t.price)}</p>
             </> : (
@@ -132,7 +136,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
               <tr key={x.id} className={x.failed ? 'failed-row' : ''}>
                 <td>{time(x.timestamp)}</td><td className={`side ${x.side}`}>{x.side}</td><td className="txt">{x.reason}</td>
                 <td>{num(x.plsAmount, x.plsAmount < 10 ? 6 : 0)}</td><td>{px(x.execPrice ?? x.price)}</td>
-                <td className={cls(x.side === 'sell' ? x.realizedPnlUsd : null)}>{x.side === 'sell' ? <Amt v={x.realizedPnlUsd} sym={q} k={k} sig={4} /> : ''}</td>
+                <td className={cls(x.side === 'sell' ? x.realizedPnlUsd : null)}>{x.side === 'sell' ? qty(x.realizedPnlUsd, q, 4) : ''}</td>
                 <td>{x.holdMs ? dur(x.holdMs) : ''}</td><td className="txt nowrap">{dexName(s, t.chainId, x.dex)}</td>
               </tr>
             ))}{!t.trades.length && <tr><td colSpan={8} className="txt muted">No trades yet.</td></tr>}</tbody>

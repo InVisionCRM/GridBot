@@ -201,55 +201,109 @@ describe('each figure once per screen', () => {
     }
   }
 
-  it('one-bot groups show no totals; the two-bot group leads with coins', () => {
+  it('one-bot groups show no totals; the two-bot group sums only the coins both bots count in', () => {
     const text = visibleText(desk(null, true), 'desktop');
-    expect(text).toMatch(/Grid 1 \$ HOOD/); // straight to the row: no totals
-    expect(text).toMatch(/Trend 1 N \$ HOOD/);
-    expect(text).toMatch(/Liquidity 2 +38,537 USDG +−463\.3 USDG/);
+    expect(text).toMatch(/Grid 1 U HOOD/); // straight to the row: no totals
+    expect(text).toMatch(/Trend 1 N U HOOD/);
+    // invested 34,000 + 5,000 USDG; generated in USDG (22.37 − 907.2) + (216.3 − 43.9); SPY and NVDA are each one bot's own
+    expect(text).toMatch(/Liquidity 2 39,000 USDG −712\.4 USDG/);
   });
 });
 
 /** The figures (in the page's dollar unit: USDG is a dollar coin here) that equal `v` to the shown precision. */
 const shown = (text: string, v: number) => figures(text).filter((f) => f.unit === '$' && Math.abs(f.v - v) <= f.tol + 1e-9);
 
-describe('LP page: one headline net (gate findings on #72 and #73)', () => {
+describe('LP page: headline Invested + Generated, the parts in Details (Kyle, #73)', () => {
   const p = stonkd.pnl;
-  const parts = {
-    'gas paid': -p.gas, 'swap costs paid': -p.swapCost, 'lost to range moves': -p.moveLoss, 'net with the price move': p.net + p.price, 'the price move': p.price,
-  };
+  const genQuote = p.feeCoins.quote - (p.gas + p.swapCost + p.moveLoss); // −884.83 USDG
+  const parts = { 'gas paid': -p.gas, 'swap costs paid': -p.swapCost, 'lost to range moves': -p.moveLoss };
   for (const view of ['desktop', 'phone'] as View[]) {
-    it(`shows the net once and nothing else net-looking until Details is opened (${view})`, () => {
-      const text = visibleText(lpPage('lp-stonkd', true), view);
-      expect(text).not.toMatch(/Earned after costs/); // #72 gate: it repeated the headline net
-      expect(shown(text, p.net)).toHaveLength(1);
+    it(`headline: Invested and Generated in tokens, nothing else net-looking until Details is opened (${view})`, () => {
+      const html = lpPage('lp-stonkd', true);
+      const text = visibleText(html, view);
+      expect(text).toMatch(/Invested i 34,000 USDG over 8\.8h Generated, net of costs i \+0\.0531 SPY −884\.83 USDG/);
+      expect(text).toMatch(/\+0\.0531 SPY/);
+      expect(shown(text, genQuote), 'generated USDG').toHaveLength(1);
+      expect(shown(text, p.net), 'the engine net in one figure').toHaveLength(0);
       for (const [what, v] of Object.entries(parts)) expect(shown(text, v), what).toHaveLength(0);
-      expect(figures(text).filter((f) => f.unit === '%' && Math.abs(f.v - (p.net / stonkd.startValue) * 100) <= f.tol + 1e-9), 'net %').toHaveLength(0);
     });
-    it(`moves the rest into Details, with plain labels, not removing it (${view})`, () => {
+    it(`Details has the parts with plain labels and no price-move lines (${view})`, () => {
       const html = opened(lpPage('lp-stonkd', true));
       const text = visibleText(html, view);
-      expect(shown(text, p.net)).toHaveLength(1);
+      expect(shown(text, genQuote)).toHaveLength(1);
       for (const [what, v] of Object.entries(parts)) expect(shown(text, v), what).toHaveLength(1);
-      // plain labels saying what each one is (labels are <th>, not figures, so read from the markup)
-      for (const label of ['Fees earned', 'Costs paid: gas', 'Costs paid: swaps to the range&#x27;s mix (pool fee and price impact)', 'Lost to range moves (0 moves)', 'Net as a share of what you put in', 'Price move of the SPY and USDG held (not in the net)', 'Net including that price move']) {
+      for (const label of ['Fees earned', 'Costs paid: gas', 'Costs paid: swaps to the range&#x27;s mix (pool fee and price impact)', 'Lost to range moves (0 moves)', 'Generated as a share of what you put in']) {
         expect(html).toContain(`<th>${label}</th>`);
       }
+      expect(html).not.toMatch(/Price move of|including that price move|coin price move/i);
+      expect(shown(text, p.price), 'the price move').toHaveLength(0);
+      expect(shown(text, p.net + p.price), 'net with the price move').toHaveLength(0);
       expect(text).toMatch(/[−-]2\.55%/);
     });
   }
+  it('the pace card reads in coins: "So far: 0.41 NVDA + 88.2 USDG", no dollars', () => {
+    const text = visibleText(lpPage('lp-nvda', true), 'desktop');
+    expect(text).toMatch(/So far: 0\.41 NVDA \+ 88\.2 USDG /);
+  });
+  it('the pace estimates show from a day, per token, labeled as estimates', () => {
+    const html = lpPage('lp-nvda', true);
+    // NVDA LP position open 19h: under a day, so no pace rows
+    expect(html).toMatch(/The estimate \(a day, 7 days, 365 days\) shows once the position has been open a day/);
+    const older = { ...nvdaLp, positionFees: { since: NOW - 2 * D, coins: { base: 0.4, quote: 88 } } };
+    const html2 = renderToStaticMarkup(wrap(h(LpDetail, { s: { ...s, lps: [stonkd, older] }, id: 'lp-nvda', events: [], ticks: null, nav: noop, act: noop, busy: false }), true));
+    expect(visibleText(html2, 'desktop')).toMatch(/Est\. a day 0\.2 NVDA \+ 44 USDG Est\. 7 days 1\.4 NVDA \+ 308 USDG Est\. 365 days 73 NVDA \+ 16,060 USDG/);
+  });
 });
 
-describe('amounts lead with the coin, dollars small', () => {
-  it('a Bots-list row opened on a phone shows Value and Invested in the coin, not dollars first', () => {
+describe('crypto units only (Kyle, #73)', () => {
+  it('a Bots-list row opened shows Value now and Invested in the coin', () => {
     const html = desk('lp-stonkd', true);
-    expect(html).toMatch(/<th>Value<\/th><td class="mono">33,122 USDG<\/td>/);
+    expect(html).toMatch(/<th>Value now<\/th><td class="mono">33,122 USDG<\/td>/);
     expect(html).toMatch(/<th>Invested<\/th><td class="mono">34,000 USDG<\/td>/);
-    expect(visibleText(html, 'phone')).not.toMatch(/\$3[34],/);
   });
-  it('a coin not worth a dollar: the coin first, the dollars after it in small print', () => {
+  it('a coin not worth a dollar shows in that coin only', () => {
     const weth = { ...grid, id: 'g-weth', quoteSym: 'WETH', usdPerQuote: 2_500, config: { ...grid.config, totalCapitalUsd: 0.8 } };
     const html = renderToStaticMarkup(h(StatTable, { b: weth, s }));
-    expect(html).toMatch(/<th>Invested<\/th><td class="mono">0\.8 WETH<small class="usd"> \$2,000<\/small>/);
+    expect(html).toMatch(/<th>Invested<\/th><td class="mono">0\.8 WETH<\/td>/);
+    expect(html).not.toContain('$');
+  });
+});
+
+/**
+ * Everything rendered, labels included: text nodes (also inside closed Details, table headers and summaries) and
+ * title / aria-label attributes (tooltips). Kyle: no '$' and never the words Realized or Unrealized on these screens.
+ */
+function rendered(html: string): string {
+  const attrs = [...html.matchAll(/\s(?:title|aria-label)="([^"]*)"/g)].map((m) => m[1]);
+  return `${html.replace(/<[^>]*>/g, ' ')} ${attrs.join(' ')}`.replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"');
+}
+const BANNED = /\$|\bUnrealized\b|\bRealized\b/i;
+const hits = (html: string) => rendered(html).split(/(?<=[.!?])\s+|\s{2,}/).filter((x) => BANNED.test(x)).map((x) => x.trim()).slice(0, 5);
+
+describe("no '$', no Realized/Unrealized labels, on every covered screen and state (Kyle, #73)", () => {
+  for (const usdOn of [false, true]) {
+    const tag = `dollars ${usdOn ? 'on' : 'off'}`;
+    it(`Bots list, collapsed and each bot open (${tag})`, () => {
+      expect(hits(desk(null, usdOn))).toEqual([]);
+      for (const b of bots) expect(hits(desk(b.id, usdOn)), b.id).toEqual([]);
+    });
+    it(`Home (${tag})`, () => {
+      expect(hits(renderToStaticMarkup(wrap(h(Home, { s, nav: noop, holdings: null, act: noop }), usdOn)))).toEqual([]);
+    });
+    it(`Grid page (${tag})`, () => { expect(hits(opened(gridPage(usdOn)))).toEqual([]); });
+    it(`Trend page (${tag})`, () => { expect(hits(opened(trendPage(usdOn)))).toEqual([]); });
+    for (const id of ['lp-stonkd', 'lp-nvda']) {
+      it(`LP page ${id}, Details closed and opened (${tag})`, () => {
+        expect(hits(lpPage(id, usdOn))).toEqual([]);
+        expect(hits(opened(lpPage(id, usdOn)))).toEqual([]);
+      });
+    }
+  }
+  it('the check itself catches a dollar sign and both labels', () => {
+    expect(hits('<td>≈ $12.00</td>')).toHaveLength(1);
+    expect(hits('<th>Realized</th>')).toHaveLength(1);
+    expect(hits('<span title="Unrealized change">x</span>')).toHaveLength(1);
+    expect(hits('<td>34,000 USDG</td>')).toHaveLength(0);
   });
 });
 
@@ -264,5 +318,33 @@ describe('APR under a day (gate finding on #72)', () => {
       if (n === 'STONKD LP #2' || n === 'PLS/robinhood:ETH/USDG') expect(apr, n).toBe('—');
       else expect(apr, n).toMatch(/^[+−-]?[\d.,]+%$/);
     }
+  });
+});
+
+describe("token and smart trader screens: no '$', no Realized/Unrealized (source check; they load their data on mount)", () => {
+  it('neither file renders a dollar sign or the labels', async () => {
+    const { readFileSync } = await import('node:fs');
+    for (const f of ['TokenTrader.tsx', 'SmartTrader.tsx']) {
+      const src = readFileSync(new URL(`../src/ui/${f}`, import.meta.url), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '') // comments
+        .replace(/\$\{/g, '{'); // template-literal holes are not dollar signs
+      expect(src, f).not.toMatch(/\$/);
+      expect(src, f).not.toMatch(/\bUnrealized\b|\bRealized\b/);
+      expect(src, f).not.toMatch(/\busd\(|<Usd\b|formatUsd/);
+    }
+  });
+});
+
+describe('Est. APR comes from Generated, never from a value change that includes the price (Kyle, #73)', () => {
+  it('the trend row: realized ÷ capital ÷ 5 days × 365, not its returnPct (which includes the open trade)', () => {
+    const html = desk(null, true);
+    const m = /EMA NVDA\/USDG-HOOD 1h<\/span>[\s\S]*?<span class="desk-apr"[^>]*>([\s\S]*?)<\/span>/.exec(html);
+    expect(m?.[1]).toBe('+449.0%'); // 61.5 / 1,000 / 5 × 365 = 4.4895
+    expect(html).not.toMatch(/\bAPY\b/);
+  });
+  it('the NVDA LP row: the engine net (fees − costs, no price move) ÷ put in, carried over a year', () => {
+    const html = desk(null, true);
+    const m = /NVDA LP<\/span>[\s\S]*?<span class="desk-apr"[^>]*>([\s\S]*?)<\/span>/.exec(html);
+    expect(m?.[1]).toBe(`+${((412 / 5_000 / 3.2) * 365 * 100).toFixed(1)}%`);
   });
 });

@@ -1,4 +1,6 @@
 /** Group, filter, and sort the bots table. Presentation only. */
+import { generatedInQuote, generatedOf, generatedPct } from './generatedView';
+import { estYearly } from './runRate';
 import { rangeState, type AnyObj } from './model';
 import { botFacts, type DeskFacts } from './deskStats';
 
@@ -86,11 +88,16 @@ export function matchItem(it: DeskItem, q: DeskQuery): boolean {
 function sortValue(it: DeskItem, key: DeskSort): number | string | null {
   const f = it.facts;
   if (key === 'name') return it.name.toLowerCase();
-  if (key === 'value') return f.valueUsd;
-  if (key === 'pnl') return f.pnlUsd;
-  if (key === 'pnlPct') return f.pnlPct;
+  // The columns show Invested and Generated (generated.ts). Ordering across coins uses dollars; none are shown.
+  if (key === 'value') return f.investedUsd;
+  if (key === 'pnl') {
+    const k = typeof it.b.usdPerQuote === 'number' && it.b.usdPerQuote > 0 ? it.b.usdPerQuote : null;
+    const q = it.b.kind === 'lp' ? (typeof it.b.pnl?.net === 'number' ? it.b.pnl.net : null) : generatedInQuote(generatedOf(it.b));
+    return q == null || k == null ? null : q * k;
+  }
+  if (key === 'pnlPct') return generatedPct(it.b);
   if (key === 'age') return f.ageMs;
-  if (key === 'apr') return f.est.d365?.pct ?? null;
+  if (key === 'apr') return estYearly(generatedPct(it.b), f.ageMs);
   if (key === 'moves') return f.moves.n;
   return f.feesEarnedUsd;
 }

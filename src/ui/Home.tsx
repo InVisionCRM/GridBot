@@ -1,15 +1,16 @@
 /** Home: net worth, the book chart, a joined strip, the bots, then the two cards that used to live only under More. */
 import { useEffect, useMemo, useState } from 'react';
 import { http } from './api';
-import { BotRow, feesTodayUsd, listBots, pnlParts, todaySeries, totalPnlUsd, useRowActions } from './botRow';
+import { BotRow, listBots, pnlParts, startOfDay, todaySeries, useRowActions } from './botRow';
 import { AreaChart, Donut, Meter, Sparkline } from './charts';
 import { chainOf, chains, useChainFilter } from './chains';
-import { cls, pct, usd } from './fmt';
-import { formatUsdAmount, type HoldingsSnapshot } from '../live/holdingsMath';
-import { AnimatedNumber, useCount } from './motion';
+import { cls, pct } from './fmt';
+import type { HoldingsSnapshot } from '../live/holdingsMath';
+import { formatTokens, generatedOf, sharedTotals, sumTokens, type TokenQty } from './generatedView';
+import { quoteSym } from './model';
 import type { Opportunity } from '../market/scan';
 import { isSafe, tryIt, useOpportunities, wayOf } from './Opportunities';
-import { bookUsd, equitySpan, feeSeries, portfolioSeries, seriesChange, type DeskRange } from './series';
+import { bookUsd, equitySpan, feeSeries, portfolioSeries, type DeskRange } from './series';
 import type { AnyObj, Nav } from './model';
 
 const RANGES: DeskRange[] = ['1H', '1D', '1W', '1M', 'ALL'];
@@ -26,16 +27,23 @@ function useJson(path: string) {
   return data;
 }
 
-function HeroWorth({ value }: { value: number | null }) {
-  const shown = useCount(value);
-  if (value == null || shown == null) return <p className="home-num">—</p>;
-  const text = formatUsdAmount(shown);
-  const dot = text.lastIndexOf('.');
-  return (
-    <p className="home-num">
-      {dot < 0 ? text : <>{text.slice(0, dot)}<span className="cents">{text.slice(dot)}</span></>}
-    </p>
-  );
+/** What the bots hold now, one figure per coin they count in (value in the bot's quote coin; no dollars). */
+function botValues(bots: AnyObj[]): TokenQty[] {
+  return sumTokens(bots.map((b) => {
+    const k = typeof b.usdPerQuote === 'number' && b.usdPerQuote > 0 ? b.usdPerQuote : null;
+    const v = bookUsd(b);
+    return v == null || k == null ? null : [{ symbol: String(quoteSym(b) ?? ''), amount: v / k }];
+  }));
+}
+
+/** Pool fees paid on fills since local midnight, per quote coin (no dollars). */
+function feesToday(bots: AnyObj[]): TokenQty[] {
+  const from = startOfDay();
+  return sumTokens(bots.map((b) => {
+    let sum = 0;
+    for (const tr of (b.trades ?? []) as AnyObj[]) if (!tr.failed && tr.timestamp >= from && typeof tr.feeQuote === 'number') sum += tr.feeQuote;
+    return sum ? [{ symbol: String(quoteSym(b) ?? ''), amount: sum }] : null;
+  }));
 }
 
 export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings: HoldingsSnapshot | null; act: (fn: () => Promise<unknown>) => void }) {
@@ -44,11 +52,8 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
   const [range, setRange] = useState<DeskRange>('1D');
   const bots = listBots(s, chain).sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
   const running = bots.filter((b) => b.status === 'running').length;
-  const worth = !holdings || !holdings.hasSigner ? null
-    : chain === 'all' ? (holdings.netWorthExDustUsd ?? holdings.netWorthUsd)
-    : (holdings.chains.find((c) => c.chainId === chain)?.usd ?? null);
-  const book = useMemo(() => bots.reduce((a, b) => a + (bookUsd(b) ?? 0), 0), [bots]);
-  const shownWorth = worth ?? (holdings?.hasSigner === false ? book : null);
+  // Crypto units only on Home (Kyle): what the bots hold, per coin. The wallet's net worth is on Holdings.
+  const held = useMemo(() => botValues(bots), [bots]);
   const series = useMemo(() => {
     const hist = portfolioSeries(bots, range);
     if (hist.length > 2 && hist.some((p) => p !== hist[0])) return hist;
@@ -58,14 +63,14 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
     }
     return hist;
   }, [bots, range, holdings?.hasSigner]);
-  const chg = seriesChange(series);
   const span = equitySpan(bots);
   const month = useMemo(() => portfolioSeries(bots, '1M'), [bots]);
-  const monthChg = seriesChange(month);
-  const pnlAll = totalPnlUsd(bots);
-  const pnl30 = span >= 20 * 86_400_000 ? monthChg.delta : pnlAll;
-  const pnlLabel = span >= 20 * 86_400_000 ? '30d P&L' : 'P&L';
-  const fees = feesTodayUsd(bots);
+  // Generated, net of costs, per coin (generated.ts); token traders have no such figure yet
+  const gens = bots.map((b) => generatedOf(b));
+  // coins two or more bots count in; one bot's own coin is on its row below
+  const generated = sharedTotals(gens.map((g) => g?.tokens));
+  const genSign = generated.length === 1 ? generated[0].amount : null;
+  const fees = feesToday(bots);
   const feesLine = useMemo(() => feeSeries(bots), [bots]);
   const best = bots.slice().sort((a, b) => (pnlParts(b).usd ?? pnlParts(b).pct ?? -Infinity) - (pnlParts(a).usd ?? pnlParts(a).pct ?? -Infinity))[0];
   const bestPnl = best ? pnlParts(best) : null;
@@ -106,14 +111,11 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
         <section className="card hero-card" aria-label="Net worth">
           <div className="home-hero">
             <div>
-              <p className="home-k">Net worth</p>
-              <HeroWorth value={shownWorth} />
+              <p className="home-k">In bots now</p>
+              <p className="home-num home-coins">{held.length ? held.map((t) => <span key={t.symbol}>{formatTokens([t], false)}</span>) : '—'}</p>
               <p className="home-sub">
                 {holdings == null && 'Reading…'}
                 {paper && 'Paper'}
-                {holdings && (
-                  <span className={`chip ${cls(chg.delta)}`}>{usd(chg.delta, true)} {chg.pct == null ? '' : pct(chg.pct, 2, true)}</span>
-                )}
               </p>
             </div>
             <div className="seg" role="tablist" aria-label="Range">
@@ -132,14 +134,14 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
 
       <section className="join" aria-label="Summary">
         <div>
-          <span>{pnlLabel}</span>
-          {/* one bot and no 30-day window: its row below has this same P&L (each figure once per screen) */}
-          <b className={cls(pnl30)}>{pnl30 == null ? '—' : bots.length === 1 && pnlLabel === 'P&L' ? <span className="muted">in its row</span> : <AnimatedNumber value={pnl30} format={(x) => usd(x, true)} />}</b>
+          <span>Generated, net of costs</span>
+          {/* one bot: its row below has this same figure (each figure once per screen) */}
+          <b className={cls(genSign)} title={gens.some((g) => g == null) ? 'Bots without a generated figure in tokens are left out' : undefined}>{!generated.length || bots.length === 1 ? <span className="muted">in the rows below</span> : formatTokens(generated, true, 4)}</b>
           <Sparkline points={span >= 20 * 86_400_000 ? month : series} width={120} height={32} />
         </div>
         <div>
           <span>Fees today</span>
-          <b><AnimatedNumber value={fees} format={(x) => usd(x, true)} /></b>
+          <b>{fees.length ? formatTokens(fees, false, 4) : '—'}</b>
           <Sparkline points={feesLine} width={120} height={32} />
         </div>
         <div>
@@ -158,7 +160,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
       <section className="desk" aria-label="Bots">
         {!!bots.length && (
           <div className="desk-head" aria-hidden="true">
-            <span>Pair</span><span /><span>Range</span><span>Value</span><span>P&amp;L</span><span />
+            <span>Pair</span><span /><span>Range</span><span>Invested</span><span>Generated</span><span />
           </div>
         )}
         {bots.map((b) => <BotRow key={b.id} s={s} b={b} nav={nav} pause={pause} close={close} columns />)}

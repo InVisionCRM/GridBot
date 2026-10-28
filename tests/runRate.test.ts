@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DAY_MS, isShortRun, rateOrRun, runLength, runSpan } from '../src/ui/runRate';
+import { DAY_MS, isShortRun, rateOrRun, runLength, runSpan, estYearly } from '../src/ui/runRate';
 
 const net = (x: number) => `${x >= 0 ? '+' : '−'}${Math.abs(x).toFixed(0)} USDG`;
 const perDay = (d: number) => `${net(d)}/day`;
@@ -54,5 +54,16 @@ describe('runSpan', () => {
     expect(runSpan(8.8 * 3_600_000)).toBe('over 8.8h');
     expect(runSpan(0)).toBe('so far');
     expect(runSpan(undefined)).toBe('so far');
+  });
+});
+
+describe('estYearly (Gen. % ÷ days run × 365, an estimate)', () => {
+  const D = 86_400_000;
+  it('is null under a day or without a share', () => {
+    expect(estYearly(0.1, 0.5 * D)).toBeNull();
+    expect(estYearly(null, 5 * D)).toBeNull();
+  });
+  it('share ÷ days × 365', () => {
+    expect(estYearly(0.01, 5 * D)).toBeCloseTo(0.73, 9);
   });
 });

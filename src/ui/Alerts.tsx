@@ -66,7 +66,7 @@ export function Alerts({ status: s, prefs, setPrefs }: { status: AnyObj; prefs: 
           {([['fills', 'Fills (grid + trend)'], ['stops', 'Stops / trailing / take-profit hit'], ['errors', 'Bot stopped / errors / skipped sells'], ['range', 'Price leaves a grid range'], ['alerts', 'Alerts below'], ['pnl', 'Large PnL change']] as const).map(([k, l]) => (
             <label key={k}><input type="checkbox" checked={!!prefs[k]} onChange={() => tog(k)} /> {l}</label>
           ))}
-          <label>Large PnL change ≥ $<input type="number" value={prefs.pnlUsd} style={{ width: 70 }} onChange={(e) => setPrefs({ ...prefs, pnlUsd: Math.max(1, +e.target.value) })} /> (Σ realized + unrealized)</label>
+          <label>Large PnL change ≥ $<input type="number" value={prefs.pnlUsd} style={{ width: 70 }} onChange={(e) => setPrefs({ ...prefs, pnlUsd: Math.max(1, +e.target.value) })} /> (the bots' total change, price moves included)</label>
         </div>
         {err && <div className="banner warn">{err}</div>}
       </div>

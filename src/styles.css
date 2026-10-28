@@ -1074,7 +1074,7 @@ label.wide input { min-width: 180px; }
 .desk-val, .desk-pnl b, .desk-pnl small { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .desk-val { font-size: 13px; text-align: right; }
 .desk-pnl { text-align: right; }
-.desk-pnl b { display: block; font-weight: 500; font-size: 13px; }
+.desk-pnl b { display: block; font-weight: 500; font-size: 13px; white-space: nowrap; }
 .desk-pnl small { font-size: 12px; }
 .desk-spark .sparkline { width: 84px; height: 28px; }
 .pair-marks { position: relative; }

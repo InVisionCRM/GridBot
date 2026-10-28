@@ -52,8 +52,9 @@ describe('desk stat math', () => {
     expect(f.investedUsd).toBe(100);
     expect(f.realizedUsd).toBe(4);
     expect(f.unrealizedUsd).toBe(6);
-    expect(f.est.h24).toEqual({ amount: 5, pct: 0.05 });
-    expect(f.est.d365?.pct).toBe(18.25);
+    // from Generated (realized 4 over 2 days), not realized + unrealized
+    expect(f.est.h24).toEqual([{ symbol: 'quote', amount: 2 }]);
+    expect(f.est.d365?.[0].amount).toBe(730);
     expect(f.feesPaidUsd).toBeCloseTo(0.5);
     expect(f.feesEarnedUsd).toBeNull();
     expect(f.timeInRange).toBeNull();
@@ -122,7 +123,7 @@ describe('grid capital is in the quote coin', () => {
     expect(f.pnlUsd).toBeCloseTo(140_000 * k, 6);
     expect(f.pnlPct).toBeCloseTo(0.01, 9);
     expect(f.realizedPct).toBeCloseTo(0.01, 9);
-    expect(f.est.d365?.pct).toBeCloseTo(0.01 * 36.5, 9);
+    expect(f.est.d365?.[0].amount).toBeCloseTo(140_000 / 10 * 365, 6);
   });
   it('shows no dollar capital when the quote has no dollar rate', () => {
     const f = botFacts({ ...grid, usdPerQuote: null }, now);

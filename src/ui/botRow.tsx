@@ -4,12 +4,12 @@ import { botApi } from './api';
 import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
 import { botFacts } from './deskStats';
-import { isShortRun } from './runRate';
-import { cls, dur, pct, px, qty, usd } from './fmt';
+import { estYearly, isShortRun } from './runRate';
+import { cls, dur, pct, px, qty } from './fmt';
+import { formatTokens, generatedOf, generatedPct, investedOf } from './generatedView';
 import { ChainMark, TokenMark } from './icons';
-import { useShowUsd } from './money';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
-import { bookUsd, botSpark } from './series';
+import { botSpark } from './series';
 import { coinFirst, StatTable } from './StatTable';
 
 export function listBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
@@ -248,16 +248,19 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   columns?: boolean;
   metrics?: boolean;
 }) {
-  const { on: showUsd } = useShowUsd();
   const pair = pairOf(b);
   const chain = chainOf(s, b.chainId ?? s.legacyChainId);
-  const pnl = pnlParts(b);
   const fills = fillsToday(b);
   const bad = !!b.lastError;
   const on = b.status === 'running' && !bad;
-  const money = showUsd && pnl.usd != null ? usd(pnl.usd, true) : pnl.quote != null ? qty(pnl.quote, pair.quote, 4) : '—';
+  // Generated, net of costs, in tokens (generated.ts); crypto units only. Token traders have no such field yet.
+  const gen = generatedOf(b);
+  const genPct = generatedPct(b);
+  const inv = investedOf(b);
+  // one line per coin, each in its own colour, so "+0.02 SPY" and "−907.2 USDG" never wrap into each other
+  const money = gen ? gen.tokens.map((t) => <b key={t.symbol} className={cls(t.amount)}>{formatTokens([t], true, 4)}</b>) : <b>—</b>;
+  const noGen = !gen && isTrader(b) ? 'No generated figure in tokens for token traders yet' : undefined;
   const pos = b.position;
-  const value = bookUsd(b);
   const facts = metrics ? botFacts(b) : null;
   const go = () => (isTrader(b) ? nav({ v: 'auto' }) : expandable ? onToggle?.() : nav(botView(b.kind, b.id)));
   if (columns) {
@@ -280,25 +283,25 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           </button>
           <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
           <span className="desk-range"><BotRange b={b} fills={fills} /></span>
-          <span className="desk-val">{coinFirst(b)(value)}</span>
-          <span className="desk-pnl">
-            <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
-            {!metrics && <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>}
+          <span className="desk-val">{inv ? formatTokens([inv], false) : '—'}</span>
+          <span className="desk-pnl" title={noGen}>
+            {money}
+            {!metrics && <small className={cls(genPct)}>{pct(genPct, 1, true)}</small>}
           </span>
           {metrics && facts && <>
-            <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
+            <span className="desk-pct"><span className={cls(genPct)}>{pct(genPct, 1, true)}</span></span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
-            <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'APR shows once the bot has run a day. Until then P&L % is the net for the run, and Age its length.' : undefined}>{isShortRun(facts.ageMs)
-              // under a day: no yearly rate; P&L % and Age beside it already say net-over-run (each figure once)
+            <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'Est. APR shows once the bot has run a day. Until then Gen. % is what it generated over the run, and Age its length.' : 'An estimate: Gen. % carried over a year at the same pace. Not a forecast.'}>{isShortRun(facts.ageMs)
+              // under a day: no yearly rate; Gen. % and Age beside it already say generated-over-run (each figure once)
               ? '—'
-              : facts.est.d365?.pct == null ? '—' : pct(facts.est.d365.pct, 1, true)}</span>
+              : pct(estYearly(genPct, facts.ageMs), 1, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
             <span className="desk-fees">{coinFirst(b)(facts.feesEarnedUsd)}</span>
           </>}
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
         </div>
         {bad && <p className="line-note">{b.lastError}</p>}
-        {open && <div className="desk-expand"><Expanded b={b} nav={nav} compact /><StatTable b={b} s={s} inRow={!!metrics} rowPnlUsd={pnl.usd} /></div>}
+        {open && <div className="desk-expand"><Expanded b={b} nav={nav} compact /><StatTable b={b} s={s} inRow={!!metrics} /></div>}
       </div>
     );
   }
@@ -320,9 +323,9 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
             </span>
             {b.kind === 'lp' && pos && <RangeBar lower={pos.lower} upper={pos.upper} price={b.price} inRange={b.inRange} />}
           </span>
-          <span className="bot-pnl">
-            <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
-            <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>
+          <span className="bot-pnl" title={noGen}>
+            {money}
+            <small className={cls(genPct)}>{pct(genPct, 1, true)}</small>
           </span>
         </button>
         <RowMenu b={b} nav={nav} pause={pause} close={close} />

@@ -33,8 +33,8 @@ export function TokenMark({ symbol, address, size = 28 }: { symbol: string; addr
       {glyph === 'pls' && <path d="M6 20h4.2V11H14v12h4.2V8H22v9h4" stroke={fg} strokeWidth="2.2" fill="none" strokeLinejoin="round" strokeLinecap="round" />}
       {glyph === 'hex' && <path d="M16 6l8 4.6v9.2L16 26l-8-4.6v-9.2L16 6z" fill="none" stroke={fg} strokeWidth="2" />}
       {glyph === 'dai' && <text x="16" y="21" textAnchor="middle" fontSize="15" fontFamily="var(--font)" fill={fg} fontWeight="600">D</text>}
-      {glyph === 'usd' && <text x="16" y="21" textAnchor="middle" fontSize="14" fontFamily="var(--font)" fill={fg} fontWeight="600">$</text>}
-      {glyph === 'letter' && <text x="16" y="21" textAnchor="middle" fontSize="14" fontFamily="var(--font)" fill={fg} fontWeight="600">{letter}</text>}
+      {/* dollar coins show their letter, not '$' (Kyle: crypto units only, no '$') */}
+      {(glyph === 'letter' || glyph === 'usd') && <text x="16" y="21" textAnchor="middle" fontSize="14" fontFamily="var(--font)" fill={fg} fontWeight="600">{letter}</text>}
     </svg>
   );
 }

@@ -81,6 +81,9 @@ function DeskMenu({ s, nav, onGuide, onActivity, close }: { s: AnyObj; nav: Nav;
   );
 }
 
+/** Views that show crypto units only (no dollars): Home, Bots, the grid, trend and LP pages, and the smart/token trader page. */
+export const CRYPTO_ONLY = new Set(['home', 'bots', 'grid', 'trend', 'lp', 'auto']);
+
 export function Header({
   s, view, nav, chain, setChain, showUsd, setShowUsd, connected, ver, holdings, onActivity, onGuide,
 }: {
@@ -138,7 +141,8 @@ export function Header({
           ))}
         </nav>
         <div className="top-end">
-          <button type="button" className="worth-num" onClick={() => { shut(); nav({ v: 'holdings' }); }} title="Net worth">{worthText}</button>
+          {/* Home, Bots, the bot pages and the trader page show crypto units only (Kyle): no dollar net worth in the bar there */}
+          {!CRYPTO_ONLY.has(view.v) && <button type="button" className="worth-num" onClick={() => { shut(); nav({ v: 'holdings' }); }} title="Net worth">{worthText}</button>}
           <button type="button" className="pill-btn" aria-expanded={chainsOpen} aria-haspopup="menu" onClick={() => { setMenu(false); setMega(null); setChainsOpen((v) => !v); }}>
             {sel ? sel.short : 'All chains'} <Caret up={chainsOpen} />
           </button>

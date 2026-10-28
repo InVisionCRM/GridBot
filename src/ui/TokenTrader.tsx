@@ -8,7 +8,8 @@ import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj } from './model';
 import { haltText } from './haltText';
 
-const usd = (n: number) => `$${num(Math.abs(n), Math.abs(n) >= 100 ? 0 : 2)}`;
+/** A limit from the USD settings below, as a plain number (no '$' on this screen). */
+const lim = (n: number) => num(Math.abs(n), Math.abs(n) >= 100 ? 0 : 2);
 
 export function TokenTraderPanel({ s }: { s: AnyObj }) {
   const [t, setT] = useState<AnyObj | null>(null);
@@ -31,7 +32,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       <div className="card-head">
         <h2>Token trader</h2>
         <span className={`tag ${t.on ? (o.mode === 'live' ? 'live' : 'pos') : ''}`}>{t.on ? `On · ${o.mode}` : 'Off'}</span>
-        <span className="muted small">{usd(t.openUsd ?? 0)} open of {usd(o.totalUsd)}</span>
+        <span className="muted small">{lim(t.openUsd ?? 0)} open of the {lim(o.totalUsd)} limit</span>
         <span className="grow" />
         {t.on
           ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/token-trader/off', 'POST'))}>Off</button>
@@ -100,7 +101,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
           <div key={p.id} className="smart-bot" style={{ cursor: 'default' }}>
             <span className="smart-bot-name"><b>{p.label}</b> <ChainBadge c={chainOf(s, p.chainId)} testnet={false} /> <span className="tag">{p.source}</span></span>
             <span className="small muted" title="Entry = spend per token received, after the pool fee, price impact and buy tax (paper and live alike). Take profit and stops are also net of the exit fee and the sell tax measured at entry.">entry {num(p.entryPrice, 6)} after fees &amp; tax · now {num(p.price, 6)} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''} · {p.exitPlan}</span>
-            <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.spentUsd ? p.pnlUsd / p.spentUsd : 0, 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
+            <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.spentUsd ? p.pnlUsd / p.spentUsd : 0, 1, true)}</b></span>
           </div>
         ))}
       </div>
@@ -131,6 +132,6 @@ export function feePct(bps: number | null | undefined): string {
 function numIn(v: string) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 
 async function start(o: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<void>) {
-  if (o.mode === 'live' && !confirm(`Turn the token trader on with real money? Up to $${o.perTradeUsd} a trade and $${o.totalUsd} open. The sniper is ${o.sniper.on ? 'on' : 'off'}.`)) return;
+  if (o.mode === 'live' && !confirm(`Turn the token trader on with real money? Up to ${o.perTradeUsd} USD a trade and ${o.totalUsd} USD open. The sniper is ${o.sniper.on ? 'on' : 'off'}.`)) return;
   await run(() => http('/api/token-trader/on', 'POST'));
 }

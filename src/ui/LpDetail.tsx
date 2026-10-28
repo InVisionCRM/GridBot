@@ -1,10 +1,10 @@
 /** One liquidity bot: range vs price, fees earned in each coin, what it cost, its coins and pool share, settings, its own log. */
 import { useEffect, useState, type ReactNode } from 'react';
 import { botApi } from './api';
-import { AnimatedNumber, StatusDot } from './motion';
+import { StatusDot } from './motion';
 import { Chart, EquityChart } from './Chart';
 import { StatTable } from './StatTable';
-import { ago, cls, dur, num, pct, px, qty, usd } from './fmt';
+import { ago, cls, dur, num, pct, px, qty } from './fmt';
 import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -13,9 +13,10 @@ import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewB
 import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
-import { pegged, Usd } from './money';
+import { formatTokens, generatedOf, generatedPct, investedOf } from './generatedView';
 import { showHalt } from './haltText';
 import { isShortRun, runSpan } from './runRate';
+import { estimates } from '../shared/generated';
 import { sameFigure, type StatKey } from './StatTable';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -100,11 +101,6 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
   );
 }
 
-/** A coin's price in dollars: the base from the pool price, the quote from its own (null when it has none). */
-function usdPrices(b: AnyObj, k: number | null): { base: number | null; quote: number | null } {
-  return { base: k != null && b.price != null ? b.price * k : null, quote: k };
-}
-
 /**
  * What the open position earns at its own pace: its fees since it opened (collected + waiting), per hour, carried to a
  * day, a week and a month. Only this position's history; the time it spent out of range is in the pace.
@@ -121,66 +117,63 @@ function openedWhen(b: AnyObj, at: number, words: [start: string, move: string],
   return opened(at);
 }
 
-function PositionPace({ b, k }: { b: AnyObj; k: number | null }) {
+function PositionPace({ b }: { b: AnyObj }) {
   const pf = b.positionFees, base = b.base, q = b.quote;
   if (!b.position || !pf) return null;
   // its fees so far are all the bot's fees (the Fees earned card): say so rather than repeat the coins
   const allFees = b.pnl?.feeCoins && sameFigure(pf.coins.base, b.pnl.feeCoins.base) && sameFigure(pf.coins.quote, b.pnl.feeCoins.quote);
-  const ms = Date.now() - pf.since, hours = ms / 3_600_000;
-  const valQuote = pf.coins.base * (b.price ?? 0) + pf.coins.quote;
-  const per = (h: number) => ({ base: (pf.coins.base / hours) * h, quote: (pf.coins.quote / hours) * h, value: (valQuote / hours) * h });
-  const rows = [['A day', 24], ['A week', 168], ['A month', 720]] as const;
-  const $ = (x: number) => (k != null ? usd(x * k) : qty(x, q, 4, false));
+  const ms = Date.now() - pf.since;
+  const coins = [{ symbol: base, amount: pf.coins.base }, { symbol: q, amount: pf.coins.quote }];
+  // per token ÷ days open × 1, 7, 365 (shared estimates); none under a day. Crypto units only.
+  const est = estimates(coins, ms / 1000);
+  const pace = est.h24 && est.d7 && est.d365 ? { d1: est.h24, d7: est.d7, d365: est.d365 } : null;
   return (
     <div className="card pace">
       <div className="card-head">
-        <h3><L tip={`Fees this position has earned since it opened (collected plus waiting), carried forward at the same pace. It counts only this position: a range move starts a new one. Time the price spent outside the range is in the pace, so a pace from a calm stretch can run high. Valued at today's ${base} price.`}>This position's pace</L></h3>
+        <h3><L tip={`Fees this position has earned since it opened (collected plus waiting), in each coin, carried forward at the same pace: an estimate, not a forecast. It counts only this position: a range move starts a new one. Time the price spent outside the range is in the pace, so a pace from a calm stretch can run high.`}>This position's pace</L></h3>
         <span className="muted small">open {openedWhen(b, pf.since, ['since the start', 'since the last move'], () => dur(ms))}</span>
       </div>
       {allFees
-        ? <p className="small">So far: the fees earned in Details above (this is the bot's first position).</p>
-        : <p className="small">So far: <b>{px(pf.coins.base, 4)} {base}</b> + <b>{px(pf.coins.quote, 4)} {q}</b> ≈ <b className="pos">{$(valQuote)}</b></p>}
-      {isShortRun(ms)
-        ? <p className="small muted">The pace (a day, a week, a month) shows once the position has been open a day.</p>
-        : <div className="pace-rows">{rows.map(([label, h]) => {
-          const x = per(h);
-          return (
+        ? <p className="small">So far: the fees in Generated and Details above (this is the bot's first position).</p>
+        : <p className="small">So far: <b>{formatTokens(coins, false, 4)}</b></p>}
+      {!pace
+        ? <p className="small muted">The estimate (a day, 7 days, 365 days) shows once the position has been open a day.</p>
+        : <div className="pace-rows">{([['Est. a day', pace.d1], ['Est. 7 days', pace.d7], ['Est. 365 days', pace.d365]] as const).map(([label, x]) => (
             <div key={label} className="pace-row">
               <span className="k">{label}</span>
-              <b className="pos">≈ {$(x.value)}</b>
-              <span className="small muted">{px(x.base, 4)} {base} + {px(x.quote, 4)} {q}</span>
+              <b className="pos">{formatTokens(x, false, 4)}</b>
             </div>
-          );
-        })}</div>}
+          ))}</div>}
       <p className="muted small">If it keeps earning as it has since it opened{b.inRange === false ? '. It is out of range now, so it earns nothing until the price is back inside or the range moves' : ''}.</p>
     </div>
   );
 }
 
 /**
- * What the headline net is made of, collapsed under it: fees earned, costs paid, what range moves lost, the net as a share
- * of what was put in (and per day once it has run a day), and the net with the coins' own price move. The same figures
- * the page showed as cards and in the table before (each figure once per screen: one headline net on show).
+ * What the headline Generated is made of, collapsed under it: fees earned (and how much is still waiting), costs paid,
+ * what range moves lost, and Generated as a share of what was put in. Crypto units only; no price-move lines.
  */
-function NetDetails({ b, pnl, q, base, k, runMs }: { b: AnyObj; pnl: AnyObj; q: string; base: string; k: number | null; runMs: number | null }) {
-  const withPrice = typeof pnl.price === 'number' ? pnl.net + pnl.price : null;
+/** Equal coin amounts (relative, so tiny amounts of a pricey coin aren't all "the same"). */
+const sameCoins = (a: unknown, c: unknown) => typeof a === 'number' && typeof c === 'number' && Math.abs(a - c) <= 1e-12 + 1e-6 * Math.abs(c);
+
+function NetDetails({ b, pnl, q, base }: { b: AnyObj; pnl: AnyObj; q: string; base: string }) {
+  const share = generatedPct(b);
   const rows: [string, ReactNode][] = [
-    ['Fees earned', <><b className={cls(pnl.feeCoins.base)}>{qty(pnl.feeCoins.base, base, 5, false)}</b> + <b className={cls(pnl.feeCoins.quote)}>{qty(pnl.feeCoins.quote, q, 5, false)}</b><Usd v={pnl.fees} k={k} /></>],
-    ['Of those, still waiting in the position', `${num(b.owed?.base, 6)} ${base} + ${num(b.owed?.quote, 6)} ${q}`],
+    // the base-coin fees are Generated's base amount above (no cost comes out of them): named, not repeated
+    ['Fees earned', <><b className={cls(pnl.feeCoins.quote)}>{qty(pnl.feeCoins.quote, q, 5, false)}</b><span className="muted"> + the {base} in Generated above</span></>],
+    // nothing collected yet: the waiting fees are all of them, said in words rather than the same coins again
+    ['Of those, still waiting in the position', sameCoins(b.owed?.base, pnl.feeCoins.base) && sameCoins(b.owed?.quote, pnl.feeCoins.quote)
+      ? 'all of them (none collected yet)'
+      : `${num(b.owed?.base, 6)} ${base} + ${num(b.owed?.quote, 6)} ${q}`],
     // the two costs on their own rows: a total beside them repeats whichever one is most of it
-    ['Costs paid: gas', <>{qty(-pnl.gas, q, 4)}<Usd v={-pnl.gas} k={k} /></>],
-    [`Costs paid: swaps to the range's mix (pool fee and price impact)`, <>{qty(-pnl.swapCost, q, 4)}<Usd v={-pnl.swapCost} k={k} /></>],
-    [`Lost to range moves (${b.reranges} move${b.reranges === 1 ? '' : 's'})`, <>{qty(-pnl.moveLoss, q, 4)}<Usd v={-pnl.moveLoss} k={k} /></>],
-    ['Net as a share of what you put in', b.startValue ? pct(pnl.net / b.startValue, 2, true) : '—'],
-    ...(isShortRun(runMs) ? [] : [['Net per day so far', qty(pnl.net / (runMs! / 86_400_000), q, 3)] as [string, ReactNode]]),
-    ...(typeof pnl.price === 'number' ? [
-      [`Price move of the ${base} and ${q} held (not in the net)`, <>{qty(pnl.price, q, 4)}<Usd v={pnl.price} k={k} /></>],
-      ['Net including that price move', <>{qty(withPrice, q, 5)}<Usd v={withPrice} k={k} /></>],
-    ] as [string, ReactNode][] : []),
+    ['Costs paid: gas', qty(-pnl.gas, q, 4)],
+    [`Costs paid: swaps to the range's mix (pool fee and price impact)`, qty(-pnl.swapCost, q, 4)],
+    [`Lost to range moves (${b.reranges} move${b.reranges === 1 ? '' : 's'})`, qty(-pnl.moveLoss, q, 4)],
+    ['Generated as a share of what you put in', share == null ? '—' : pct(share, 2, true)],
   ];
   return (
     <details className="card net-details">
-      <summary>Details: what the net is made of</summary>
+      <summary>Details: what Generated is made of</summary>
       <table className="net-table"><tbody>
         {rows.map(([label, v]) => <tr key={label}><th>{label}</th><td className="mono">{v}</td></tr>)}
       </tbody></table>
@@ -194,22 +187,20 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   useEffect(() => { const i = setInterval(() => tick((x) => x + 1), 30_000); return () => clearInterval(i); }, []);
   if (!b) return null;
 
-  const q = b.quote, base = b.base, k: number | null = b.usdPerQuote ?? null;
-  const prices = usdPrices(b, k);
+  const q = b.quote, base = b.base;
+  const lpb = { ...b, kind: 'lp' };
+  const gen = generatedOf(lpb), inv = investedOf(lpb);
   const pnl: AnyObj | null = b.pnl;
   const pos = b.position, step = b.step;
   const running = b.status === 'running', closed = b.status === 'closed';
   const closing = !!b.closing || step?.action === 'close';
   // a daily rate only once it has run a full day; under a day, the net over the run (runRate.ts)
   const runMs = b.startedAt ? Date.now() - b.startedAt : null;
-  // Each figure once per screen: the cards above have the net (= Realized), fees, costs and moves, the range card the
-  // range and width. The table's Net (net + the coins' price move) shows only when it differs from the card's net.
-  // The table's Net (net + the coins' price move) and Unrealized (that price move) are in Details too.
-  const omit: StatKey[] = ['realized', 'unrealized', 'net', 'feesEarned', 'feesPaid', 'moves', 'range', 'spacing', 'lastMove'];
-  // the headline card has the run length under a day ("over 8.8h"); Details has the % of what was put in
-  omit.push('netPct', 'netSpan');
+  // Each figure once per screen: the cards above have Invested and Generated, Details the fees, costs and moves, the range
+  // card the range and width.
+  const omit: StatKey[] = ['invested', 'net', 'feesEarned', 'feesPaid', 'moves', 'range', 'spacing', 'lastMove'];
+  // the headline cards have the run length under a day ("over 8.8h")
   if (isShortRun(runMs)) omit.push('age');
-  const pinned = pegged(k); // the price pill shows the base in dollars; for a dollar coin that is the pool price
   const close = () => {
     if (b.mode === 'live' && !confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
     act(() => botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close'));
@@ -228,7 +219,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
           <DexTag name={b.dexName} feeBps={b.feeBps} feeTier={b.feeTier} />
           <span className={`st ${closing ? 'closing' : b.status}`}>{closing ? 'Closing…' : closed ? 'Closed' : running ? 'Running' : 'Paused'}{step && !closing ? ` · ${ACTION[step.action].toLowerCase()}` : ''}</span>
-          {prices.base != null && <span className="pill mono" title={`Today's prices in dollars${prices.quote != null ? ` (${q} at ${usd(prices.quote)})` : ''}`}>{base} {usd(prices.base)}{prices.quote != null && Math.abs(prices.quote - 1) > 0.02 ? ` · ${q} ${usd(prices.quote)}` : ''}</span>}
+          {b.price != null && <span className="pill mono" title={`The pool's price now, in ${q} per ${base}`}>{base} {px(b.price)} {q}</span>}
         </div>
         <div className="detail-actions">
           {running && <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST', undefined, 'row-pause'))}>Pause</button>}
@@ -246,23 +237,27 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {pos && b.inRange === false && !step && <div className="banner"><span className="grow"><b>The price is outside the range</b>, so the position isn't earning. {moveNote(b)}</span></div>}
       </div>
 
-      {/* One headline net (Kyle: each number once per screen). What it is made of, and the net with the coins' own price
-          move, sit in the collapsed Details below: moved there, not removed. */}
+      {/* Headline (Kyle): Invested + Generated, net of costs, in tokens. What Generated is made of sits in the collapsed
+          Details below. No price-move figures, no dollars. */}
       <div className="kpi-row detail-stats">
         <div className="kpi">
-          <span><L tip={`Fees earned minus costs paid and what range moves lost, in ${q}. The coins' own price move isn't in it: that happens whether or not the bot runs. Details below shows each part.`}>Generated, net of costs</L></span>
-          <div className={`kpi-v ${cls(pnl?.net)}`}>{pnl ? <AnimatedNumber value={pnl.net} format={(x) => qty(x, q, 5)} /> : '—'}</div>
-          <span className="sub">{pnl ? <>{isShortRun(runMs) ? runSpan(runMs) : 'since it started'}<Usd v={pnl.net} k={k} /></> : ''}</span>
+          <span><L tip={`What the bot put in, in ${q}.`}>Invested</L></span>
+          <div className="kpi-v">{inv ? formatTokens([inv], false) : '—'}</div>
+          <span className="sub">{isShortRun(runMs) ? runSpan(runMs) : 'since it started'}</span>
+        </div>
+        <div className="kpi">
+          <span><L tip={`The fees earned in each coin, with the costs paid and what range moves lost taken out of the ${q} side. The coins' own price move isn't in it: that happens whether or not the bot runs. Details below shows each part.`}>Generated, net of costs</L></span>
+          <div className={`kpi-v coins2 ${cls(pnl?.net)}`}>{gen ? gen.tokens.map((t) => <b key={t.symbol} className={cls(t.amount)}>{formatTokens([t], true)}</b>) : '—'}</div>
         </div>
         <div className="kpi">
           <span><L tip="The coins in the position right now (they change as the price moves inside the range), and its share of the liquidity trading at today's price, which is its share of every trade's fee. Out of range the share is 0.">Liquidity provided</L></span>
           <div className="kpi-v coins2">{b.coins ? <><b>{num(b.coins.base, 6)} {base}</b><b>{num(b.coins.quote, 6)} {q}</b></> : '—'}</div>
-          <span className="sub">{b.poolShare != null ? <>{pct(b.poolShare, b.poolShare < 0.001 ? 4 : 2)} of the pool's active liquidity</> : 'once the position is open'}<Usd v={b.coins && b.price != null ? b.coins.base * b.price + b.coins.quote : null} k={k} sign={false} /></span>
+          <span className="sub">{b.poolShare != null ? <>{pct(b.poolShare, b.poolShare < 0.001 ? 4 : 2)} of the pool's active liquidity</> : 'once the position is open'}</span>
         </div>
       </div>
-      {pnl && <NetDetails b={b} pnl={pnl} q={q} base={base} k={k} runMs={runMs} />}
+      {pnl?.feeCoins && <NetDetails b={lpb} pnl={pnl} q={q} base={base} />}
 
-      <PositionPace b={b} k={k} />
+      <PositionPace b={b} />
 
       <div className="split wide-left">
         <div className="card">
@@ -274,7 +269,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <div className="card">
             <h3>{pos ? (b.inRange ? 'In range, earning' : 'Out of range') : closed ? 'Closed' : 'No position open'}</h3>
             {pos ? <>
-              <p className="small">{px(pos.lower)} – {px(pos.upper)} {q}/{base}{pinned && prices.base != null ? '' : ` · price ${px(b.price)}`}</p>
+              <p className="small">{px(pos.lower)} – {px(pos.upper)} {q}/{base}</p>
               <RangeGauge lower={pos.lower} upper={pos.upper} price={b.price} />
               {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
               {/* the coins in it and the fees waiting are on the Liquidity provided and Fees earned cards */}

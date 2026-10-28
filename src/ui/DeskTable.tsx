@@ -3,9 +3,8 @@ import { useMemo, useState } from 'react';
 import { BotRow } from './botRow';
 import { chainOf } from './chains';
 import { bucketItems, emptyQuery, nextSort, type DeskQuery, type DeskSort, deskItems } from './deskTableModel';
-import { cls, qty, usd } from './fmt';
-import { pegged } from './money';
-import { quoteSym } from './model';
+import { cls } from './fmt';
+import { formatTokens, generatedOf, investedOf, sharedTotals } from './generatedView';
 import type { DeskBucket } from './deskTableModel';
 import type { AnyObj, Nav } from './model';
 
@@ -13,7 +12,7 @@ const TYPES: [DeskQuery['type'], string][] = [['all', 'All'], ['grid', 'Grid'], 
 const STATUSES: [DeskQuery['status'], string][] = [['all', 'Any status'], ['running', 'Running'], ['paused', 'Paused'], ['stopped', 'Stopped'], ['out', 'Out of range']];
 const MODES: [DeskQuery['mode'], string][] = [['all', 'Live + paper'], ['live', 'Live'], ['paper', 'Paper']];
 const SORTS: [DeskSort, string][] = [
-  ['name', 'Name'], ['value', 'Value'], ['pnl', 'P&L $'], ['pnlPct', 'P&L %'], ['age', 'Age'], ['apr', 'Est. APR'], ['moves', 'Moves'], ['fees', 'Fees earned'],
+  ['name', 'Name'], ['value', 'Invested'], ['pnl', 'Generated'], ['pnlPct', 'Gen. %'], ['age', 'Age'], ['apr', 'Est. APR'], ['moves', 'Moves'], ['fees', 'Fees earned'],
 ];
 
 function Chip({ on, children, onClick }: { on: boolean; children: string; onClick: () => void }) {
@@ -21,26 +20,18 @@ function Chip({ on, children, onClick }: { on: boolean; children: string; onClic
 }
 
 /**
- * A group's totals. One bot: nothing (its row has the figures; each figure once per screen). Several in one coin: the
- * coin first, dollars small (left out for a coin worth about a dollar, where they'd repeat it). Mixed coins: dollars.
+ * A group's totals: what its bots put in and generated, in tokens (one sum per coin; no dollars). One bot: nothing (its
+ * row has the figures; each figure once per screen).
  */
 export function GroupTotals({ g }: { g: DeskBucket }) {
   if (g.rows.length < 2) return null;
-  const syms = new Set(g.rows.map((it) => String(quoteSym(it.b) ?? '')));
-  const ks = g.rows.map((it) => it.b.usdPerQuote);
-  const sym = syms.size === 1 ? [...syms][0] : '';
-  const k = sym && ks.every((x) => typeof x === 'number' && x > 0) ? ks[0] as number : null;
-  const one = k != null && ks.every((x) => Math.abs((x as number) - k) < 1e-9 * k);
-  if (!sym || !one) {
-    return <>
-      <span className="mono">{g.value == null ? '—' : usd(g.value)}</span>
-      <span className={cls(g.pnl)}>{g.pnl == null ? '—' : usd(g.pnl, true)}</span>
-    </>;
-  }
-  const small = !pegged(k);
+  const inv = sharedTotals(g.rows.map((it) => { const v = investedOf(it.b); return v ? [v] : null; }));
+  const gens = g.rows.map((it) => generatedOf(it.b));
+  const gen = sharedTotals(gens.map((x) => x?.tokens));
+  const sign = gen.length === 1 ? gen[0].amount : null;
   return <>
-    <span className="mono">{g.value == null ? '—' : qty(g.value / k, sym, 5, false)}{small && g.value != null && <small className="muted"> {usd(g.value)}</small>}</span>
-    <span className={cls(g.pnl)}>{g.pnl == null ? '—' : qty(g.pnl / k, sym, 4)}{small && g.pnl != null && <small> {usd(g.pnl, true)}</small>}</span>
+    <span className="mono">{formatTokens(inv, false)}</span>
+    <span className={cls(sign)} title={`Coins two or more of these bots count in${gens.some((x) => x == null) ? '; bots without a generated figure in tokens are left out' : ''}`}>{formatTokens(gen, true, 4)}</span>
   </>;
 }
 
@@ -103,11 +94,11 @@ export function DeskTable({ s, bots, nav, pause, close, initialOpen = null }: {
           {head('name', 'Pair')}
           <span />
           <span>Range</span>
-          {head('value', 'Value', true)}
-          {head('pnl', 'P&L $', true)}
-          {head('pnlPct', 'P&L %', true)}
+          {head('value', 'Invested', true)}
+          {head('pnl', 'Generated', true)}
+          {head('pnlPct', 'Gen. %', true)}
           {head('age', 'Age', true)}
-          {head('apr', 'APR', true)}
+          {head('apr', 'Est. APR', true)}
           {head('moves', 'Moves', true)}
           {head('fees', 'Fees', true)}
           <span />

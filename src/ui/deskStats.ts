@@ -2,6 +2,8 @@
 import { analyzeSpacing } from '../live/spacing';
 import type { AnyObj } from './model';
 import { bookUsd, quoteUsd } from './series';
+import { estimates, type EstimateSet } from '../shared/generated';
+import { generatedOf } from './generatedView';
 
 export const MIN_AGE_MS = 60_000;
 export const DAY_MS = 86_400_000;
@@ -79,7 +81,8 @@ export interface DeskFacts {
   unrealizedPct: number | null;
   pnlUsd: number | null;
   pnlPct: number | null;
-  est: { h24: Extrapolation | null; d7: Extrapolation | null; d365: Extrapolation | null };
+  /** Generated (net of costs, in tokens) ÷ age in days × 1, 7, 365 (shared estimates); null under a day. Never from the price move. */
+  est: EstimateSet;
   moves: MoveParts;
   winRate: number | null;
   feesPaidUsd: number | null;
@@ -127,7 +130,7 @@ function spacingOf(b: AnyObj): { frac: number | null; band: number | null } {
   return { frac: null, band: null };
 }
 
-/** Dollars and percents already on the bot. Estimates scale the P&L so far across 24h, 7d, and 365d. */
+/** Dollars and percents already on the bot (sorting only; nothing renders them). Estimates scale Generated in tokens across 24h, 7d and 365d. */
 export function botFacts(b: AnyObj, now = Date.now(), extra?: { chain?: string | null; dex?: string | null; pool?: string | null }): DeskFacts {
   const k = b.kind === 'trader' || b.kind === 'sniper' ? (quoteUsd(b) || 1) : quoteUsd(b);
   const started = num(b.startedAt) ?? num(b.openedAt);
@@ -161,7 +164,6 @@ export function botFacts(b: AnyObj, now = Date.now(), extra?: { chain?: string |
   const pnlPct = b.kind === 'trend' && num(b.pnl?.returnPct) != null ? b.pnl.returnPct
     : b.kind === 'lp' && num(b.pnl?.net) != null && investedQuote != null && investedQuote > 0 ? b.pnl.net / investedQuote
     : investedUsd != null && investedUsd > 0 && pnlUsd != null ? pnlUsd / investedUsd : null;
-  const estOf = (windowMs: number) => (pnlUsd == null || age == null ? null : extrapolate(pnlUsd, investedUsd ?? 0, age, windowMs));
   let feesPaid: number | null = null;
   let feesEarned: number | null = null;
   if (b.kind === 'grid') {
@@ -190,7 +192,7 @@ export function botFacts(b: AnyObj, now = Date.now(), extra?: { chain?: string |
     unrealizedPct,
     pnlUsd,
     pnlPct,
-    est: { h24: estOf(DAY_MS), d7: estOf(7 * DAY_MS), d365: estOf(365 * DAY_MS) },
+    est: estimates(generatedOf(b)?.tokens ?? [], age == null ? null : age / 1000),
     moves: moveParts(b),
     winRate: winRateOf(b),
     feesPaidUsd: feesPaid,

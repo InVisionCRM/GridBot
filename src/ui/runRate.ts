@@ -46,3 +46,9 @@ export function rateOrRun(net: number | null | undefined, runMs: number | null |
   if (isShortRun(runMs)) return `${fmtNet(net)} ${runSpan(runMs)}`;
   return rate(net / ((runMs as number) / DAY_MS));
 }
+
+/** A yearly rate from a share generated over the run (pct ÷ days run × 365). Null under a day. An estimate, not a forecast. */
+export function estYearly(pct: number | null | undefined, runMs: number | null | undefined): number | null {
+  if (typeof pct !== 'number' || !Number.isFinite(pct) || isShortRun(runMs)) return null;
+  return (pct / ((runMs as number) / DAY_MS)) * 365;
+}

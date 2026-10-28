@@ -1,6 +1,6 @@
 /** Small charts. Strokes and tracks come from --chart-* so the desk palette restyles them. */
 import { useId } from 'react';
-import { usd } from './fmt';
+import { pct } from './fmt';
 import { rangeTone } from './series';
 
 function lineOf(points: number[], w: number, h: number) {
@@ -81,7 +81,7 @@ export function Donut({ slices }: { slices: { key: string; label: string; usd: n
       </div>
       <ul>
         {slices.map((s) => (
-          <li key={s.key}><i style={{ background: s.color }} />{s.label}<b>{slices.length === 1 ? 'all of it' : usd(s.usd)}</b></li>
+          <li key={s.key}><i style={{ background: s.color }} />{s.label}<b>{slices.length === 1 ? 'all of it' : pct(s.usd / total, 0)}</b></li>
         ))}
         {!slices.length && <li className="muted">No balances yet</li>}
       </ul>

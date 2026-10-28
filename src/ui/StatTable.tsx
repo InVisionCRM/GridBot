@@ -1,41 +1,38 @@
 /**
  * The figures under a chart. A dash is a figure the stored bot does not have.
  *
- * Each figure shows once per screen (Kyle's rule):
- * - Net shows once. Realized and Unrealized show only when they differ from it (when one equals the net the other is ~0).
- * - Invested shows only when it differs from Value.
- * - `inRow`: the table sits under a Bots-list row. Figures that row already shows in its columns (value, P&L %, age,
- *   moves, fees, APR) get the `in-row` class: hidden on desktop, where the columns show, and shown on a phone, where they
- *   don't (styles.css). The row's P&L amount (`rowPnlUsd`) shows on both, so the net amount is left out here, and so is
- *   Realized or Unrealized when it is that amount (an LP row's P&L is its net after costs, which is Realized here).
- * - `omit`: rows a page already shows elsewhere (the LP page's cards).
- * - Amounts lead with the bot's coin, dollars small (`coinFirst`): "34,000 USDG", not "$34,000".
+ * Display rules (Kyle): crypto units only (no dollars), each figure once per screen, and the headline is what was
+ * Invested plus what the bot Generated, net of costs (generated.ts). No price-move figures.
+ * - Generated shows once, in tokens, with its share of what was put in; under a day with the run length ("over 8.8h").
+ * - Estimates (24h, 7d, 365d) are Generated per token ÷ days run (src/shared/generated.ts estimates), from a day on.
+ * - Invested shows only when it differs from Value now.
+ * - `inRow`: the table sits under a Bots-list row. Figures that row already shows in its columns (invested, generated %,
+ *   age, moves, fees) get the `in-row` class: hidden on desktop, where the columns show, and shown on a phone, where they
+ *   don't (styles.css). The row's Generated amount shows on both, so here only its share.
+ * - `omit`: rows a page already shows elsewhere (the bot pages' cards).
  * Display only: botFacts and every value behind it are unchanged.
  */
 import type { ReactNode } from 'react';
 import { chainOf, mk } from './chains';
 import { botFacts } from './deskStats';
-import { ago, dur, pct, px, qty, usd } from './fmt';
-import { pegged } from './money';
+import { ago, dur, pct, px, qty } from './fmt';
+import { formatTokens, generatedOf, generatedPct, investedOf, quoteSymbolOf } from './generatedView';
 import { quoteSym, type AnyObj } from './model';
 import { isShortRun, runSpan } from './runRate';
+import { estimates } from '../shared/generated';
 
-export type StatKey = 'age' | 'net' | 'netPct' | 'netSpan' | 'realized' | 'unrealized' | 'feesPaid' | 'feesEarned' | 'moves' | 'range' | 'spacing' | 'value' | 'invested' | 'lastMove' | 'winRate';
+export type StatKey = 'age' | 'net' | 'netPct' | 'netSpan' | 'feesPaid' | 'feesEarned' | 'moves' | 'range' | 'spacing' | 'value' | 'invested' | 'lastMove' | 'winRate' | 'est';
 
 /**
- * An amount the bot's facts hold in dollars, shown in the bot's coin first with the dollars small (Kyle's rule: lead with
- * token units, USD small). A coin worth about a dollar shows no dollars (they'd repeat the amount). No coin price (or a
- * token trader, whose figures are dollars): dollars. Display only: the dollar figure is divided back by the same
- * dollars-per-coin it was made with (botFacts).
+ * An amount the bot's facts hold in dollars, shown in the bot's coin only (crypto units, no dollars on these screens):
+ * the dollar figure divided back by the same dollars-per-coin it was made with (botFacts). No coin price: "—".
  */
 export function coinFirst(b: AnyObj): (v: number | null | undefined, sign?: boolean) => ReactNode {
   const k = typeof b.usdPerQuote === 'number' && b.usdPerQuote > 0 ? b.usdPerQuote : null;
   const sym = String(quoteSym(b) ?? '');
-  const trader = b.kind === 'trader' || b.kind === 'sniper';
   return (v, sign = false) => {
-    if (v == null || !Number.isFinite(v)) return '—';
-    if (trader || k == null || !sym) return usd(v, sign);
-    return <>{qty(v / k, sym, 5, sign)}{!pegged(k) && <small className="usd"> {usd(v, sign)}</small>}</>;
+    if (v == null || !Number.isFinite(v) || k == null || !sym) return '—';
+    return qty(v / k, sym, 5, sign);
   };
 }
 
@@ -51,7 +48,7 @@ function poolText(pool: string | null) {
 
 interface Row { k: string; v: ReactNode; cls?: string }
 
-export function StatTable({ b, s, inRow = false, rowPnlUsd = null, omit = [] }: { b: AnyObj; s: AnyObj; inRow?: boolean; rowPnlUsd?: number | null; omit?: StatKey[] }) {
+export function StatTable({ b, s, inRow = false, omit = [] }: { b: AnyObj; s: AnyObj; inRow?: boolean; omit?: StatKey[] }) {
   const key = (b.stable || b.market || b.quote) as string | undefined;
   const market = key ? mk(s, key) : null;
   const chain = chainOf(s, b.chainId ?? s.legacyChainId)?.short ?? (typeof b.chainShort === 'string' ? b.chainShort : null);
@@ -62,45 +59,49 @@ export function StatTable({ b, s, inRow = false, rowPnlUsd = null, omit = [] }: 
   });
   const skip = new Set<StatKey>(omit);
   const amt = coinFirst(b);
-  const money = (v: number | null, p: number | null): ReactNode => {
-    if (v == null && p == null) return '—';
-    return <>{v == null ? '—' : amt(v, true)}{p == null ? '' : ` · ${pct(p, 2, true)}`}</>;
-  };
+  const gen = generatedOf(b);
+  const inv = investedOf(b);
+  const gp = generatedPct(b);
   const short = isShortRun(f.ageMs);
   const row = inRow ? 'in-row' : undefined; // also in the Bots-list row's columns
-  const range = f.range ? `${px(f.range.lower)} – ${px(f.range.upper)}` : '—';
+  const baseSym = typeof b.base === 'string' ? b.base : null;
+  const range = f.range ? `${px(f.range.lower)} – ${px(f.range.upper)}${baseSym ? ` ${quoteSymbolOf(b)} per ${baseSym}` : ''}` : '—';
   const spacing = f.spacingFrac != null ? `${(f.spacingFrac * 100).toFixed(3)}%` : f.bandPct != null ? `±${(f.bandPct * 100).toFixed(2)}%` : '—';
-  const showNet = !skip.has('net') && (f.pnlUsd != null || f.pnlPct != null);
-  // one of them equals the net, so the other is ~0: the net row says it all
-  if (showNet && (sameFigure(f.realizedUsd, f.pnlUsd) || sameFigure(f.unrealizedUsd, f.pnlUsd))) { skip.add('realized'); skip.add('unrealized'); }
-  if (inRow && sameFigure(f.realizedUsd, rowPnlUsd)) skip.add('realized');
-  if (inRow && sameFigure(f.unrealizedUsd, rowPnlUsd)) skip.add('unrealized');
-  // same as shown ("$2,000" and "$2,000.07" both read $2,000)
-  if (f.investedUsd != null && f.valueUsd != null && usd(f.investedUsd) === usd(f.valueUsd)) skip.add('invested');
-  // under a day the net row carries the run length ("over 8.8h"), so no separate Age row
+  // the Bots-list row shows Generated in tokens on desktop and phone: here only its share and, under a day, the run length
+  const showNet = !skip.has('net') && (gen != null || gp != null);
+  // the Bots-list row has Generated and its share in its columns: not again in the table under it
+  if (inRow) skip.add('net');
+  // Value now within 0.1% of what was put in reads as the same figure twice: say so in words instead
+  const k = typeof b.usdPerQuote === 'number' && b.usdPerQuote > 0 ? b.usdPerQuote : null;
+  const valueQuote = f.valueUsd != null && k != null ? f.valueUsd / k : null;
+  const valueSame = inv != null && valueQuote != null && inv.amount > 0 && Math.abs(valueQuote - inv.amount) / inv.amount < 0.001;
+  // under a day the Generated row carries the run length ("over 8.8h"), so no separate Age row
   if (short && showNet && !skip.has('netSpan') && f.ageMs != null && f.ageMs > 0) skip.add('age');
   const span = short && !skip.has('netSpan') ? ` ${runSpan(f.ageMs)}` : '';
-  const netText: ReactNode = inRow
-    ? `${f.pnlPct == null ? '—' : pct(f.pnlPct, 2, true)}${span}` // the amount is in the row
-    : <>{money(f.pnlUsd, skip.has('netPct') ? null : f.pnlPct)}{span}</>;
-  const est = (v: { amount: number; pct: number | null } | null, apr = false): ReactNode => {
-    if (!v) return '—';
-    return <>{amt(v.amount, true)}{v.pct != null && <span className={apr ? row : undefined}>{` · ${pct(v.pct, 2, true)}`}</span>}</>;
-  };
+  const share = skip.has('netPct') || gp == null ? '' : `${pct(gp, 2, true)} of what was put in`;
+  const netText = inRow
+    ? `${share || '—'}${span}`
+    : [formatTokens(gen?.tokens, true), share].filter(Boolean).join(' · ') + span;
+  // shared estimates: Generated per token ÷ age in days × 1, 7, 365; none under a day
+  const est = estimates(gen?.tokens ?? [], f.ageMs == null ? null : f.ageMs / 1000);
+  const pace = est.h24 ? { d1: est.h24, d7: est.d7, d365: est.d365 } : null;
   const rows: (Row & { id?: StatKey })[] = [
     { id: 'age', k: 'Age', v: f.ageMs == null ? '—' : dur(f.ageMs), cls: row },
-    { id: 'invested', k: 'Invested', v: amt(f.investedUsd) },
-    { id: 'value', k: 'Value', v: amt(f.valueUsd), cls: row },
-    { id: 'realized', k: 'Realized', v: money(f.realizedUsd, f.realizedPct) },
-    { id: 'unrealized', k: 'Unrealized', v: money(f.unrealizedUsd, f.unrealizedPct) },
-    ...(showNet ? [{ id: 'net' as StatKey, k: short ? 'Net so far' : 'Net', v: netText, cls: row }] : []),
-    // Under a day: the net for the run with its length, not estimates scaled up from it (runRate.ts).
-    ...(short ? [] : [{ k: 'Est. 24h', v: est(f.est.h24) }, { k: 'Est. 7d', v: est(f.est.d7) }, { k: 'Est. 365d', v: est(f.est.d365, true) }]),
+    { id: 'invested', k: 'Invested', v: inv ? formatTokens([inv], false) : '—', cls: row },
+    { id: 'value', k: 'Value now', v: valueSame ? 'about what was put in' : amt(f.valueUsd) },
+    ...(showNet ? [{ id: 'net' as StatKey, k: short ? 'Generated so far, net of costs' : 'Generated, net of costs', v: netText }] : []),
+    // Under a day: none (runRate.ts). From a day: Generated per token ÷ days run × 1, 7, 365.
+    ...(short || skip.has('est') ? [] : [
+      { k: 'Est. 24h (estimate)', v: formatTokens(pace?.d1, true, 4) },
+      { k: 'Est. 7d (estimate)', v: formatTokens(pace?.d7, true, 4) },
+      { k: 'Est. 365d (estimate)', v: formatTokens(pace?.d365, true, 4) },
+    ]),
     { id: 'moves', k: 'Moves', v: f.moves.text ?? '—', cls: row },
-    { id: 'winRate', k: 'Win rate', v: f.winRate == null ? '—' : pct(f.winRate, 0) },
+    // rows with nothing to say are left out (an LP has no win rate; no bot sends a time-in-range fraction yet)
+    ...(f.winRate == null ? [] : [{ id: 'winRate' as StatKey, k: 'Win rate', v: pct(f.winRate, 0) }]),
     { id: 'feesPaid', k: 'Fees paid', v: amt(f.feesPaidUsd) },
     { id: 'feesEarned', k: 'Fees earned', v: amt(f.feesEarnedUsd), cls: row },
-    { k: 'Time in range', v: f.timeInRange == null ? '—' : pct(f.timeInRange, 0) },
+    ...(f.timeInRange == null ? [] : [{ k: 'Time in range', v: pct(f.timeInRange, 0) }]),
     { id: 'range', k: 'Range', v: range },
     { id: 'spacing', k: 'Spacing', v: spacing },
     { id: 'lastMove', k: 'Last move', v: f.lastMoveAt == null ? '—' : ago(f.lastMoveAt) },
@@ -111,8 +112,8 @@ export function StatTable({ b, s, inRow = false, rowPnlUsd = null, omit = [] }: 
   return (
     <div className="stat-table">
       <p className="stat-note">{short
-        ? 'Est. 24h, 7d, and 365d show once the bot has run a day. Until then: the net for the run.'
-        : 'Est. 24h, 7d, and 365d extrapolate performance so far. They are not a forecast.'}</p>
+        ? 'Estimates (24h, 7d, 365d) show once the bot has run a day. Until then: what it generated over the run.'
+        : 'Estimates: what it generated so far, per token, carried over 24h, 7d and 365d at the same pace. Not a forecast.'}</p>
       <table>
         <tbody>
           {rows.filter((r) => !r.id || !skip.has(r.id)).map((r) => (

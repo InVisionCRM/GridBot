@@ -110,8 +110,7 @@ function ModeAnalytics({ s, mode }: { s: AnyObj; mode: 'live' | 'paper' }) {
         <div className="kpi-row">
           <Kpi label="Total value ≈$" tip="Everything the bots hold (their coins at today's prices plus the coin they spend), in dollars. It moves with the market every day."><AnimatedNumber value={tot?.equityUsd} format={(x) => usd(x)} className="big" /></Kpi>
           <Kpi label="Allocated" tip="The amounts you gave the bots, in dollars at today's prices." sub={`${ov?.bots?.length ?? 0} bots`}>{usd(tot?.capitalUsd)}</Kpi>
-          <Kpi label="Realized" tip="Banked from completed trades and liquidity fees after gas, in dollars at today's prices. Price moves don't change it."><AnimatedNumber value={tot?.realizedUsd} format={(x) => usd(x, true)} className={cls(tot?.realizedUsd)} /></Kpi>
-          <Kpi label="Unrealized" tip="The change on coins bought and not sold yet, at today's price. It moves with the market until they sell."><AnimatedNumber value={tot?.unrealizedUsd} format={(x) => usd(x, true)} className={cls(tot?.unrealizedUsd)} /></Kpi>
+          <Kpi label="Generated, net of costs" tip="Banked from completed trades and liquidity fees after gas, in dollars at today's prices. Price moves don't change it."><AnimatedNumber value={tot?.realizedUsd} format={(x) => usd(x, true)} className={cls(tot?.realizedUsd)} /></Kpi>
           <Kpi label="Today" tip="How much the bots' value changed since midnight (realized from trades shown below it)."><P k="today" /></Kpi>
           <Kpi label="7 days" tip="How much the bots' value changed over the last 7 days (realized from trades shown below it)."><P k="d7" /></Kpi>
           <Kpi label="All-time" tip="How much the bots' value changed since they started (realized from trades shown below it)."><P k="all" /></Kpi>
@@ -125,12 +124,12 @@ function ModeAnalytics({ s, mode }: { s: AnyObj; mode: 'live' | 'paper' }) {
         )}
         {ov?.chains?.length > 0 && (
           <table className="chain-breakdown small">
-            <thead><tr><th>Chain</th><th>Bots</th><th>Equity ≈$</th><th>Allocated</th><th>Realized</th><th>Unrealized</th><th>Gas paid</th>{!paper && <th>Gas wallet</th>}</tr></thead>
+            <thead><tr><th>Chain</th><th>Bots</th><th>Equity ≈$</th><th>Allocated</th><th>Generated</th><th>Gas paid</th>{!paper && <th>Gas wallet</th>}</tr></thead>
             <tbody>{ov!.chains.map((c: AnyObj) => (
               <tr key={c.chainId} className={chain !== 'all' && chain !== c.chainId ? 'dim' : ''}>
                 <td><span className="chain-badge" style={{ ['--cc' as string]: c.color }}>{c.short}</span> {c.name}</td>
                 <td>{c.running}/{c.bots}</td><td>{usd(c.equityUsd)}</td><td>{usd(c.capitalUsd)}</td>
-                <td className={cls(c.realizedUsd)}>{usd(c.realizedUsd, true)}</td><td className={cls(c.unrealizedUsd)}>{usd(c.unrealizedUsd, true)}</td>
+                <td className={cls(c.realizedUsd)}>{usd(c.realizedUsd, true)}</td>
                 <td>{usd(c.gasUsd)}</td>
                 {!paper && <td>{c.gasNative != null ? `${num(c.gasNative, c.gasNative < 1 ? 5 : 1)} ${c.nativeSymbol}` : '—'}{c.gasNativeUsd != null ? <span className="muted"> ≈{usd(c.gasNativeUsd)}</span> : null}{c.lowGas ? <b className="neg"> LOW</b> : null}</td>}
               </tr>
