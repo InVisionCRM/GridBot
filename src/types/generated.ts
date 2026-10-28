@@ -38,4 +38,19 @@ export interface Generated {
   closed: number | null;
   /** Only closed positions are realized; open ones count only the costs they already paid */
   basis: 'closed';
+  /**
+   * Paper or live money. Paper and live are never added together: the token trader keeps one entry per mode, chain and
+   * coin. Missing = a server from before this field.
+   */
+  mode?: 'paper' | 'live';
+  /**
+   * Token trader only. true = an entry saved before paper and live were kept apart, whose mode was inferred when it was
+   * split (gas paid = live, otherwise paper); see TokenTrader.migrateLedgerModes. Missing/false = recorded.
+   */
+  modeInferred?: boolean;
+  /**
+   * Token trader only. Sells that left the wallet but whose coins received are not known (a send reported as failed
+   * that went through, found when the wallet was re-read). Not in `amount`: neither their cost nor what they brought.
+   */
+  unpriced?: number;
 }

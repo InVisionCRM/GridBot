@@ -590,6 +590,9 @@ export class Autopilot {
         amount: proceeds - a.budget.amount,
         proceeds, cost: a.budget.amount, fees: null, taxes: null,
         gasNative: a.gasNative, gasSymbol: nativeSym, gasInAmount: native, closed: null, basis: 'closed',
+        // One mode per account: configure() changes the mode only while off with nothing held, and starts new accounts
+        // (accounts: []), so an account's Generated never mixes paper and live.
+        mode: this.state.mode,
       },
       inTransit: [...inTransit].map(([symbol, amount]) => ({ symbol, amount })),
     };
