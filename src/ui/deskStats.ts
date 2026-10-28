@@ -23,6 +23,29 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
   return now - startedAt;
 }
 
+/**
+ * Where a bot's history ends, for rates and estimates. A running (or still-closing) bot, an idle one (not started, so
+ * it has no age anyway) or one with no status: now. A paused liquidity bot that still has its position open: now as
+ * well, since it keeps earning fees while paused (it still refreshes and its P&L keeps growing); freezing the window
+ * at the pause would inflate its per-day figures and APR without limit. A stopped grid / trend, or a closed / archived
+ * LP or one with no position left: its recorded stop / close time (halt.at), else the last thing it did (latest of its
+ * last reading, last fill, last range move, last trade), else when it was archived; never later than now. Otherwise a
+ * closed bot's per-day figures keep shrinking as time passes after it stopped.
+ */
+export function historyEnd(b: AnyObj, now: number): number {
+  const status = typeof b?.status === 'string' ? b.status : null;
+  if (!status || status === 'running' || status === 'idle' || b.closing) return now;
+  if (b.kind === 'lp' && status === 'stopped' && b.position && !b.archivedAt) return now;
+  const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  const cap = (v: number) => Math.min(v, now);
+  if (ok(b.halt?.at)) return cap(b.halt.at);
+  const lastTrade = Array.isArray(b.trades) ? b.trades.reduce((m: number, t: AnyObj) => (ok(t?.timestamp) && t.timestamp > m ? t.timestamp : m), 0) : 0;
+  const last = Math.max(...[b.priceAt, b.lastPriceAt, b.lastMoveAt, b.lastRerangeAt, lastTrade].filter(ok), 0);
+  if (last > 0) return cap(last);
+  if (ok(b.archivedAt)) return cap(b.archivedAt);
+  return now;
+}
+
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
@@ -131,7 +154,8 @@ function spacingOf(b: AnyObj): { frac: number | null; band: number | null } {
 export function botFacts(b: AnyObj, now = Date.now(), extra?: { chain?: string | null; dex?: string | null; pool?: string | null }): DeskFacts {
   const k = b.kind === 'trader' || b.kind === 'sniper' ? (quoteUsd(b) || 1) : quoteUsd(b);
   const started = num(b.startedAt) ?? num(b.openedAt);
-  const age = ageMs(started, now);
+  // Rates / estimates / APR span the bot's active history: to now while it runs, to its stop / close time after.
+  const age = ageMs(started, historyEnd(b, now));
   const trader = b.kind === 'trader' || b.kind === 'sniper';
   const investedQuote = trader ? null
     : b.kind === 'grid' ? num(b.config?.totalCapitalUsd)

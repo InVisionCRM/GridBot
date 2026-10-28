@@ -237,7 +237,7 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
                   <td><Addr s={s} chainId={m.chainId} a={m.pool} /></td>
                   <td title={`${v.quote} per ${v.base}`}>{v.spot != null ? px(v.spot, 6) : '—'}</td>
                   <td className="small">{v.usdPerQuote != null ? px(v.usdPerQuote, 4) : '—'}</td>
-                  <td>{m.risk ? <><RiskBadge risk={m.risk} title={`${m.liveAllowed ? 'Live allowed' : 'Paper only'}. ${m.riskWhy ?? ''}`} />{m.risk !== 'low' && m.riskWhy ? <div className="muted small risk-why">{m.riskWhy}</div> : null}</> : <span className="muted small" title="Built-in market without a token safety report (the chain's own coin, stablecoins or PulseChain's original markets)">—</span>}</td>
+                  <td>{m.risk ? <><RiskBadge risk={m.risk} title={`${m.liveAllowed ? 'Live allowed' : 'Paper only'}. ${m.riskWhy ?? ''}`} />{m.safetyStale ? <span className="tag risk-mid" title={`The last re-check didn't measure (${m.safetyStale.why}). These are the last known results${m.safetyAt ? ` from ${new Date(m.safetyAt).toLocaleString()}` : ''}. Bots keep running.`}>stale</span> : null}{m.risk !== 'low' && m.riskWhy ? <div className="muted small risk-why">{m.riskWhy}</div> : null}</> : <span className="muted small" title="Built-in market without a token safety report (the chain's own coin, stablecoins or PulseChain's original markets)">—</span>}</td>
                   <td className="small">{m.buyTaxPct != null || m.sellTaxPct != null ? `${((m.buyTaxPct ?? 0) * 100).toFixed(1)}% / ${((m.sellTaxPct ?? 0) * 100).toFixed(1)}%` : <span className="muted">—</span>}</td>
                   <td className="nowrap">
                     {ch?.tradable && <><button type="button" className="btn small-btn" onClick={() => setPoolsFor(open ? null : m.key)}>{open ? 'Hide' : 'Pools'}</button>{' '}</>}
@@ -276,7 +276,7 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
             {x.note && <p className="muted small">{x.note}</p>}
             <table className="small"><thead><tr><th>DEX</th><th>Kind</th><th>Factory</th><th>Router</th><th>Quoter</th><th>Fee</th></tr></thead>
               <tbody>{x.dexes.map((d: AnyObj) => (
-                <tr key={d.id}><td>{d.name}{d.note ? <span className="muted"> · {d.note}</span> : null}</td><td>{d.kind}</td><td><Addr s={s} chainId={x.id} a={d.factory} /></td><td><Addr s={s} chainId={x.id} a={d.router} /></td><td><Addr s={s} chainId={x.id} a={d.quoter} /></td><td>{d.kind === 'v3' ? d.tiers.join(' / ') : `${d.feeBps / 100}%`}</td></tr>
+                <tr key={d.id}><td>{d.name}{d.note ? <span className="muted"> · {d.note}</span> : null}</td><td>{d.kind}</td><td><Addr s={s} chainId={x.id} a={d.factory} /></td><td><Addr s={s} chainId={x.id} a={d.router} /></td><td><Addr s={s} chainId={x.id} a={d.quoter} /></td><td>{d.kind === 'v3' ? d.tiers.join(' / ') : d.kind === 'v4' ? 'per pool' : `${d.feeBps / 100}%`}</td></tr>
               ))}{x.dexes.length === 0 && <tr><td colSpan={6} className="muted">none — {x.reason}</td></tr>}</tbody></table>
             <p className="small">Sources: {x.sources.map((src: AnyObj, i: number) => <span key={i}>{i ? ' · ' : ''}<a href={src.url} target="_blank" rel="noreferrer">{src.label}</a></span>)}</p>
           </div>

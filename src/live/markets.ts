@@ -23,10 +23,24 @@ export interface PoolRef {
   kind: DexKind;
   /** Pool / pair address ('' = resolve through the factory) */
   address: string;
-  /** LP fee in bps (V2: DEX fee; V3: tier / 100) */
+  /** LP fee in bps (V2: DEX fee; V3: tier / 100; V4: lpFee / 100, re-read at quote time when the pool is dynamic) */
   feeBps: number;
   /** V3 fee tier in hundredths of a bip */
   feeTier?: number;
+  /**
+   * V4 PoolKey. `address` on this ref is the pool id (bytes32). currency 0x0 is native ETH; swaps and the
+   * safety probe use this key, not the wrapped-native address the rest of the app shows.
+   */
+  v4?: {
+    currency0: string;
+    currency1: string;
+    /** Static fee, or DYNAMIC_FEE_FLAG (0x800000) when the live fee comes from StateView. */
+    fee: number;
+    tickSpacing: number;
+    hooks: string;
+    poolId: string;
+    dynamicFee: boolean;
+  };
 }
 
 export interface SafetyReport {
@@ -43,10 +57,10 @@ export interface SafetyReport {
   liquidityUsd: number | null;
   simulated: boolean;
   note?: string;
-  /** How taxes are traded: none · V2 fee-on-transfer methods · V3 proven by simulation · blocked */
-  taxMode?: 'none' | 'v2-fot' | 'v3-proven' | 'blocked';
-  /** Pool kind the report was measured on (taxes are pool-specific for V3) */
-  poolKind?: 'v2' | 'v3';
+  /** How taxes are traded: none · V2 fee-on-transfer methods · V3 or V4 proven by simulation · blocked */
+  taxMode?: 'none' | 'v2-fot' | 'v3-proven' | 'v4-proven' | 'blocked';
+  /** Pool kind the report was measured on (taxes are pool-specific for V3 and V4) */
+  poolKind?: 'v2' | 'v3' | 'v4';
   /** Live cap per side (fraction) at the time of the check */
   taxCapPct?: number;
   /** Token limits in human units (maxTxAmount / maxWallet views); trades above them are skipped */
@@ -58,6 +72,20 @@ export interface SafetyReport {
   paused?: boolean | null;
   /** Token decimals read on-chain at check time */
   decimals?: number;
+  /**
+   * Set when the last re-check failed or measured nothing: the values above are the last known ones, kept for display
+   * and for the taxes the quotes use, but not re-confirmed since `since`. Cleared by the next re-check that measures.
+   * Being stale never pauses or stops a bot; `liveAllowed` keeps its last known value.
+   */
+  stale?: SafetyStale;
+}
+
+export interface SafetyStale {
+  /** First failed re-check in this run of failures */
+  since: number;
+  /** Most recent failed re-check */
+  lastTry: number;
+  why: string;
 }
 
 export interface MarketDef {

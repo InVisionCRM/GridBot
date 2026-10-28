@@ -29,10 +29,11 @@ import { lpShareOf } from '../lp/lpShare';
 import { onchainFeePace } from './feePace';
 import { RateLimited } from './gecko';
 
-export interface ScanChain { chainId: number; name: string; at: number; items: Opportunity[]; tested: number; skipped: Skipped[]; error: string | null }
+/** partial: still being scanned (shown as its pools are tested; only when it has no earlier result) */
+export interface ScanChain { chainId: number; name: string; at: number; items: Opportunity[]; tested: number; skipped: Skipped[]; error: string | null; partial?: boolean }
 /** One V3 fee-growth reading. Strings because JSON has no bigint. The next scan turns two of these into a fee pace. */
 export interface FeeMark { at: number; g0: string; g1: string; liquidity: string }
-export interface ScanFile { version: 3; at: number | null; testUsd: number; chains: ScanChain[]; feeMarks?: Record<string, FeeMark> }
+export interface ScanFile { version: 4; at: number | null; testUsd: number; chains: ScanChain[]; feeMarks?: Record<string, FeeMark> }
 
 /** `dexes` = GeckoTerminal ids of the DEXes this app trades on the chain (only their pools are read); `lpDexes` = app DEX ids a liquidity bot can use. */
 export interface ScanChainInfo { id: number; name: string; slug: string | null; wrapped: string; spendable: string[]; dexes: string[]; lpDexes: string[] }
@@ -67,6 +68,37 @@ export interface ScanDeps {
   approval: 'exact' | 'max';
   now?: () => number;
   emit?: Emit;
+}
+
+/** Version 3 kept a pool's addresses only for coins not in the app (`add`) */
+type ScanFileV3 = { version: 3; at: number | null; testUsd: number; feeMarks?: Record<string, FeeMark>; chains: (Omit<ScanChain, 'items'> & { items: (Omit<Opportunity, 'ref'> & { add: Opportunity['ref'] | null })[] })[] };
+function upgradeV3(f: ScanFileV3, existing: ScanDeps['existing']): ScanFile {
+  return {
+    ...f, version: 4,
+    chains: f.chains.map((c) => ({
+      ...c,
+      // A pool in the app gets its addresses from its market; one whose market was removed since is dropped.
+      items: c.items.flatMap(({ add, ...o }) => {
+        const d = add ? null : existing(c.chainId).find((m) => m.key === o.key);
+        const ref = add ?? (d ? { address: d.base.address, quote: d.quote.address, pool: d.pool.address } : null);
+        return ref ? [{ ...o, ref }] : [];
+      }),
+    })),
+  };
+}
+
+/**
+ * The scan as this app reads it: each pool's `key` is this app's market on that pool (by its addresses), or null.
+ * The scan may come from another app (a friend's copy shows its host's), and keys differ between apps.
+ */
+export function localScan(hub: Pick<Hub, 'marketFor'>, src: { status(): unknown; run(testUsd?: number): Promise<unknown> }) {
+  return {
+    async status() {
+      const s = (await src.status()) as ReturnType<DailyScanner['status']>;
+      return { ...s, chains: s.chains.map((c) => ({ ...c, items: c.items.map((o) => ({ ...o, key: hub.marketFor(o.chainId, o.dex, o.ref) })) })) };
+    },
+    run: (testUsd?: number) => src.run(testUsd),
+  };
 }
 
 /** Candle volume is in quote units. Scale it so the window matches fees the pool actually paid. */
@@ -105,9 +137,9 @@ export class DailyScanner {
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly d: ScanDeps) {
-    const f = d.store.load();
+    const f = d.store.load() as ScanFile | ScanFileV3 | { version: 2; testUsd?: number } | null;
     // version 2 (3 picks a chain, ranked with the price move) is dropped: the next scan replaces it
-    this.file = f?.version === 3 ? f : { version: 3, at: null, testUsd: f?.testUsd ?? TEST_USD, chains: [] };
+    this.file = f?.version === 4 ? f : f?.version === 3 ? upgradeV3(f, d.existing) : { version: 4, at: null, testUsd: f?.testUsd ?? TEST_USD, chains: [] };
   }
 
   private now() { return (this.d.now ?? Date.now)(); }
@@ -124,7 +156,7 @@ export class DailyScanner {
   private chainsNow(): ScanChain[] {
     if (!this.live) return this.file.chains;
     const { done, current } = this.live, old = this.file.chains;
-    const fresh = current && !old.some((c) => c.chainId === current.chainId) ? [...done, current] : done;
+    const fresh = current && !old.some((c) => c.chainId === current.chainId) ? [...done, { ...current, partial: true }] : done;
     return [...fresh, ...old.filter((c) => !fresh.some((f) => f.chainId === c.chainId))];
   }
 
@@ -143,7 +175,7 @@ export class DailyScanner {
     if (this.running) throw new Error('A scan is already running.');
     this.running = true;
     // Fee readings are stored on the scan file while the scan runs. A first install has no file yet, so start one.
-    if (this.d.store.load()?.version !== 3) this.d.store.save(this.file);
+    if (this.d.store.load()?.version !== 4) this.d.store.save(this.file);
     this.d.emit?.({ type: 'info', kind: 'system', msg: `Opportunity scan started ($${usd.toLocaleString('en-US')} test size)` });
     try {
       const chains: ScanChain[] = [];
@@ -151,7 +183,7 @@ export class DailyScanner {
       const list = this.d.chains();
       for (const [i, c] of list.entries()) chains.push(await this.scanChain(c, i + 1, list.length, usd));
       const feeMarks = this.d.store.load()?.feeMarks ?? this.file.feeMarks;
-      this.file = { version: 3, at: this.now(), testUsd: usd, chains, ...(feeMarks ? { feeMarks } : {}) };
+      this.file = { version: 4, at: this.now(), testUsd: usd, chains, ...(feeMarks ? { feeMarks } : {}) };
       this.d.store.save(this.file);
       this.d.emit?.({ type: 'info', kind: 'system', level: 'success', msg: `Opportunity scan done: ${chains.map((c) => `${c.name} ${c.items.length} pool${c.items.length === 1 ? '' : 's'}`).join(', ')}` });
       return this.file;
@@ -235,7 +267,7 @@ export class DailyScanner {
       chainId: c.id,
       // A new token's draft quote keeps the wrapped address (WPLS / WETH) even though it spends the native coin.
       key: isNew ? null : d.key,
-      add: isNew ? { address: d.base.address, quote: d.quote.address, pool: d.pool.address } : null,
+      ref: { address: d.base.address, quote: d.quote.address, pool: d.pool.address },
       label: `${d.base.symbol}/${d.quote.symbol}`, spend: d.quote.symbol, stack: d.base.symbol,
       dex: d.pool.dex, kind: d.pool.kind, feeBps: d.pool.feeBps,
       risk: d.safety?.risk ?? null, riskWhy: d.safety?.reasons.join(' ') || null, liveAllowed: d.safety ? d.safety.liveAllowed : true,
@@ -251,15 +283,22 @@ export class DailyScanner {
       else o.gridWhy = `no grid earned from its trades this week (price ${pct(movePct)})`;
     }
     if (d.pool.kind !== 'v3' || !c.lpDexes.includes(d.pool.dex)) {
-      o.lpWhy = d.pool.kind === 'v3' ? "A liquidity bot can't open positions on this DEX yet (no verified position manager)." : 'A liquidity bot needs a V3 pool; this one is V2.';
+      o.lpWhy = d.pool.kind === 'v3' ? "A liquidity bot can't open positions on this DEX yet (no verified position manager)." : d.pool.kind === 'v4' ? 'A liquidity bot needs a V3 pool; this one is V4.' : 'A liquidity bot needs a V3 pool; this one is V2.';
       return o;
     }
     let candles = week;
     if (wash) {
       const pace = this.d.feePace ? await this.d.feePace(d) : null;
       const scale = pace ? paceScale(pace, week, await this.d.usdPerSpend(d), d.pool.feeBps, this.now()) : null;
-      if (!(scale != null && scale > 0)) {
-        o.lpWhy = `volume is ${Math.round((pool?.volume24Usd ?? 0) / Math.max(pool?.liquidityUsd ?? 1, 1))}× liquidity and this pool's fees weren't measured on-chain, so it isn't ranked for liquidity`;
+      const times = Math.round((pool?.volume24Usd ?? 0) / Math.max(pool?.liquidityUsd ?? 1, 1));
+      // Not measured yet (the first reading only starts the clock, or the read failed): no evidence either way
+      if (scale == null) {
+        o.lpWhy = `volume is ${times}× liquidity and this pool's fees weren't measured on-chain, so it isn't ranked for liquidity`;
+        o.lpFailed = true;
+        return o;
+      }
+      if (!(scale > 0)) {
+        o.lpWhy = `volume is ${times}× liquidity and the pool paid no fees on-chain since the last reading`;
         return o;
       }
       o.feeScale = scale;
@@ -269,7 +308,7 @@ export class DailyScanner {
       const l = bestLp(candles, costs, capital, 'v3', await this.d.lpShare(d));
       if (l.bandPct == null) throw new Error('a V3 position was tested as full range');
       o.lp = { bandPct: l.bandPct, earnedPct: l.earnedPct, feesPct: l.feesPct, inRangePct: l.inRangePct, poolSharePct: l.poolSharePct, returnPct: l.returnPct };
-    } catch (e) { o.lpWhy = msg(e); }
+    } catch (e) { o.lpWhy = msg(e); o.lpFailed = true; }
     return o;
   }
 }

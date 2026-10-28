@@ -149,15 +149,18 @@ export function pickTokens(pools: TopPool[], spendable: string[], wrapped: strin
 /** One pool, tested both ways over the same week at the same test size. */
 export interface Opportunity {
   chainId: number;
-  /** Market key when the pair is already in the app (may be a flipped key such as 'HEX~') */
+  /**
+   * This app's market key when the pool is already in it (may be a flipped key such as 'HEX~'); null otherwise. Set from
+   * `ref` each time the scan is read (server/market/scanner.ts localScan): another app's keys are never used here.
+   */
   key: string | null;
-  /** How to add it otherwise (POST /api/opportunities/use) */
-  add: { address: string; quote: string; pool: string } | null;
+  /** The pool: its coin (address), the coin it spends (quote) and the pool's address. Adding it: POST /api/opportunities/use */
+  ref: { address: string; quote: string; pool: string };
   label: string;
   spend: string;
   stack: string;
   dex: string;
-  kind: 'v2' | 'v3';
+  kind: 'v2' | 'v3' | 'v4';
   feeBps: number;
   risk: SafetyReport['risk'] | null;
   /** Why the safety check gave that risk */
@@ -180,6 +183,8 @@ export interface Opportunity {
   /** Best liquidity range by fees − costs (null: not tested, see lpWhy). Only where a liquidity bot can run: a V3 pool on a DEX with a verified position manager */
   lp: { bandPct: number; earnedPct: number; feesPct: number; inRangePct: number; poolSharePct: number; returnPct: number } | null;
   lpWhy: string | null;
+  /** The liquidity test couldn't run (a read failed, or a wash-flagged pool's fees aren't measured yet; see lpWhy): no evidence either way, unlike a range that earned nothing */
+  lpFailed?: boolean;
   /** Reported volume looks like wash trading. Liquidity is ranked on on-chain fees instead, when they were measured. */
   wash?: boolean;
   /** Candle volume was multiplied by this so it matches fees read on chain. */
