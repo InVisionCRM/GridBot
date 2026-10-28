@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { TAX_TOLERANCE } from '../src/live/tax';
+import { readFileSync } from 'node:fs';
 import {
   decideExit, filterFresh, fromDexPair, fromTopPool, gateToken, replay, sizeBuy, splitSell,
   type ExitPos, type FreshPool, type GateInput,
 } from '../src/market/tokenTrader';
+import { effectiveMinLiquidityUsd, ENFORCED_LIQUIDITY_FLOOR_USD, gateMinLiquidityUsd, shownMinLiquidityUsd } from '../src/market/liquidityFloor';
+import { ethUsdOf, inEth } from '../src/ui/units';
 
 const clean = (o: Partial<GateInput> = {}): GateInput => ({
   mode: 'paper', risk: 'safe', honeypot: false, sellSimOk: true, paused: false, decimals: 18,
@@ -228,5 +231,52 @@ describe('replay and discovery rows', () => {
       chainId: 'ethereum', dexId: 'uni', pairAddress: '0x' + 'ef'.repeat(20),
       baseToken: { address: TOKEN, symbol: 'NEW' }, quoteToken: { address: WETH, symbol: 'WETH' },
     }, { id: 369, dexId: 'pulsechain', spend: new Set([WETH]), wrapped: WETH })).toBeNull();
+  });
+});
+
+describe('liquidity floor', () => {
+  it('defaults to the old floor of 0, so the $50,000 flag does nothing while it is off', () => {
+    expect(effectiveMinLiquidityUsd({})).toBe(0);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 0, enforceLiquidityFloor: false })).toBe(0);
+    expect(gateMinLiquidityUsd({ source: 'new' }, 0, {})).toBe(0);
+    expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 0 })).toBe(0);
+  });
+
+  it('honors a custom floor, and a reported 0 does not replace it', () => {
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 10_000, enforceLiquidityFloor: false })).toBe(10_000);
+    expect(gateMinLiquidityUsd({ source: 'new' }, 0, { minLiquidityUsd: 10_000 })).toBe(10_000);
+    expect(gateMinLiquidityUsd({ source: 'trending' }, 25_000, { minLiquidityUsd: 10_000 })).toBe(25_000);
+  });
+
+  it('the $50,000 flag raises a lower floor and does not lower a higher one', () => {
+    expect(ENFORCED_LIQUIDITY_FLOOR_USD).toBe(50_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 0, enforceLiquidityFloor: true })).toBe(50_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 10_000, enforceLiquidityFloor: true })).toBe(50_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 80_000, enforceLiquidityFloor: true })).toBe(80_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 80_000, enforceLiquidityFloor: false })).toBe(80_000);
+    expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { sniperMinLiquidityUsd: 5_000 })).toBe(5_000);
+    expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { enforceLiquidityFloor: true, sniperMinLiquidityUsd: 5_000 })).toBe(50_000);
+    expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { enforceLiquidityFloor: true, sniperMinLiquidityUsd: 80_000 })).toBe(80_000);
+  });
+
+  it('the desk shows the floor in force, in ETH at the snapshot price', () => {
+    expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 50_000 })).toBe(50_000);
+    expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 12_000 })).toBe(12_000);
+    const panel = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
+    expect(panel.match(/shownMinLiquidityUsd\(t\)/g)).toEqual(['shownMinLiquidityUsd(t)']);
+    expect(panel).toContain('Min liquidity (≈');
+    expect(panel).toContain('Enforce liquidity floor (≈');
+    expect(panel).toContain('In force ${liqEth(shownMinLiquidityUsd(t))}');
+    expect(panel).not.toContain('Min liquidity USD');
+    expect(panel).not.toContain('Enforce $');
+    expect(panel).not.toContain('.toLocaleString');
+    const price = ethUsdOf({ chains: [{ id: 1, nativeSymbol: 'ETH', nativeUsd: 2_500 }] });
+    expect(price).toBe(2_500);
+    expect(inEth(ENFORCED_LIQUIDITY_FLOOR_USD, price)).toBe('20 ETH');
+    expect(inEth(12_000, price)).toBe('4.8 ETH');
+    expect(inEth(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 50_000 }), null)).toBe('—');
+    expect(ethUsdOf({ chains: [{ id: 4663, nativeSymbol: 'ETH', nativeUsd: 1_800 }] }, {
+      wallet: [{ coin: { symbol: 'WETH', usdEach: 2_000 } }],
+    } as never)).toBe(2_000);
   });
 });

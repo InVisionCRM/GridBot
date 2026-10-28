@@ -391,10 +391,12 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const patch: Partial<TraderOptions> = {};
     if (b.mode === 'paper' || b.mode === 'live') patch.mode = b.mode;
-    for (const k of ['perTradeUsd', 'totalUsd', 'minPoolAgeSec', 'maxImpact', 'maxPoolShare', 'maxHolderShare', 'maxTop10Share', 'minHolderCoverage', 'sizeImpactCap'] as const) if (b[k] != null) patch[k] = Number(b[k]);
+    for (const k of ['perTradeUsd', 'totalUsd', 'minPoolAgeSec', 'maxImpact', 'maxPoolShare', 'minLiquidityUsd', 'maxHolderShare', 'maxTop10Share', 'minHolderCoverage', 'sizeImpactCap'] as const) if (b[k] != null) patch[k] = Number(b[k]);
+    if (typeof b.enforceLiquidityFloor === 'boolean') patch.enforceLiquidityFloor = b.enforceLiquidityFloor;
     if (typeof b.enforceSizeImpact === 'boolean') patch.enforceSizeImpact = b.enforceSizeImpact;
     if (b.risk === 'safe' || b.risk === 'medium' || b.risk === 'any') patch.risk = b.risk;
     if (typeof b.v3LpLockCheck === 'boolean') patch.v3LpLockCheck = b.v3LpLockCheck;
+    if (typeof b.lpUnlockCheck === 'boolean') patch.lpUnlockCheck = b.lpUnlockCheck;
     if (typeof b.enforceHolderCheck === 'boolean') patch.enforceHolderCheck = b.enforceHolderCheck;
     if (Array.isArray(b.chains)) patch.chains = b.chains.map(Number);
     if (b.sniper && typeof b.sniper === 'object') patch.sniper = b.sniper;
@@ -403,6 +405,7 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
   app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
+  app.get('/api/plays/scorecard', wrap(() => tt().scorecard()));
 
   // ── Capital router (settings only; this does not move funds) ──
   const router = () => { if (!o.router) throw new Error('The capital router is not available.'); return o.router; };
