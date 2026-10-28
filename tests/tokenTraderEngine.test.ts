@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
+import type { OwnerReport } from '../src/market/ownerPowers';
 import { createApp } from '../src/server/app';
 import { Logger } from '../src/server/bot/logger';
 import { MultiBot, type MultiState } from '../src/server/bot/multi';
@@ -38,6 +39,7 @@ function trader(o: {
   quoteImpact?: (p: FreshPool, spend: number) => Promise<number>;
   hits?: SnipeHit[]; resolve?: (h: SnipeHit) => Promise<FreshPool | null>;
   store?: MemoryStore<TraderState>;
+  ownerPowers?: (p: FreshPool) => Promise<OwnerReport>;
 } = {}) {
   const store = o.store ?? new MemoryStore<TraderState>();
   const sniper = { tick: async (cursors: Record<string, number>) => ({ cursors, hits: o.hits ?? [], notes: [] }) } as unknown as PoolSniper;
@@ -47,6 +49,7 @@ function trader(o: {
     holders: o.holders,
     quoteImpact: o.quoteImpact,
     resolve: o.resolve ?? (async () => null),
+    ownerPowers: o.ownerPowers,
   });
   return { t, store };
 }
@@ -161,6 +164,119 @@ describe('token trader engine', () => {
       expect((await call('POST', '/api/token-trader/on')).body.on).toBe(true);
       expect((await call('POST', '/api/token-trader/off')).body.on).toBe(false);
       expect(store.load()!.options.perTradeUsd).toBe(40);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('owner powers off does not read, and a saved file from before the flag stays off', async () => {
+    let calls = 0;
+    const now = 1_700_000_000_000;
+    const p = pool({ createdAt: now - 48 * 3600_000 });
+    const { t } = trader({
+      now: () => now,
+      discover: async () => [p],
+      ownerPowers: async () => { calls++; throw new Error('rpc down'); },
+    });
+    t.configure({ enforceOwnerPowers: false, minPoolAgeSec: 24 * 3600 });
+    t.turnOn();
+    await t.tick();
+    expect(calls).toBe(0);
+    expect(t.status().positions).toHaveLength(1);
+    expect(t.status().trades[0].why).toMatch(/^buy /);
+    expect(t.status().trades[0].why).not.toMatch(/owner/i);
+
+    const store = new MemoryStore<TraderState>();
+    store.data = {
+      version: 1, on: false,
+      options: {
+        mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 86_400,
+        chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: 0.02,
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+      },
+      positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
+    } as unknown as TraderState;
+    const old = new TokenTrader({ store, now: () => now });
+    expect(old.status().options.enforceOwnerPowers).toBe(false);
+  });
+
+  it('owner powers on skips safe and medium for a live mint or a failed read, and reports a renounced owner', async () => {
+    const now = 1_700_000_000_000;
+    const held: OwnerReport = {
+      unverified: false, why: 'owner 0xabcd… holds mint(uint256)', note: 'owner 0xabcd… holds mint(uint256)',
+      powers: ['mint(uint256)'], owner: '0x' + 'ab'.repeat(20), renounced: false, liveAdmin: null,
+    };
+    const renounced: OwnerReport = {
+      unverified: false, why: null,
+      note: 'owner renounced (0x0000…0000); bytecode has mint(address,uint256); not upgradeable',
+      powers: ['mint(address,uint256)'], owner: '0x' + '00'.repeat(20), renounced: true, liveAdmin: null,
+    };
+    const run = async (risk: 'safe' | 'medium' | 'any', report: OwnerReport | 'throw') => {
+      const p = pool({ createdAt: now - 48 * 3600_000, tokenSymbol: risk });
+      let calls = 0;
+      const { t } = trader({
+        now: () => now,
+        discover: async () => [p],
+        ownerPowers: async () => { calls++; if (report === 'throw') throw new Error('rpc down'); return report; },
+      });
+      t.configure({ risk, enforceOwnerPowers: true, minPoolAgeSec: 24 * 3600 });
+      t.turnOn();
+      await t.tick();
+      return { t, calls };
+    };
+
+    const safe = await run('safe', held);
+    expect(safe.calls).toBe(1);
+    expect(safe.t.status().positions).toHaveLength(0);
+    expect(safe.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/holds mint\(uint256\)/);
+
+    const medium = await run('medium', held);
+    expect(medium.t.status().positions).toHaveLength(0);
+    expect(medium.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/holds mint/);
+
+    const any = await run('any', held);
+    expect(any.t.status().positions).toHaveLength(1);
+    expect(any.t.status().trades[0].why).toMatch(/holds mint\(uint256\)/);
+
+    const ok = await run('safe', renounced);
+    expect(ok.t.status().positions).toHaveLength(1);
+    expect(ok.t.status().trades[0].why).toMatch(/owner renounced/);
+    expect(ok.t.status().trades[0].why).toMatch(/mint\(address,uint256\)/);
+
+    for (const risk of ['safe', 'medium'] as const) {
+      const failed = await run(risk, 'throw');
+      expect(failed.calls).toBe(1);
+      expect(failed.t.status().positions).toHaveLength(0);
+      expect(failed.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+    }
+    const anyFail = await run('any', 'throw');
+    expect(anyFail.t.status().positions).toHaveLength(1);
+    expect(anyFail.t.status().trades[0].why).toMatch(/could not be verified/);
+  });
+
+  it('the API round-trips the owner-powers flag, default off', async () => {
+    const store = new MemoryStore<TraderState>();
+    const { t } = trader({ store, discover: async () => [] });
+    const bot = new MultiBot({ net: NET, reader: new MockChain(), signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), now: () => 1_800_000_000_000 });
+    const server = createApp({ bot, net: NET, tokenTrader: t }).listen(0, '127.0.0.1');
+    await new Promise((r) => server.once('listening', r));
+    const port = (server.address() as AddressInfo).port;
+    const call = (method: string, path: string, body?: unknown) => new Promise<{ status: number; body: TraderState & { on: boolean } }>((resolve, reject) => {
+      const data = JSON.stringify(body ?? {});
+      const req = http.request({ host: '127.0.0.1', port, path, method, headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, (res) => {
+        let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(b) }));
+      });
+      req.on('error', reject); req.end(data);
+    });
+    try {
+      expect((await call('GET', '/api/token-trader')).body.options.enforceOwnerPowers).toBe(false);
+      const saved = await call('PUT', '/api/token-trader', { enforceOwnerPowers: true });
+      expect(saved.status).toBe(200);
+      expect(saved.body.options.enforceOwnerPowers).toBe(true);
+      expect(store.load()!.options.enforceOwnerPowers).toBe(true);
+      const ui = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
+      expect(ui).toContain('Owner powers');
+      expect(ui).toContain('enforceOwnerPowers');
     } finally {
       await new Promise((r) => server.close(r));
     }

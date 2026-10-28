@@ -180,6 +180,15 @@ export interface GateInput {
   /** The existing safety classifier. Live still requires this. */
   liveAllowed: boolean;
   /**
+   * Owner, EIP-1967 admin, and setter scan. Ignored unless this is true, so a gate call that
+   * leaves it off matches the gate from before this check existed.
+   */
+  enforceOwnerPowers?: boolean;
+  /** A read we needed failed. Safe and medium skip when the flag is on. */
+  ownerPowersUnverified?: boolean;
+  /** Skip text when a non-renounced owner holds a blocking power, or a live admin can upgrade. */
+  ownerPowersWhy?: string | null;
+  /**
    * Quote impact at the sized trade and cap it. Absent or false: `sizeImpact` is ignored, so the gate
    * matches today. The $100/$500/$1000 depth rules and the sizing cap are unchanged either way.
    */
@@ -263,6 +272,10 @@ export function gateToken(g: GateInput): GateResult {
     if (g.canBlacklist === true) return hard('owner can blacklist');
     if (tax > TAX_TOLERANCE) return hard(`tax ${(tax * 100).toFixed(2)}% (safe allows none)`);
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
+  }
+  if ((g.risk === 'safe' || g.risk === 'medium') && g.enforceOwnerPowers) {
+    if (g.ownerPowersUnverified) return hard(g.ownerPowersWhy || 'owner powers could not be verified');
+    if (g.ownerPowersWhy) return hard(g.ownerPowersWhy);
   }
   if (g.enforceHolderCheck && !g.holderThin && (g.risk === 'safe' || g.risk === 'medium') && g.holderConcentration != null && g.top10Concentration != null) {
     const maxHolder = clampHolderShare(g.maxHolderShare ?? DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_HOLDER_SHARE);
