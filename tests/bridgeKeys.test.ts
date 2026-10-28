@@ -156,19 +156,49 @@ describe('bridge quote keys and integrator id', () => {
     expect(acrossIntegratorId()).toBe('abcd');
   });
 
-  it('refuses an invalid integrator id without printing the value', () => {
-    for (const bad of ['zz', '0xabc', '0xdeadbeef', 'not-a-secret-id']) {
+  it('refuses an invalid integrator id without printing the value', async () => {
+    for (const bad of ['zz', '0xabc', '0xdeadbeef', 'not-a-secret-id', 'dead1']) {
       clearBridgeEnv();
+      process.env.ACROSS_API_KEY = KEY;
       process.env.ACROSS_INTEGRATOR_ID = bad;
-      try {
-        takeBridgeKeys();
-        throw new Error('expected a refusal');
-      } catch (e) {
-        const message = (e as Error).message;
-        expect(message).toMatch(/exactly 2 bytes/);
-        expect(message).not.toContain(bad.replace(/^0x/i, ''));
-        expect(message).not.toContain('not-a-secret');
-      }
+      expect(takeBridgeKeys()).toEqual({ across: true, relay: false, lifi: false });
+      expect(acrossIntegratorId()).toBeUndefined();
+      const warnings = shortQuoteKeyWarnings().join('\n');
+      expect(warnings).toContain('ACROSS_INTEGRATOR_ID was refused');
+      expect(warnings).not.toContain(bad);
+      expect(warnings).not.toContain('not-a-secret');
+    }
+    clearBridgeEnv();
+    process.env.ACROSS_API_KEY = KEY;
+    process.env.ACROSS_INTEGRATOR_ID = 'dead1';
+    const { clients, calls } = clientsFromEnv();
+    expect(acrossIntegratorId()).toBeUndefined();
+    expect(shortQuoteKeyWarnings().join('\n')).toContain('ACROSS_INTEGRATOR_ID was refused');
+    expect(shortQuoteKeyWarnings().join('\n')).not.toContain('dead1');
+    const quote = await clients.across.quote(requestOf(LEGS[0]));
+    expect(calls[0].headers.Authorization).toBe(`Bearer ${KEY}`);
+    expect(quote.deposit.data).not.toContain('1dc0de');
+    const req = requestOf(LEGS[0]);
+    for (const suffix of ['1dc0deabcd', '1dc0dedead', '1dc0de1234', '1dc0de']) {
+      expect(() => decodeDeposit('across', `${quote.deposit.data}${suffix}`, req, quote.deposit.to, acrossIntegratorId())).toThrow(/not canonical/);
+    }
+  });
+
+  it('a typo in optional ACROSS_INTEGRATOR_ID does not stop boot', () => {
+    const log = new Logger(true);
+    for (const id of ['dead1', '0xdea', 'f00l', '0x0xdead']) {
+      clearBridgeEnv();
+      process.env.ACROSS_API_KEY = KEY;
+      process.env.ACROSS_INTEGRATOR_ID = id;
+      let r = 'ok';
+      try { takeBridgeKeys(); } catch (e) { r = `THROWS ${(e as Error).message}`; }
+      expect(r).toBe('ok');
+      expect(acrossIntegratorId()).toBeUndefined();
+      expect(bridgeProviderConfig().across).toEqual({ apiKey: KEY });
+      for (const msg of shortQuoteKeyWarnings()) log.warn(msg);
+      const logged = log.entries.map((e) => e.msg).join('\n');
+      expect(logged).toContain('ACROSS_INTEGRATOR_ID was refused');
+      expect(logged).not.toContain(id);
     }
   });
 

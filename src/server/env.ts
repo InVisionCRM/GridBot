@@ -78,7 +78,7 @@ export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boole
  */
 type BridgeName = 'across' | 'relay' | 'lifi';
 let bridgeKeys: Record<BridgeName, string | null> = { across: null, relay: null, lifi: null };
-/** 4 lowercase hex characters, no 0x. Null when attribution is off. */
+/** 4 lowercase hex characters, no 0x. Null when attribution is off or the value was refused. */
 let integratorId: string | null = null;
 /** Names only. A refused key is not stored here, and the value is never in this list. */
 let shortQuoteWarnings: string[] = [];
@@ -137,7 +137,8 @@ function takeIntegratorId(): string | null {
   const trimmed = raw.trim();
   const hex = trimmed.replace(/^0x/i, '');
   if (!/^[0-9a-fA-F]{4}$/.test(hex) || (trimmed !== hex && !/^0x/i.test(trimmed))) {
-    throw new Error('ACROSS_INTEGRATOR_ID must be exactly 2 bytes, written as 4 hex characters with an optional 0x prefix.');
+    shortQuoteWarnings.push('ACROSS_INTEGRATOR_ID was refused');
+    return null;
   }
   return hex.toLowerCase();
 }

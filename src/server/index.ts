@@ -39,20 +39,33 @@ registerRpcUrls(process.env);
 const friendsSecret = takeFriendsSecret();
 const hostAuth = takeHostAuth();
 // Before anything copies process.env (a friend's copy must not inherit quote keys).
-const bridgeKeyStatus = takeBridgeKeys();
+// A bad integrator id is a warning inside takeBridgeKeys. Anything else unexpected
+// must not stop the host: quote clients come up keyless, with attribution off.
+const log = new Logger();
+let bridgeKeyStatus = { across: false, relay: false, lifi: false };
+let quoteKeys = { across: null, relay: null, lifi: null } as ReturnType<typeof bridgeProviderConfig>;
+let integratorForClients: string | undefined;
+try {
+  bridgeKeyStatus = takeBridgeKeys();
+  quoteKeys = bridgeProviderConfig();
+  integratorForClients = acrossIntegratorId();
+} catch {
+  log.warn('bridge quote clients were not started');
+  bridgeKeyStatus = { across: false, relay: false, lifi: false };
+  quoteKeys = { across: null, relay: null, lifi: null };
+  integratorForClients = undefined;
+}
 const cfg = readSettings();
 const isProd = process.env.NODE_ENV === 'production';
-const log = new Logger();
 for (const msg of shortQuoteKeyWarnings()) log.warn(msg);
 // Quote clients only. Nothing here selects a route or sends a bridge transaction.
-const quoteKeys = bridgeProviderConfig();
 export const bridgeQuoteClients = bootBridgeClients({
   keys: {
     ...(quoteKeys.across ? { across: quoteKeys.across.apiKey } : {}),
     ...(quoteKeys.relay ? { relay: quoteKeys.relay.apiKey } : {}),
     ...(quoteKeys.lifi ? { lifi: quoteKeys.lifi.apiKey } : {}),
   },
-  integratorId: acrossIntegratorId(),
+  integratorId: integratorForClients,
   log: (level, msg) => log[level](msg),
 });
 // A friend's copy (started by the host app, friends/copies.ts) shares the host's candles budget and daily scan.
