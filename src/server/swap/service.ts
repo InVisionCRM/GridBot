@@ -129,6 +129,7 @@ export class SwapService {
 
     const scored: Scored[] = [];
     await Promise.all([...rt.adapters.values()].map(async (ad) => {
+      if (ad.kind === 'v4') return; // Swap desk has no V4 path (no Permit2, native-currency pools); V4 trades only through the market Quoter.
       let pools: PoolRef[] = [];
       try { pools = await ad.findPools(poolIn, poolOut); } catch { return; }
       const seen = new Set<string>();
@@ -251,6 +252,7 @@ export class SwapService {
     taxInTok: Taxes; taxOutTok: Taxes; slippageBps: number; gasPrice: bigint;
     inIsWrapped: boolean; outIsWrapped: boolean; recipient: string; deadline: bigint; paper: boolean;
   }): Promise<Scored> {
+    if (ad.kind === 'v4') throw new Error('V4 pools are not routed by the swap desk');
     // V2 pulls amountIn and the pool sees the post-tax remainder. V3 sends amountIn straight through,
     // so the quoter and the router are given the same amount.
     const quoteAmount = ad.kind === 'v3' ? x.amountIn : x.poolAmount;
@@ -297,6 +299,7 @@ export class SwapService {
   /** First pool's exact-in output, or null when this pair is not quoted. */
   private async probeOut(rt: ChainRuntime, tokenIn: string, tokenOut: string, amountIn: bigint): Promise<bigint | null> {
     for (const ad of rt.adapters.values()) {
+      if (ad.kind === 'v4') continue;
       let pools: PoolRef[] = [];
       try { pools = await ad.findPools(tokenIn, tokenOut); } catch { continue; }
       for (const pool of pools) {
