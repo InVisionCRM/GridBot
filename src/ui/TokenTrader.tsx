@@ -154,7 +154,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         {t.positions.map((p: AnyObj) => (
           <div key={p.id} className="smart-bot" style={{ cursor: 'default' }}>
             <span className="smart-bot-name"><b>{p.label}</b> <ChainBadge c={chainOf(s, p.chainId)} testnet={false} /> <span className="tag">{p.source}</span></span>
-            <span className="small muted" title="Entry = spend per token received, after the pool fee, price impact and buy tax (paper and live alike). Take profit and stops are also net of the exit fee and the sell tax measured at entry.">entry {num(p.entryPrice, 6)} after fees &amp; tax · now {num(p.price, 6)} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''} · {p.exitPlan}</span>
+            <span className="small muted" title="Entry = spend per token received, after the pool fee, price impact and buy tax (paper and live alike). Take profit and stops are also net of the exit fee and the sell tax measured at entry.">entry {num(p.entryPrice, 6)} after fees &amp; tax · now {num(p.price, 6)} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''} · {p.exitsBlocked ? <b className="neg" role="alert">{blockedNote(p)}</b> : p.exitPlan}</span>
             <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.spentUsd ? p.pnlUsd / p.spentUsd : 0, 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
           </div>
         ))}
@@ -181,6 +181,12 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
 /** bps → "0.01%", "0.05%", "0.3%", "1%" */
 export function feePct(bps: number | null | undefined): string {
   return bps == null || !Number.isFinite(bps) ? '?' : `${+(bps / 100).toFixed(4)}%`;
+}
+
+/** A live position whose exits are blocked until the wallet balance can be read: shown on its row until it clears. */
+export function blockedNote(p: AnyObj): string | null {
+  if (!p.exitsBlocked) return null;
+  return `${p.exitsBlocked}${p.blockedSince ? ` since ${ago(p.blockedSince)}` : ''}`;
 }
 
 function numIn(v: string) { const n = Number(v); return Number.isFinite(n) ? n : 0; }

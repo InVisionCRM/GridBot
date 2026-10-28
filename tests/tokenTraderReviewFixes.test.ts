@@ -8,7 +8,7 @@ import type { GateInput, FreshPool } from '../src/market/tokenTrader';
 import { MemoryStore } from '../src/server/bot/store';
 import { TokenTrader, type Position, type TraderState } from '../src/server/bot/tokenTrader';
 import type { PoolSniper } from '../src/server/market/sniper';
-import { modeLabel, pickChoice, runExitsConfirmText } from '../src/ui/TokenTrader';
+import { blockedNote, modeLabel, pickChoice, runExitsConfirmText } from '../src/ui/TokenTrader';
 
 const NOW = 1_793_129_093_757;
 const clean = (): GateInput => ({
@@ -194,5 +194,163 @@ describe('4. migration guard: any file not explicitly on is checked', () => {
   });
   it('`on: true`: not migrated (stays on, no banner)', async () => {
     expect(load(await oldFile(true)).status()).toMatchObject({ runMode: 'on', pendingChoice: null });
+  });
+});
+
+// ── #42 second review (Claude gate on 53fc2e6) ─────────────────────────────────────────────────────────────────────
+type Live = { d: { live: { sell: (p: Position, tokens: number) => Promise<unknown> }; balanceOf: (p: Position) => Promise<number | null> } };
+/** Sells that work again (and move tokens out of the fake wallet). */
+function healSells(s: Awaited<ReturnType<typeof liveWithPosition>>) {
+  (s.t as unknown as Live).d.live.sell = async (_p, tokens) => {
+    s.sells.push(tokens);
+    s.wallet.balance = (s.wallet.balance ?? 0) - tokens;
+    return { quoteOut: tokens * 80, tokensIn: tokens, price: 80, impact: 0.01 };
+  };
+}
+
+describe('5. a take profit that stops partway is not marked done; the rest of that tranche is sold later', () => {
+  it('part 2 reverts: tp1Done stays false, then the next take profit sells only the rest of the third', async () => {
+    const s = await liveWithPosition({ failAt: 1 });
+    const entry = s.p.entryTokens, third = entry / 3;
+    pump(s.t, s.p, s.p.tokens * 4);
+    await s.t.tick();
+    let p = s.t.status().positions[0];
+    expect(s.sells).toHaveLength(1);
+    expect(p.tp1Done).toBe(false);
+    expect(p.tpPending).toMatchObject({ tp: 1 });
+    expect(p.tpPending!.sold).toBeCloseTo(s.sells[0], 6);
+    expect(p.tpPending!.target).toBeCloseTo(third, 6);
+    healSells(s);
+    await s.t.tick(); // take profit 1 still hit: sells the rest of the tranche, not another full third
+    p = s.t.status().positions[0];
+    const total = s.sells.reduce((a, b) => a + b, 0);
+    expect(total).toBeCloseTo(third, 6);
+    expect(p.tp1Done).toBe(true);
+    expect(p.tp2Done).toBe(false);
+    expect(p.tpPending ?? null).toBeNull();
+    expect(p.tokens).toBeCloseTo(entry - third, 6);
+    expect(p.tokens).toBeCloseTo(s.wallet.balance!, 6);
+  });
+
+  it('a "failed" part that actually landed counts toward the tranche (read from the wallet)', async () => {
+    const s = await liveWithPosition();
+    const entry = s.p.entryTokens, third = entry / 3;
+    let i = 0;
+    (s.t as unknown as Live).d.live.sell = async (_p, tokens) => {
+      s.wallet.balance = (s.wallet.balance ?? 0) - tokens; // it lands…
+      if (i++ === 1) throw new Error('receipt timeout'); // …but the second one reports a failure
+      s.sells.push(tokens);
+      return { quoteOut: tokens * 80, tokensIn: tokens, price: 80, impact: 0.01 };
+    };
+    pump(s.t, s.p, s.p.tokens * 4);
+    await s.t.tick();
+    const p1 = s.t.status().positions[0];
+    expect(p1.tp1Done).toBe(false);
+    const landed = entry - s.wallet.balance!;
+    expect(p1.tpPending!.sold).toBeCloseTo(landed, 6);
+    expect(p1.tokens).toBeCloseTo(s.wallet.balance!, 6);
+    healSells(s);
+    await s.t.tick();
+    expect(entry - s.wallet.balance!).toBeCloseTo(third, 6); // one third left the wallet in total
+    expect(s.t.status().positions[0].tp1Done).toBe(true);
+  });
+
+  it('paper and a live take profit that completes are unchanged: one third, marked done at once', async () => {
+    const s = await liveWithPosition();
+    pump(s.t, s.p, s.p.tokens * 4);
+    await s.t.tick();
+    const p = s.t.status().positions[0];
+    expect(p.tp1Done).toBe(true);
+    expect(p.tpPending ?? null).toBeNull();
+    expect(p.tokens).toBeCloseTo(s.p.entryTokens * 2 / 3, 6);
+  });
+});
+
+describe('6. a position stuck on reconcile shows a lasting "exits blocked" state (saved, survives a restart)', () => {
+  it('blocked on the row and in plan(), lastError may clear but the warning stays; the peak keeps updating; clears once read', async () => {
+    const s = await liveWithPosition({ failAt: 1 });
+    pump(s.t, s.p, s.p.tokens * 4);
+    const tr = s.t as unknown as Live;
+    const read = tr.d.balanceOf;
+    tr.d.balanceOf = async () => { throw new Error('rpc down'); };
+    await s.t.tick();
+    let st = s.t.status();
+    expect(st.exitsBlocked).toBe(1);
+    expect(st.positions[0].exitsBlocked).toMatch(/exits blocked: can't read the wallet balance \(rpc down\)/);
+    expect(st.positions[0].exitPlan).toBe(st.positions[0].exitsBlocked);
+    const since = st.positions[0].blockedSince;
+    expect(since).toBe(NOW);
+    // a later tick: lastError is reset each tick, the blocked state is not
+    const higher = s.p.entryPrice * 3;
+    // the tick's own price read (d.mark), as in the app: the peak must follow it while blocked
+    (s.t as unknown as { d: { mark: (p: Position) => Promise<Partial<Position> | null> } }).d.mark = async () => ({ price: higher });
+    await s.t.tick();
+    (s.t as unknown as { d: { mark: (p: Position) => Promise<Partial<Position> | null> } }).d.mark = async () => null;
+    st = s.t.status();
+    expect(st.lastError ?? null).toBeNull();
+    expect(st.positions[0].exitsBlocked).toMatch(/exits blocked/);
+    expect(st.positions[0].peak).toBeCloseTo(higher, 9); // peak follows the price while blocked
+    // saved: a restart still shows it
+    const again = new TokenTrader({
+      store: s.store, now: () => NOW, emit: () => {},
+      sniper: { tick: async (c: Record<string, number>) => ({ cursors: c, hits: [], notes: [] }) } as unknown as PoolSniper,
+      discover: async () => [], assess: async () => clean(), resolve: async () => null,
+    });
+    expect(again.status().exitsBlocked).toBe(1);
+    expect(again.status().positions[0]).toMatchObject({ reconcile: true, blockedSince: since, exitsBlocked: expect.stringMatching(/exits blocked/) });
+    expect(blockedNote(again.status().positions[0])).toMatch(/^exits blocked: can't read the wallet balance \(rpc down\) since /);
+    // the wallet is readable again: cleared
+    tr.d.balanceOf = read;
+    s.t.mark(s.p.id, { price: s.p.entryPrice, peak: s.p.entryPrice * 3 * 0.99 });
+    await s.t.tick();
+    st = s.t.status();
+    expect(st.exitsBlocked).toBe(0);
+    expect(st.positions[0]).toMatchObject({ reconcile: false, exitsBlocked: null, blockedSince: null });
+    expect(blockedNote(st.positions[0])).toBeNull();
+  });
+});
+
+describe('7. reconcile never counts wallet tokens the bot did not buy', () => {
+  it('1,000 tokens bought by hand sit in the same wallet: a stop partway books only what left during the sell', async () => {
+    const s = await liveWithPosition({ failAt: 1 });
+    const start = s.p.tokens;
+    s.wallet.balance! += 1000; // manual buy / airdrop of the same coin
+    pump(s.t, s.p, start * 4);
+    await s.t.tick();
+    const p = s.t.status().positions[0];
+    expect(p.tokens).toBeCloseTo(start - s.sells[0], 6); // not the wallet's balance (or entryTokens)
+    expect(s.wallet.balance! - p.tokens).toBeCloseTo(1000, 6); // the manual tokens are not the bot's
+    expect(p.reconcile).toBe(false);
+  });
+
+  it('…and a "failed" part that landed is booked too, still without the manual tokens', async () => {
+    const s = await liveWithPosition();
+    const start = s.p.tokens;
+    s.wallet.balance! += 1000;
+    let i = 0;
+    (s.t as unknown as Live).d.live.sell = async (_p, tokens) => {
+      s.wallet.balance = (s.wallet.balance ?? 0) - tokens;
+      if (i++ === 1) throw new Error('receipt timeout');
+      s.sells.push(tokens);
+      return { quoteOut: tokens * 80, tokensIn: tokens, price: 80, impact: 0.01 };
+    };
+    pump(s.t, s.p, start * 4);
+    await s.t.tick();
+    expect(s.t.status().positions[0].tokens).toBeCloseTo(s.wallet.balance! - 1000, 6);
+  });
+
+  it('balance before the sell unreadable: the wallet is only an upper bound, the position never grows from it', async () => {
+    const s = await liveWithPosition({ failAt: 1 });
+    const start = s.p.tokens;
+    s.wallet.balance! += 1000;
+    const tr = s.t as unknown as Live;
+    const read = tr.d.balanceOf;
+    let calls = 0;
+    tr.d.balanceOf = async (p) => (calls++ === 0 ? null : read(p)); // the read before the sell fails
+    pump(s.t, s.p, start * 4);
+    await s.t.tick();
+    const p = s.t.status().positions[0];
+    expect(p.tokens).toBeCloseTo(start - s.sells[0], 6);
+    expect(p.tokens).toBeLessThan(s.wallet.balance! - 999);
   });
 });
