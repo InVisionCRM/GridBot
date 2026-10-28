@@ -19,6 +19,9 @@
  * - "exact approval to an attacker" fails if the Relay spender check is removed.
  * - "depositor is an attacker" and "inner depositor is zero" fail if assertDepositor is removed.
  * - "extra call to an attacker contract" fails if the inner-target allowlist throw is removed.
+ * - cleanupErc20s of amountIn+1 fails if the overpayment check is removed.
+ * - cleanupErc20s of amountIn-1 fails if the underpayment check is removed.
+ * - outer amounts of amountIn-1, or a second token, fails if the outer tokens/amounts check is removed.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -413,6 +416,47 @@ describe('Relay sequences and hostile approvals', () => {
     const body = usdc();
     setErc20(body, ATTACKER, USDC_IN);
     await expect(relayQuoteOf(body, LEGS[2])).rejects.toThrow(/deposit depositor does not match/);
+  });
+
+  it('rejects a single cleanupErc20s of amountIn-1, which is the underpayment check', async () => {
+    await expect(relayQuoteOf(weth((mc) => {
+      mc.calls = [{
+        target: RELAY_ROUTER_V32,
+        allowFailure: false,
+        value: 0n,
+        callData: ROUTER.encodeFunctionData('cleanupErc20s', [[mc.tokens[0]], [SENDER], [ETH_IN - 1n]]),
+      }];
+    }))).rejects.toThrow(/deposit amount does not match/);
+  });
+
+  it('rejects a single cleanupErc20s of amountIn+1, which is the overpayment check', async () => {
+    await expect(relayQuoteOf(weth((mc) => {
+      mc.calls = [{
+        target: RELAY_ROUTER_V32,
+        allowFailure: false,
+        value: 0n,
+        callData: ROUTER.encodeFunctionData('cleanupErc20s', [[mc.tokens[0]], [SENDER], [ETH_IN + 1n]]),
+      }];
+    }))).rejects.toThrow(/deposit amount does not match/);
+  });
+
+  it('rejects transferAndMulticall amounts of amountIn-1, which is the outer amount check', async () => {
+    await expect(relayQuoteOf(weth((mc) => {
+      mc.amounts = [ETH_IN - 1n];
+    }))).rejects.toThrow(/deposit amount does not match/);
+  });
+
+  it('rejects transferAndMulticall amounts of amountIn+1', async () => {
+    await expect(relayQuoteOf(weth((mc) => {
+      mc.amounts = [ETH_IN + 1n];
+    }))).rejects.toThrow(/deposit amount does not match/);
+  });
+
+  it('rejects a second token in the outer tokens and amounts arrays', async () => {
+    await expect(relayQuoteOf(weth((mc) => {
+      mc.tokens.push(LEGS[0].dst.address);
+      mc.amounts.push(ETH_IN + 1n);
+    }))).rejects.toThrow(/deposit token does not match/);
   });
 
   it('R12b rejects a direct depositErc20 whose amount is amountIn minus one', async () => {

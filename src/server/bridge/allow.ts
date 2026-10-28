@@ -400,7 +400,10 @@ function classifyRelayCall(provider: string, req: BridgeQuoteRequest, router: st
       if (tokens.length !== 1 || recipients.length !== 1 || amounts.length !== 1) bad(provider, 'deposit recipient does not match');
       if (!sameAddress(String(tokens[0]), req.tokenIn.address)) bad(provider, 'deposit token does not match');
       const paid = asBig(amounts[0]);
-      if (paid !== req.amountIn) bad(provider, 'deposit amount does not match');
+      // Overpayment. Underpayment is rejected in acceptRelaySequence. The two
+      // comparisons together require paid === amountIn, and each one is the only
+      // reject for its side.
+      if (paid > req.amountIn) bad(provider, 'deposit amount does not match');
       return { kind: 'cleanupErc20s', recipient: getAddress(String(recipients[0])), amount: paid };
     }
     bad(provider, 'deposit calldata is not decodable');
@@ -443,7 +446,8 @@ function acceptRelaySequence(provider: string, req: BridgeQuoteRequest, router: 
   }
   if (actions.length === 1 && actions[0].kind === 'cleanupErc20s') {
     const paid = actions[0];
-    if (paid.amount !== req.amountIn) bad(provider, 'deposit amount does not match');
+    // Underpayment. Overpayment was rejected while classifying the call.
+    if (paid.amount < req.amountIn) bad(provider, 'deposit amount does not match');
     if (!sameAddress(paid.recipient, req.recipient)) bad(provider, 'deposit recipient does not match');
     return { depositId: null, recipient: paid.recipient };
   }
