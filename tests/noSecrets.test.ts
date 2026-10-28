@@ -62,7 +62,7 @@ describe('private key handling', () => {
     const store = new MemoryStore<BotState>();
     const signer = { getAddress: () => wallet.getAddress(), sendTransaction: chain.sendTransaction.bind(chain) };
     const engine = new GridEngine({ net: NET, reader: chain, signer, store, log });
-    await engine.start({ mode: 'paper', lowerPrice: 0.000009, upperPrice: 0.000011, gridCount: 10, totalCapitalUsd: 10 });
+    await engine.start({ mode: 'paper', lowerPrice: 0.000009, upperPrice: 0.000011, gridCount: 10, totalCapitalQuote: 10 });
     await engine.tick();
     const blob = JSON.stringify(engine.status()) + JSON.stringify(store.data) + JSON.stringify(log.entries);
     expect(blob).not.toContain(key.slice(2).toLowerCase());
@@ -74,6 +74,16 @@ describe('private key handling', () => {
     process.env.PRIVATE_KEY = 'not-a-key-SECRETVALUE';
     expect(() => createSigner({} as never)).toThrow(/^PRIVATE_KEY in \.env is not/);
     try { process.env.PRIVATE_KEY = 'not-a-key-SECRETVALUE'; createSigner({} as never); } catch (e) { expect((e as Error).message).not.toContain('SECRETVALUE'); }
+  });
+  it('bridge quote keys are registered so redact masks them', async () => {
+    const { createBridgeProviders } = await import('../src/server/bridge');
+    const key = 'BridgeQuoteKey0123456789abcdEF';
+    createBridgeProviders({
+      keys: { across: key, relay: key, lifi: key },
+      http: async () => ({ status: 200, body: {}, retryAfterMs: null }),
+    });
+    expect(redact(`leak ${key}`)).toBe('leak [REDACTED]');
+    expect(redact(`header ${key}`)).not.toContain(key);
   });
   it('.env is gitignored and .env.example holds only a placeholder', () => {
     expect(readFileSync(join(root, '.gitignore'), 'utf8')).toMatch(/^\.env$/m);

@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { TAX_TOLERANCE } from '../src/live/tax';
+import { readFileSync } from 'node:fs';
 import {
   decideExit, filterFresh, fromDexPair, fromTopPool, gateToken, replay, sizeBuy, splitSell,
   type ExitPos, type FreshPool, type GateInput,
 } from '../src/market/tokenTrader';
+import { effectiveMinLiquidityUsd, ENFORCED_LIQUIDITY_FLOOR_USD, gateMinLiquidityUsd, shownMinLiquidityUsd } from '../src/market/liquidityFloor';
+import { ethUsdOf, inEth } from '../src/ui/units';
 
 const clean = (o: Partial<GateInput> = {}): GateInput => ({
   mode: 'paper', risk: 'safe', honeypot: false, sellSimOk: true, paused: false, decimals: 18,
@@ -122,6 +125,44 @@ describe('safety gate', () => {
     expect(gateToken(clean({ risk: 'medium', sellTax: 0.2 })).reason).toMatch(/over the/);
   });
 
+  it('wash and age fields do nothing until the flag is on', () => {
+    const extra = { volumeUsd: 1e12, poolAgeSec: null as number | null, gateMinPoolAgeSec: 24 * 3600, freshnessUnverified: true };
+    expect(gateToken(clean(extra))).toEqual(gateToken(clean()));
+    expect(gateToken(clean({ ...extra, enforceWashAndAge: false }))).toEqual(gateToken(clean()));
+  });
+
+  it('with wash and age on, safe and medium skip wash volume, a young pool, and an unknown or failed age; any does not', () => {
+    const old = { enforceWashAndAge: true, volumeUsd: 1_000, poolAgeSec: 48 * 3600, gateMinPoolAgeSec: 24 * 3600 };
+    expect(gateToken(clean(old)).ok).toBe(true);
+    expect(gateToken(clean({ ...old, volumeUsd: 50_000 * 20 })).ok).toBe(true);
+    expect(gateToken(clean({ ...old, volumeUsd: 50_000 * 21 })).reason).toBe('volume is 21× liquidity');
+    expect(gateToken(clean({ risk: 'medium', ...old, volumeUsd: 50_000 * 21 })).reason).toMatch(/21× liquidity/);
+    expect(gateToken(clean({ ...old, poolAgeSec: 3600 })).reason).toBe('pool is 1h old (minimum 24h)');
+    expect(gateToken(clean({ risk: 'medium', ...old, poolAgeSec: null })).reason).toBe('pool age could not be verified');
+    expect(gateToken(clean({ ...old, poolAgeSec: null, gateMinPoolAgeSec: 0 })).ok).toBe(true);
+    expect(gateToken(clean({ ...old, freshnessUnverified: true })).reason).toBe('pool age or volume could not be verified');
+    expect(gateToken(clean({ risk: 'any', enforceWashAndAge: true, freshnessUnverified: true, volumeUsd: 1e12, poolAgeSec: null, gateMinPoolAgeSec: 24 * 3600 })).ok).toBe(true);
+    expect(gateToken(clean({ ...old, liquidityUsd: 0, minLiquidityUsd: 0, volumeUsd: 1e12 })).ok).toBe(true);
+  });
+
+  it('owner-power fields do nothing until the flag is on', () => {
+    const extra = { ownerPowersUnverified: true, ownerPowersWhy: 'owner 0xabcd… holds mint(uint256)' };
+    expect(gateToken(clean(extra))).toEqual(gateToken(clean()));
+    expect(gateToken(clean({ ...extra, enforceOwnerPowers: false }))).toEqual(gateToken(clean()));
+    expect(gateToken(clean({ proxy: true, enforceOwnerPowers: true })).reason).toBe('contract is upgradeable');
+  });
+
+  it('with owner powers on, safe and medium skip a live blocking owner or an unverified read; any does not', () => {
+    const why = 'owner 0xabcd… holds mint(uint256)';
+    expect(gateToken(clean({ enforceOwnerPowers: true, ownerPowersWhy: why })).reason).toBe(why);
+    expect(gateToken(clean({ risk: 'medium', enforceOwnerPowers: true, ownerPowersWhy: why })).reason).toBe(why);
+    expect(gateToken(clean({ risk: 'any', enforceOwnerPowers: true, ownerPowersWhy: why, ownerPowersUnverified: true })).ok).toBe(true);
+    expect(gateToken(clean({ enforceOwnerPowers: true, ownerPowersUnverified: true })).reason).toMatch(/could not be verified/);
+    expect(gateToken(clean({ risk: 'medium', enforceOwnerPowers: true, ownerPowersUnverified: true, ownerPowersWhy: 'owner powers could not be verified: bytecode unread' })).reason).toMatch(/bytecode unread/);
+    expect(gateToken(clean({ risk: 'medium', proxy: true, enforceOwnerPowers: true })).ok).toBe(true);
+    expect(gateToken(clean({ enforceOwnerPowers: true, ownerPowersWhy: null })).ok).toBe(true);
+  });
+
   it('any blocks only the hard failures, and live still needs the existing classifier', () => {
     expect(gateToken(clean({ risk: 'any', proxy: true, canPause: true, canBlacklist: true, sellTax: 0.05, lpUnlocked: true })).ok).toBe(true);
     expect(gateToken(clean({ mode: 'live', risk: 'any', liveAllowed: false })).reason).toMatch(/does not allow live/);
@@ -228,5 +269,52 @@ describe('replay and discovery rows', () => {
       chainId: 'ethereum', dexId: 'uni', pairAddress: '0x' + 'ef'.repeat(20),
       baseToken: { address: TOKEN, symbol: 'NEW' }, quoteToken: { address: WETH, symbol: 'WETH' },
     }, { id: 369, dexId: 'pulsechain', spend: new Set([WETH]), wrapped: WETH })).toBeNull();
+  });
+});
+
+describe('liquidity floor', () => {
+  it('defaults to the old floor of 0, so the $50,000 flag does nothing while it is off', () => {
+    expect(effectiveMinLiquidityUsd({})).toBe(0);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 0, enforceLiquidityFloor: false })).toBe(0);
+    expect(gateMinLiquidityUsd({ source: 'new' }, 0, {})).toBe(0);
+    expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 0 })).toBe(0);
+  });
+
+  it('honors a custom floor, and a reported 0 does not replace it', () => {
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 10_000, enforceLiquidityFloor: false })).toBe(10_000);
+    expect(gateMinLiquidityUsd({ source: 'new' }, 0, { minLiquidityUsd: 10_000 })).toBe(10_000);
+    expect(gateMinLiquidityUsd({ source: 'trending' }, 25_000, { minLiquidityUsd: 10_000 })).toBe(25_000);
+  });
+
+  it('the $50,000 flag raises a lower floor and does not lower a higher one', () => {
+    expect(ENFORCED_LIQUIDITY_FLOOR_USD).toBe(50_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 0, enforceLiquidityFloor: true })).toBe(50_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 10_000, enforceLiquidityFloor: true })).toBe(50_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 80_000, enforceLiquidityFloor: true })).toBe(80_000);
+    expect(effectiveMinLiquidityUsd({ minLiquidityUsd: 80_000, enforceLiquidityFloor: false })).toBe(80_000);
+    expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { sniperMinLiquidityUsd: 5_000 })).toBe(5_000);
+    expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { enforceLiquidityFloor: true, sniperMinLiquidityUsd: 5_000 })).toBe(50_000);
+    expect(gateMinLiquidityUsd({ source: 'snipe' }, 0, { enforceLiquidityFloor: true, sniperMinLiquidityUsd: 80_000 })).toBe(80_000);
+  });
+
+  it('the desk shows the floor in force, in ETH at the snapshot price', () => {
+    expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 50_000 })).toBe(50_000);
+    expect(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 12_000 })).toBe(12_000);
+    const panel = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
+    expect(panel.match(/shownMinLiquidityUsd\(t\)/g)).toEqual(['shownMinLiquidityUsd(t)']);
+    expect(panel).toContain('Min liquidity (≈');
+    expect(panel).toContain('Enforce liquidity floor (≈');
+    expect(panel).toContain('In force ${liqEth(shownMinLiquidityUsd(t))}');
+    expect(panel).not.toContain('Min liquidity USD');
+    expect(panel).not.toContain('Enforce $');
+    expect(panel).not.toContain('.toLocaleString');
+    const price = ethUsdOf({ chains: [{ id: 1, nativeSymbol: 'ETH', nativeUsd: 2_500 }] });
+    expect(price).toBe(2_500);
+    expect(inEth(ENFORCED_LIQUIDITY_FLOOR_USD, price)).toBe('20 ETH');
+    expect(inEth(12_000, price)).toBe('4.8 ETH');
+    expect(inEth(shownMinLiquidityUsd({ effectiveMinLiquidityUsd: 50_000 }), null)).toBe('—');
+    expect(ethUsdOf({ chains: [{ id: 4663, nativeSymbol: 'ETH', nativeUsd: 1_800 }] }, {
+      wallet: [{ coin: { symbol: 'WETH', usdEach: 2_000 } }],
+    } as never)).toBe(2_000);
   });
 });

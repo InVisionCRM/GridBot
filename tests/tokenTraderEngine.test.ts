@@ -2,14 +2,20 @@ import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
+import type { OwnerReport } from '../src/market/ownerPowers';
 import { createApp } from '../src/server/app';
 import { Logger } from '../src/server/bot/logger';
 import { MultiBot, type MultiState } from '../src/server/bot/multi';
 import { MockChain, NET } from './helpers/mockChain';
 import type { GateInput, FreshPool } from '../src/market/tokenTrader';
+import { shownMinLiquidityUsd } from '../src/market/liquidityFloor';
 import { MemoryStore } from '../src/server/bot/store';
 import { TokenTrader, type TraderState } from '../src/server/bot/tokenTrader';
 import type { PoolSniper, SnipeHit } from '../src/server/market/sniper';
+import { setEthUsdSource } from '../src/lib/ethUnits';
+
+// screen text shows dollar-only figures in ETH; pin the price so the wording is fixed (gates stay in USD)
+setEthUsdSource(() => 2500);
 
 const clean = (o: Partial<GateInput> = {}): GateInput => ({
   mode: 'paper', risk: 'safe', honeypot: false, sellSimOk: true, paused: false, decimals: 18,
@@ -33,6 +39,8 @@ function trader(o: {
   quoteImpact?: (p: FreshPool, spend: number) => Promise<number>;
   hits?: SnipeHit[]; resolve?: (h: SnipeHit) => Promise<FreshPool | null>;
   store?: MemoryStore<TraderState>;
+  ownerPowers?: (p: FreshPool) => Promise<OwnerReport>;
+  poolFacts?: (p: FreshPool) => Promise<{ createdAt: number | null; volumeUsd: number; liquidityUsd: number }>;
 } = {}) {
   const store = o.store ?? new MemoryStore<TraderState>();
   const sniper = { tick: async (cursors: Record<string, number>) => ({ cursors, hits: o.hits ?? [], notes: [] }) } as unknown as PoolSniper;
@@ -42,6 +50,8 @@ function trader(o: {
     holders: o.holders,
     quoteImpact: o.quoteImpact,
     resolve: o.resolve ?? (async () => null),
+    ownerPowers: o.ownerPowers,
+    poolFacts: o.poolFacts,
   });
   return { t, store };
 }
@@ -135,6 +145,10 @@ describe('token trader engine', () => {
       expect(saved.body.options.perTradeUsd).toBe(40);
       expect(saved.body.options.sniper.on).toBe(true);
       expect(saved.body.options.sniper.chains[1]).toBe(false);
+      expect(saved.body.options.minLiquidityUsd).toBe(0);
+      expect(saved.body.options.enforceLiquidityFloor).toBe(false);
+      expect((saved.body as TraderState & { effectiveMinLiquidityUsd: number }).effectiveMinLiquidityUsd).toBe(0);
+      expect(shownMinLiquidityUsd(saved.body)).toBe(0);
       expect(saved.body.options.enforceHolderCheck).toBe(false);
       expect(saved.body.options.enforceSizeImpact).toBe(false);
       expect(saved.body.options.sizeImpactCap).toBe(0.01);
@@ -144,6 +158,7 @@ describe('token trader engine', () => {
       expect(ui).toMatch(/enforceHolderCheck/);
       expect(ui).toMatch(/Cap impact at the trade size/);
       expect(ui).toMatch(/enforceSizeImpact/);
+      expect(ui.match(/shownMinLiquidityUsd\(t\)/g)).toEqual(['shownMinLiquidityUsd(t)']);
       const capped = await call('PUT', '/api/token-trader', { enforceSizeImpact: true, sizeImpactCap: 0.015 });
       expect(capped.body.options.enforceSizeImpact).toBe(true);
       expect(capped.body.options.sizeImpactCap).toBeCloseTo(0.015, 6);
@@ -156,12 +171,258 @@ describe('token trader engine', () => {
     }
   });
 
+  it('owner powers off does not read, and a saved file from before the flag stays off', async () => {
+    let calls = 0;
+    const now = 1_700_000_000_000;
+    const p = pool({ createdAt: now - 48 * 3600_000 });
+    const { t } = trader({
+      now: () => now,
+      discover: async () => [p],
+      ownerPowers: async () => { calls++; throw new Error('rpc down'); },
+    });
+    t.configure({ enforceOwnerPowers: false, minPoolAgeSec: 24 * 3600 });
+    t.turnOn();
+    await t.tick();
+    expect(calls).toBe(0);
+    expect(t.status().positions).toHaveLength(1);
+    expect(t.status().trades[0].why).toMatch(/^buy /);
+    expect(t.status().trades[0].why).not.toMatch(/owner/i);
+
+    const store = new MemoryStore<TraderState>();
+    store.data = {
+      version: 1, on: false,
+      options: {
+        mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 86_400,
+        chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: 0.02,
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+      },
+      positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
+    } as unknown as TraderState;
+    const old = new TokenTrader({ store, now: () => now });
+    expect(old.status().options.enforceOwnerPowers).toBe(false);
+  });
+
+  it('owner powers on skips safe and medium for a live mint or a failed read, and reports a renounced owner', async () => {
+    const now = 1_700_000_000_000;
+    const held: OwnerReport = {
+      unverified: false, why: 'owner 0xabcd… holds mint(uint256)', note: 'owner 0xabcd… holds mint(uint256)',
+      powers: ['mint(uint256)'], owner: '0x' + 'ab'.repeat(20), renounced: false, liveAdmin: null,
+    };
+    const renounced: OwnerReport = {
+      unverified: false, why: null,
+      note: 'owner renounced (0x0000…0000); bytecode has mint(address,uint256); not upgradeable',
+      powers: ['mint(address,uint256)'], owner: '0x' + '00'.repeat(20), renounced: true, liveAdmin: null,
+    };
+    const run = async (risk: 'safe' | 'medium' | 'any', report: OwnerReport | 'throw') => {
+      const p = pool({ createdAt: now - 48 * 3600_000, tokenSymbol: risk });
+      let calls = 0;
+      const { t } = trader({
+        now: () => now,
+        discover: async () => [p],
+        ownerPowers: async () => { calls++; if (report === 'throw') throw new Error('rpc down'); return report; },
+      });
+      t.configure({ risk, enforceOwnerPowers: true, minPoolAgeSec: 24 * 3600 });
+      t.turnOn();
+      await t.tick();
+      return { t, calls };
+    };
+
+    const safe = await run('safe', held);
+    expect(safe.calls).toBe(1);
+    expect(safe.t.status().positions).toHaveLength(0);
+    expect(safe.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/holds mint\(uint256\)/);
+
+    const medium = await run('medium', held);
+    expect(medium.t.status().positions).toHaveLength(0);
+    expect(medium.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/holds mint/);
+
+    const any = await run('any', held);
+    expect(any.t.status().positions).toHaveLength(1);
+    expect(any.t.status().trades[0].why).toMatch(/holds mint\(uint256\)/);
+
+    const ok = await run('safe', renounced);
+    expect(ok.t.status().positions).toHaveLength(1);
+    expect(ok.t.status().trades[0].why).toMatch(/owner renounced/);
+    expect(ok.t.status().trades[0].why).toMatch(/mint\(address,uint256\)/);
+
+    for (const risk of ['safe', 'medium'] as const) {
+      const failed = await run(risk, 'throw');
+      expect(failed.calls).toBe(1);
+      expect(failed.t.status().positions).toHaveLength(0);
+      expect(failed.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+    }
+    const anyFail = await run('any', 'throw');
+    expect(anyFail.t.status().positions).toHaveLength(1);
+    expect(anyFail.t.status().trades[0].why).toMatch(/could not be verified/);
+  });
+
+  it('wash and age off still buys an unknown-age pool and does not read facts', async () => {
+    let calls = 0;
+    const now = 1_700_000_000_000;
+    const p = pool({ createdAt: null, tokenSymbol: 'OLD' });
+    const { t } = trader({
+      now: () => now,
+      discover: async () => [p],
+      poolFacts: async () => { calls++; throw new Error('rpc down'); },
+    });
+    t.configure({ enforceWashAndAge: false, minPoolAgeSec: 24 * 3600 });
+    t.turnOn();
+    await t.tick();
+    expect(calls).toBe(0);
+    expect(t.status().positions).toHaveLength(1);
+
+    const store = new MemoryStore<TraderState>();
+    store.data = {
+      version: 1, on: false,
+      options: {
+        mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 86_400,
+        chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: 0.02,
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+      },
+      positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
+    } as unknown as TraderState;
+    expect(new TokenTrader({ store, now: () => now }).status().options.enforceWashAndAge).toBe(false);
+  });
+
+  it('wash and age on skips unknown age, a young pool, wash volume, and a failed read for safe and medium', async () => {
+    const now = 1_700_000_000_000;
+    const run = async (risk: 'safe' | 'medium' | 'any', p: FreshPool, facts?: 'throw' | { createdAt: number | null; volumeUsd: number; liquidityUsd: number }) => {
+      let calls = 0;
+      const { t } = trader({
+        now: () => now,
+        discover: async () => [p],
+        poolFacts: facts == null ? undefined : async () => {
+          calls++;
+          if (facts === 'throw') throw new Error('rpc down');
+          return facts;
+        },
+      });
+      t.configure({ risk, enforceWashAndAge: true, minPoolAgeSec: 24 * 3600 });
+      t.turnOn();
+      await t.tick();
+      return { t, calls };
+    };
+    const old = () => pool({ createdAt: now - 48 * 3600_000, volumeUsd: 10_000, liquidityUsd: 80_000 });
+
+    const unknown = await run('safe', pool({ createdAt: null }));
+    expect(unknown.t.status().positions).toHaveLength(0);
+    expect(unknown.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/pool age could not be verified/);
+    const unknownMed = await run('medium', pool({ createdAt: null }));
+    expect(unknownMed.t.status().positions).toHaveLength(0);
+    const unknownAny = await run('any', pool({ createdAt: null, volumeUsd: 10_000 }));
+    expect(unknownAny.t.status().positions).toHaveLength(1);
+
+    const young = await run('safe', old(), { createdAt: now - 3600_000, volumeUsd: 10_000, liquidityUsd: 80_000 });
+    expect(young.calls).toBe(1);
+    expect(young.t.status().positions).toHaveLength(0);
+    expect(young.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/pool is 1h old/);
+
+    const aged = await run('safe', old());
+    expect(aged.t.status().positions).toHaveLength(1);
+
+    const edge = await run('medium', pool({ createdAt: now - 48 * 3600_000, volumeUsd: 80_000 * 20, liquidityUsd: 80_000 }));
+    expect(edge.t.status().positions).toHaveLength(1);
+
+    const wash = await run('safe', pool({ createdAt: now - 48 * 3600_000, volumeUsd: 80_000 * 21, liquidityUsd: 80_000 }));
+    expect(wash.t.status().positions).toHaveLength(0);
+    expect(wash.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/volume is 21× liquidity/);
+    const washMed = await run('medium', pool({ createdAt: now - 48 * 3600_000, volumeUsd: 80_000 * 21, liquidityUsd: 80_000 }));
+    expect(washMed.t.status().positions).toHaveLength(0);
+
+    for (const risk of ['safe', 'medium'] as const) {
+      const failed = await run(risk, old(), 'throw');
+      expect(failed.calls).toBe(1);
+      expect(failed.t.status().positions).toHaveLength(0);
+      expect(failed.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+    }
+    const anyFail = await run('any', old(), 'throw');
+    expect(anyFail.t.status().positions).toHaveLength(1);
+  });
+
+  it('wash and age on: a snipe skips only the wash leg, never the age leg, at safe and medium', async () => {
+    const now = 1_700_000_000_000;
+    const snipeRun = async (risk: 'safe' | 'medium', volumeUsd: number) => {
+      const fresh = pool({ createdAt: null, liquidityUsd: 20_000, volumeUsd, tokenSymbol: 'SNIPE', source: 'snipe' });
+      const hit: SnipeHit = { chainId: 1, dex: 'uni-v3', kind: 'v3', pool: fresh.pool, token0: fresh.token, token1: fresh.spend, fee: 3000, blockNumber: 10, at: now, skip: null };
+      const sn = trader({ now: () => now, hits: [hit], resolve: async () => fresh });
+      sn.t.configure({ risk, enforceWashAndAge: true, minPoolAgeSec: 24 * 3600, sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null } });
+      sn.t.turnOn();
+      await sn.t.tick();
+      return sn.t;
+    };
+    for (const risk of ['safe', 'medium'] as const) {
+      const ok = await snipeRun(risk, 0);
+      expect(ok.status().positions).toHaveLength(1);
+      expect(ok.status().positions[0].source).toBe('snipe');
+      const wash = await snipeRun(risk, 20_000 * 21);
+      expect(wash.status().positions).toHaveLength(0);
+      expect(wash.status().feed.map((f) => f.why).join(' | ')).toMatch(/volume is 21× liquidity/);
+    }
+  });
+
+  it('the API round-trips the wash-and-age flag, default off', async () => {
+    const store = new MemoryStore<TraderState>();
+    const { t } = trader({ store, discover: async () => [] });
+    const bot = new MultiBot({ net: NET, reader: new MockChain(), signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), now: () => 1_800_000_000_000 });
+    const server = createApp({ bot, net: NET, tokenTrader: t }).listen(0, '127.0.0.1');
+    await new Promise((r) => server.once('listening', r));
+    const port = (server.address() as AddressInfo).port;
+    const call = (method: string, path: string, body?: unknown) => new Promise<{ status: number; body: TraderState & { on: boolean } }>((resolve, reject) => {
+      const data = JSON.stringify(body ?? {});
+      const req = http.request({ host: '127.0.0.1', port, path, method, headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, (res) => {
+        let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(b) }));
+      });
+      req.on('error', reject); req.end(data);
+    });
+    try {
+      expect((await call('GET', '/api/token-trader')).body.options.enforceWashAndAge).toBe(false);
+      const saved = await call('PUT', '/api/token-trader', { enforceWashAndAge: true });
+      expect(saved.status).toBe(200);
+      expect(saved.body.options.enforceWashAndAge).toBe(true);
+      expect(store.load()!.options.enforceWashAndAge).toBe(true);
+      const ui = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
+      expect(ui).toContain('Wash and pool age');
+      expect(ui).toContain('enforceWashAndAge');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('the API round-trips the owner-powers flag, default off', async () => {
+    const store = new MemoryStore<TraderState>();
+    const { t } = trader({ store, discover: async () => [] });
+    const bot = new MultiBot({ net: NET, reader: new MockChain(), signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), now: () => 1_800_000_000_000 });
+    const server = createApp({ bot, net: NET, tokenTrader: t }).listen(0, '127.0.0.1');
+    await new Promise((r) => server.once('listening', r));
+    const port = (server.address() as AddressInfo).port;
+    const call = (method: string, path: string, body?: unknown) => new Promise<{ status: number; body: TraderState & { on: boolean } }>((resolve, reject) => {
+      const data = JSON.stringify(body ?? {});
+      const req = http.request({ host: '127.0.0.1', port, path, method, headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, (res) => {
+        let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(b) }));
+      });
+      req.on('error', reject); req.end(data);
+    });
+    try {
+      expect((await call('GET', '/api/token-trader')).body.options.enforceOwnerPowers).toBe(false);
+      const saved = await call('PUT', '/api/token-trader', { enforceOwnerPowers: true });
+      expect(saved.status).toBe(200);
+      expect(saved.body.options.enforceOwnerPowers).toBe(true);
+      expect(store.load()!.options.enforceOwnerPowers).toBe(true);
+      const ui = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
+      expect(ui).toContain('Owner powers');
+      expect(ui).toContain('enforceOwnerPowers');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
   it('refuses a live start without a signer and an https-only MEV URL', () => {
     const { t } = trader();
     t.configure({ mode: 'live', chains: [1] });
     expect(() => t.turnOn()).toThrow(/not wired/);
     expect(() => t.configure({ sniper: { on: false, minLiquidityUsd: 1, delayBlocks: 0, delaySec: 0, maxPerHour: 1, chains: {}, mevRpc: 'http://rpc.example' } })).toThrow(/https/);
     expect(() => t.configure({ maxImpact: 0.2 })).toThrow(/5%/);
+    expect(() => t.configure({ minLiquidityUsd: -1 })).toThrow(/liquidity/i);
     expect(() => t.configure({ sizeImpactCap: 0.2 })).toThrow(/Trade-size/);
   });
 
@@ -214,6 +475,137 @@ describe('token trader engine', () => {
     await t.tick();
     expect(t.status().positions).toHaveLength(0);
     expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+  });
+
+  it('the default floor is still 0, including a saved file from before the setting existed', async () => {
+    const now = 1_700_000_000_000;
+    const store = new MemoryStore<TraderState>();
+    store.save({
+      version: 1, on: false,
+      options: {
+        mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 24 * 3600, chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: 0.02,
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+      },
+      positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
+    } as unknown as TraderState);
+    const dust = pool({ liquidityUsd: 1, createdAt: now - 48 * 3600_000, tokenSymbol: 'DUST' });
+    const { t } = trader({
+      now: () => now, store, discover: async () => [dust],
+      assess: async (p) => clean({ liquidityUsd: p.liquidityUsd, minLiquidityUsd: 0 }),
+    });
+    expect(t.status().options.minLiquidityUsd).toBe(0);
+    expect(t.status().options.enforceLiquidityFloor).toBe(false);
+    expect(t.status().options.sniper.minLiquidityUsd).toBe(5_000);
+    expect(t.status().effectiveMinLiquidityUsd).toBe(0);
+    expect(shownMinLiquidityUsd(t.status())).toBe(0);
+    t.turnOn();
+    await t.tick();
+    expect(t.status().positions).toHaveLength(1);
+  });
+
+  it('honors a custom floor, and a 0 reported by assess does not clear it', async () => {
+    const now = 1_700_000_000_000;
+    const low = pool({ liquidityUsd: 9_000, createdAt: now - 48 * 3600_000, tokenSymbol: 'LOW' });
+    const ok = pool({ liquidityUsd: 12_000, createdAt: now - 48 * 3600_000, tokenSymbol: 'OK' });
+    const masked = pool({ liquidityUsd: 80_000, createdAt: now - 48 * 3600_000, tokenSymbol: 'MASK' });
+    const { t } = trader({
+      now: () => now,
+      discover: async () => [low, ok, masked],
+      assess: async (p) => clean({ liquidityUsd: p.tokenSymbol === 'MASK' ? 100 : p.liquidityUsd, minLiquidityUsd: 0 }),
+    });
+    t.configure({ minLiquidityUsd: 10_000, enforceLiquidityFloor: false });
+    expect(t.status().effectiveMinLiquidityUsd).toBe(10_000);
+    expect(shownMinLiquidityUsd(t.status())).toBe(10_000);
+    t.turnOn();
+    await t.tick();
+    expect(t.status().positions.map((p) => p.label)).toEqual(['OK/WETH']);
+    const why = t.status().feed.map((f) => f.why).join(' | ');
+    expect(why).toMatch(/under the ≈ 4 ETH minimum/); // the $10,000 gate, in ETH at 2,500 a coin
+    expect(why).not.toMatch(/\$/);
+    expect(why).toMatch(/under the/);
+  });
+
+  it('leaves a $40,000 pool alone while the $50,000 flag is off, and blocks it when the flag is on', async () => {
+    const now = 1_700_000_000_000;
+    const mid = () => pool({ liquidityUsd: 40_000, createdAt: now - 48 * 3600_000, tokenSymbol: 'MID' });
+    const fat = () => pool({ liquidityUsd: 60_000, createdAt: now - 48 * 3600_000, tokenSymbol: 'FAT' });
+    const off = trader({
+      now: () => now, discover: async () => [mid()],
+      assess: async (p) => clean({ liquidityUsd: p.liquidityUsd, minLiquidityUsd: 0 }),
+    });
+    off.t.configure({ minLiquidityUsd: 0, enforceLiquidityFloor: false });
+    expect(off.t.status().effectiveMinLiquidityUsd).toBe(0);
+    off.t.turnOn();
+    await off.t.tick();
+    expect(off.t.status().positions).toHaveLength(1);
+
+    const on = trader({
+      now: () => now, discover: async () => [mid(), fat()],
+      assess: async (p) => clean({ liquidityUsd: p.liquidityUsd, minLiquidityUsd: 0 }),
+    });
+    on.t.configure({ minLiquidityUsd: 0, enforceLiquidityFloor: true });
+    expect(on.t.status().effectiveMinLiquidityUsd).toBe(50_000);
+    expect(shownMinLiquidityUsd(on.t.status())).toBe(50_000);
+    on.t.turnOn();
+    await on.t.tick();
+    expect(on.t.status().positions.map((p) => p.label)).toEqual(['FAT/WETH']);
+    expect(on.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/≈ 20 ETH/); // the $50,000 floor
+  });
+
+  it('does not let the $50,000 flag lower a higher sniper minimum', async () => {
+    const now = 1_700_000_000_000;
+    const mid = pool({ liquidityUsd: 60_000, tokenSymbol: 'MID', source: 'snipe' });
+    const fat = pool({ liquidityUsd: 90_000, tokenSymbol: 'FAT', source: 'snipe' });
+    const hit = (p: FreshPool): SnipeHit => ({ chainId: 1, dex: 'uni', kind: 'v3', pool: p.pool, token0: p.token, token1: p.spend, fee: null, blockNumber: 1, at: now, skip: null });
+    const { t } = trader({
+      now: () => now, hits: [hit(mid), hit(fat)], resolve: async (h) => [mid, fat].find((p) => p.pool === h.pool) ?? null,
+      assess: async (p) => clean({ liquidityUsd: p.liquidityUsd, minLiquidityUsd: 0 }),
+    });
+    t.configure({
+      minLiquidityUsd: 0, enforceLiquidityFloor: true,
+      sniper: { on: true, minLiquidityUsd: 80_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null },
+    });
+    t.turnOn();
+    await t.tick();
+    expect(t.status().positions.map((p) => p.label)).toEqual(['FAT/WETH']);
+    expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/liquidity under ≈ 32 ETH/); // the $80,000 sniper minimum
+    expect(t.status().feed.map((f) => f.why).join(' | ')).not.toMatch(/\$/);
+  });
+
+  it('the API reports the floor in force, which is what the panel shows', async () => {
+    const { t } = trader({ discover: async () => [] });
+    const bot = new MultiBot({ net: NET, reader: new MockChain(), signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), now: () => 1_800_000_000_000 });
+    const server = createApp({ bot, net: NET, tokenTrader: t }).listen(0, '127.0.0.1');
+    await new Promise((r) => server.once('listening', r));
+    const port = (server.address() as AddressInfo).port;
+    const call = (body: unknown) => new Promise<{ status: number; body: TraderState & { on: boolean; effectiveMinLiquidityUsd: number } }>((resolve, reject) => {
+      const data = JSON.stringify(body);
+      const req = http.request({ host: '127.0.0.1', port, path: '/api/token-trader', method: 'PUT', headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, (res) => {
+        let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(b) }));
+      });
+      req.on('error', reject); req.end(data);
+    });
+    try {
+      const flagged = await call({ minLiquidityUsd: 0, enforceLiquidityFloor: true });
+      expect(flagged.status).toBe(200);
+      expect(flagged.body.options.minLiquidityUsd).toBe(0);
+      expect(flagged.body.options.enforceLiquidityFloor).toBe(true);
+      expect(flagged.body.effectiveMinLiquidityUsd).toBe(50_000);
+      expect(shownMinLiquidityUsd(flagged.body)).toBe(50_000);
+
+      const custom = await call({ minLiquidityUsd: 12_000, enforceLiquidityFloor: false });
+      expect(custom.body.effectiveMinLiquidityUsd).toBe(12_000);
+      expect(shownMinLiquidityUsd(custom.body)).toBe(12_000);
+
+      const higher = await call({ minLiquidityUsd: 80_000, enforceLiquidityFloor: true });
+      expect(higher.body.options.minLiquidityUsd).toBe(80_000);
+      expect(higher.body.effectiveMinLiquidityUsd).toBe(80_000);
+      expect(shownMinLiquidityUsd(higher.body)).toBe(80_000);
+      const panel = readFileSync(new URL('../src/ui/TokenTrader.tsx', import.meta.url), 'utf8');
+      expect(panel.match(/shownMinLiquidityUsd\(t\)/g)).toEqual(['shownMinLiquidityUsd(t)']);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
   });
 
   it('keeps the trade-size check off for a saved file that predates it', async () => {

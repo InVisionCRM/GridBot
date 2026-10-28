@@ -10,7 +10,8 @@ import { TrendConfigEditor } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
 import { T, alpha } from './theme';
 import type { AnyObj, BtPrefill } from './model';
-import { cls, dur, num, pct, px, qty, time, usd } from './fmt';
+import { cls, dur, num, pct, px, qty, time } from './fmt';
+import { inEth, useEthUsd } from './units';
 import { L, Tip } from './Tip';
 import { humanAmount } from '../live/amount';
 
@@ -52,7 +53,9 @@ function Breakdown({ m, sym }: { m: AnyObj; sym: string }) {
 function SizeWarning({ m, sym, usdPer, levels }: { m: AnyObj; sym: string; usdPer: number | null; levels: number | null }) {
   const tooDeep = m.poolDepth != null && m.tradeSize > 0.25 * m.poolDepth;
   if (!(m.tradeImpactPct > 0.02) && !tooDeep) return null;
-  const amt = (x: number) => `${humanAmount(x)} ${sym}${usdPer ? ` (≈ ${usd(x * usdPer)})` : ''}`;
+  const ethUsd = useEthUsd();
+  const isEth = /^W?ETH$/i.test(sym);
+  const amt = (x: number) => `${humanAmount(x)} ${sym}${usdPer && ethUsd && !isEth ? ` (≈ ${inEth(x * usdPer, ethUsd)})` : ''}`;
   // constant-product impact ≈ size ÷ (depth + size): under 1% when one trade is below depth ÷ 99
   const ok1 = m.poolDepth != null ? m.poolDepth / 99 : null;
   return (
@@ -68,6 +71,7 @@ function SizeWarning({ m, sym, usdPer, levels }: { m: AnyObj; sym: string; usdPe
 }
 
 export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefill: BtPrefill | null; onUse: (p: { pair: string; tf: TF; cfg: TrendConfig; capital: number; created?: string }) => void }) {
+  const ethUsd = useEthUsd();
   const [kind, setKind] = useState<'trend' | 'grid'>('trend');
   const [pair, setPair] = useState('DAI');
   const [tf, setTf] = useState<TF>('4h');
@@ -148,8 +152,8 @@ export function Backtest({ status: s, prefill, onUse }: { status: AnyObj; prefil
           <PairPicker s={s} value={pair} onChange={setPair} />
           <label><L tip="Candle size to replay. A grid checks each candle's high and low for level crossings; a trend strategy decides on each closed candle.">Timeframe</L><select value={tf} onChange={(e) => setTf(e.target.value as TF)}>{TFS.map((x) => <option key={x}>{x}</option>)}</select></label>
           <label><L tip="How much of the stored history to replay, counting back from the latest candle.">Period</L><select value={days} onChange={(e) => setDays(e.target.value)}><option value="0">all stored</option><option value="7">7 days</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option><option value="180">180 days</option></select></label>
-          <label><L tip={`How much to test with, in ${mk(s, pair).quote} (the coin it spends), not in dollars. Use what you would really put in: price impact grows with the size of each trade.`}>Amount ({mk(s, pair).quote})</L><input value={amount} placeholder="0" inputMode="decimal" onChange={(e) => setAmount(e.target.value.replace(/,/g, ''))} />
-            {+amount > 0 && mk(s, pair).usdPerQuote ? <span className="muted">≈ {usd(+amount * mk(s, pair).usdPerQuote!)} at today's price</span> : null}</label>
+          <label><L tip={`How much to test with, in ${mk(s, pair).quote} (the coin it spends). Use what you would really put in: price impact grows with the size of each trade.`}>Amount ({mk(s, pair).quote})</L><input value={amount} placeholder="0" inputMode="decimal" onChange={(e) => setAmount(e.target.value.replace(/,/g, ''))} />
+            {+amount > 0 && mk(s, pair).usdPerQuote && ethUsd && !/^W?ETH$/i.test(mk(s, pair).quote) ? <span className="muted">≈ {inEth(+amount * mk(s, pair).usdPerQuote!, ethUsd)} at today's price</span> : null}</label>
           <label><L tip="Charge price impact: a swap moves the pool's price against you, more the bigger it is. Uses the coins the pool holds near today's price. Leave on.">Impact</L><input type="checkbox" checked={costs.useImpact} onChange={(e) => setCosts((c) => ({ ...c, useImpact: e.target.checked }))} /></label>
           <label><L tip="Charge network gas for every swap and approval at today's gas price. Leave on.">Gas</L><input type="checkbox" checked={costs.useGas} onChange={(e) => setCosts((c) => ({ ...c, useGas: e.target.checked }))} /></label>
           <label><L tip="Extra worse price assumed on every swap, in basis points: 10 = 0.10%. Covers the price moving between the quote and the swap landing.">Slippage (bps)</L><input value={costs.slippageBps} onChange={(e) => setCosts((c) => ({ ...c, slippageBps: e.target.value }))} /></label>

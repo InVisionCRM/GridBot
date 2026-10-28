@@ -11,7 +11,7 @@ import { Q128, rangeBaseShare } from '../src/live/v3Liquidity';
 import { LpPool } from '../src/server/lp/lpPool';
 import { MultiDexMock, type Tok } from './helpers/multiDex';
 import { ERC20, V3_NPM } from '../src/server/dex/abis';
-import type { ReceiptLike } from '../src/server/bot/chain';
+import { ExecError, type ReceiptLike } from '../src/server/bot/chain';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/server/app';
@@ -24,7 +24,7 @@ const WPLS: Tok = { address: NET.pulsex.wpls, symbol: 'WPLS', decimals: 18 };
 const DAI: Tok = { address: NET.quotes.find((q) => q.symbol === 'DAI')!.address, symbol: 'DAI', decimals: 18 };
 const PRICE = 0.00003; // DAI per PLS
 
-function world() {
+function world(opt?: { emit?: (e: { msg: string }) => void; candles?: (market: string, tf: '1h') => { o: number; h: number; l: number; c: number }[] }) {
   const m = new MultiDexMock();
   [WPLS, DAI].forEach((t) => m.addToken(t));
   m.addV3('9mm-v3', { factory: dex('9mm-v3').factory, quoter: dex('9mm-v3').quoter! });
@@ -38,7 +38,7 @@ function world() {
   const hub = new Hub({ runtimes: [new ChainRuntime(CH, m, null)], markets: [...legacyMarkets(NET), def], legacyNet: NET });
   let t = 1_800_000_000_000;
   const store = new MemoryStore<LpState>();
-  const lp = new LpEngine({ net: NET, store, log: new Logger(true), hub, now: () => t });
+  const lp = new LpEngine({ net: NET, store, log: new Logger(true), hub, now: () => t, emit: opt?.emit, candles: opt?.candles });
   return { m, pool, def, hub, lp, store, at: (ms: number) => { t = 1_800_000_000_000 + ms; } };
 }
 const value = (lp: LpEngine) => lp.status().value!;
@@ -140,7 +140,6 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
   });
 
   // Out of range with Auto-move on: the range moves to the price at the next fresh reading.
-  const H = 3600_000;
   const STEP = Q128 / 10n ** 8n; // one burst of trading in the pool: fee growth per unit of liquidity on each token
   /** Trade in the pool and tick until the bot moves its range (or `max` ticks). */
   async function tradeUntilMoved(lp: LpEngine, m: MultiDexMock, pool: string, max = 20) {
@@ -439,6 +438,77 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     await b.tick();
     expect(b.status().position).toMatchObject({ id: '777', liquidity: (10n ** 20n).toString() });
     expect(b.status().step).toBeNull();
+  });
+
+  describe('a swap settled by hash after a restart: gas in base units, or marked unknown with a warning', () => {
+    type Rec = { ok: boolean; amountOutHuman: number; gasPls: number; gasNative: number; gasUnknown?: true };
+    type Exec = { recover: (...a: unknown[]) => Promise<Rec | null>; quote: (...a: unknown[]) => Promise<Record<string, unknown>>; execute: (...a: unknown[]) => Promise<unknown> };
+    const GAS_NATIVE = 0.1;
+    /** A live bot restarted with a broadcast swap still to settle (`close`: the close-to-cash sale, else the range swap). */
+    async function pending(close: boolean, rec: Rec, basePerNative?: number) {
+      const w = live();
+      const a = w.make();
+      await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      const ex = (w.make() as unknown as { executor: Exec }).executor;
+      (a as unknown as { executor: unknown }).executor = ex;
+      const args: unknown[][] = [];
+      ex.recover = async (...x: unknown[]) => { args.push(x); return rec; };
+      a.state.idle = close ? { base: 0, quote: 1000 } : a.state.idle;
+      a.state.step = {
+        action: close ? 'close' : 'open', stage: 'swap', tries: 0, ...(close ? { toCash: true } : {}),
+        swap: { hash: '0xfeed', tokenOut: close ? DAI.address : WPLS.address, decimalsOut: 18, side: close ? 'sell' : 'buy', amountIn: 100, price: PRICE, ...(basePerNative != null ? { basePerNative } : {}) },
+      };
+      const gas0 = a.state.totals.gas;
+      const log = (a as unknown as { d: { log: Logger } }).d.log;
+      await a.tick();
+      const warns = log.entries.filter((e) => e.level === 'warn' && e.msg.includes('0xfeed'));
+      return { a, args, gas: a.state.totals.gas - gas0, warns };
+    }
+    for (const close of [false, true]) {
+      const what = close ? 'close-to-cash sale' : 'range swap';
+      it(`${what}, rate unreadable: gas 0, its native gas kept in gasUnknownNative, and a warning with the native amount`, async () => {
+        const r = await pending(close, { ok: true, amountOutHuman: close ? 0.003 : 3_000_000, gasPls: 0, gasNative: GAS_NATIVE, gasUnknown: true });
+        expect(r.args[0][0]).toBe('0xfeed');
+        expect(r.a.state.step?.swap).toBeUndefined(); // settled, not retried
+        expect(r.a.state.totals.gasUnknownNative).toBeCloseTo(GAS_NATIVE, 12);
+        expect(r.warns).toHaveLength(1);
+        expect(r.warns[0].msg).toContain(`gas ${GAS_NATIVE.toPrecision(4)} PLS not booked`);
+        expect(r.warns[0].msg).toContain('the base/native rate was not saved with the swap and could not be read after the restart');
+        if (close) expect(r.gas).toBe(0);
+      });
+      it(`${what}, rate readable: gas booked at today's price as before, no flag and no warning`, async () => {
+        const r = await pending(close, { ok: true, amountOutHuman: close ? 0.003 : 3_000_000, gasPls: GAS_NATIVE, gasNative: GAS_NATIVE });
+        expect(r.a.state.totals.gasUnknownNative).toBeUndefined();
+        expect(r.warns).toHaveLength(0);
+        if (close) expect(r.gas).toBeCloseTo(GAS_NATIVE * PRICE, 15);
+        else expect(r.gas).toBeGreaterThanOrEqual(GAS_NATIVE * PRICE * (1 - 1e-12));
+      });
+    }
+    it('range swap: the readable and unknown cases differ by exactly the swap gas (nothing else changes)', async () => {
+      const known = await pending(false, { ok: true, amountOutHuman: 3_000_000, gasPls: GAS_NATIVE, gasNative: GAS_NATIVE });
+      const unknown = await pending(false, { ok: true, amountOutHuman: 3_000_000, gasPls: 0, gasNative: GAS_NATIVE, gasUnknown: true });
+      expect(known.gas - unknown.gas).toBeCloseTo(GAS_NATIVE * PRICE, 15);
+    });
+    it('the rate saved with the swap goes to recover(); an old save without it passes none (recover reads it now)', async () => {
+      const saved = await pending(true, { ok: true, amountOutHuman: 0.003, gasPls: GAS_NATIVE, gasNative: GAS_NATIVE }, 0.008);
+      expect(saved.args[0][3]).toBe(0.008);
+      const old = await pending(true, { ok: true, amountOutHuman: 0.003, gasPls: GAS_NATIVE, gasNative: GAS_NATIVE });
+      expect(old.args[0][3]).toBeUndefined();
+    });
+    it("a swap left pending saves the quote's basePerNative in the step", async () => {
+      const w = live();
+      const a = w.make();
+      await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      const ex = (w.make() as unknown as { executor: Exec }).executor;
+      (a as unknown as { executor: unknown }).executor = ex;
+      const quote = ex.quote;
+      ex.quote = async (...x: unknown[]) => ({ ...(await quote(...x)), basePerNative: 0.008 });
+      ex.execute = async () => { throw new ExecError('not confirmed yet', { pending: true, swapTxHash: '0xpend' }); };
+      a.state.idle = { base: 0, quote: 1000 };
+      a.state.step = { action: 'open', stage: 'swap', tries: 0 };
+      await a.tick();
+      expect(a.state.step?.swap).toMatchObject({ hash: '0xpend', basePerNative: 0.008 });
+    });
   });
 
   it("live fees are the position manager's own collect quote, asked once as the position's owner (not rebuilt from several reads)", async () => {
@@ -952,5 +1022,175 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       expect(row.realized).toBeCloseTo(p.net, 9);
       expect(row.unrealized).toBeCloseTo(p.price, 9);
     } finally { await a.close(); }
+  });
+});
+
+describe('LP range gates and compounding (off unless set)', () => {
+  const open = async (opt?: Parameters<typeof world>[0], start?: Partial<Parameters<LpEngine['start']>[0]>) => {
+    const w = world(opt);
+    await w.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: true, ...start });
+    await w.lp.tick();
+    return w;
+  };
+
+  it('a start without the new fields saves the old config shape and still moves on the first reading outside', async () => {
+    const { lp, m, pool } = await open();
+    expect(Object.keys(lp.state.config!).sort()).toEqual(['bandPct', 'baseAmount', 'capital', 'rerange']);
+    const saved = JSON.parse(JSON.stringify(lp.state)) as LpState;
+    expect(saved.config).not.toHaveProperty('range');
+    expect(saved.config).not.toHaveProperty('compound');
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 1, inRange: true });
+  });
+
+  it('dwells outside for the configured minutes, then moves', async () => {
+    const { lp, m, pool, at } = await open(undefined, { range: { dwellMin: 30 } });
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 0, inRange: false, hold: { wait: 'dwell' } });
+    at(29 * 60_000);
+    await lp.tick();
+    expect(lp.status().reranges).toBe(0);
+    at(30 * 60_000);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 1, inRange: true });
+  });
+
+  it('a price buffer holds a poke just past the edge', async () => {
+    const { lp, m, pool } = await open(undefined, { range: { bufferPct: 0.05 } });
+    m.movePrice(pool, 1.12); // about 12% up, only ~2% past a ±10% edge
+    await lp.tick();
+    expect(lp.status().inRange).toBe(false);
+    expect(lp.status().reranges).toBe(0);
+    expect(lp.status().hold?.wait).toBe('buffer');
+    m.movePrice(pool, 1.2 / 1.12); // ~20% from the start, past the 5% buffer
+    await lp.tick();
+    expect(lp.status().reranges).toBe(1);
+  });
+
+  it('the cost check waits for in-range time, and time outside does not invent a pace', async () => {
+    const { lp, m, pool, at } = await open(undefined, { range: { costCheck: true, feeHorizonH: 24 } });
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n);
+    await lp.tick(); // starts the in-range clock; this tick itself is not yet earning time
+    at(9 * 60_000);
+    await lp.tick();
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 0, hold: { wait: 'cost' } });
+    at(9 * 60_000 + 60 * 60_000);
+    await lp.tick();
+    expect(lp.state.position!.earningMs).toBe(9 * 60_000);
+    expect(lp.status()).toMatchObject({ reranges: 0, hold: { wait: 'cost' } });
+  });
+
+  it('once the in-range pace covers the cost, waiting outside does not talk the bot out of the move', async () => {
+    const { lp, m, pool, at } = await open(undefined, { range: { costCheck: true, feeHorizonH: 24, dwellMin: 48 * 60 } });
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n);
+    await lp.tick();
+    at(15 * 60_000);
+    await lp.tick();
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 0, hold: { wait: 'dwell' } });
+    expect(lp.state.position!.earningMs).toBe(15 * 60_000);
+    at(15 * 60_000 + 48 * 60 * 60_000 - 1);
+    await lp.tick();
+    expect(lp.state.position!.earningMs).toBe(15 * 60_000);
+    expect(lp.status().reranges).toBe(0);
+    at(15 * 60_000 + 48 * 60 * 60_000);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 1, inRange: true });
+  });
+
+  it('compoundNow does not replace a step that started while it was reading the pool', async () => {
+    const { lp, m, pool } = await open();
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n);
+    await lp.tick();
+    const owed = lp['owed'].bind(lp) as (pool: unknown, pos: unknown) => Promise<unknown>;
+    lp['owed'] = async (p: unknown, pos: unknown) => {
+      lp.state.step = { action: 'rerange', stage: 'exit', tries: 0 };
+      return owed(p, pos);
+    };
+    await expect(lp.compoundNow()).rejects.toThrow(/busy moving the range/);
+    expect(lp.state.step).toMatchObject({ action: 'rerange', stage: 'exit' });
+  });
+
+  it('warns once as the price nears the edge, and not again until it comes back', async () => {
+    const msgs: string[] = [];
+    const { lp, m, pool } = await open({ emit: (e) => msgs.push(e.msg) }, { range: { nearEdgeFrac: 0.25 } });
+    m.movePrice(pool, 1.08);
+    await lp.tick();
+    expect(lp.status().inRange).toBe(true);
+    expect(lp.status().hold?.near).toBe(true);
+    expect(msgs.filter((x) => /near the edge/.test(x))).toHaveLength(1);
+    await lp.tick();
+    expect(msgs.filter((x) => /near the edge/.test(x))).toHaveLength(1);
+    m.movePrice(pool, 1 / 1.08);
+    await lp.tick();
+    expect(lp.status().hold?.near).toBe(false);
+  });
+
+  it('an ATR multiple widens the open beyond the configured band', async () => {
+    const px = PRICE;
+    const candles = Array.from({ length: 30 }, () => ({ o: px, h: px * 1.02, l: px * 0.98, c: px }));
+    const { lp } = await open({ candles: () => candles }, { bandPct: 0.01, range: { atrMult: 2, atrPeriod: 14 } });
+    const pos = lp.status().position!;
+    expect(pos.upper / pos.lower).toBeGreaterThan(1.1); // ±1% would be ~1.02; 2× a 4% ATR is about ±8%
+    expect(lp.state.config!.bandPct).toBe(0.01); // the setting is unchanged
+  });
+
+  it('cooldown 0 moves again on the next reading outside, right after a move', async () => {
+    const { lp, m, pool } = await open();
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status().reranges).toBe(1);
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 2, inRange: true });
+  });
+
+  it('a cooldown holds the next move, and a preset only changes the saved width', async () => {
+    const { lp, m, pool, at } = await open(undefined, { range: { cooldownMin: 60 } });
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status().reranges).toBe(1);
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 1, inRange: false, hold: { wait: 'cooldown' } });
+    at(59 * 60_000);
+    await lp.tick();
+    expect(lp.status().reranges).toBe(1);
+    at(60 * 60_000);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 2, inRange: true });
+
+    const quiet = await open();
+    const before = quiet.lp.status().position;
+    quiet.lp.setPolicy({ bandPct: 0.02, range: { dwellMin: 12 * 60, cooldownMin: 24 * 60 } });
+    expect(quiet.lp.state.config).toMatchObject({ bandPct: 0.02, range: { dwellMin: 720, cooldownMin: 1440 } });
+    expect(quiet.lp.status().reranges).toBe(0);
+    expect(quiet.lp.status().position).toEqual(before);
+  });
+
+  it('compounds fees into the position once they clear the gas multiple, and not before', async () => {
+    const { lp, m, pool } = await open(undefined, { compound: { enabled: true, gasMultiple: 1_000_000 }, rerange: false });
+    const L0 = lp.status().position!.liquidity;
+    // Small enough that 1_000_000 × the mock's gas still exceeds it, and large enough to add liquidity later.
+    m.addFees(pool, Q128 / 10n ** 9n, Q128 / 10n ** 9n);
+    await lp.tick();
+    const mid = lp.status();
+    const worth = mid.owed!.base * mid.price! + mid.owed!.quote;
+    expect(mid.hold?.compoundNeed).toBeGreaterThan(worth);
+    expect(mid.position!.liquidity).toBe(L0);
+    expect(mid.reranges).toBe(0);
+    const one = (mid.hold!.compoundNeed as number) / 1_000_000;
+    lp.setPolicy({ compound: { enabled: true, gasMultiple: Math.max(1, worth / one / 2) } });
+    await lp.tick();
+    const done = lp.status();
+    expect(done.owed!.base + done.owed!.quote).toBeCloseTo(0, 12);
+    expect(BigInt(done.position!.liquidity) > BigInt(L0)).toBe(true);
+    expect(done.reranges).toBe(0);
+    expect(done.pnl!.fees).toBeGreaterThan(0);
   });
 });

@@ -1,9 +1,10 @@
 /** Sticky Pro Desk bar. Four destinations stay; chevrons open the strategy menu. Phone uses the bottom bar. */
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { chainOf, chains, type ChainFilter } from './chains';
 import { Sparkline } from './charts';
 import { Icon, type IconName } from './icons';
-import { formatUsdChip, type HoldingsSnapshot } from '../live/holdingsMath';
+import type { HoldingsSnapshot } from '../live/holdingsMath';
+import { EthUsdCtx, inEthShort } from './units';
 import { pct } from './fmt';
 import type { AnyObj, Nav, View } from './model';
 import type { Opportunity } from '../market/scan';
@@ -27,6 +28,22 @@ function go(nav: Nav, id: (typeof TABS)[number]['id']) {
   if (id === 'home') nav({ v: 'home' });
   else if (id === 'bots') nav({ v: 'bots' });
   else if (id === 'holdings') nav({ v: 'holdings' });
+  else nav({ v: 'more' });
+}
+
+const PHONE: { id: 'home' | 'bots' | 'holdings' | 'alerts' | 'more'; label: string; icon: IconName }[] = [
+  { id: 'home', label: 'Home', icon: 'home' },
+  { id: 'bots', label: 'Bots', icon: 'grid' },
+  { id: 'holdings', label: 'Holdings', icon: 'wallet' },
+  { id: 'alerts', label: 'Alerts', icon: 'bell' },
+  { id: 'more', label: 'More', icon: 'more' },
+];
+
+function phoneGo(nav: Nav, id: (typeof PHONE)[number]['id']) {
+  if (id === 'home') nav({ v: 'home' });
+  else if (id === 'bots') nav({ v: 'bots' });
+  else if (id === 'holdings') nav({ v: 'holdings' });
+  else if (id === 'alerts') nav({ v: 'alerts' });
   else nav({ v: 'more' });
 }
 
@@ -66,6 +83,7 @@ function DeskMenu({ s, nav, onGuide, onActivity, close }: { s: AnyObj; nav: Nav;
           <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'chart' })}>Charts<small>Candles for a pair</small></button>
           <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'analytics' })}>Analytics<small>What the bots made</small></button>
           <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'convert' })}>Convert<small>Swap a coin you hold</small></button>
+          <button type="button" className="mega-link" onClick={() => jump({ v: 'alerts' })}>Alerts<small>Lock screen and this tab</small></button>
           <button type="button" className="mega-link" onClick={() => { close(); onGuide(); }}>Guide<small>What each bot does</small></button>
           <button type="button" className="mega-link" onClick={() => { close(); onActivity(); }}>Activity<small>Trades and stops</small></button>
         </div>
@@ -82,15 +100,13 @@ function DeskMenu({ s, nav, onGuide, onActivity, close }: { s: AnyObj; nav: Nav;
 }
 
 export function Header({
-  s, view, nav, chain, setChain, showUsd, setShowUsd, connected, ver, holdings, onActivity, onGuide,
+  s, view, nav, chain, setChain, connected, ver, holdings, onActivity, onGuide,
 }: {
   s: AnyObj;
   view: View;
   nav: Nav;
   chain: ChainFilter;
   setChain: (c: ChainFilter) => void;
-  showUsd: boolean;
-  setShowUsd: (on: boolean) => void;
   connected: boolean;
   ver: AnyObj | null;
   holdings: HoldingsSnapshot | null;
@@ -102,10 +118,12 @@ export function Header({
   const [mega, setMega] = useState<null | 'bots' | 'more' | 'phone'>(null);
   const root = useRef<HTMLElement>(null);
   const current = tabOf(view);
+  const phoneCurrent = view.v === 'alerts' ? 'alerts' : current;
   const cs = chains(s);
   const sel = chain === 'all' ? null : chainOf(s, chain);
+  const ethUsd = useContext(EthUsdCtx);
   const worth = !holdings ? null : !holdings.hasSigner ? null : holdings.netWorthExDustUsd ?? holdings.netWorthUsd;
-  const worthText = !holdings ? '…' : !holdings.hasSigner ? '—' : worth == null ? '—' : formatUsdChip(worth);
+  const worthText = !holdings ? '…' : !holdings.hasSigner ? '—' : worth == null ? '—' : inEthShort(worth, ethUsd);
   const letter = s.address ? s.address.slice(2, 4).toUpperCase() : 'P';
   const showAccount = !!s.copy || (typeof window !== 'undefined' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname));
 
@@ -157,7 +175,6 @@ export function Header({
           {menu && (
             <div className="menu" role="menu">
               <p className="menu-note">{s.address ? `${s.address.slice(0, 6)}…${s.address.slice(-4)}` : 'Paper only. No signing key.'}</p>
-              <button type="button" role="menuitem" onClick={() => setShowUsd(!showUsd)}>{showUsd ? 'Hide dollar amounts' : 'Show dollar amounts'}</button>
               <button type="button" role="menuitem" onClick={() => { setMenu(false); onActivity(); }}>Activity</button>
               {!s.copy && ver && <button type="button" role="menuitem" onClick={() => { setMenu(false); nav({ v: 'tools', tab: 'system' }); }}>{ver.title ?? 'Version'}</button>}
               {showAccount && <a role="menuitem" href="/account">Account</a>}
@@ -168,8 +185,8 @@ export function Header({
       </header>
       {mega && <div className="shade" onClick={() => setMega(null)} />}
       <nav className="tabbar" aria-label="Main">
-        {TABS.map((t) => (
-          <button key={t.id} type="button" className={current === t.id ? 'on' : ''} aria-current={current === t.id ? 'page' : undefined} onClick={() => { shut(); go(nav, t.id); }}>
+        {PHONE.map((t) => (
+          <button key={t.id} type="button" className={phoneCurrent === t.id ? 'on' : ''} aria-current={phoneCurrent === t.id ? 'page' : undefined} onClick={() => { shut(); phoneGo(nav, t.id); }}>
             <Icon name={t.icon} size={22} />
             <span>{t.label}</span>
           </button>

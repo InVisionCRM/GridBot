@@ -6,7 +6,7 @@
  * The gate blocks safe/medium when this report is unverified, or verified but not at least 90% burned or
  * locked by an allowlisted locker. Nothing in this repo calls a GoPlus-style LP-holder API. The report is
  * attached only when `v3LpLockCheck` is on (default off). With that option off the gate input never carries
- * a report, and gateToken is unchanged.
+ * a report, and gateToken is unchanged. Assess leaves `lpUnlocked` null unless `lpUnlockCheck` is on.
  *
  * Only a burn address, or an allowlisted locker whose code contains getLock and getLocksLength, counts as
  * locked. A contract that merely answers an expiry probe does not.
@@ -186,6 +186,29 @@ export interface V3LockRequest {
   backoffMs?: number[];
   sleep?: (ms: number) => Promise<void>;
   clock?: () => number;
+  /**
+   * Reuse a finished result for this chain, pool, and scanned block window.
+   * Off unless set. The window is `blockNumber - maxBlockSpan` … `blockNumber`.
+   */
+  cacheEnabled?: boolean;
+  /** TTL for that window cache. Default 10 minutes. Ignored unless `cacheEnabled`. */
+  cacheTtlMs?: number;
+  /** Max RPC calls for this invocation. 0 or omitted means no cap. */
+  callBudget?: number;
+}
+
+/** Default TTL for the block-range cache (`v3LpLockCacheTtlMs`). */
+export const V3_LP_LOCK_CACHE_TTL_MS = 10 * 60_000;
+
+export function v3LockRangeKey(chainId: number, pool: string, fromBlock: number, toBlock: number): string {
+  return `${chainId}:${pool.toLowerCase()}:${fromBlock}:${toBlock}`;
+}
+
+/** The Mint-log window `discover` walks for a known head. */
+export function v3LockScanRange(head: number, maxBlockSpan?: number): { fromBlock: number; toBlock: number } {
+  const span = Math.max(0, maxBlockSpan ?? DEFAULT_SPAN);
+  const toBlock = Math.max(0, Math.floor(head));
+  return { fromBlock: Math.max(0, toBlock - span), toBlock };
 }
 
 export interface LockExpiry { at: number | null; permanent: boolean }
@@ -273,8 +296,38 @@ export function encodeIncreaseLiquidity(tokenId: bigint, liquidity: bigint): { t
 }
 
 const cache = new Map<string, { at: number; ttl: number; report: V3LpReport }>();
+const rangeCache = new Map<string, { at: number; ttl: number; report: V3LpReport }>();
 
-export function clearV3LpLockCache(): void { cache.clear(); }
+export function clearV3LpLockCache(): void { cache.clear(); rangeCache.clear(); }
+
+const BUDGET_DETAIL = 'LP lock unverified: call budget exceeded';
+
+function budgetDetail(calls: number): string {
+  return `${BUDGET_DETAIL} (${calls} calls)`;
+}
+
+function isBudgetError(e: unknown): boolean {
+  return e instanceof Error && e.message.startsWith(BUDGET_DETAIL);
+}
+
+/** Count every RPC this invocation makes. The call that would pass the cap is not sent. */
+function withCallBudget(inner: V3LockRpc, budget: number): { rpc: V3LockRpc; count: () => number } {
+  let n = 0;
+  const take = () => {
+    if (n >= budget) throw new Error(budgetDetail(n));
+    n += 1;
+  };
+  return {
+    count: () => n,
+    rpc: {
+      call: (to, data) => { take(); return inner.call(to, data); },
+      getCode: (a) => { take(); return inner.getCode(a); },
+      getLogs: (f) => { take(); return inner.getLogs(f); },
+      getReceipt: (h) => { take(); return inner.getReceipt(h); },
+      blockNumber: () => { take(); return inner.blockNumber(); },
+    },
+  };
+}
 
 function clip(e: unknown): string {
   return String((e as Error)?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 180);
@@ -661,20 +714,65 @@ async function runInspect(ctx: ScanCtx, req: V3LockRequest): Promise<V3LpReport>
  * Never throws: RPC trouble comes back as `status: 'unverified'`.
  * Repeated calls for the same pool reuse a short cache (verified 10 min, unverified 30 s).
  */
-export async function inspectV3LpLock(rpc: V3LockRpc, req: V3LockRequest): Promise<V3LpReport> {
+async function inspectV3LpLockNow(rpc: V3LockRpc, req: V3LockRequest, legacyCache: boolean): Promise<V3LpReport> {
   const pool = req.pool.toLowerCase();
   const npm = req.positionManager.toLowerCase();
   const key = `${req.chainId}:${pool}:${npm}`;
   const clock = req.clock ?? Date.now;
-  const hit = cache.get(key);
-  if (hit && clock() - hit.at < hit.ttl) return hit.report;
+  if (legacyCache) {
+    const hit = cache.get(key);
+    if (hit && clock() - hit.at < hit.ttl) return hit.report;
+  }
   const ctx: ScanCtx = { rpc: pace(rpc, req), multicall: null, code: new Map(), uncx: new Map() };
   let report: V3LpReport;
   try {
     report = await runInspect(ctx, req);
   } catch (e) {
+    if (isBudgetError(e)) throw e;
     report = unverifiedV3Lp(pool, npm, `rpc failed: ${clip(e)}`);
   }
-  cache.set(key, { at: clock(), ttl: report.status === 'verified' ? VERIFIED_TTL_MS : UNVERIFIED_TTL_MS, report });
+  if (legacyCache) cache.set(key, { at: clock(), ttl: report.status === 'verified' ? VERIFIED_TTL_MS : UNVERIFIED_TTL_MS, report });
   return report;
+}
+
+async function inspectV3LpLockBounded(rpc: V3LockRpc, req: V3LockRequest, cacheOn: boolean, budget: number): Promise<V3LpReport> {
+  const counted = budget > 0 ? withCallBudget(rpc, budget) : { rpc, count: () => 0 };
+  const clock = req.clock ?? Date.now;
+  const ttl = req.cacheTtlMs != null && req.cacheTtlMs > 0 ? req.cacheTtlMs : V3_LP_LOCK_CACHE_TTL_MS;
+  let head = req.blockNumber;
+  const fail = (e: unknown): V3LpReport => {
+    if (isBudgetError(e)) return unverifiedV3Lp(req.pool, req.positionManager, budgetDetail(counted.count()));
+    return unverifiedV3Lp(req.pool, req.positionManager, `rpc failed: ${clip(e)}`);
+  };
+  if (cacheOn && head == null) {
+    try { head = await counted.rpc.blockNumber(); } catch (e) { return fail(e); }
+  }
+  const range = head != null ? v3LockScanRange(head, req.maxBlockSpan) : null;
+  const rangeKey = cacheOn && range ? v3LockRangeKey(req.chainId, req.pool, range.fromBlock, range.toBlock) : null;
+  if (rangeKey) {
+    const hit = rangeCache.get(rangeKey);
+    if (hit && clock() - hit.at < hit.ttl) return hit.report;
+  }
+  const next = head != null ? { ...req, blockNumber: head } : req;
+  let report: V3LpReport;
+  try {
+    report = await inspectV3LpLockNow(counted.rpc, next, !cacheOn);
+  } catch (e) {
+    report = fail(e);
+  }
+  if (rangeKey) rangeCache.set(rangeKey, { at: clock(), ttl, report });
+  return report;
+}
+
+/**
+ * Read one V3 pool's position NFTs and classify the in-range liquidity.
+ * Never throws: RPC trouble comes back as `status: 'unverified'`.
+ * Repeated calls for the same pool reuse a short cache (verified 10 min, unverified 30 s).
+ * `cacheEnabled` and `callBudget` are extra limits. Both off leaves this path unchanged.
+ */
+export async function inspectV3LpLock(rpc: V3LockRpc, req: V3LockRequest): Promise<V3LpReport> {
+  const cacheOn = req.cacheEnabled === true;
+  const budget = typeof req.callBudget === 'number' && req.callBudget > 0 ? Math.floor(req.callBudget) : 0;
+  if (!cacheOn && budget === 0) return inspectV3LpLockNow(rpc, req, true);
+  return inspectV3LpLockBounded(rpc, req, cacheOn, budget);
 }

@@ -45,7 +45,7 @@ const PRESET_USE: Record<string, string> = {
   'stack-hex': 'Start with only PLS and end with more HEX.',
   'stack-plsx': 'Start with only PLS and end with more PLSX.',
   'stack-ehex': 'Start with only PLS and end with more eHEX.',
-  'stable-ladder': 'PLS against dollars, split across DAI and USDC.',
+  'stable-ladder': 'PLS against stablecoins, split across DAI and USDC.',
 };
 
 function GridDiagram() {
@@ -147,7 +147,7 @@ export function Guide({ onClose }: { onClose: () => void }) {
                 </ul>
               </div>
             </div>
-            <p className="muted small">Each grid shows two numbers separately. <b>Earned by trading</b> is what completed buy → sell trades made, after fees and gas, in the coin the grid spends; price moves no longer change it. <b>Bought, not sold yet</b> is the coins waiting for the next level up, which go up and down with the price until they sell. Everything is shown in coins first; the <b>$</b> switch in the top bar adds the dollar value beside each amount, at today's price.</p>
+            <p className="muted small">Each grid shows two numbers separately. <b>Earned by trading</b> is what completed buy → sell trades made, after fees and gas, in the coin the grid spends; price moves no longer change it. <b>Bought, not sold yet</b> is the coins waiting for the next level up, which go up and down with the price until they sell. Everything is shown in coins; totals across coins (net worth, pool sizes) are shown in ETH.</p>
           </section>
 
           <section id="g-costs">

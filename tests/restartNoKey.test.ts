@@ -17,7 +17,7 @@ describe('restart: a saved live grid without a key', () => {
     const store = new MemoryStore<MultiState>();
     const a = new MultiBot({ net: NET, reader: chain, signer: chain, store, log: new Logger(true) });
     const spot = (await a.prices())[NET.defaultQuote];
-    const grid = { stable: NET.defaultQuote, lowerPrice: spot * 0.8, upperPrice: spot * 1.2, gridCount: 4, totalCapitalUsd: 10 };
+    const grid = { stable: NET.defaultQuote, lowerPrice: spot * 0.8, upperPrice: spot * 1.2, gridCount: 4, totalCapitalQuote: 10 };
     const live = await a.add({ mode: 'live', ...grid });
     const paper = await a.add({ mode: 'paper', ...grid });
 

@@ -3,6 +3,7 @@
  * (server: market/scanner.ts; the estimate is market/scan.ts bestWay, fitted on the walk-forward in the README). Each
  * row says how to use the pool (grid or liquidity) and opens New bot with that setting; details are one tap away.
  */
+import { coinNum, Eth, ethToUsd, usdToEth, useEthUsd } from './units';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { http } from './api';
 import { ago, num, pct } from './fmt';
@@ -28,8 +29,7 @@ function saveFilters(f: Filters) {
   try { localStorage.setItem('opps2', JSON.stringify({ ...f, q: '' })); } catch { /* storage unavailable */ }
 }
 
-const money = (x: number) => (x >= 1e9 ? `$${(x / 1e9).toFixed(1)}B` : x >= 1e6 ? `$${(x / 1e6).toFixed(1)}M` : x >= 1e3 ? `$${(x / 1e3).toFixed(0)}K` : `$${x.toFixed(0)}`);
-const dollars = (x: number) => `${x < 0 ? '−' : '+'}$${Math.abs(x) >= 100 ? Math.abs(x).toFixed(0) : Math.abs(x).toFixed(2)}`;
+// Pool sizes and test amounts come from the API in dollars and are shown in ETH (units.tsx: which ETH price)
 
 /** Built-in markets carry no report (null): they were checked when they were added to the app. */
 export const isSafe = (o: Opportunity) => o.liveAllowed && (o.risk == null || o.risk === 'low');
@@ -94,13 +94,13 @@ function Row({ s, o, w, rank, nav, act, busy }: { s: AnyObj; o: Opportunity; w: 
           <span className="opp2-title"><ChainBadge c={chainOf(s, o.chainId)} testnet={false} /><b>{o.label}</b><span className={`tag ${w.how === 'lp' ? 'way-lp' : 'way-grid'}`}>{w.how === 'lp' ? 'Liquidity' : 'Grid'}</span><RiskTag o={o} />{Math.abs(o.movePct) >= BIG_MOVE && <span className="tag risk-mid" title="The estimate counts what the bot earns, not the coin's own price. A coin that moved this much can lose (or gain) more than the bot earns.">price {pct(o.movePct, 0, true)} this week</span>}</span>
           <span className="small muted">{howLine(o, w.how)}</span>
         </span>
-        <span className="opp2-num"><b className="pos">≈ {pct(w.expected, 1, true)}</b><span className="small muted">a week · {dollars(w.expected * o.usd)} on {money(o.usd)}</span></span>
+        <span className="opp2-num"><b className="pos">≈ {pct(w.expected, 1, true)}</b><span className="small muted">a week · <Eth usd={w.expected * o.usd} sign /> on <Eth usd={o.usd} /></span></span>
       </button>
       <button type="button" className="btn small-btn primary opp2-try" disabled={busy} onClick={() => tryIt(o, w.how, nav, act)}>Try</button>
       {open && (
         <div className="opp2-more small">
-          <span>Last week it would have earned <b>{pct(last, 2, true)}</b> ({dollars(last * o.usd)})</span>
-          {o.activity && <span>{money(o.activity.liquidityUsd)} in the pool · {money(o.activity.volume24Usd)} traded today</span>}
+          <span>Last week it would have earned <b>{pct(last, 2, true)}</b> (<Eth usd={last * o.usd} sign />)</span>
+          {o.activity && <span><Eth usd={o.activity.liquidityUsd} /> in the pool · <Eth usd={o.activity.volume24Usd} /> traded today</span>}
           <span>Price {pct(o.movePct, 1, true)} this week (not counted: that isn't the bot's doing)</span>
           <span className="inline"><DexTag name={dexName} feeBps={o.feeBps} />{o.key == null && <span className="mono muted" title="A coin not in the app yet: two coins can share a name, this is the one at this address">{o.ref.address.slice(0, 6)}…{o.ref.address.slice(-4)}</span>}</span>
           {!o.liveAllowed && o.riskWhy && <span className="neg">Failed the safety check: {o.riskWhy}</span>}
@@ -116,7 +116,8 @@ export function Opportunities({ s, nav, act, busy }: { s: AnyObj; nav: Nav; act:
   const [f, setF] = useState<Filters>(loadFilters);
   const set = (x: Partial<Filters>) => { const n = { ...f, ...x }; setF(n); saveFilters(n); setShown(PAGE); };
   const [shown, setShown] = useState(PAGE);
-  const [usd, setUsd] = useState<string | null>(null);
+  const [testEth, setTestEth] = useState<string | null>(null); // typed in ETH; the scan is still asked in dollars
+  const ethUsd = useEthUsd();
 
   const all = useMemo(() => ((p?.chains ?? []) as AnyObj[]).filter((c) => chain === 'all' || c.chainId === chain).flatMap((c) => c.items as Opportunity[]), [p, chain]);
   const best = useMemo(() => all.filter(isSafe).flatMap((o) => { const w = wayOf(o, 'best'); return w ? [{ o, w }] : []; }).sort((a, b) => b.w.expected - a.w.expected).slice(0, 3), [all]);
@@ -130,7 +131,8 @@ export function Opportunities({ s, nav, act, busy }: { s: AnyObj; nav: Nav; act:
 
   if (err) return <main className="stack"><div className="banner error"><span className="grow">Opportunities: {err}</span></div></main>;
   if (!p) return <main className="stack"><p className="muted">Loading…</p></main>;
-  const testUsd = usd ?? String(p.testUsd);
+  const shownEth = testEth ?? (usdToEth(p.testUsd, ethUsd) != null ? coinNum(usdToEth(p.testUsd, ethUsd)!, 3).replace(/,/g, '') : '');
+  const testUsd = testEth == null ? p.testUsd : ethToUsd(Number(testEth), ethUsd);
   const scan = () => act(async () => { await http('/api/opportunities/scan', 'POST', { testUsd: Number(testUsd) }); setP({ ...p, running: true }); });
   const errors = ((p.chains ?? []) as AnyObj[]).filter((c) => (chain === 'all' || c.chainId === chain) && c.error);
 
@@ -154,7 +156,7 @@ export function Opportunities({ s, nav, act, busy }: { s: AnyObj; nav: Nav; act:
           <span className="muted small">{p.running ? scanStep(p.progress) : p.at ? `updated ${ago(p.at)}` : 'not checked yet'}</span>
         </div>
         <p className="small">
-          <L tip="From the last 7 days of each pool's real trades. A grid's estimate comes from how much its price swings; a liquidity range's from what it earned after costs last week, scaled to what usually repeats. Checked on 92 real pools over 4 weeks (October 2026): the top tenth was expected to earn 7.2% (grid) and 14.1% (liquidity) and earned 7.4% and 12.5%. Single pools vary a lot: start in paper.">What each pool is likely to earn in the next week</L>, best first, with {money(p.testUsd)} put in.
+          <L tip="From the last 7 days of each pool's real trades. A grid's estimate comes from how much its price swings; a liquidity range's from what it earned after costs last week, scaled to what usually repeats. Checked on 92 real pools over 4 weeks (October 2026): the top tenth was expected to earn 7.2% (grid) and 14.1% (liquidity) and earned 7.4% and 12.5%. Single pools vary a lot: start in paper.">What each pool is likely to earn in the next week</L>, best first, with <Eth usd={p.testUsd} /> put in.
         </p>
         <div className="opp-filters">
           <div className="seg" role="radiogroup" aria-label="Strategy">
@@ -180,8 +182,8 @@ export function Opportunities({ s, nav, act, busy }: { s: AnyObj; nav: Nav; act:
         <details className="more">
           <summary>Check again</summary>
           <div className="actions">
-            <label className="small muted test-usd"><L tip="Every pool is tested with this much, in dollars. Use what you plan to put in: price impact and your share of a pool depend on it.">Test with $</L><input value={testUsd} inputMode="decimal" onChange={(e) => setUsd(e.target.value.replace(/[$,\s]/g, ''))} /></label>
-            <button type="button" className="btn small-btn" disabled={busy || p.running} onClick={scan}>{p.running ? 'Checking…' : 'Check now'}</button>
+            <label className="small muted test-usd"><L tip="Every pool is tested with this much, in ETH. Use what you plan to put in: price impact and your share of a pool depend on it.">Test with (ETH)</L><input value={shownEth} inputMode="decimal" disabled={!ethUsd} onChange={(e) => setTestEth(e.target.value.replace(/[,\s]/g, ''))} /></label>
+            <button type="button" className="btn small-btn" disabled={busy || p.running || !(Number(testUsd) > 0)} onClick={scan}>{p.running ? 'Checking…' : 'Check now'}</button>
             <span className="small muted">It runs by itself once a day.</span>
           </div>
         </details>

@@ -5,6 +5,21 @@ export const px = (x: number | null | undefined, sig = 6) => {
   if (Math.abs(x) >= 1) return x.toLocaleString(undefined, { maximumFractionDigits: 4 });
   return Number(x.toPrecision(sig)).toString().replace(/e-(\d)$/, 'e-0$1');
 };
+const SUB = '₀₁₂₃₄₅₆₇₈₉';
+/**
+ * A small price for a narrow tile: the run of zeros after "0.0" as a subscript count, the same significant digits as
+ * px() (0.00000216304 → "0.0₅216304", five zeros). Prices from 1e-4 up, and non-finite values, read as px() does.
+ * Pair it with a title of px() so the plain figure is a hover/long-press away.
+ */
+export const pxShort = (x: number | null | undefined, sig = 6) => {
+  if (x == null || !Number.isFinite(x) || x === 0 || Math.abs(x) >= 1e-4) return px(x, sig);
+  const r = Number(Math.abs(x).toPrecision(sig));
+  if (r >= 1e-4) return px(x, sig);
+  const [mant, exp] = r.toExponential().split('e');
+  const zeros = -Number(exp) - 1;
+  const digits = mant.replace('.', '');
+  return `${x < 0 ? '−' : ''}0.0${String(zeros).split('').map((d) => SUB[+d]).join('')}${digits}`;
+};
 export const num = (x: number | null | undefined, d = 2) => (x == null || !Number.isFinite(x) ? '—' : x.toLocaleString(undefined, { maximumFractionDigits: d }));
 export const pct = (x: number | null | undefined, d = 2, sign = false) =>
   x == null || !Number.isFinite(x) ? '—' : `${sign && x > 0 ? '+' : ''}${(x * 100).toFixed(d)}%`;

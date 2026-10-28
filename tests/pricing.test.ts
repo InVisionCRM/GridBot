@@ -29,7 +29,7 @@ function make(chain: MockChain, signer: MockChain | null = chain, opts: Record<s
 }
 async function hexGrid(engine: GridEngine, chain: MockChain, mode: 'live' | 'paper' = 'live', extra = {}) {
   const spot = await new Quoter(chain, NET, HEX).getPrice();
-  await engine.start({ mode, stable: 'HEX', lowerPrice: spot * 0.88, upperPrice: spot * 1.12, gridCount: 12, totalCapitalUsd: 6000, ...extra });
+  await engine.start({ mode, stable: 'HEX', lowerPrice: spot * 0.88, upperPrice: spot * 1.12, gridCount: 12, totalCapitalQuote: 6000, ...extra });
   return spot;
 }
 /** Move the HEX pool so getPrice() lands just past `level` (below for buys, above for sells). */
@@ -112,7 +112,7 @@ describe('Engine pricing on PLS/HEX (8 decimals)', () => {
     await engine.tick();
     expect(chain.sent.map((s) => s.method)).toEqual(['approve', 'swapExactTokensForETH']);
     // exact approval in HEX raw units (8 decimals), not 18
-    expect(chain.sent[0].args[1]).toBe(toUnits(engine.state.usdPerBuy.toFixed(8), 8));
+    expect(chain.sent[0].args[1]).toBe(toUnits(engine.state.quotePerBuy.toFixed(8), 8));
     const buy = engine.state.trades[0];
     expect(buy).toMatchObject({ side: 'buy', stable: 'HEX', fromReceipt: true, levelPrice: iv.buyPrice });
     expect(buy.triggerPrice!).toBeLessThanOrEqual(iv.buyPrice);
@@ -120,9 +120,9 @@ describe('Engine pricing on PLS/HEX (8 decimals)', () => {
     expect(Math.abs(buy.slippagePct!)).toBeLessThan(1e-6);
     expect(buy.execPrice! / (buy.triggerPrice! / (1 - F) ** 2)).toBeCloseTo(1, 2); // ≈ trigger + 2 fees
     expect(buy.execPrice!).toBeLessThan(iv.sellPrice);
-    expect(buy.plsAmount).toBeCloseTo(engine.state.usdPerBuy / buy.execPrice!, 6);
-    expect(buy.gasUsd).toBeCloseTo(buy.gasPls * buy.execPrice!, 12); // gas in HEX
-    expect(buy.lotCost!).toBeCloseTo(buy.stableAmount + buy.gasUsd, 12);
+    expect(buy.plsAmount).toBeCloseTo(engine.state.quotePerBuy / buy.execPrice!, 6);
+    expect(buy.gasQuote).toBeCloseTo(buy.gasPls * buy.execPrice!, 12); // gas in HEX
+    expect(buy.lotCost!).toBeCloseTo(buy.stableAmount + buy.gasQuote, 12);
     expect(engine.state.intervals[iv.index].lotCost).toBeCloseTo(buy.lotCost!, 12);
 
     crossHex(chain, iv.sellPrice, 'up');
@@ -133,9 +133,9 @@ describe('Engine pricing on PLS/HEX (8 decimals)', () => {
     expect(sell.plsAmount / buy.plsAmount).toBeCloseTo(1, 12); // sells exactly the lot that interval bought
     expect(sell.execPrice!).toBeGreaterThan(buy.execPrice!);
     expect(sell.lotCost!).toBeCloseTo(buy.lotCost!, 12);
-    expect(sell.roundTripNet!).toBeCloseTo(sell.stableAmount - sell.gasUsd - buy.lotCost!, 10);
+    expect(sell.roundTripNet!).toBeCloseTo(sell.stableAmount - sell.gasQuote - buy.lotCost!, 10);
     expect(sell.roundTripNet!).toBeGreaterThan(0);
-    expect(sell.realizedPnlUsd).toBeCloseTo(sell.roundTripNet!, 12);
+    expect(sell.realizedPnlQuote).toBeCloseTo(sell.roundTripNet!, 12);
     // on-chain HEX balance moved by exactly the recorded amounts
     const dHex = Number(chain.bal('HEX') - hex0) / 1e8;
     expect(dHex).toBeCloseTo(sell.stableAmount - buy.stableAmount, 6);
@@ -144,7 +144,7 @@ describe('Engine pricing on PLS/HEX (8 decimals)', () => {
     expect(st.stats.roundTrips).toBe(1);
     expect(st.stats.avgNet).toBeCloseTo(sell.roundTripNet!, 12);
     expect(st.stats.totalFees).toBeCloseTo(buy.feeQuote! + sell.feeQuote!, 12);
-    expect(st.stats.totalGas).toBeCloseTo(buy.gasUsd + sell.gasUsd, 12);
+    expect(st.stats.totalGas).toBeCloseTo(buy.gasQuote + sell.gasQuote, 12);
     expect(st.pnl.plsHeld).toBeCloseTo(0, 6);
   });
 
@@ -224,7 +224,7 @@ describe('Engine pricing on PLS/HEX (8 decimals)', () => {
 });
 
 describe('Economics warning (never blocks a start) + paper/live parity', () => {
-  const tight = (spot: number) => ({ lowerPrice: spot * 0.98, upperPrice: spot * 1.02, gridCount: 40, totalCapitalUsd: 50 });
+  const tight = (spot: number) => ({ lowerPrice: spot * 0.98, upperPrice: spot * 1.02, gridCount: 40, totalCapitalQuote: 50 });
 
   it('a live grid that loses money per round-trip still starts, with a plain warning', async () => {
     const chain = new MockChain(P0);
@@ -240,8 +240,8 @@ describe('Economics warning (never blocks a start) + paper/live parity', () => {
     const chain = new MockChain(P0);
     const store = new MemoryStore<BotState>();
     const { engine } = make(chain);
-    await engine.start({ mode: 'live', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 50 });
-    store.save({ ...engine.state, config: { lowerPrice: P0 * 0.975, upperPrice: P0 * 1.025, gridCount: 36, totalCapitalUsd: 100 }, econ: undefined, status: 'running' });
+    await engine.start({ mode: 'live', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 50 });
+    store.save({ ...engine.state, config: { lowerPrice: P0 * 0.975, upperPrice: P0 * 1.025, gridCount: 36, totalCapitalQuote: 100 }, econ: undefined, status: 'running' });
     const reloaded = new GridEngine({ net: NET, reader: chain, signer: chain, store, log: new Logger(true), maxRetries: 0, retryDelayMs: 0 });
     expect(reloaded.state.status).toBe('running');
     reloaded.stop();
@@ -261,7 +261,7 @@ describe('Economics warning (never blocks a start) + paper/live parity', () => {
     const chain = new MockChain(P0);
     chain.gasPrice = 10n ** 15n; // 280–500 PLS per round-trip
     const { engine } = make(chain);
-    await engine.start({ mode: 'live', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalUsd: 0.01 });
+    await engine.start({ mode: 'live', lowerPrice: P0 * 0.9, upperPrice: P0 * 1.1, gridCount: 10, totalCapitalQuote: 0.01 });
     expect(engine.state.spacingWarn).toMatch(/Net per round-trip ≤ 0/);
   });
 
@@ -269,7 +269,7 @@ describe('Economics warning (never blocks a start) + paper/live parity', () => {
     for (const approval of ['exact', 'max'] as const) {
       const chain = new MockChain(P0);
       const { engine } = make(chain, null, { approval });
-      await engine.start({ mode: 'paper', lowerPrice: P0 * 0.8, upperPrice: P0, gridCount: 10, totalCapitalUsd: 50 }); // top of range: no start-up buy
+      await engine.start({ mode: 'paper', lowerPrice: P0 * 0.8, upperPrice: P0, gridCount: 10, totalCapitalQuote: 50 }); // top of range: no start-up buy
       chain.setPrice(P0 * 0.955); await engine.tick(); // two buys
       const buys = engine.state.trades.filter((t) => t.side === 'buy');
       expect(buys).toHaveLength(2);

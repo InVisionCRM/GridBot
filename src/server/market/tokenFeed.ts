@@ -4,15 +4,19 @@
  * on the trader, is used only to broadcast the signed transaction.
  */
 import { JsonRpcProvider } from 'ethers';
+import { readDecimals } from '../../live/decimals';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
-import { unverifiedV3Lp } from '../../market/v3LpLock';
+import { applyLpUnlock, cachedTokenLp, LP_CHECK_TIMEOUT_MS, tokenLpKey, unverifiedLpUnlock, type TokenLpSnapshot } from '../../market/lpUnlock';
+import { unverifiedV3Lp, V3_LP_LOCK_CACHE_TTL_MS } from '../../market/v3LpLock';
+import { readLiveLpUnlock } from './lpUnlockRead';
 import { readV3LpLock, type V3LockReader } from './v3LpLockRead';
 import { ERC20, ROUTER } from '../dex/abis';
 import { readCall } from '../dex/types';
 import { fetchJson } from '../fetchJson';
 import { holderApiBase, readHolderConcentration, type HolderChain } from './holderRead';
+import { readOwnerPowers } from './ownerRead';
 import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
 import type { DexConfig } from '../../live/chains';
 import type { SafetyLimits } from '../../live/limits';
@@ -24,6 +28,7 @@ import type { Hub } from '../chains/hub';
 import type { GeckoSource } from './gecko';
 import { PoolSniper, type LogSource, type SniperChain } from './sniper';
 import { TokenTrader, type Position, type TraderState } from '../bot/tokenTrader';
+import { PlayRejectLog } from '../bot/playRejects';
 import { quoteTradeImpact } from './tradeImpact';
 
 interface Reader extends ChainReader {
@@ -92,14 +97,24 @@ function broadcast(url: string, raw: string): Promise<string> {
 export function createTokenTrader(o: {
   hub: Hub; gecko: GeckoSource; store: Store<TraderState>; emit: Emit;
   approval: 'exact' | 'max'; receiptTimeoutMs: number;
+  /** Data directory for the append-only reject log. Omit in tests that keep rejects in memory. */
+  dataDir?: string;
 }): TokenTrader {
   const sniper = new PoolSniper({ chains: sniperChains(o.hub), source: logSource(o.hub) });
-  const flag = { on: () => false };
+  const flags = {
+    v3LpLockCheck: () => false,
+    lpUnlockCheck: () => false,
+    v3LpLockCacheEnabled: () => false,
+    v3LpLockCacheTtlMs: () => V3_LP_LOCK_CACHE_TTL_MS,
+    v3LpLockCallBudget: () => 0,
+  };
   const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
-    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flag.on()),
+    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flags.v3LpLockCheck(), flags.lpUnlockCheck(), {
+      cacheEnabled: flags.v3LpLockCacheEnabled(), cacheTtlMs: flags.v3LpLockCacheTtlMs(), callBudget: flags.v3LpLockCallBudget(),
+    }),
     // Called only when the holder check is on. Flag off never reaches this, so a scan makes no explorer calls.
     holders: (pool) => {
       const rt = o.hub.rt(pool.chainId);
@@ -137,8 +152,25 @@ export function createTokenTrader(o: {
     // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
     quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
     resolve: (hit) => resolveHit(o.hub, hit),
+    ownerPowers: (pool) => readOwnerPowers(o.hub.rt(pool.chainId).reader, pool.chainId, pool.token),
+    // the signer's on-chain balance of the position's token (reconcile after a sell that stopped partway)
+    balanceOf: async (p) => {
+      const rt = o.hub.rt(p.chainId);
+      if (!rt.signer) return null;
+      const owner = await rt.signer.getAddress();
+      const [raw, dec] = await Promise.all([rt.tokenBalance(owner, p.token), readDecimals(rt.reader, p.chainId, p.token)]);
+      return Number(raw) / 10 ** dec;
+    },
     // dynamic-fee pools: the fee at quote time (never cached)
     feeNow: (p) => readV3FeeBps(o.hub.rt(p.chainId).reader, p.pool),
+    // Generated only: is the spend coin the chain's own (wrapped or not), so its gas comes out of Generated
+    coinInfo: (chainId, spend) => {
+      try {
+        const cfg = o.hub.rt(chainId).cfg, a = spend.toLowerCase();
+        return { native: [cfg.wrappedNative.address, NATIVE_ZERO, NATIVE_EEEE].some((x) => x.toLowerCase() === a), nativeSymbol: cfg.nativeSymbol };
+      } catch { return null; } // a chain not on in this app: gas stays apart
+    },
+    rejects: o.dataDir ? new PlayRejectLog(o.dataDir) : undefined,
     live: {
       buy: async (pool, spend, limits) => {
         const draft = await draftOf(o.hub, pool);
@@ -146,25 +178,30 @@ export function createTokenTrader(o: {
         // (sells keep running: they are exits).
         const { q, fill } = await liveSwap(o.hub.rt(pool.chainId), o.hub.draftQuoter(draft), swapOpts(o, pool.chainId, trader.status().options.sniper.mevRpc), 'buy', spend, limits, sendChecks(trader).buy(pool.chainId));
         const usd = fill.amountInHuman * pool.usdPerSpend;
-        return { tokens: fill.amountOutHuman, spent: fill.amountInHuman, spentUsd: usd, price: fill.amountOutHuman > 0 ? fill.amountInHuman / fill.amountOutHuman : pool.price, impact: q.priceImpact, tx: fill.txHash };
+        return { tokens: fill.amountOutHuman, spent: fill.amountInHuman, spentUsd: usd, price: fill.amountOutHuman > 0 ? fill.amountInHuman / fill.amountOutHuman : pool.price, impact: q.priceImpact, tx: fill.txHash, gasUsed: fill.swapGasUsed, gasPriceWei: fill.swapGasPriceWei, gasNative: fill.gasNative };
       },
       sell: async (pos, tokens, limits) => {
         const pool = positionPool(pos);
         const draft = await draftOf(o.hub, pool);
         const { q, fill } = await liveSwap(o.hub.rt(pos.chainId), o.hub.draftQuoter(draft), swapOpts(o, pos.chainId, trader.status().options.sniper.mevRpc), 'sell', tokens, limits, sendChecks(trader).sell());
-        return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash };
+        return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash, gasUsed: fill.swapGasUsed, gasPriceWei: fill.swapGasPriceWei, gasNative: fill.gasNative };
       },
     },
   });
-  flag.on = () => trader.status().options.v3LpLockCheck === true;
+  flags.v3LpLockCheck = () => trader.status().options.v3LpLockCheck === true;
+  flags.lpUnlockCheck = () => trader.status().options.lpUnlockCheck === true;
+  flags.v3LpLockCacheEnabled = () => trader.status().options.v3LpLockCacheEnabled === true;
+  flags.v3LpLockCacheTtlMs = () => trader.status().options.v3LpLockCacheTtlMs;
+  flags.v3LpLockCallBudget = () => trader.status().options.v3LpLockCallBudget;
   return trader;
 }
 
 /** The halt checks a token-trader send runs right before it takes a nonce (and again between approve and swap). */
-export function sendChecks(trader: Pick<TokenTrader, 'canBuy' | 'status'>) {
+export function sendChecks(trader: Pick<TokenTrader, 'canBuy' | 'canSell'>) {
   return {
     buy: (chainId: number) => () => trader.canBuy(chainId),
-    sell: () => () => trader.status().on,
+    // Exits: allowed on and in "off for new buys" (exits only), never when off completely.
+    sell: () => () => trader.canSell(),
   };
 }
 
@@ -259,7 +296,7 @@ export async function withPoolFees(
   return read.filter((p): p is NonNullable<typeof p> => !!p);
 }
 
-async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', v3LpLockCheck = false): Promise<GateInput> {
+async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', v3LpLockCheck = false, lpUnlockCheck = false, v3Bounds: { cacheEnabled: boolean; cacheTtlMs: number; callBudget: number } = { cacheEnabled: false, cacheTtlMs: V3_LP_LOCK_CACHE_TTL_MS, callBudget: 0 }): Promise<GateInput> {
   const r = await hub.inspect({ chainId: pool.chainId, address: pool.token, quote: pool.spend, pool: pool.pool });
   const s = r.safety;
   let canMint: boolean | null = null;
@@ -275,17 +312,49 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
     proxy: s?.proxy != null ? true : null, lpUnlocked: null, holderConcentration: null, recentLiqPull: false,
     liveAllowed: s?.liveAllowed ?? false,
   };
-  // Flag off: do not attach v3Lp, so gateToken sees the same input it always has.
-  if (!v3LpLockCheck || pool.kind !== 'v3') return gate;
-  try {
-    const rt = hub.rt(pool.chainId);
-    gate.v3Lp = await readV3LpLock(rt.reader as V3LockReader, pool, rt.cfg.dexes, {
-      nowSec: Math.floor(Date.now() / 1000), blockTimeSec: rt.cfg.blockTimeSec, logChunk: rt.cfg.logChunk,
-    });
-  } catch (e) {
-    gate.v3Lp = unverifiedV3Lp(pool.pool, '', `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
-  }
+  // Both flags off: do not attach v3Lp or lpUnlock, so gateToken sees the same input it always has.
+  // This read runs only from assess, which the trader calls on the buy path. Exits do not come through here.
+  if (!lpUnlockCheck && (!v3LpLockCheck || pool.kind !== 'v3')) return gate;
+  const kind = pool.kind === 'v3' ? 'v3' : pool.kind === 'v2' ? 'v2' : 'other';
+  const snap = await cachedTokenLp(tokenLpKey(pool.chainId, pool.token), () => lpSnapshot(hub, pool, v3LpLockCheck, lpUnlockCheck, v3Bounds), {
+    timeoutMs: LP_CHECK_TIMEOUT_MS,
+    fallback: () => ({
+      ...(v3LpLockCheck && pool.kind === 'v3' ? { v3: unverifiedV3Lp(pool.pool, '', 'lp check timed out') } : {}),
+      ...(lpUnlockCheck ? { lp: unverifiedLpUnlock(kind, 'lp check timed out') } : {}),
+    }),
+  });
+  if (v3LpLockCheck && snap.v3) gate.v3Lp = snap.v3;
+  if (lpUnlockCheck && snap.lp) applyLpUnlock(gate, true, snap.lp);
   return gate;
+}
+
+async function lpSnapshot(hub: Hub, pool: FreshPool, v3LpLockCheck: boolean, lpUnlockCheck: boolean, v3Bounds: { cacheEnabled: boolean; cacheTtlMs: number; callBudget: number }): Promise<TokenLpSnapshot> {
+  const timing = () => {
+    const rt = hub.rt(pool.chainId);
+    return {
+      rt, nowSec: Math.floor(Date.now() / 1000), blockTimeSec: rt.cfg.blockTimeSec, logChunk: rt.cfg.logChunk,
+      ...(v3Bounds.cacheEnabled ? { cacheEnabled: true as const, cacheTtlMs: v3Bounds.cacheTtlMs } : {}),
+      ...(v3Bounds.callBudget > 0 ? { callBudget: v3Bounds.callBudget } : {}),
+    };
+  };
+  const snap: TokenLpSnapshot = {};
+  if (v3LpLockCheck && pool.kind === 'v3') {
+    try {
+      const t = timing();
+      snap.v3 = await readV3LpLock(t.rt.reader as V3LockReader, pool, t.rt.cfg.dexes, t);
+    } catch (e) {
+      snap.v3 = unverifiedV3Lp(pool.pool, '', `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
+    }
+  }
+  if (!lpUnlockCheck) return snap;
+  try {
+    const t = timing();
+    snap.lp = await readLiveLpUnlock(t.rt.reader as V3LockReader, pool, t.rt.cfg.dexes, t, snap.v3);
+  } catch (e) {
+    const kind = pool.kind === 'v3' ? 'v3' : pool.kind === 'v2' ? 'v2' : 'other';
+    snap.lp = unverifiedLpUnlock(kind, `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
+  }
+  return snap;
 }
 
 async function resolveHit(hub: Hub, hit: import('./sniper').SnipeHit): Promise<FreshPool | null> {

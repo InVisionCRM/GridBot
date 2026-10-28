@@ -5,9 +5,10 @@ import { ago } from './fmt';
 import { useChainFilter, type ChainInfo } from './chains';
 import { TokenMark, ChainMark } from './icons';
 import {
-  formatTokenAmount, formatUsdAmount, HOW_HOLDINGS, type FeeRow, type HoldingsSnapshot, type PositionRow,
+  formatTokenAmount, HOW_HOLDINGS, type FeeRow, type HoldingsSnapshot, type PositionRow,
 } from '../live/holdingsMath';
 import { botView, errMsg, type AnyObj, type Nav } from './model';
+import { inEth, useEthUsd } from './units';
 
 const DUST_KEY = 'holdingsDust';
 
@@ -59,7 +60,6 @@ function sliceOf(snap: HoldingsSnapshot, chainId: number | 'all', showDust: bool
   return { wallet, positions, fees, bots, hidden, net, botsUsd: priced ? Math.min(claim, walletUsd) : null };
 }
 
-const money = (n: number | null | undefined) => (n == null ? '—' : formatUsdAmount(n));
 const RANGE: Record<string, string> = { in: 'In range', below: 'Below range', above: 'Above range' };
 
 function amounts(row: PositionRow | FeeRow) {
@@ -77,6 +77,9 @@ export function Holdings({ s, snap, loading, error, reload, nav }: {
   nav: Nav;
 }) {
   const { chain } = useChainFilter();
+  // Values are held in dollars by the snapshot and shown in ETH (units.tsx: which ETH price)
+  const ethUsd = useEthUsd();
+  const money = (n: number | null | undefined) => inEth(n, ethUsd);
   const [showDust, setShowDust] = useState(() => { try { return localStorage.getItem(DUST_KEY) === '0'; } catch { return false; } });
   const toggleDust = () => setShowDust((v) => {
     const next = !v;
