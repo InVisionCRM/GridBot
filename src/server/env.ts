@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { FetchRequest, JsonRpcProvider, Wallet } from 'ethers';
 import { getNetwork, type NetworkKey } from '../live/networks';
-import { registerSecret } from './bot/logger';
+import { REDACT_FLOOR, registerSecret } from './bot/logger';
 import { ownerLoginFrom, parsePassHash, type OwnerConfig } from './friends/owner';
 
 /** Load .env from the working directory (Node ≥ 20.12). Missing file is fine. */
@@ -58,6 +58,66 @@ export function takeHostAuth(): OwnerConfig | null {
   const pass = parsePassHash(hash);
   const n = Number(sessionRaw);
   return { login: ownerLoginFrom(loginRaw), pass, session: Number.isInteger(n) && n > 0 ? n : 1 };
+}
+
+export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boolean }
+
+/**
+ * Quote keys for the capital router. Like PRIVATE_KEY they are removed from process.env at once.
+ * A key shorter than REDACT_FLOOR is refused: it is not stored, not configured, and not given to a provider.
+ * shortQuoteKeyWarnings() names the variable only, never the value and never its length.
+ * A longer key is registered for redaction. The strings stay in this module except on a quote request
+ * for a provider that was actually configured. A friend's copy never sees them.
+ */
+type BridgeName = 'across' | 'relay' | 'lifi';
+let bridgeKeys: Record<BridgeName, string | null> = { across: null, relay: null, lifi: null };
+/** Names only. A refused key is not stored here, and the value is never in this list. */
+let shortQuoteWarnings: string[] = [];
+
+/** Warnings from the last takeBridgeKeys(). Each line names the variable, never the value or its length. */
+export function shortQuoteKeyWarnings(): readonly string[] {
+  return shortQuoteWarnings;
+}
+
+function takeOne(name: 'ACROSS_API_KEY' | 'RELAY_API_KEY' | 'LIFI_API_KEY'): string | null {
+  const raw = process.env[name];
+  delete process.env[name];
+  if (!raw || !raw.trim()) return null;
+  const v = raw.trim();
+  if (v.length < REDACT_FLOOR) {
+    shortQuoteWarnings.push(`${name} was refused`);
+    return null;
+  }
+  registerSecret(v, REDACT_FLOOR);
+  return v;
+}
+
+/** What a quote provider may be constructed with. Null means keyless: nothing to put on a request. */
+export function bridgeProviderConfig(): Record<BridgeName, { apiKey: string } | null> {
+  const slot = (k: string | null) => (k == null ? null : { apiKey: k });
+  return { across: slot(bridgeKeys.across), relay: slot(bridgeKeys.relay), lifi: slot(bridgeKeys.lifi) };
+}
+
+/**
+ * A quote request for one provider. A keyless provider gets no Authorization header, and the key is
+ * never written into the url or the body.
+ */
+export function bridgeQuoteRequest(provider: BridgeName, url: string, init: { headers?: Record<string, string>; body?: string } = {}): { url: string; headers: Record<string, string>; body?: string } {
+  const headers = { ...(init.headers ?? {}) };
+  const key = bridgeKeys[provider];
+  if (key) headers.Authorization = `Bearer ${key}`;
+  return { url, headers, body: init.body };
+}
+
+export function takeBridgeKeys(): BridgeConfigured {
+  shortQuoteWarnings = [];
+  bridgeKeys = { across: takeOne('ACROSS_API_KEY'), relay: takeOne('RELAY_API_KEY'), lifi: takeOne('LIFI_API_KEY') };
+  return bridgeConfigured();
+}
+
+/** Whether a quote key was accepted. A refused key is false. The value is not in this object. */
+export function bridgeConfigured(): BridgeConfigured {
+  return { across: bridgeKeys.across != null, relay: bridgeKeys.relay != null, lifi: bridgeKeys.lifi != null };
 }
 
 /** What a friend's copy knows about itself: set by the host app that starts it (friends/copies.ts). */

@@ -33,6 +33,31 @@ export const EXIT = {
   liqPull: 0.4,
 } as const;
 
+/**
+ * costs.ts simBuy / simSell take the SELL-SIDE price (what one token fetches after one LP fee): pool mid × (1 − fee).
+ * Pools here carry the reserve mid, so convert before calling them (passing the mid charged the fee twice on a paper
+ * buy and not at all on a paper sell).
+ */
+export function sellSidePrice(mid: number, feeBps: number): number {
+  return mid * (1 - feeBps / 10_000);
+}
+
+/**
+ * Effective entry, spend per token actually received: net of the entry fee, price impact, slippage and buy tax.
+ * Paper and live use this same formula on their fill (paper: the simBuy fill; live: amountIn / amount received).
+ */
+export function effectiveEntry(spent: number, tokens: number): number {
+  return spent > 0 && tokens > 0 ? spent / tokens : 0;
+}
+
+/**
+ * Move needed in the pool mid to break even after a buy and a sell: the entry fee, the exit fee, and the sell tax taken
+ * from the tokens sold (1%/1% → +2.03%; 1%/1% + 5% sell tax → +7.40%). A buy tax is in the entry already (fewer tokens).
+ */
+export function breakEvenMove(entryFeeBps: number, exitFeeBps: number, sellTax = 0): number {
+  return 1 / ((1 - entryFeeBps / 10_000) * (1 - exitFeeBps / 10_000) * (1 - sellTax)) - 1;
+}
+
 export interface FreshPool {
   chainId: number;
   pool: string;
@@ -192,7 +217,7 @@ export function sizeBuy(p: {
     feeBps: p.feeBps, pool: { quoteReserve: p.quoteReserve, plsReserve: p.quoteReserve / p.price },
     gasPricePls: 0, approval: 'exact', slippageBps: 0, buyTaxPct: p.buyTax ?? 0,
   };
-  const fill = simBuy(fit.amount, p.price, model);
+  const fill = simBuy(fit.amount, sellSidePrice(p.price, p.feeBps), model);
   const usd = fit.amount * p.usdPerSpend;
   const why = fit.why
     ? `${fit.why}; ${usd.toFixed(2)} USD after fees and ${(((p.buyTax ?? 0) * 100).toFixed(1))}% buy tax`
@@ -216,13 +241,26 @@ export interface ExitPos {
   tp1Done: boolean;
   tp2Done: boolean;
   remainingFrac: number;
+  /**
+   * The pool fee the exit pays, as a fraction (0.003 = 0.3%). `entryPrice` is the effective entry (fees, impact and buy
+   * tax in); gains are measured on what a token fetches after this fee, so TP / SL / trail arming are net of both
+   * fees: with 1% in and 1% out, break-even is +2.03% in the mid. Default 0 (gross, the old behaviour).
+   */
+  exitFee?: number;
+  /**
+   * Sell tax the exit pays (fraction), taken from the tokens before the pool: gains are net of it too, so TP / SL are
+   * net of every cost. The bot passes the entry-time sell tax; a tax that rises later is the separate "sell tax rose"
+   * exit. Default 0.
+   */
+  exitTax?: number;
 }
 
 export type ExitDecision = { action: 'hold' } | { action: 'sell'; frac: number; why: string };
 
 /** What to do with an open position. `frac` is a share of the original size (the remainder on a full exit). */
 export function decideExit(p: ExitPos): ExitDecision {
-  const gain = p.entryPrice > 0 ? p.price / p.entryPrice - 1 : 0;
+  const keep = (1 - Math.max(0, Math.min(p.exitFee ?? 0, 0.99))) * (1 - Math.max(0, Math.min(p.exitTax ?? 0, 0.99)));
+  const gain = p.entryPrice > 0 ? (p.price * keep) / p.entryPrice - 1 : 0;
   const left = Math.max(0, Math.min(1, p.remainingFrac));
   if (!(left > 0)) return { action: 'hold' };
   const all = (why: string): ExitDecision => ({ action: 'sell', frac: left, why });
@@ -230,7 +268,7 @@ export function decideExit(p: ExitPos): ExitDecision {
   if (p.sellTax > p.entrySellTax + 0.005 || (p.entrySellTax <= TAX_TOLERANCE && p.sellTax > TAX_TOLERANCE)) return all(`sell tax rose to ${(p.sellTax * 100).toFixed(1)}%`);
   if (p.entryLiq > 0 && p.liq < p.entryLiq * (1 - EXIT.liqPull)) return all(`liquidity down ${((1 - p.liq / p.entryLiq) * 100).toFixed(0)}% from entry`);
   if (gain <= -EXIT.hardStop) return all(`hard stop ${(gain * 100).toFixed(1)}% from entry`);
-  const armed = p.peak >= p.entryPrice * (1 + EXIT.trailArm);
+  const armed = p.peak * keep >= p.entryPrice * (1 + EXIT.trailArm);
   if (armed && p.price <= p.peak * (1 - EXIT.trailGap)) return all(`trailing stop ${((1 - p.price / p.peak) * 100).toFixed(0)}% off the peak`);
   if (!p.tp1Done && gain >= EXIT.tp1) return { action: 'sell', frac: Math.min(left, EXIT.tp1Frac), why: `take profit ${(gain * 100).toFixed(0)}% (sell a third)` };
   if (!p.tp2Done && gain >= EXIT.tp2) return { action: 'sell', frac: Math.min(left, EXIT.tp2Frac), why: `take profit ${(gain * 100).toFixed(0)}% (sell a third)` };
@@ -274,7 +312,8 @@ export function replay(candles: ReplayCandle[], o: { feeBps?: number; maxImpact?
   const model = (price: number, liq: number): CostModel => ({
     feeBps, pool: { quoteReserve: Math.max(1, liq / 2), plsReserve: Math.max(1, liq / 2) / price }, gasPricePls: 0, approval: 'exact', slippageBps: 10,
   });
-  const buy = simBuy(spend, c0.price, model(c0.price, c0.liq));
+  const buy = simBuy(spend, sellSidePrice(c0.price, feeBps), model(c0.price, c0.liq));
+  const entryPrice = effectiveEntry(spend, buy.pls);
   let tokens = buy.pls;
   const entryTokens = tokens;
   let quote = 0;
@@ -286,7 +325,7 @@ export function replay(candles: ReplayCandle[], o: { feeBps?: number; maxImpact?
     if (c.price > peak) peak = c.price;
     const remainingFrac = entryTokens > 0 ? tokens / entryTokens : 0;
     const d = decideExit({
-      entryPrice: c0.price, price: c.price, peak, openedAt: c0.t, now: c.t,
+      entryPrice, exitFee: feeBps / 10_000, price: c.price, peak, openedAt: c0.t, now: c.t,
       entryVolume: c0.volume, volume: c.volume, entryLiq: c0.liq, liq: c.liq,
       sellTax: 0, entrySellTax: 0, sellSimOk: true, tp1Done, tp2Done, remainingFrac,
     });
@@ -294,7 +333,7 @@ export function replay(candles: ReplayCandle[], o: { feeBps?: number; maxImpact?
     const qty = Math.min(tokens, entryTokens * d.frac);
     const m = model(c.price, c.liq);
     for (const part of splitSell(qty, m.pool!.plsReserve, feeBps, maxImpact)) {
-      const s = simSell(part, c.price, m);
+      const s = simSell(part, sellSidePrice(c.price, feeBps), m);
       quote += s.quote;
       tokens -= part;
       sells++;
@@ -304,7 +343,8 @@ export function replay(candles: ReplayCandle[], o: { feeBps?: number; maxImpact?
     else if (d.why.includes('take profit')) tp2Done = true;
     if (tokens <= entryTokens * 1e-9) break;
   }
-  const mark = tokens > 0 ? simSell(tokens, candles[candles.length - 1].price, model(candles[candles.length - 1].price, candles[candles.length - 1].liq)).quote : 0;
+  const last = candles[candles.length - 1];
+  const mark = tokens > 0 ? simSell(tokens, sellSidePrice(last.price, feeBps), model(last.price, last.liq)).quote : 0;
   const pnlPct = spend > 0 ? (quote + mark - spend) / spend : 0;
   return { pnlPct, exits, held: tokens > entryTokens * 1e-6, buys: 1, sells };
 }

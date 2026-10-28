@@ -25,6 +25,7 @@ import type { ChainReader, MarketSnapshot, Quoter, TxSender } from './chain';
 export interface PresetPool { dex: string; kind: 'v2' | 'v3'; address: string; feeBps: number; feeTier?: number; dexName: string; switchTo: boolean }
 import { getPreset, legKey, listPresets, resolvePreset, type ResolvedLeg } from '../../live/presets';
 import { sameAddr } from '../dex/types';
+import type { ReservedBalance } from '../swap/holds';
 import { costModelOf, gridEconomics, type EconCfg, type EconSummary } from './econ';
 import { capGridEntry } from '../../market/poolSize';
 import { ActivityBus } from './activity';
@@ -203,6 +204,11 @@ export class MultiBot {
    * and the token trader stop opening anything new. The one stop hook system (it replaced onStop).
    */
   readonly stopHooks: ((chainId: number | null, halt: Halt) => void)[] = [];
+  /**
+   * ROUTER HOOK. index.ts sets this to `(halt) => router.halt(halt)`.
+   * Stop all turns the capital router off. STOP chain does not call it.
+   */
+  routerHalt: ((halt: Halt) => void) | null = null;
   /** Stop all / STOP chain presses, numbered: a start that was under way when one landed is refused (stopWins) */
   private stopSeq = 0;
   private stopLog: { seq: number; chainId: number | null; halt: Halt }[] = [];
@@ -623,6 +629,13 @@ export class MultiBot {
     this.d.log.warn(`KILL ALL — ${n} bot(s) stopped (grids, trend and liquidity bots).`);
     this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'error', notify: true, msg: `KILL ALL — ${n} bot(s) stopped`, data: { halt } });
     this.noteStop(null, halt);
+    // ROUTER HOOK: Stop all turns the capital router off. STOP chain does not.
+    // A save error inside the router must not fail the stop; the bots are already stopped.
+    try { this.routerHalt?.(halt); }
+    catch (e) {
+      const msg = String((e as Error)?.message ?? e).replace(/https?:\/\/\S+/gi, '[rpc]').slice(0, 180);
+      this.d.log.error(`router halt failed: ${msg}`);
+    }
   }
 
   /** Stop one bot by id, whatever its kind (POST /api/bot/stop { id }). */
@@ -699,6 +712,35 @@ export class MultiBot {
       return { ...r, wallet, ok: wallet == null ? null : wallet + 1e-9 >= r.allocated };
     });
     return { rows: out, ok: out.every((r) => r.ok !== false), note: 'Each chain\'s native coin also needs headroom for gas on every swap.' };
+  }
+
+  /**
+   * Input of a live swap the router has already been asked to do (grid, trend, or an LP move) and that has not
+   * settled. Separate from allocations(), which is the bot's capital rather than this one in-flight transfer.
+   */
+  routerReservations(): ReservedBalance[] {
+    const out: ReservedBalance[] = [];
+    const push = (d: MarketDef, side: 'base' | 'quote', amount: number) => {
+      if (!(amount > 0)) return;
+      const tk = d[side];
+      out.push({ chainId: d.chainId, address: tk.address, native: !!tk.native, amount, source: 'in-flight' });
+    };
+    for (const e of this.engines.values()) {
+      const inf = e.state.inFlight, d = e.def;
+      if (!inf || !d || e.state.mode !== 'live') continue;
+      push(d, inf.job.side === 'buy' ? 'quote' : 'base', inf.job.amount);
+    }
+    for (const e of this.trendEngines.values()) {
+      const inf = e.state.inFlight, d = e.def;
+      if (!inf || !d || e.state.mode !== 'live') continue;
+      push(d, inf.job.side === 'buy' ? 'quote' : 'base', inf.job.amount);
+    }
+    for (const e of this.lpEngines.values()) {
+      const sw = e.state.step?.swap, d = e.def;
+      if (!sw || !d || e.state.mode !== 'live') continue;
+      push(d, sw.side === 'buy' ? 'quote' : 'base', sw.amountIn);
+    }
+    return out;
   }
 
   /** Markets whose tokens are tracked in wallets: legacy + chain defaults + custom + anything a bot/alert uses. */

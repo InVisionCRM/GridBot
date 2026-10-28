@@ -1,5 +1,6 @@
 /**
  * Who stopped or closed a bot. Stored on the bot so a restart still shows it.
+ * Stop all also stores this halt on the capital router with subject 'router' (router.halt).
  * Request fields come from the request that is running now (AsyncLocalStorage). A timer, the tax watcher,
  * or startup has no request, so those are recorded as the app itself.
  */
