@@ -197,7 +197,7 @@ describe('V4 adapter', () => {
     expect(q.dynamicFee).toBe(false);
     expect(q.amountOut).toBe(573458801863169377441980n);
     expect(q.hook?.allowed).toBe(true);
-    const st = await ad.state(ref(), WETH, NATIVE_KEY.currency1);
+    const st = await ad.state(ref());
     expect(st.token0).toBe(WETH); // address(0) is faced as the wrapped native
     expect(st.pool.feeBps).toBe(100);
     const built = ad.buildSwap({

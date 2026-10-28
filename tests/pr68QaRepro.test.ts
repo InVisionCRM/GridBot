@@ -21,7 +21,7 @@ const TOK = '0xc50C3c7a92E1b512Ec982770Abe91948F20356d0';
 const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
 const ME = '0x' + '0'.repeat(34) + '0a11ce';
 const PID = '0x892cfd4e384f62fc574cd1b46380b2f4028c887439b92329dfd7ca5fc706da99';
-const LIMITS = { slippageBps: 100, deadlineMinutes: 5 };
+const LIMITS = { slippageBps: 100, deadlineMinutes: 5, maxPriceImpact: 0.03 };
 const HOOKS = { canSend: () => true, onSent: () => undefined };
 
 const hood = CHAINS.find((c) => c.id === 4663)!;
