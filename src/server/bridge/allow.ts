@@ -514,7 +514,9 @@ export function decodeDeposit(provider: BridgeId, data: string, req: BridgeQuote
   const sel = selectorOf(data);
   try {
     if (provider === 'across' && sel === DEPOSIT_V3.getFunction('depositV3')!.selector.toLowerCase()) {
-      const d = DEPOSIT_V3.decodeFunctionData('depositV3', data);
+      // Direct depositV3 may end with Across's 1dc0de delimiter plus a 2-byte integrator id.
+      // It is not an ABI argument. Strip that suffix before decoding.
+      const d = DEPOSIT_V3.decodeFunctionData('depositV3', data.replace(/1dc0de[0-9a-f]{4}$/i, ''));
       if (!emptyBytes(String(d.message))) bad(provider, 'deposit message is not empty');
       return {
         ...baseDecoded(getAddress(String(d.inputToken)), asBig(d.inputAmount)),

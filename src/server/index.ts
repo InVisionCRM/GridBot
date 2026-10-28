@@ -6,7 +6,8 @@ import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
 import { DurableJsonStore } from './bot/durableStore';
 import { ActivityBus } from './bot/activity';
-import { createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, shortQuoteKeyWarnings, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
+import { createBridgeProviders } from './bridge';
+import { acrossIntegratorId, bridgeProviderConfig, createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, shortQuoteKeyWarnings, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
 import { Router, type RouterFile } from './router/router';
 import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
@@ -40,6 +41,17 @@ const cfg = readSettings();
 const isProd = process.env.NODE_ENV === 'production';
 const log = new Logger();
 for (const msg of shortQuoteKeyWarnings()) log.warn(msg);
+// Quote clients only. Nothing here selects a route or sends a bridge transaction.
+const quoteKeys = bridgeProviderConfig();
+export const bridgeQuoteClients = createBridgeProviders({
+  keys: {
+    ...(quoteKeys.across ? { across: quoteKeys.across.apiKey } : {}),
+    ...(quoteKeys.relay ? { relay: quoteKeys.relay.apiKey } : {}),
+    ...(quoteKeys.lifi ? { lifi: quoteKeys.lifi.apiKey } : {}),
+  },
+  integratorId: acrossIntegratorId(),
+  log: (level, msg) => log[level](msg),
+});
 // A friend's copy (started by the host app, friends/copies.ts) shares the host's candles budget and daily scan.
 const copy = readCopy();
 

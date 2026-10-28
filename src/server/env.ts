@@ -77,6 +77,8 @@ export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boole
  */
 type BridgeName = 'across' | 'relay' | 'lifi';
 let bridgeKeys: Record<BridgeName, string | null> = { across: null, relay: null, lifi: null };
+/** 4 lowercase hex characters, no 0x. Null when attribution is off. */
+let integratorId: string | null = null;
 /** Names only. A refused key is not stored here, and the value is never in this list. */
 let shortQuoteWarnings: string[] = [];
 
@@ -118,7 +120,25 @@ export function bridgeQuoteRequest(provider: BridgeName, url: string, init: { he
 export function takeBridgeKeys(): BridgeConfigured {
   shortQuoteWarnings = [];
   bridgeKeys = { across: takeOne('ACROSS_API_KEY'), relay: takeOne('RELAY_API_KEY'), lifi: takeOne('LIFI_API_KEY') };
+  integratorId = takeIntegratorId();
   return bridgeConfigured();
+}
+
+/** Across integrator id for the quote clients. Absent when unset. */
+export function acrossIntegratorId(): string | undefined {
+  return integratorId ?? undefined;
+}
+
+function takeIntegratorId(): string | null {
+  const raw = process.env.ACROSS_INTEGRATOR_ID;
+  delete process.env.ACROSS_INTEGRATOR_ID;
+  if (!raw || !raw.trim()) return null;
+  const trimmed = raw.trim();
+  const hex = trimmed.replace(/^0x/i, '');
+  if (!/^[0-9a-fA-F]{4}$/.test(hex) || (trimmed !== hex && !/^0x/i.test(trimmed))) {
+    throw new Error('ACROSS_INTEGRATOR_ID must be exactly 2 bytes, written as 4 hex characters with an optional 0x prefix.');
+  }
+  return hex.toLowerCase();
 }
 
 /** Whether a quote key was accepted. A refused key is false. The value is not in this object. */

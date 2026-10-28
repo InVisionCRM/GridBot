@@ -187,7 +187,7 @@ export function optionalKey(raw: string | undefined, provider: string): string |
   if (raw == null) return undefined;
   const v = raw.trim();
   if (!v) return undefined;
-  if (v !== raw || !/^[A-Za-z0-9._~+/=-]{8,256}$/.test(v)) {
+  if (v !== raw || !/^[A-Za-z0-9._~+/=-]{6,256}$/.test(v)) {
     throw new BridgeError(provider, 'invalid', `${provider}: quote key was rejected`);
   }
   return v;
