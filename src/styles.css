@@ -470,6 +470,7 @@ label.wide input { min-width: 180px; }
 .guide { width: min(860px, 100%); max-height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .guide-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
 .guide-nav { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+@media (max-width: 640px) { .guide-head { flex-wrap: wrap; } .guide-head > .btn { margin-left: auto; } .guide-nav { order: 1; flex: 1 1 100%; } }
 .chip { appearance: none; font: inherit; font-size: 0.76rem; background: var(--bg); border: 1px solid var(--line-2); color: var(--muted); border-radius: 999px; padding: 2px 10px; cursor: pointer; }
 .chip:hover { color: var(--text); }
 .guide-body { overflow-y: auto; padding: 4px 20px 24px; }
@@ -817,7 +818,7 @@ label.wide input { min-width: 180px; }
 .smart-log li { display: flex; gap: 8px; align-items: baseline; font-size: 0.86rem; padding: 4px 0; border-top: 1px solid var(--line); }
 .tt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-top: 8px; }
 .tt-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-top: 8px; }
-.tt-grid input, .tt-row input, .tt-grid select { width: 100%; min-height: 36px; }
+.tt-grid input:not([type='checkbox']), .tt-row input:not([type='checkbox']), .tt-grid select { width: 100%; min-height: 36px; }
 @media (max-width: 560px) {
   .tt-grid { grid-template-columns: 1fr 1fr; }
   .tt-row { align-items: stretch; }
