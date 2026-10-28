@@ -12,5 +12,5 @@
     "noUnusedLocals": true,
     "types": ["node"]
   },
-  "include": ["src/server/**/*", "src/live/**/*", "src/engine/**/*", "src/types/**/*", "scripts/**/*"]
+  "include": ["src/server/**/*", "src/metrics/**/*", "src/live/**/*", "src/engine/**/*", "src/types/**/*", "src/plays/**/*", "scripts/**/*"]
 }

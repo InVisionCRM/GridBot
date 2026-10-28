@@ -277,7 +277,7 @@ describe('flipped grid (HEX/PLS): paper fills and PnL in PLS', () => {
   it('buys spend PLS for HEX on dips, sells only that level\'s HEX lot for PLS; realized PnL > 0 in PLS', async () => {
     const { chain, bot } = make();
     const mid = flipMid();
-    const id = await bot.add({ mode: 'paper', stable: 'HEX~', lowerPrice: mid * 0.9, upperPrice: mid * 1.1, gridCount: 10, totalCapitalUsd: 1_000_000 });
+    const id = await bot.add({ mode: 'paper', stable: 'HEX~', lowerPrice: mid * 0.9, upperPrice: mid * 1.1, gridCount: 10, totalCapitalQuote: 1_000_000 });
     let g = bot.status().grids.find((x) => x.id === id)!;
     expect(g.flipped).toBe(true);
     expect(g.label).toBe('HEX/PLS');
@@ -313,7 +313,7 @@ describe('flipped grid (HEX/PLS): paper fills and PnL in PLS', () => {
       expect(lot).toBeTruthy();
       expect(s.plsAmount).toBeCloseTo(lot.plsAmount, 6); // only the HEX that level bought
       expect(s.stableAmount).toBeGreaterThan(lot.stableAmount); // more PLS back
-      expect(s.realizedPnlUsd).toBeGreaterThan(0); // in PLS (the field is quote units)
+      expect(s.realizedPnlQuote).toBeGreaterThan(0); // in PLS (the field is quote units)
     }
     expect(g.pnl.realized).toBeGreaterThan(0);
     expect(g.quoteSym).toBe('PLS');
@@ -326,21 +326,21 @@ describe('flipped live grid on the mock: native router methods + gas reserve gat
     const mid = flipMid();
     const bal = Number(chain.pls / 10n ** 18n);
     const cfg = { mode: 'live' as const, stable: 'HEX~', lowerPrice: mid * 0.9, upperPrice: mid * 1.1, gridCount: 10 };
-    await expect(bot.add({ ...cfg, totalCapitalUsd: bal * 0.99 })).rejects.toThrow(/kept for gas/);
+    await expect(bot.add({ ...cfg, totalCapitalQuote: bal * 0.99 })).rejects.toThrow(/kept for gas/);
     // A fixed reserve can also block: 60 % of the balance + a fixed reserve of 50 % of it
-    await expect(bot.add({ ...cfg, totalCapitalUsd: bal * 0.6, limits: { ...DEFAULT_LIMITS, gasReserveNative: bal * 0.5 } })).rejects.toThrow(/kept for gas/);
-    const id = await bot.add({ ...cfg, totalCapitalUsd: 1_000_000 });
+    await expect(bot.add({ ...cfg, totalCapitalQuote: bal * 0.6, limits: { ...DEFAULT_LIMITS, gasReserveNative: bal * 0.5 } })).rejects.toThrow(/kept for gas/);
+    const id = await bot.add({ ...cfg, totalCapitalQuote: 1_000_000 });
     const g = bot.status().grids.find((x) => x.id === id)!;
     expect(g.status).toBe('running');
     expect(g.gasReserve).toBeCloseTo(20_000, 6);
     // Second live bot: the first one's capital counts as allocated
-    await expect(bot.add({ ...cfg, totalCapitalUsd: bal - 1_000_000 })).rejects.toThrow(/Not enough PLS in your wallet/);
+    await expect(bot.add({ ...cfg, totalCapitalQuote: bal - 1_000_000 })).rejects.toThrow(/Not enough PLS in your wallet/);
   });
 
   it('buy = swapExactETHForTokens with msg.value (no approve); sell = approve + swapExactTokensForETH', async () => {
     const { chain, bot } = make({ live: true });
     const mid = flipMid();
-    await bot.add({ mode: 'live', stable: 'HEX~', lowerPrice: mid * 0.9, upperPrice: mid * 1.1, gridCount: 10, totalCapitalUsd: 1_000_000 });
+    await bot.add({ mode: 'live', stable: 'HEX~', lowerPrice: mid * 0.9, upperPrice: mid * 1.1, gridCount: 10, totalCapitalQuote: 1_000_000 });
     const pls0 = chain.pls, hex0 = chain.bal('HEX');
     chain.setPrice(QH / 0.97, 'HEX');
     await bot.tickAll();
@@ -463,8 +463,8 @@ describe('state migration: existing grids keep their orientation', () => {
     const store = new MemoryStore<MultiState>();
     const a = make({ store });
     const mid = flipMid();
-    const classic = await a.bot.add({ mode: 'paper', stable: 'HEX', lowerPrice: QH * 0.9, upperPrice: QH * 1.1, gridCount: 10, totalCapitalUsd: 5_000 });
-    const flipped = await a.bot.add({ mode: 'paper', stable: 'HEX~', lowerPrice: mid * 0.9, upperPrice: mid * 1.1, gridCount: 10, totalCapitalUsd: 500_000 });
+    const classic = await a.bot.add({ mode: 'paper', stable: 'HEX', lowerPrice: QH * 0.9, upperPrice: QH * 1.1, gridCount: 10, totalCapitalQuote: 5_000 });
+    const flipped = await a.bot.add({ mode: 'paper', stable: 'HEX~', lowerPrice: mid * 0.9, upperPrice: mid * 1.1, gridCount: 10, totalCapitalQuote: 500_000 });
     // Simulate a pre-flip state file: no orientation fields anywhere, just the quote key.
     const saved = JSON.parse(JSON.stringify(store.load()));
     for (const g of saved.grids) for (const k of Object.keys(g)) if (/flip|orient/i.test(k)) delete g[k];

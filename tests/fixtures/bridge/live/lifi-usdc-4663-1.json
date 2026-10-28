@@ -1,0 +1,484 @@
+{
+  "type": "lifi",
+  "id": "6d88741c-5e23-494e-a545-f6406b33e9f0:0",
+  "tool": "across",
+  "toolDetails": {
+    "key": "across",
+    "name": "AcrossV4"
+  },
+  "action": {
+    "fromToken": {
+      "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "chainId": 4663,
+      "symbol": "USDG",
+      "decimals": 6,
+      "name": "USDG",
+      "coinKey": "USDG",
+      "priceUSD": "0.9989603074",
+      "tags": [
+        "stablecoin"
+      ],
+      "verificationStatus": "verified",
+      "verificationStatusBreakdown": [
+        {
+          "provider": "hypernative",
+          "result": "verified",
+          "providerResult": "accept"
+        }
+      ]
+    },
+    "fromAmount": "10000000",
+    "toToken": {
+      "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "chainId": 1,
+      "symbol": "USDC",
+      "decimals": 6,
+      "name": "USD Coin",
+      "coinKey": "USDC",
+      "priceUSD": "1.0002724038",
+      "tags": [
+        "stablecoin"
+      ],
+      "verificationStatus": "verified",
+      "verificationStatusBreakdown": [
+        {
+          "provider": "hypernative",
+          "result": "verified",
+          "providerResult": "accept"
+        }
+      ]
+    },
+    "fromChainId": 4663,
+    "toChainId": 1,
+    "slippage": 0.005,
+    "fromAddress": "0x1111111111111111111111111111111111111111",
+    "toAddress": "0x1111111111111111111111111111111111111111"
+  },
+  "estimate": {
+    "tool": "across",
+    "approvalAddress": "0xB477751B76CF82d00a686A1232f5fCD772414Af3",
+    "toAmountMin": "9951464",
+    "toAmount": "9951464",
+    "fromAmount": "10000000",
+    "feeCosts": [
+      {
+        "name": "LIFI Fixed Fee",
+        "description": "Fixed LIFI fee, independent of any other fee",
+        "token": {
+          "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "chainId": 4663,
+          "symbol": "USDG",
+          "decimals": 6,
+          "name": "USDG",
+          "coinKey": "USDG",
+          "priceUSD": "0.9989603074",
+          "tags": [
+            "stablecoin"
+          ],
+          "verificationStatus": "verified",
+          "verificationStatusBreakdown": [
+            {
+              "provider": "hypernative",
+              "result": "verified",
+              "providerResult": "accept"
+            }
+          ]
+        },
+        "amount": "25000",
+        "amountUSD": "0.0250",
+        "percentage": "0.0025",
+        "included": true,
+        "feeSplit": {
+          "lifiFee": "25000",
+          "integratorFee": "0",
+          "recipients": [
+            {
+              "name": "lifi",
+              "type": "FIXED",
+              "fee": "25000"
+            }
+          ]
+        }
+      },
+      {
+        "name": "Relayer fee",
+        "description": "The fee taken by the relayer",
+        "token": {
+          "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "chainId": 4663,
+          "symbol": "USDG",
+          "decimals": 6,
+          "name": "USDG",
+          "coinKey": "USDG",
+          "priceUSD": "0.9989603074",
+          "tags": [
+            "stablecoin"
+          ],
+          "verificationStatus": "verified",
+          "verificationStatusBreakdown": [
+            {
+              "provider": "hypernative",
+              "result": "verified",
+              "providerResult": "accept"
+            }
+          ]
+        },
+        "amount": "997",
+        "amountUSD": "0.0010",
+        "percentage": "0.000100",
+        "included": true
+      },
+      {
+        "name": "Relayer gas fee",
+        "description": "The gas fee taken by the relayer",
+        "token": {
+          "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "chainId": 4663,
+          "symbol": "USDG",
+          "decimals": 6,
+          "name": "USDG",
+          "coinKey": "USDG",
+          "priceUSD": "0.9989603074",
+          "tags": [
+            "stablecoin"
+          ],
+          "verificationStatus": "verified",
+          "verificationStatusBreakdown": [
+            {
+              "provider": "hypernative",
+              "result": "verified",
+              "providerResult": "accept"
+            }
+          ]
+        },
+        "amount": "16565",
+        "amountUSD": "0.0165",
+        "percentage": "0.001661",
+        "included": true
+      }
+    ],
+    "gasCosts": [
+      {
+        "type": "SEND",
+        "price": "20000000",
+        "estimate": "216421",
+        "limit": "281347",
+        "amount": "4328420000000",
+        "amountUSD": "0.0102",
+        "token": {
+          "address": "0x0000000000000000000000000000000000000000",
+          "chainId": 4663,
+          "symbol": "ETH",
+          "decimals": 18,
+          "name": "ETH",
+          "coinKey": "ETH",
+          "priceUSD": "2347.68",
+          "tags": [
+            "major_asset"
+          ],
+          "verificationStatus": "unverified",
+          "verificationStatusBreakdown": []
+        }
+      }
+    ],
+    "executionDuration": 8,
+    "fromAmountUSD": "9.9896",
+    "toAmountUSD": "9.9542"
+  },
+  "includedSteps": [
+    {
+      "id": "86218bb9-ada6-431d-a8e3-20de0cd74abb",
+      "type": "protocol",
+      "action": {
+        "fromChainId": 4663,
+        "fromAmount": "10000000",
+        "fromToken": {
+          "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "chainId": 4663,
+          "symbol": "USDG",
+          "decimals": 6,
+          "name": "USDG",
+          "coinKey": "USDG",
+          "priceUSD": "0.9989603074",
+          "tags": [
+            "stablecoin"
+          ],
+          "verificationStatus": "verified",
+          "verificationStatusBreakdown": [
+            {
+              "provider": "hypernative",
+              "result": "verified",
+              "providerResult": "accept"
+            }
+          ]
+        },
+        "toChainId": 4663,
+        "toToken": {
+          "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "chainId": 4663,
+          "symbol": "USDG",
+          "decimals": 6,
+          "name": "USDG",
+          "coinKey": "USDG",
+          "priceUSD": "0.9989603074",
+          "tags": [
+            "stablecoin"
+          ],
+          "verificationStatus": "verified",
+          "verificationStatusBreakdown": [
+            {
+              "provider": "hypernative",
+              "result": "verified",
+              "providerResult": "accept"
+            }
+          ]
+        },
+        "slippage": 0.005,
+        "fromAddress": "0xB477751B76CF82d00a686A1232f5fCD772414Af3",
+        "toAddress": "0xB477751B76CF82d00a686A1232f5fCD772414Af3"
+      },
+      "estimate": {
+        "fromAmount": "10000000",
+        "toAmount": "9975000",
+        "toAmountMin": "9975000",
+        "tool": "feeCollection",
+        "approvalAddress": "0xF4BFFE4dfC693f37715A47c15BdA8af9ed8f7Cf1",
+        "gasCosts": [
+          {
+            "type": "SEND",
+            "price": "20000000",
+            "estimate": "130000",
+            "limit": "169000",
+            "amount": "2600000000000",
+            "amountUSD": "0.0061",
+            "token": {
+              "address": "0x0000000000000000000000000000000000000000",
+              "chainId": 4663,
+              "symbol": "ETH",
+              "decimals": 18,
+              "name": "ETH",
+              "coinKey": "ETH",
+              "priceUSD": "2347.68",
+              "tags": [
+                "major_asset"
+              ],
+              "verificationStatus": "unverified",
+              "verificationStatusBreakdown": []
+            }
+          }
+        ],
+        "feeCosts": [
+          {
+            "name": "LIFI Fixed Fee",
+            "description": "Fixed LIFI fee, independent of any other fee",
+            "token": {
+              "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+              "chainId": 4663,
+              "symbol": "USDG",
+              "decimals": 6,
+              "name": "USDG",
+              "coinKey": "USDG",
+              "priceUSD": "0.9989603074",
+              "tags": [
+                "stablecoin"
+              ],
+              "verificationStatus": "verified",
+              "verificationStatusBreakdown": [
+                {
+                  "provider": "hypernative",
+                  "result": "verified",
+                  "providerResult": "accept"
+                }
+              ]
+            },
+            "amount": "25000",
+            "amountUSD": "0.0250",
+            "percentage": "0.0025",
+            "included": true,
+            "feeSplit": {
+              "lifiFee": "25000",
+              "integratorFee": "0",
+              "recipients": [
+                {
+                  "name": "lifi",
+                  "type": "FIXED",
+                  "fee": "25000"
+                }
+              ]
+            }
+          }
+        ],
+        "executionDuration": 0
+      },
+      "tool": "feeCollection",
+      "toolDetails": {
+        "key": "feeCollection",
+        "name": "Integrator Fee"
+      }
+    },
+    {
+      "id": "887f131f-1806-4070-a175-ea575b3ee587",
+      "type": "cross",
+      "action": {
+        "fromChainId": 4663,
+        "fromAmount": "9975000",
+        "fromToken": {
+          "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "chainId": 4663,
+          "symbol": "USDG",
+          "decimals": 6,
+          "name": "USDG",
+          "coinKey": "USDG",
+          "priceUSD": "0.9989603074",
+          "tags": [
+            "stablecoin"
+          ],
+          "verificationStatus": "verified",
+          "verificationStatusBreakdown": [
+            {
+              "provider": "hypernative",
+              "result": "verified",
+              "providerResult": "accept"
+            }
+          ]
+        },
+        "toChainId": 1,
+        "toToken": {
+          "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+          "chainId": 1,
+          "symbol": "USDC",
+          "decimals": 6,
+          "name": "USD Coin",
+          "coinKey": "USDC",
+          "priceUSD": "1.0002724038",
+          "tags": [
+            "stablecoin"
+          ],
+          "verificationStatus": "verified",
+          "verificationStatusBreakdown": [
+            {
+              "provider": "hypernative",
+              "result": "verified",
+              "providerResult": "accept"
+            }
+          ]
+        },
+        "slippage": 0.005,
+        "fromAddress": "0xB477751B76CF82d00a686A1232f5fCD772414Af3",
+        "toAddress": "0x1111111111111111111111111111111111111111",
+        "destinationGasConsumption": "0"
+      },
+      "estimate": {
+        "fromAmount": "9975000",
+        "toAmount": "9951464",
+        "toAmountMin": "9951464",
+        "approvalAddress": "0xD29C85F15DF544bA632C9E25829fd29d767d7978",
+        "executionDuration": 8,
+        "feeCosts": [
+          {
+            "name": "Relayer fee",
+            "description": "The fee taken by the relayer",
+            "token": {
+              "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+              "chainId": 4663,
+              "symbol": "USDG",
+              "decimals": 6,
+              "name": "USDG",
+              "coinKey": "USDG",
+              "priceUSD": "0.9989603074",
+              "tags": [
+                "stablecoin"
+              ],
+              "verificationStatus": "verified",
+              "verificationStatusBreakdown": [
+                {
+                  "provider": "hypernative",
+                  "result": "verified",
+                  "providerResult": "accept"
+                }
+              ]
+            },
+            "amount": "997",
+            "amountUSD": "0.0010",
+            "percentage": "0.000100",
+            "included": true
+          },
+          {
+            "name": "Relayer gas fee",
+            "description": "The gas fee taken by the relayer",
+            "token": {
+              "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+              "chainId": 4663,
+              "symbol": "USDG",
+              "decimals": 6,
+              "name": "USDG",
+              "coinKey": "USDG",
+              "priceUSD": "0.9989603074",
+              "tags": [
+                "stablecoin"
+              ],
+              "verificationStatus": "verified",
+              "verificationStatusBreakdown": [
+                {
+                  "provider": "hypernative",
+                  "result": "verified",
+                  "providerResult": "accept"
+                }
+              ]
+            },
+            "amount": "16565",
+            "amountUSD": "0.0165",
+            "percentage": "0.001661",
+            "included": true
+          }
+        ],
+        "gasCosts": [
+          {
+            "type": "SEND",
+            "price": "20000000",
+            "estimate": "86000",
+            "limit": "111800",
+            "amount": "1720000000000",
+            "amountUSD": "0.0040",
+            "token": {
+              "address": "0x0000000000000000000000000000000000000000",
+              "chainId": 4663,
+              "symbol": "ETH",
+              "decimals": 18,
+              "name": "ETH",
+              "coinKey": "ETH",
+              "priceUSD": "2347.68",
+              "tags": [
+                "major_asset"
+              ],
+              "verificationStatus": "unverified",
+              "verificationStatusBreakdown": []
+            }
+          }
+        ],
+        "tool": "across"
+      },
+      "tool": "across",
+      "toolDetails": {
+        "key": "across",
+        "name": "AcrossV4"
+      }
+    }
+  ],
+  "integrator": "lifi-api",
+  "stepSimulation": {
+    "status": "success",
+    "gasSource": "simulation"
+  },
+  "transactionRequest": {
+    "value": "0x0",
+    "to": "0xB477751B76CF82d00a686A1232f5fCD772414Af3",
+    "data": "0x1794958f0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000022000000000000000000000000000000000000000000000000000000000000004204b4973e7c62e74002a480fb5cc09d6b6a272cf88404442560fe461d238c7a6d60000000000000000000000000000000000000000000000000000000000000140000000000000000000000000000000000000000000000000000000000000018000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d168000000000000000000000000111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000009834d800000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066163726f7373000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000086c6966692d61706900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000f4bffe4dfc693f37715a47c15bda8af9ed8f7cf1000000000000000000000000f4bffe4dfc693f37715a47c15bda8af9ed8f7cf10000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d1680000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d168000000000000000000000000000000000000000000000000000000000098968000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000a4332d746b0000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d16800000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000001000000000000000000000000c06ebbefd94032b85424d51906e2a335efae264b00000000000000000000000000000000000000000000000000000000000061a800000000000000000000000000000000000000000000000000000000000000000000000000000000111111111111111111111111111111111111111100000000000000000000000011111111111111111111111111111111111111110000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d168000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000000000000000000000000000000000000097d8e80000000000000000000000000000000000000000000000000dd854c00abc52210000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006ae1395b000000000000000000000000000000000000000000000000000000006ae15cd9000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000000000000",
+    "from": "0x1111111111111111111111111111111111111111",
+    "chainId": 4663,
+    "gasPrice": "0x1312d00",
+    "gasLimit": "0x44b03"
+  },
+  "transactionId": "0x4b4973e7c62e74002a480fb5cc09d6b6a272cf88404442560fe461d238c7a6d6",
+  "recommendedSlippage": 0.005
+}

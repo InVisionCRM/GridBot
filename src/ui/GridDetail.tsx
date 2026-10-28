@@ -4,12 +4,15 @@ import { formatPrice } from '../lib/format';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { RangeBar } from './charts';
-import { Chart, EquityChart } from './Chart';
+import { Chart } from './Chart';
+import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
-import { ago, cls, num, pct, px, qty, time } from './fmt';
-import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
+import { MoneyDetails, type ValueChangeRow } from './MoneyDetails';
+import { isCloseOut } from '../live/ledger';
+import { metricsOf } from './deskStats';
+import { ago, cls, num, pct, px, qty, sameShown, time, pxShort } from './fmt';
+import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
-import { T } from './theme';
 import { errMsg, gridName, quoteSym, rangeState, spendFunds, type AnyObj, type Nav } from './model';
 import { AmountField, fundsProblem, isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { reserveCfg } from '../live/gasReserve';
@@ -17,8 +20,8 @@ import { humanAmount } from '../live/amount';
 import { recenterAt } from '../live/recenter';
 import { LiveLevels, livePrice } from './live';
 import { L, Tip } from './Tip';
-import { Amt, Usd } from './money';
-import { showHalt } from './haltText';
+import { overrideText, showHalt } from './haltText';
+import { SafetyChecking, heldForSafety, useLiveStart, useSafetyChecking } from './SafetyChecking';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -38,7 +41,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
   const [lower, setLower] = useState(String(g.config.lowerPrice));
   const [upper, setUpper] = useState(String(g.config.upperPrice));
   const [count, setCount] = useState(String(g.config.gridCount));
-  const [amount, setAmount] = useState(String(g.config.totalCapitalUsd));
+  const [amount, setAmount] = useState(String(g.config.totalCapitalQuote));
   const [econ, setEcon] = useState<AnyObj | null>(null);
   const [econErr, setEconErr] = useState<string | null>(null);
   useEffect(() => {
@@ -54,10 +57,11 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
   const running = g.status === 'running';
   const funds = spendFunds(s, g.stable, +amount || 0, reserveCfg(g.limits));
   const problem = fundsProblem(funds, +amount || 0, g.mode);
-  const restart = () => act(async () => {
+  const live = useLiveStart(act, busy);
+  const restart = () => {
     if (g.mode === 'live' && !confirm(`Restart this LIVE grid with the new range? It signs real swaps.`)) return;
-    await botApi(`grids/${g.id}/start`, 'POST', { mode: g.mode, stable: g.stable, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalUsd: +amount });
-  });
+    live.run(g.mode === 'live', (extra, from) => botApi(`grids/${g.id}/start`, 'POST', { mode: g.mode, stable: g.stable, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalQuote: +amount, ...extra }, from));
+  };
   const coin = (x: number, sign = false) => `${sign && x > 0 ? '+' : ''}${humanAmount(x)} ${q}`;
   return (
     <div className="stack" style={{ gap: 10 }}>
@@ -65,7 +69,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
         <label>Lowest price<input value={lower} onChange={(e) => setLower(e.target.value)} /></label>
         <label>Highest price<input value={upper} onChange={(e) => setUpper(e.target.value)} /></label>
         <label>Levels<input value={count} onChange={(e) => setCount(e.target.value)} /></label>
-        <AmountField label={`Amount (${q})`} value={amount} f={funds} onChange={setAmount} />
+        <AmountField label={`Amount (${q})`} value={amount} f={funds} onChange={setAmount} echo={false} />
       </div>
       <div className="quick">
         <span className="muted small">Centre on today's price {g.price ? px(g.price) : '—'}:</span>
@@ -75,6 +79,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
       {econ && <div className={`verdict ${econ.ok ? 'ok' : 'bad'}`}>{econ.ok
         ? <span>Each completed buy-then-sell nets about <b>{coin(econ.netPerRoundTrip, true)}</b> ({pct(econ.netPct, 2)}). Levels are {pct(econ.spacingPct, 2)} apart.</span>
         : <span><b className="neg">Each completed buy-then-sell {econ.netPerRoundTrip < 0 ? `loses about ${coin(-econ.netPerRoundTrip)}` : `nets only ${coin(econ.netPerRoundTrip)}`} at this size.</b> You can still restart it. {econ.reasons.join(' ')}</span>}</div>}
+      {live.banner}
       <div className="actions">
         <button type="button" className={`btn ${g.mode === 'live' ? 'live' : 'primary'}`} disabled={busy || running || !(+amount > 0) || !(+upper > +lower) || !!problem} onClick={restart}>Restart with this range</button>
         <span className={`small ${problem ? 'neg' : 'muted'}`}>{running ? 'Stop the grid first.' : problem ?? `Restarts as ${g.mode} on ${gridName(g)}. ${g.base} the old levels still hold stays in this grid's totals.`}</span>
@@ -82,6 +87,9 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
     </div>
   );
 }
+
+/** Figures the grid page shows elsewhere, left out of the chart's stat table: Generated (headline), the range (under the chart). */
+const GRID_SHOWN_ELSEWHERE = ['Generated', 'Range', 'Fees paid'] as const; // fees: the Fees tile
 
 /** Something on the grid still has to sell (or a trade is queued / in flight): the range can't move yet. */
 const busyLevels = (g: AnyObj) => !!g.inFlight || g.queue.length > 0 || g.intervals.some((i: AnyObj) => i.status !== 'inactive' && i.status !== 'waitingBuy');
@@ -111,7 +119,7 @@ function FollowUp({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolea
   const at = recenterAt(r);
   const now = rangeState(g) === 'above' && r.enabled
     ? busyLevels(g) ? `Price is above the range. Waiting for the last ${g.base} to sell before moving it.` : at ? `Price is above the range. If it stays there, the range moves up at ${time(at)}.` : 'Price is above the range.'
-    : r.enabled ? (r.count ? `Moved up ${r.count} time${r.count === 1 ? '' : 's'}, last ${ago(r.lastAt)}.` : 'On. It hasn\'t needed to move yet.') : 'Off. The range stays where you set it.';
+    : r.enabled ? (r.count ? `Moved up ${r.count} time${r.count === 1 ? '' : 's'}${r.lastAt && Math.abs(r.lastAt - (g.lastMoveAt ?? 0)) < 60_000 ? ' (the last move above)' : `, last ${ago(r.lastAt)}`}.` : 'On. It hasn\'t needed to move yet.') : 'Off. The range stays where you set it.';
   return (
     <div className="follow-row">
       <label className="check follow">
@@ -139,10 +147,10 @@ function Limits({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean 
   );
 }
 
-function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
+function Fills({ s, g, gen }: { s: AnyObj; g: AnyObj; gen: number | null }) {
   const [all, setAll] = useState(false);
-  const q = quoteSym(g), base = g.base ?? 'PLS', k: number | null = g.usdPerQuote ?? null;
-  const net = (t: AnyObj) => t.roundTripNet ?? t.realizedPnlUsd;
+  const q = quoteSym(g), base = g.base ?? 'PLS';
+  const net = (t: AnyObj) => t.roundTripNet ?? t.realizedPnlQuote;
   const tx = (h: string) => (h && !h.startsWith('paper')
     ? <a href={explorerTx(s, g.chainId, h)} target="_blank" rel="noreferrer">{h.slice(0, 10)}…</a>
     : <span className="muted">{h ? 'paper' : ''}</span>);
@@ -159,8 +167,12 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
         </thead>
         <tbody>
           {g.trades.map((t: AnyObj) => {
-            const profit = t.side === 'sell' || t.failed ? net(t) : null;
-            const profitTxt = profit == null ? '' : <Amt v={profit} sym={q} k={k} sig={4} />;
+            // the cash-out sale at stop/close isn't a trade profit and its value change is in Details (one figure, once)
+            const stop = !t.failed && isCloseOut(t as Parameters<typeof isCloseOut>[0]);
+            const profit = stop ? null : t.side === 'sell' || t.failed ? net(t) : null;
+            const shown = profit == null ? '' : qty(profit, q, 4);
+            // one trade that is all of Generated: point there rather than print the figure twice
+            const profitTxt = stop ? 'Sold at stop (see Details)' : profit == null ? '' : gen != null && sameShown(shown, qty(gen, q, 5)) ? 'all of Generated' : shown;
             return all ? (
               <tr key={t.id} className={t.failed ? 'failed-row' : ''}>
                 <td>{time(t.timestamp)}</td><td className={`side ${t.side}`} title={t.seed ? `Start-up buy for levels ${t.seed.join(', ')} above the start price` : undefined}>{t.side}{t.seed ? ' (start-up)' : ''}{t.failed ? ' ✗' : ''}</td><td className="muted">{t.intervalIndex}</td>
@@ -168,7 +180,7 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
                 <td>{t.triggerPrice ? formatPrice(t.triggerPrice) : '—'}</td><td>{t.quotedPrice ? formatPrice(t.quotedPrice) : '—'}</td>
                 <td title={t.fromReceipt === false && !t.paper ? 'receipt log missing: minimum-out used' : ''}>{t.execPrice ?? t.price ? formatPrice(t.execPrice ?? t.price) : '—'}{t.fromReceipt === false && !t.paper ? '*' : ''}</td>
                 <td className={(t.slippagePct ?? 0) > 0.001 ? 'neg' : ''}>{t.slippagePct != null ? pct(t.slippagePct, 3) : '—'}</td>
-                <td>{t.taxPct != null && t.taxPct > 0.0005 ? pct(t.taxPct, 2) : '—'}</td><td>{num(t.gasUsd, 8)}</td>
+                <td>{t.taxPct != null && t.taxPct > 0.0005 ? pct(t.taxPct, 2) : '—'}</td><td>{num(t.gasQuote, 8)}</td>
                 <td className={cls(profit)}>{profitTxt}</td><td className="txt nowrap">{dexName(s, g.chainId, t.dex)}</td><td>{tx(t.txHash)}</td>
               </tr>
             ) : (
@@ -186,14 +198,53 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
   );
 }
 
+/**
+ * The grid's cash-out sale when it was stopped or closed (Kyle: not generated, so it stays out of Generated, but its
+ * value change belongs in Details). The server's own figure: `stats.closeOutNet` from roundTripStats (src/live/ledger.ts),
+ * what the cash-out sells got minus what those coins cost, in the quote coin. No row when the grid has none.
+ */
+/**
+ * The levels table's amounts. An amount that several levels share (each waiting level buys the same, each holding level
+ * holds the same) is stated once above the table and left off those rows (Kyle: each figure once per screen).
+ */
+export function levelAmounts(g: AnyObj): { same: string[]; cell: (iv: AnyObj) => string; buyEcho: (cost: string) => string } {
+  const text = (iv: AnyObj): string => (iv.plsAmount ? `${num(iv.plsAmount, iv.plsAmount < 10 ? 6 : 0)} ${g.base}` : iv.status === 'waitingBuy' || iv.status === 'pendingBuy' ? `buys ${qty(iv.buyAmount, quoteSym(g), 4, false)}` : '');
+  const count = new Map<string, number>();
+  for (const iv of (g.intervals ?? []) as AnyObj[]) { const t = text(iv); if (t) count.set(t, (count.get(t) ?? 0) + 1); }
+  const shared = new Set([...count].filter(([, n]) => n > 1).map(([t]) => t));
+  const same = [...shared].map((t) => (t.startsWith('buys ') ? `Each level waiting to buy ${t}` : `Each level holding has ${t}`));
+  // what the grid holds (Details) is often one level's coins: that level's row then points there instead of repeating it
+  const h = Number(g.pnl?.plsHeld ?? 0), held = num(h, h < 10 ? 6 : 2); // as the Holding line prints it
+  const buyTxt = [...shared].find((t) => t.startsWith('buys '));
+  return {
+    same,
+    cell: (iv) => {
+      const t = text(iv);
+      if (shared.has(t)) return t.startsWith('buys ') ? 'buys (above)' : '(above)';
+      return iv.plsAmount && sameShown(t, `${held} ${g.base}`) ? 'the coins under Holding' : t;
+    },
+    // the Holding line's cost when it prints as each level's buy: say so instead of a second figure
+    buyEcho: (cost) => (buyTxt && sameShown(cost, buyTxt.slice(5)) ? "one level's buy" : cost),
+  };
+}
+
+export function stopSale(g: AnyObj): ValueChangeRow[] {
+  const n = g.stats?.closeOuts ?? 0;
+  if (!(n > 0) || typeof g.stats?.closeOutNet !== 'number') return [];
+  return [['Value change from the stop sale', g.stats.closeOutNet, `What the ${n === 1 ? 'sale' : `${n} sales`} of the remaining coins at stop/close got, minus what those coins cost. A change in value, not generated, so it is not in Generated.`]];
+}
+
 export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
+  const chk = useSafetyChecking();
   const g: AnyObj | undefined = s.grids.find((x: AnyObj) => x.id === id);
   if (!g) return null;
+  const lv = levelAmounts(g);
 
-  const k: number | null = g.usdPerQuote ?? null;
+  const m = metricsOf(g);
   const q = quoteSym(g);
   const rs = rangeState(g);
-  const earned: number = g.pnl.realized, open: number = g.pnl.unrealized, held: number = g.pnl.plsHeld;
+  // Money figures come from the server's metrics (src/metrics/botMetrics.ts); nothing is added up here.
+  const earned: number | null = m?.generated?.[q] ?? m?.quote.realized ?? null, open: number | null = m?.quote.unrealized ?? null, held: number = g.pnl.plsHeld;
   const running = g.status === 'running';
   const closing = !!g.closing;
   const remove = () => act(async () => { if (confirm(`Remove the ${gridName(g)} grid and its history? ${g.base} it still holds stays in your wallet.`)) { await botApi(`grids/${g.id}`, 'DELETE'); nav({ v: 'home' }); } });
@@ -218,12 +269,14 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="detail-actions">
           {running
             ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
-            : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => botApi(`grids/${g.id}/resume`, 'POST'))}>Resume</button>}
+            : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => chk.run(g.mode === 'live', () => botApi(`grids/${g.id}/resume`, 'POST')))}>Resume</button>}
           <button type="button" className="btn danger" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
           <button type="button" className="btn danger" disabled={busy || running || !!g.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
         </div>
       </div>
       {showHalt(g, closing) && <p className="bot-why">{showHalt(g, closing)}</p>}
+      {overrideText(g) && <p className="bot-why">{overrideText(g)}</p>}
+      {(chk.on || heldForSafety(s, g.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… exits (stop-loss, take-profit, sells) still run; no new buys until it passes.'} />}
 
       <div className="notices">
         {g.available === false && <div className="banner error"><span className="grow">This market isn't available on the running server (its chain may be turned off {s.copy ? `by ${s.copy.host}` : 'in .env'}).</span></div>}
@@ -236,38 +289,32 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="card">
         <Chart status={s} ticks={ticks} pairs={[g.stable]} pair={g.stable} compact desk height={480} />
         {g.config && (
-          <div className="detail-range">
+          <div className="detail-range" data-testid="range-line">
             <span className="k">Range</span>
             <RangeBar wide lower={g.config.lowerPrice} upper={g.config.upperPrice} price={g.price} inRange={rs == null ? null : rs === 'in'} />
             <span className="mono small">{px(g.config.lowerPrice)} – {px(g.config.upperPrice)}</span>
           </div>
         )}
-        <p className="muted small"><Orientation m={{ base: g.base ?? 'PLS', quote: q, flipped: g.flipped, label: g.label }} compact /> · dashed lines are the grid levels · solid lines are the range · B and S mark fills · pool fee {feeLabel(mk(s, g.stable))} per swap</p>
-        <StatTable b={g} s={s} />
+        <p className="muted small"><Orientation m={{ base: g.base ?? 'PLS', quote: q, flipped: g.flipped, label: g.label }} compact /> · dashed lines are the grid levels · solid lines are the range · B and S mark fills</p>
+        <StatTable b={g} s={s} hide={GRID_SHOWN_ELSEWHERE} />
       </div>
 
       {running && <div className="card live-strip"><LiveLevels g={g} price={livePrice(ticks, g.stable, g.price)} /></div>}
 
-      <div className="kpi-row detail-stats">
+      <div className="kpi-row detail-stats" data-testid="top-strip">
         <div className="kpi">
-          <span><L tip="Every completed buy then sell: what the sell brought in minus what that buy cost, after pool fees and gas. This is money the grid has made; the coin's price no longer changes it.">Earned by trading</L></span>
-          <div className={`kpi-v ${cls(earned)}`}><AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} /></div>
-          <span className="sub">from {g.stats.roundTrips} completed buy → sell trade{g.stats.roundTrips === 1 ? '' : 's'}, after fees and gas<Usd v={earned} k={k} /></span>
+          <span><L tip={m?.calc ?? 'Generated'}>Generated, in {q}</L></span>
+          <div className={`kpi-v ${cls(earned)}`}>{earned == null ? '—' : <AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} />}</div>
+          <span className="sub">from completed buy → sell trades, after fees and gas</span>
         </div>
-        <div className="kpi">
-          <span><L tip="Coins the grid bought that haven't sold yet, compared with what they cost. This goes up and down with the price until they sell one level up; it isn't a loss unless they're sold below cost.">Bought, not sold yet</L></span>
-          <div className={`kpi-v ${cls(open)}`}>{held > 0 ? qty(open, q, 5) : '—'}</div>
-          <span className="sub">{held > 0 ? <>{num(held, held < 10 ? 6 : 2)} {g.base} bought for {qty(g.pnl.costUsd, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now<Usd v={open} k={k} /></> : 'nothing waiting to sell'}</span>
-        </div>
-        <div className="kpi">
-          <span><L tip={`Earned by trading plus the change on the coins not sold yet, in ${q}.`}>Overall, in {q}</L></span>
-          <div className={`kpi-v ${cls(earned + open)}`}>{qty(earned + open, q, 5)}</div>
-          <span className="sub">earned + not sold yet<Usd v={earned + open} k={k} /></span>
-        </div>
-        <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">avg <Amt v={g.stats.avgNet} sym={q} k={k} sig={4} /> each · {g.stats.wins} profitable</span></div>
-        <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{g.config ? `range ${px(g.config.lowerPrice)}–${px(g.config.upperPrice)}` : ''} {q}/{g.base}</span></div>
+        <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">{g.stats.roundTrips > 1 && <>avg {qty(g.stats.avgNet, q, 4)} each · </>}{g.stats.wins} profitable</span></div>
+        <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v" title={g.price ? px(g.price) : undefined}>{g.price ? pxShort(g.price) : '—'}</div><span className="sub">{q} per {g.base}</span></div>
         <div className="kpi"><span><L tip="Pool fees paid on this grid's fills, in the quote coin.">Fees</L></span><div className="kpi-v">{qty(((g.trades ?? []) as AnyObj[]).reduce((a, t) => a + (typeof t.feeQuote === 'number' ? t.feeQuote : 0), 0), q, 4, false)}</div><span className="sub">paid on fills</span></div>
       </div>
+      <MoneyDetails b={g} note="what it holds, open positions, total P&L" hide={held > 0 ? ['Open positions'] : []} changes={stopSale(g)} breakdown={held > 0 ? [
+        ['Holding', <>{num(held, held < 10 ? 6 : 2)} {g.base}, bought for {lv.buyEcho(qty(g.pnl.costQuote, q, 5, false))}, worth {qty(held * (g.price ?? 0), q, 5, false)} now</>, `The ${g.base} the grid bought and hasn't sold yet. It sells one level up.`],
+        [`Open positions, ${q}`, open == null ? '—' : qty(open, q, 5), `What those coins are worth now minus what they cost. It moves with the price until they sell, so it is not in Generated.`],
+      ] : [['Holding', 'nothing waiting to sell']]} />
 
       {g.config && (
         <div className="card">
@@ -287,12 +334,13 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="split">
         <div className="card">
           <h3>Levels</h3>
+          {lv.same.length > 0 && <p className="muted small" data-testid="levels-same">{lv.same.join(' · ')}</p>}
           <div className="table-wrap"><table><tbody>
             {[...g.intervals].reverse().map((iv: AnyObj) => (
               <tr key={iv.index}>
                 <td className="muted">#{iv.index}</td><td>{formatPrice(iv.buyPrice)} → {formatPrice(iv.sellPrice)}</td>
                 <td className={`st ${iv.status}`}>{({ waitingBuy: 'waiting to buy', pendingBuy: 'buying', holding: 'holding', pendingSell: 'selling', inactive: 'inactive' } as Record<string, string>)[iv.status] ?? iv.status}{iv.needsRearm ? ' (re-arm)' : ''}</td>
-                <td>{iv.plsAmount ? `${num(iv.plsAmount, iv.plsAmount < 10 ? 6 : 0)} ${g.base}` : iv.status === 'waitingBuy' || iv.status === 'pendingBuy' ? `buys ${qty(iv.buyAmount, quoteSym(g), 4, false)}` : ''}</td>
+                <td>{lv.cell(iv)}</td>
               </tr>
             ))}
             {!g.intervals.length && <tr><td className="txt muted">No levels.</td></tr>}
@@ -301,12 +349,9 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="card"><h3>Log</h3><BotLog events={events} botId={g.id} /></div>
       </div>
 
-      <Fills s={s} g={g} />
+      <Fills s={s} g={g} gen={earned} />
 
-      <div className="card">
-        <h3>Value over time <span className="muted small">{q}</span></h3>
-        <EquityChart series={[{ name: `value ${q}`, data: g.equityHist ?? [], color: T.text }]} />
-      </div>
+      <ValueOverTime q={q} data={g.equityHist ?? []} />
     </main>
   );
 }

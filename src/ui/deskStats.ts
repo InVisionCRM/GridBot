@@ -1,35 +1,15 @@
 /** Read-only figures for the desk table and the stat block under a chart. Missing inputs stay null. */
 import { analyzeSpacing } from '../live/spacing';
 import type { AnyObj } from './model';
-import { bookUsd, quoteUsd } from './series';
 
-export const MIN_AGE_MS = 60_000;
-export const DAY_MS = 86_400_000;
+// Estimate rules live with the server's metrics (one definition); re-exported for callers and tests.
+export { ageMs, DAY_MS, EST_HINT, estHint, estNeedMs, extrapolate, historyEnd, MIN_AGE_MS } from '../metrics/botMetrics';
+import type { BotMetrics } from '../metrics/botMetrics';
 
 export interface Extrapolation { amount: number; pct: number | null }
 
-/** Linear extrapolation of the P&L so far. Null until the bot has been running at least a minute. */
-export function extrapolate(pnl: number, invested: number, age: number, windowMs: number): Extrapolation | null {
-  if (!(age >= MIN_AGE_MS) || !(windowMs > 0) || !Number.isFinite(pnl)) return null;
-  const amount = pnl * (windowMs / age);
-  if (!Number.isFinite(amount)) return null;
-  const pct = invested > 0 && Number.isFinite(invested) ? (pnl / invested) * (windowMs / age) : null;
-  return { amount, pct: pct != null && Number.isFinite(pct) ? pct : null };
-}
-
-/** Milliseconds since start. Null when the start time is missing or in the future. */
-export function ageMs(startedAt: number | null | undefined, now: number): number | null {
-  if (typeof startedAt !== 'number' || !Number.isFinite(startedAt) || startedAt <= 0 || startedAt > now) return null;
-  return now - startedAt;
-}
-
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
-}
-
-function usdOf(quote: number | null, k: number): number | null {
-  if (quote == null || !(k > 0)) return null;
-  return quote * k;
 }
 
 export interface MoveParts { fills: number | null; recenters: number | null; trades: number | null; n: number | null; text: string | null }
@@ -79,11 +59,26 @@ export interface DeskFacts {
   unrealizedPct: number | null;
   pnlUsd: number | null;
   pnlPct: number | null;
+  /** Generated (the headline) scaled to 24h / 7d / 365d, in dollars; pct only on 365d (= APR). */
   est: { h24: Extrapolation | null; d7: Extrapolation | null; d365: Extrapolation | null };
+  /** Why an estimate is a dash: "shows after a day" (EST_HINT). */
+  estHint: { h24: string | null; d7: string | null; d365: string | null };
+  aprPct: number | null;
+  /** Headline: units generated per token, and their dollar value at today's mid price. */
+  generated: Record<string, number> | null;
+  generatedUsd: number | null;
+  generatedRate: BotMetrics['generatedRate'] | null;
+  priceChangeUsd: number | null;
+  /** How the server calculated the money figures (tooltip). */
+  calc: string | null;
   moves: MoveParts;
   winRate: number | null;
   feesPaidUsd: number | null;
   feesEarnedUsd: number | null;
+  /** The same in the bot's quote coin (`quoteSym`), which is what the pages show (crypto units only). */
+  feesPaid: number | null;
+  feesEarned: number | null;
+  quoteSym: string | null;
   timeInRange: number | null;
   range: { lower: number; upper: number } | null;
   spacingFrac: number | null;
@@ -127,74 +122,52 @@ function spacingOf(b: AnyObj): { frac: number | null; band: number | null } {
   return { frac: null, band: null };
 }
 
-/** Dollars and percents already on the bot. Estimates scale the P&L so far across 24h, 7d, and 365d. */
-export function botFacts(b: AnyObj, now = Date.now(), extra?: { chain?: string | null; dex?: string | null; pool?: string | null }): DeskFacts {
-  const k = b.kind === 'trader' || b.kind === 'sniper' ? (quoteUsd(b) || 1) : quoteUsd(b);
-  const started = num(b.startedAt) ?? num(b.openedAt);
-  const age = ageMs(started, now);
-  const trader = b.kind === 'trader' || b.kind === 'sniper';
-  const investedQuote = trader ? null
-    : b.kind === 'grid' ? num(b.config?.totalCapitalUsd)
-    : b.kind === 'trend' ? num(b.capital)
-    : b.kind === 'lp' ? (num(b.startValue) ?? num(b.config?.capital))
-    : null;
-  // Grid capital (config.totalCapitalUsd) is in quote units despite its name: equity = capital + realized + unrealized
-  // in the quote coin (engine.ts), and the server's USD rollups multiply it by usdPerQuote (multi.ts). Convert it here too.
-  const investedUsd = trader ? num(b.spentUsd) : usdOf(investedQuote, k);
-  const valueUsd = bookUsd(b);
-  let realizedQuote: number | null = null;
-  let unrealizedQuote: number | null = null;
-  if (b.kind === 'grid' || b.kind === 'trend') {
-    realizedQuote = num(b.pnl?.realized);
-    unrealizedQuote = num(b.pnl?.unrealized);
-  } else if (b.kind === 'lp' && b.pnl) {
-    realizedQuote = num(b.pnl.net);
-    unrealizedQuote = num(b.pnl.price);
-  }
-  const realizedUsd = trader ? null : usdOf(realizedQuote, k);
-  const unrealizedUsd = trader ? num(b.pnlUsd) ?? num(b.pnl?.unrealized) : usdOf(unrealizedQuote, k);
-  const realizedPct = realizedQuote != null && investedQuote != null && investedQuote > 0 ? realizedQuote / investedQuote : null;
-  const unrealizedPct = trader
-    ? (unrealizedUsd != null && investedUsd != null && investedUsd > 0 ? unrealizedUsd / investedUsd : null)
-    : (unrealizedQuote != null && investedQuote != null && investedQuote > 0 ? unrealizedQuote / investedQuote : null);
-  const pnlUsd = realizedUsd == null && unrealizedUsd == null ? null : (realizedUsd ?? 0) + (unrealizedUsd ?? 0);
-  const pnlPct = b.kind === 'trend' && num(b.pnl?.returnPct) != null ? b.pnl.returnPct
-    : b.kind === 'lp' && num(b.pnl?.net) != null && investedQuote != null && investedQuote > 0 ? b.pnl.net / investedQuote
-    : investedUsd != null && investedUsd > 0 && pnlUsd != null ? pnlUsd / investedUsd : null;
-  const estOf = (windowMs: number) => (pnlUsd == null || age == null ? null : extrapolate(pnlUsd, investedUsd ?? 0, age, windowMs));
-  let feesPaid: number | null = null;
-  let feesEarned: number | null = null;
-  if (b.kind === 'grid') {
-    const fee = num(b.stats?.totalFees);
-    const gas = num(b.stats?.totalGas);
-    feesPaid = fee == null && gas == null ? null : usdOf((fee ?? 0) + (gas ?? 0), k);
-  } else if (b.kind === 'trend') {
-    const fee = num(b.pnl?.fees);
-    const gas = num(b.pnl?.gas);
-    feesPaid = fee == null && gas == null ? null : usdOf((fee ?? 0) + (gas ?? 0), k);
-  } else if (b.kind === 'lp') {
-    const gas = num(b.totals?.gas);
-    const swap = num(b.totals?.swapCost);
-    feesPaid = gas == null && swap == null ? null : usdOf((gas ?? 0) + (swap ?? 0), k);
-    feesEarned = usdOf(num(b.pnl?.fees), k);
-  }
+/** The server's money figures for a bot (BotMetrics), or null when the payload has none. */
+export function metricsOf(b: AnyObj): BotMetrics | null {
+  return b && typeof b.metrics === 'object' && b.metrics ? (b.metrics as BotMetrics) : null;
+}
+
+/**
+ * Figures for the desk table and the stat table. Every dollar / percent / estimate comes from the server's
+ * `metrics` (src/metrics/botMetrics.ts); this only reshapes them and adds non-money facts (range, spacing, moves).
+ */
+export function botFacts(b: AnyObj, _now = Date.now(), extra?: { chain?: string | null; dex?: string | null; pool?: string | null }): DeskFacts {
+  const m = metricsOf(b);
+  const ex = (v: number | null | undefined, pct: number | null = null): Extrapolation | null => (v == null ? null : { amount: v, pct });
   const space = spacingOf(b);
   const inRange = num(b.timeInRange);
+  // Everything that came off what the bot earned: gas + swap fees, and for an LP the range-move losses too (so
+  // fees earned − fees paid = Generated, at event prices). Grid / trend losing round trips are already in their profit.
+  const paid = m && (m.swapCostUsd != null || m.gasUsd != null)
+    ? (m.swapCostUsd ?? 0) + (m.gasUsd ?? 0) + (m.kind === 'lp' ? m.realizedRebalanceLossUsd ?? 0 : 0) : null;
+  const q = m?.quote;
+  const paidQ = q && (q.swapCost != null || q.gas != null)
+    ? (q.swapCost ?? 0) + (q.gas ?? 0) + (m!.kind === 'lp' ? q.rebalanceLoss ?? 0 : 0) : null;
   return {
-    ageMs: age,
-    investedUsd,
-    valueUsd,
-    realizedUsd,
-    unrealizedUsd,
-    realizedPct,
-    unrealizedPct,
-    pnlUsd,
-    pnlPct,
-    est: { h24: estOf(DAY_MS), d7: estOf(7 * DAY_MS), d365: estOf(365 * DAY_MS) },
+    ageMs: m?.ageSec == null ? null : m.ageSec * 1000,
+    investedUsd: m?.capitalInUsd ?? null,
+    valueUsd: m?.currentValueUsd ?? null,
+    realizedUsd: m?.realizedUsd ?? null,
+    unrealizedUsd: m?.unrealizedUsd ?? null,
+    realizedPct: null,
+    unrealizedPct: null,
+    pnlUsd: m?.totalPnlUsd ?? null,
+    pnlPct: m?.totalPnlPct ?? null,
+    est: { h24: ex(m?.est.d1), d7: ex(m?.est.d7), d365: ex(m?.est.d365, m?.aprPct ?? null) },
+    estHint: { h24: m?.est.needs.d1 ?? null, d7: m?.est.needs.d7 ?? null, d365: m?.est.needs.d365 ?? null },
+    aprPct: m?.aprPct ?? null,
+    generated: m?.generated ?? null,
+    generatedUsd: m?.generatedUsd ?? null,
+    generatedRate: m?.generatedRate ?? null,
+    priceChangeUsd: m?.priceChangeUsd ?? null,
+    calc: m?.calc ?? null,
     moves: moveParts(b),
     winRate: winRateOf(b),
-    feesPaidUsd: feesPaid,
-    feesEarnedUsd: feesEarned,
+    feesPaidUsd: paid,
+    feesEarnedUsd: m?.feesEarnedUsd ?? null,
+    feesPaid: paidQ,
+    feesEarned: q?.feesEarned ?? null,
+    quoteSym: q?.symbol ?? null,
     timeInRange: inRange != null && inRange >= 0 && inRange <= 1 ? inRange : null,
     range: rangeOf(b),
     spacingFrac: space.frac,
@@ -204,4 +177,33 @@ export function botFacts(b: AnyObj, now = Date.now(), extra?: { chain?: string |
     dex: extra?.dex ?? (typeof b.dexName === 'string' ? b.dexName : null),
     pool: extra?.pool ?? (typeof b.pool === 'string' ? b.pool : null),
   };
+}
+
+/** "+0.00626 ETH · +41.46 USDC": units per token, signed, zero legs dropped (all zero → "0"). Null → dash. */
+/** The figures in a formatted string as numbers, without sign, "$" and separators ("−$1,234.50" → ["1234.5"]); zero is not a figure. */
+export function figuresOf(text: string | null | undefined): string[] {
+  return (String(text ?? '').match(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g) ?? []).map((t) => Number(t.replace(/,/g, ''))).filter((n) => n !== 0).map(String);
+}
+
+/**
+ * True when `extra` adds no figure that `shown` doesn't already have, e.g. "≈ $23.75" beside "−23.75 USDG" (a stablecoin's
+ * dollar value prints the same number). Used to leave such echoes out: no number twice on a screen.
+ */
+export function echoes(shown: string | null | undefined, extra: string | null | undefined): boolean {
+  const have = new Set(figuresOf(shown));
+  const add = figuresOf(extra);
+  return add.length > 0 && add.every((f) => have.has(f));
+}
+
+export function unitsText(gen: Record<string, number> | null | undefined, max = 2, signed = true): string {
+  if (!gen) return '—';
+  const legs = Object.entries(gen).filter(([, u]) => Number.isFinite(u) && u !== 0);
+  // all zero: still name the coin ('0 USDG'), a bare 0 has no unit (Kyle)
+  if (!legs.length) { const ks = Object.keys(gen).slice(0, max); return ks.length ? ks.map((k) => `0 ${k}`).join(' · ') : '0'; }
+  const f = (u: number) => {
+    const a = Math.abs(u);
+    const d = a >= 1000 ? 0 : a >= 1 ? 2 : Math.min(8, 2 - Math.floor(Math.log10(a)));
+    return `${u > 0 ? (signed ? '+' : '') : '−'}${a.toLocaleString('en-US', { maximumFractionDigits: d })}`;
+  };
+  return legs.slice(0, max).map(([k, u]) => `${f(u)} ${k}`).join(' · ') + (legs.length > max ? ' …' : '');
 }

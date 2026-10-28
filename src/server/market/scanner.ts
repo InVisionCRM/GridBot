@@ -13,6 +13,7 @@
  * until the chain is done.
  * Nothing is added or started here: "Try it" adds the market and opens New bot. Results persist in data/picks.json.
  */
+import { usdAsEth } from '../../lib/ethUnits';
 import type { MarketDef, MarketToken } from '../../live/markets';
 import { bestSetup, checkTestUsd, dailySwing, pickTokens, SCAN_CANDLES, SCAN_EVERY_MS, SCAN_PAGES, TEST_USD, type Opportunity, type Skipped, type TopPool } from '../../market/scan';
 import { feePace } from '../../market/lpFees';
@@ -176,7 +177,7 @@ export class DailyScanner {
     this.running = true;
     // Fee readings are stored on the scan file while the scan runs. A first install has no file yet, so start one.
     if (this.d.store.load()?.version !== 4) this.d.store.save(this.file);
-    this.d.emit?.({ type: 'info', kind: 'system', msg: `Opportunity scan started ($${usd.toLocaleString('en-US')} test size)` });
+    this.d.emit?.({ type: 'info', kind: 'system', msg: `Opportunity scan started (${usdAsEth(usd)} test size)` });
     try {
       const chains: ScanChain[] = [];
       this.live = { done: chains, current: null };
@@ -283,7 +284,7 @@ export class DailyScanner {
       else o.gridWhy = `no grid earned from its trades this week (price ${pct(movePct)})`;
     }
     if (d.pool.kind !== 'v3' || !c.lpDexes.includes(d.pool.dex)) {
-      o.lpWhy = d.pool.kind === 'v3' ? "A liquidity bot can't open positions on this DEX yet (no verified position manager)." : 'A liquidity bot needs a V3 pool; this one is V2.';
+      o.lpWhy = d.pool.kind === 'v3' ? "A liquidity bot can't open positions on this DEX yet (no verified position manager)." : d.pool.kind === 'v4' ? 'A liquidity bot needs a V3 pool; this one is V4.' : 'A liquidity bot needs a V3 pool; this one is V2.';
       return o;
     }
     let candles = week;
@@ -343,7 +344,7 @@ export function scanDepsFromHub(hub: Hub, candles: CandleStore, rest: Pick<ScanD
       if (hub.isStable(d.chainId, d.quote.address)) return 1;
       if (!spends(d.chainId, d.quote)) throw new Error(`${d.quote.symbol} is not the native coin or a stablecoin`);
       const usd = await hub.nativeUsdAsync(d.chainId);
-      if (!usd) throw new Error(`no USD price for ${hub.chain(d.chainId).nativeSymbol}`);
+      if (!usd) throw new Error(`no price for ${hub.chain(d.chainId).nativeSymbol}`);
       return usd;
     },
   };

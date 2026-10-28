@@ -1,0 +1,601 @@
+{
+ "_about": "Sanitized subset of a read-only GridBot pull (Oct 27 2026, 5:07 PM ET): bot ids, amounts, prices and times only. No addresses, tx hashes, keys or env. Expected values from the pull's per-bot actuals.",
+ "now": 1793135233226,
+ "lpClosedLegacy": {
+  "state": {
+   "kind": "lp",
+   "version": 6,
+   "id": "lp-mvfv3g7g-to6l",
+   "mode": "live",
+   "market": "robinhood:ETH/USDG",
+   "status": "closed",
+   "config": {
+    "bandPct": 0.01,
+    "capital": 1000,
+    "baseAmount": 0.5,
+    "rerange": true
+   },
+   "profits": {
+    "mode": "reinvest"
+   },
+   "position": null,
+   "idle": {
+    "base": 0.8717608375797146,
+    "quote": 117.28206999999966
+   },
+   "step": null,
+   "reranges": 12,
+   "totals": {
+    "fees": 90.32713036846832,
+    "gas": 0.8165948417122956,
+    "sent": 0,
+    "feeCoins": {
+     "base": 0,
+     "quote": 90.32713036846832
+    },
+    "swapCost": 0,
+    "moveLoss": 0
+   },
+   "startedAt": 1792451084356,
+   "startPrice": 2406.506829374283,
+   "lastPrice": 2332.745368296711,
+   "lastPriceAt": 1792918370261,
+   "archivedAt": 1793029659559
+  },
+  "status": {
+   "base": "ETH",
+   "quote": "USDG",
+   "startValue": 2203.2534146871412,
+   "usdPerQuote": 1,
+   "price": 2332.745368296711
+  }
+ },
+ "lpLive": {
+  "kind": "lp",
+  "id": "lp-mvnm73sx-hghe",
+  "mode": "live",
+  "status": "running",
+  "base": "USDC",
+  "quote": "ETH",
+  "config": {
+   "bandPct": 0.01,
+   "capital": 3.5,
+   "baseAmount": 0,
+   "rerange": true
+  },
+  "idle": {
+   "base": 168.85268999999926,
+   "quote": 0
+  },
+  "price": 0.00042695303365252607,
+  "inRange": true,
+  "coins": {
+   "base": 5655.696910437107,
+   "quote": 1.0086987957119846
+  },
+  "owed": {
+   "base": 19.460191,
+   "quote": 0.008014781238196862
+  },
+  "value": 3.5118312860993206,
+  "reranges": 3,
+  "totals": {
+   "fees": 0.03762501072342108,
+   "gas": 0.0006807057687194715,
+   "sent": 0,
+   "feeCoins": {
+    "base": 43.77938200000039,
+    "quote": 0.01882215975197599
+   },
+   "swapCost": 0.001952698134734282,
+   "moveLoss": 0.022472881717407633
+  },
+  "pnl": {
+   "equity": 3.511150580330601,
+   "feeCoins": {
+    "base": 63.23957300000039,
+    "quote": 0.02683694099017285
+   },
+   "fees": 0.053948379544525527,
+   "gas": 0.0006807057687194715,
+   "swapCost": 0.001952698134734282,
+   "moveLoss": 0.022472881717407633,
+   "net": 0.028842093923664137,
+   "price": -0.017691513593063014
+  },
+  "startValue": 3.5,
+  "startedAt": 1792919867798,
+  "usdPerQuote": 2341.0063999999998
+ },
+ "gridHexLegacy": {
+  "state": {
+   "id": "g-mvowdsys-i5iq",
+   "mode": "live",
+   "status": "running",
+   "stable": "HEX~",
+   "config": {
+    "lowerPrice": 167.02,
+    "upperPrice": 278.37,
+    "gridCount": 20,
+    "totalCapitalUsd": 14000000
+   },
+   "usdPerBuy": 700000,
+   "startedAt": 1792997442851,
+   "trades": [
+    {
+     "side": "buy",
+     "intervalIndex": 11,
+     "stable": "HEX~",
+     "plsAmount": 28084.197551,
+     "stableAmount": 6300000,
+     "price": 224.3254409729672,
+     "gasPls": 0.17558169898124076,
+     "gasUsd": 39.38744205074962,
+     "timestamp": 1792997457503,
+     "realizedPnlUsd": 0,
+     "paper": false,
+     "feeQuote": 18270,
+     "lotCost": 6300039.3874420505
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 10,
+     "stable": "HEX~",
+     "plsAmount": 3125.21113473,
+     "stableAmount": 700000,
+     "price": 223.98486688499395,
+     "gasPls": 0.19094835062330734,
+     "gasUsd": 42.76954089627065,
+     "timestamp": 1793034748027,
+     "realizedPnlUsd": 0,
+     "paper": false,
+     "feeQuote": 2029.9999999999998,
+     "lotCost": 700042.7695408963
+    }
+   ]
+  },
+  "status": {
+   "quoteSym": "PLS",
+   "base": "HEX",
+   "price": 220.772615439998,
+   "usdPerQuote": 5.0938348336569646e-06,
+   "chainKey": "pulsechain"
+  }
+ },
+ "gridSchiffyStopped": {
+  "state": {
+   "id": "g-mvpcx5sw-btln",
+   "mode": "paper",
+   "status": "stopped",
+   "stable": "robinhood:SCHIFFY/WETH",
+   "config": {
+    "lowerPrice": 1.5606280085554456e-06,
+    "upperPrice": 2.6010466809257423e-06,
+    "gridCount": 6,
+    "totalCapitalUsd": 0.14446162851561242
+   },
+   "usdPerBuy": 0.024076938085935404,
+   "startedAt": 1793025222875,
+   "trades": [
+    {
+     "side": "buy",
+     "intervalIndex": 4,
+     "stable": "robinhood:SCHIFFY/WETH",
+     "plsAmount": 22637.128525290693,
+     "stableAmount": 0.0481538761718708,
+     "price": 2.1272077913094077e-06,
+     "gasPls": 110.0530037000794,
+     "gasUsd": 0.00023410560692781199,
+     "timestamp": 1793025244328,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.000481538761718708,
+     "lotCost": 0.04838798177879861
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 3,
+     "stable": "robinhood:SCHIFFY/WETH",
+     "plsAmount": 11663.82036700766,
+     "stableAmount": 0.0240769380859354,
+     "price": 2.0642411601296218e-06,
+     "gasPls": 4.316083758276925,
+     "gasUsd": 8.909437744402177e-06,
+     "timestamp": 1793025292977,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.000240769380859354,
+     "lotCost": 0.0240858475236798
+    },
+    {
+     "side": "sell",
+     "intervalIndex": -1,
+     "stable": "robinhood:SCHIFFY/WETH",
+     "plsAmount": 34300.9488922983,
+     "stableAmount": 0.068159110716593,
+     "price": 1.9870911131527614e-06,
+     "gasPls": 5.735302156898449,
+     "gasUsd": 1.1396567947218773e-05,
+     "timestamp": 1793025315473,
+     "realizedPnlUsd": -0.004326115153832513,
+     "paper": true,
+     "feeQuote": 0.0006884758658241718,
+     "lotCost": 0.0724738293024783,
+     "roundTripNet": -0.004326115153832513
+    }
+   ]
+  },
+  "status": {
+   "quoteSym": "ETH",
+   "base": "SCHIFFY",
+   "price": 1.9557600285672565e-06,
+   "usdPerQuote": 2341.179,
+   "chainKey": "robinhood"
+  }
+ },
+ "gridEthUsdgStopped": {
+  "state": {
+   "id": "g-mvnlxta0-y6t4",
+   "mode": "paper",
+   "status": "stopped",
+   "stable": "robinhood:ETH/USDG",
+   "config": {
+    "lowerPrice": 2194.2,
+    "upperPrice": 2425.2,
+    "gridCount": 28,
+    "totalCapitalUsd": 9000
+   },
+   "usdPerBuy": 321.42857142857144,
+   "startedAt": 1792988164432,
+   "trades": [
+    {
+     "side": "buy",
+     "intervalIndex": 15,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 1.8051594160262843,
+     "stableAmount": 4178.571428,
+     "price": 2314.7935805017887,
+     "gasPls": 1.1219279656e-05,
+     "gasUsd": 0.025970316525563114,
+     "timestamp": 1792988171440,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.4178571428,
+     "lotCost": 4178.597398316526
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 14,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.1391713308798746,
+     "stableAmount": 321.428571,
+     "price": 2309.588971865479,
+     "gasPls": 1.13152325e-05,
+     "gasUsd": 0.026133536196093852,
+     "timestamp": 1792988444485,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.0321428571,
+     "lotCost": 321.45470453619606
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 14,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.139171330879874,
+     "stableAmount": 322.606241,
+     "price": 2318.050987659651,
+     "gasPls": 8.85054475e-06,
+     "gasUsd": 0.02051601399906344,
+     "timestamp": 1792990744925,
+     "realizedPnlUsd": 1.1310204498048866,
+     "paper": true,
+     "feeQuote": 0.032263850485048505,
+     "lotCost": 321.45470453619606,
+     "roundTripNet": 1.1310204498048866
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 14,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.13963070050092677,
+     "stableAmount": 322.559591,
+     "price": 2310.09075971698,
+     "gasPls": 1.1242458084e-05,
+     "gasUsd": 0.025971098536353862,
+     "timestamp": 1792996149549,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.0322559591,
+     "lotCost": 322.58556209853634
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 14,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.139630700500926,
+     "stableAmount": 323.741229,
+     "price": 2318.5533542306694,
+     "gasPls": 8.803720284e-06,
+     "gasUsd": 0.02041189519417678,
+     "timestamp": 1792998034051,
+     "realizedPnlUsd": 1.135255006269456,
+     "paper": true,
+     "feeQuote": 0.032377360636063605,
+     "lotCost": 322.58556209853634,
+     "roundTripNet": 1.135255006269456
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 14,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.1401450580925256,
+     "stableAmount": 323.694846,
+     "price": 2309.712881822008,
+     "gasPls": 1.1256327056e-05,
+     "gasUsd": 0.0259988836032448,
+     "timestamp": 1793001779599,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.0323694846,
+     "lotCost": 323.7208448836032
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 13,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.13964649249571293,
+     "stableAmount": 321.428571,
+     "price": 2301.7303568141365,
+     "gasPls": 1.1273176068e-05,
+     "gasUsd": 0.025947811573426224,
+     "timestamp": 1793002284682,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.0321428571,
+     "lotCost": 321.4545188115734
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 13,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.139646492495712,
+     "stableAmount": 322.921912,
+     "price": 2312.4240804681554,
+     "gasPls": 9.07984e-06,
+     "gasUsd": 0.020996440662797974,
+     "timestamp": 1793002657849,
+     "realizedPnlUsd": 1.4463967477638286,
+     "paper": true,
+     "feeQuote": 0.032295420742074206,
+     "lotCost": 321.4545188115734,
+     "roundTripNet": 1.4463967477638286
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 14,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.140145058092525,
+     "stableAmount": 325.016197,
+     "price": 2319.141334155511,
+     "gasPls": 8.87079908e-06,
+     "gasUsd": 0.02057263681341668,
+     "timestamp": 1793003248565,
+     "realizedPnlUsd": 1.274779479583354,
+     "paper": true,
+     "feeQuote": 0.0325048701870187,
+     "lotCost": 323.7208448836032,
+     "roundTripNet": 1.274779479583354
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 15,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.138858416617406,
+     "stableAmount": 322.936529,
+     "price": 2325.6532579496493,
+     "gasPls": 8.893157152e-06,
+     "gasUsd": 0.020682399904007026,
+     "timestamp": 1793003978879,
+     "realizedPnlUsd": 1.485277498824797,
+     "paper": true,
+     "feeQuote": 0.03229688258825883,
+     "lotCost": 321.4305691012712,
+     "roundTripNet": 1.485277498824797
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 16,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.138858416617406,
+     "stableAmount": 324.190097,
+     "price": 2334.680928223709,
+     "gasPls": 8.824611388e-06,
+     "gasUsd": 0.020602651906549353,
+     "timestamp": 1793008629476,
+     "realizedPnlUsd": 2.7389252468222276,
+     "paper": true,
+     "feeQuote": 0.03242225192519252,
+     "lotCost": 321.4305691012712,
+     "roundTripNet": 2.7389252468222276
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 16,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.13932880022861305,
+     "stableAmount": 324.167496,
+     "price": 2326.636671442663,
+     "gasPls": 1.123696e-05,
+     "gasUsd": 0.026144323211534346,
+     "timestamp": 1793010069674,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.0324167496,
+     "lotCost": 324.1936403232116
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 15,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.13936961363127306,
+     "stableAmount": 322.913848,
+     "price": 2316.960200910979,
+     "gasPls": 1.1240552736e-05,
+     "gasUsd": 0.026043913325553013,
+     "timestamp": 1793019697163,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.032291384799999996,
+     "lotCost": 322.93989191332554
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 14,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.14071165037200656,
+     "stableAmount": 324.969626,
+     "price": 2309.472066746863,
+     "gasPls": 1.126608e-05,
+     "gasUsd": 0.026018697061735502,
+     "timestamp": 1793021210809,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.032496962600000005,
+     "lotCost": 324.9956446970617
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 13,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.14039611639976063,
+     "stableAmount": 322.874968,
+     "price": 2299.7428723787016,
+     "gasPls": 1.144528e-05,
+     "gasUsd": 0.026321201102378507,
+     "timestamp": 1793021717610,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.0322874968,
+     "lotCost": 322.90128920110243
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 13,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.14039611639976,
+     "stableAmount": 324.49796,
+     "price": 2311.3029642218416,
+     "gasPls": 9.2576e-06,
+     "gasUsd": 0.02139711832158012,
+     "timestamp": 1793021883468,
+     "realizedPnlUsd": 1.5752736805759684,
+     "paper": true,
+     "feeQuote": 0.03245304130413041,
+     "lotCost": 322.90128920110243,
+     "roundTripNet": 1.5752736805759684
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 13,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.14120852269704692,
+     "stableAmount": 324.450241,
+     "price": 2297.6675543592046,
+     "gasPls": 1.53113282e-05,
+     "gasUsd": 0.035180342019285125,
+     "timestamp": 1793022477108,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.032445024100000004,
+     "lotCost": 324.48542134201927
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 12,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.14020376438281468,
+     "stableAmount": 321.428571,
+     "price": 2292.5816037461454,
+     "gasPls": 1.151696e-05,
+     "gasUsd": 0.02640357062708021,
+     "timestamp": 1793023054325,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.0321428571,
+     "lotCost": 321.45497457062703
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 12,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.140203764382814,
+     "stableAmount": 322.678734,
+     "price": 2301.4983614773296,
+     "gasPls": 8.9364e-06,
+     "gasUsd": 0.02056710995750601,
+     "timestamp": 1793023253958,
+     "realizedPnlUsd": 1.2031923194154839,
+     "paper": true,
+     "feeQuote": 0.032271100510051005,
+     "lotCost": 321.45497457062703,
+     "roundTripNet": 1.2031923194154839
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 13,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.141208522697046,
+     "stableAmount": 326.450722,
+     "price": 2311.834411725838,
+     "gasPls": 8.99624e-06,
+     "gasUsd": 0.020797817208144453,
+     "timestamp": 1793023895913,
+     "realizedPnlUsd": 1.9445028407725753,
+     "paper": true,
+     "feeQuote": 0.03264833703370337,
+     "lotCost": 324.48542134201927,
+     "roundTripNet": 1.9445028407725753
+    },
+    {
+     "side": "sell",
+     "intervalIndex": 14,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.140711650372006,
+     "stableAmount": 326.409222,
+     "price": 2319.7028898250896,
+     "gasPls": 9.196e-06,
+     "gasUsd": 0.021331987774831522,
+     "timestamp": 1793024370968,
+     "realizedPnlUsd": 1.3922453151634475,
+     "paper": true,
+     "feeQuote": 0.03264418661866186,
+     "lotCost": 324.9956446970617,
+     "roundTripNet": 1.3922453151634475
+    },
+    {
+     "side": "buy",
+     "intervalIndex": 14,
+     "stable": "robinhood:ETH/USDG",
+     "plsAmount": 0.14139404261495345,
+     "stableAmount": 326.361871,
+     "price": 2308.1727133918503,
+     "gasPls": 1.143632e-05,
+     "gasUsd": 0.026397001765617486,
+     "timestamp": 1793024824875,
+     "realizedPnlUsd": 0,
+     "paper": true,
+     "feeQuote": 0.032636187100000005,
+     "lotCost": 326.38826800176565
+    }
+   ]
+  },
+  "status": {
+   "quoteSym": "USDG",
+   "base": "ETH",
+   "price": 2335.3738,
+   "usdPerQuote": 1,
+   "chainKey": "robinhood"
+  }
+ }
+}

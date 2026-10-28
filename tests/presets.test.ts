@@ -105,7 +105,7 @@ describe('strategy presets', () => {
     expect(ids).toHaveLength(2);
     // engine sizing matches the economics preview
     const g0 = bot.status().grids.find((g) => g.id === ids[0])!;
-    expect(g0.usdPerBuy).toBeCloseTo(prev.legs[0].econ!.levelSize, 6);
+    expect(g0.quotePerBuy).toBeCloseTo(prev.legs[0].econ!.levelSize, 6);
     expect(new Set(bot.status().grids.map((g) => g.stable))).toEqual(new Set(['DAI', 'USDC']));
 
     const { ids: one } = await bot.startPreset('tight-scalp', { mode: 'paper', quote: 'HEX', amounts: { HEX: 1000 } });

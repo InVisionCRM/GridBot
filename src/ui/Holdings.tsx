@@ -1,11 +1,14 @@
-/** Holdings: one total, then each chain as a short list. Read-only. */
+/**
+ * Holdings: each chain as a short list of coin amounts. Read-only. Crypto units only (Kyle, #73): every amount in its own
+ * coin ("34,000 USDG"), never a dollar figure, and no total across coins or chains.
+ */
 import { useCallback, useEffect, useState } from 'react';
 import { http } from './api';
 import { ago } from './fmt';
 import { useChainFilter, type ChainInfo } from './chains';
 import { TokenMark, ChainMark } from './icons';
 import {
-  formatTokenAmount, formatUsdAmount, HOW_HOLDINGS, type FeeRow, type HoldingsSnapshot, type PositionRow,
+  HOW_HOLDINGS, type FeeRow, type HoldingsSnapshot, type PositionRow,
 } from '../live/holdingsMath';
 import { botView, errMsg, type AnyObj, type Nav } from './model';
 
@@ -37,34 +40,23 @@ function sliceOf(snap: HoldingsSnapshot, chainId: number | 'all', showDust: bool
   const positions = snap.positions.filter((r) => on(r.chainId) && keep(r.dust));
   const fees = snap.fees.filter((r) => on(r.chainId) && keep(r.dust));
   const bots = snap.bots.filter((r) => on(r.chainId) && keep(r.dust));
-  let walletUsd = 0, walletPriced = false, claim = 0;
-  for (const row of wallet) {
-    if (row.coin.usd != null) { walletUsd += row.coin.usd; walletPriced = true; }
-    if (row.coin.usdEach == null) continue;
-    let room = row.coin.amount;
-    for (const b of row.bots) {
-      if (b.bot.kind === 'lp' || b.bot.mode !== 'live') continue;
-      const take = Math.min(Math.max(0, b.amount), Math.max(0, room));
-      room -= take;
-      claim += take * row.coin.usdEach;
-    }
-  }
-  const sum = (rows: { usd: number | null }[]) => rows.reduce((s, r) => (r.usd != null ? s + r.usd : s), 0);
-  const priced = walletPriced || positions.some((r) => r.usd != null) || fees.some((r) => r.usd != null);
   const hidden = snap.wallet.filter((r) => on(r.coin.chainId) && r.dust).length
     + snap.positions.filter((r) => on(r.chainId) && r.dust).length
     + snap.fees.filter((r) => on(r.chainId) && r.dust).length
     + snap.bots.filter((r) => on(r.chainId) && r.dust).length;
-  const net = priced ? walletUsd + sum(positions) + sum(fees) : null;
-  return { wallet, positions, fees, bots, hidden, net, botsUsd: priced ? Math.min(claim, walletUsd) : null };
+  // dollar values only order the chains and fold away tiny positions; none is shown
+  const sortUsd = [...wallet.map((r) => r.coin.usd), ...positions.map((r) => r.usd), ...fees.map((r) => r.usd)].reduce<number>((a, u) => a + (u ?? 0), 0);
+  return { wallet, positions, fees, bots, hidden, sortUsd };
 }
 
-const money = (n: number | null | undefined) => (n == null ? '—' : formatUsdAmount(n));
+/** A coin amount in full, grouped: "34,000 USDG", "21.3 SPY", "0.00016568 NVDA". */
+export const coinAmount = (n: number, symbol: string) =>
+  `${!Number.isFinite(n) ? '—' : `${n < 0 ? '−' : ''}${Number(Math.abs(n).toPrecision(6)).toLocaleString('en-US', { maximumFractionDigits: 12 })}`} ${symbol}`;
 const RANGE: Record<string, string> = { in: 'In range', below: 'Below range', above: 'Above range' };
 
 function amounts(row: PositionRow | FeeRow) {
-  const bits = [row.token0, row.token1].filter((c) => c.amount > 0).map((c) => `${formatTokenAmount(c.amount)} ${c.symbol}`);
-  return bits.join(' · ');
+  const bits = [row.token0, row.token1].filter((c) => c.amount > 0).map((c) => coinAmount(c.amount, c.symbol));
+  return bits.join(' · ') || '—';
 }
 
 export function Holdings({ s, snap, loading, error, reload, nav }: {
@@ -89,15 +81,15 @@ export function Holdings({ s, snap, loading, error, reload, nav }: {
     ? [...new Set([...view.wallet.map((r) => r.coin.chainId), ...view.positions.map((r) => r.chainId), ...view.fees.map((r) => r.chainId), ...view.bots.map((r) => r.chainId)])]
     : [];
   chainIds.sort((a, b) => {
-    const usdOf = (id: number) => sliceOf(snap!, id, showDust).net ?? 0;
+    const usdOf = (id: number) => sliceOf(snap!, id, showDust).sortUsd;
     return usdOf(b) - usdOf(a);
   });
 
   return (
     <main className="home">
-      <section className="home-fig" aria-label="Net worth">
+      <section className="home-fig" aria-label="Holdings">
         <div>
-          <p className="home-num">{view ? money(view.net) : loading ? '…' : '—'}</p>
+          <p className="home-num">{view || !loading ? 'Your coins' : '…'}</p>
           <p className="home-day muted">
             {snap?.hasSigner === false && 'Paper mode. No wallet to read.'}
             {snap?.hasSigner && snap.address && <>{snap.address.slice(0, 6)}…{snap.address.slice(-4)}</>}
@@ -110,7 +102,7 @@ export function Holdings({ s, snap, loading, error, reload, nav }: {
         <button type="button" disabled={loading} onClick={reload}>{loading ? 'Reading…' : 'Read again'}</button>
       </p>
       {error && <p className="note bad">{error}</p>}
-      {snap?.overdrawn && <p className="note">Bot books add up to more than the wallet. The total uses the wallet, not the books.</p>}
+      {snap?.overdrawn && <p className="note">Bot books add up to more than the wallet holds. The amounts here are the wallet's, not the books'.</p>}
       {snap?.errors.map((e, i) => <p key={i} className="note">{e.message}</p>)}
 
       {view && chainIds.map((id) => {
@@ -122,13 +114,12 @@ export function Holdings({ s, snap, loading, error, reload, nav }: {
             <h2 className="chain-head">
               {info && <ChainMark short={info.short} color={info.color} size={22} />}
               <span>{name}</span>
-              <b>{money(part.net)}</b>
             </h2>
             {part.wallet.map((row) => (
               <div key={`${id}-${row.coin.address ?? 'native'}`} className="line static">
                 <TokenMark symbol={row.coin.symbol} address={row.coin.address} size={22} />
-                <span className="line-name">{row.coin.symbol}<span>{formatTokenAmount(row.coin.amount)}{row.bots.length ? ' · in a bot' : ''}</span></span>
-                <b>{money(row.coin.usd)}</b>
+                <span className="line-name">{row.coin.symbol}{row.bots.length ? <span>in a bot</span> : null}</span>
+                <b>{coinAmount(row.coin.amount, row.coin.symbol)}</b>
               </div>
             ))}
             {part.positions.filter((r) => (r.usd ?? 0) > 1).map((row) => (
@@ -136,9 +127,8 @@ export function Holdings({ s, snap, loading, error, reload, nav }: {
                 <span>
                   {row.token0.symbol}/{row.token1.symbol}
                   <small>{row.dexName} {row.feeLabel}{row.range ? ` · ${RANGE[row.range]}` : ''}{row.stranded ? ' · still in the position' : ''}</small>
-                  <small>{amounts(row)}</small>
                 </span>
-                <b>{money(row.usd)}</b>
+                <b>{amounts(row)}</b>
                 {row.bot && <button type="button" className="text-link" onClick={() => nav(botView(row.bot!.kind, row.bot!.id))}>{row.bot.name}</button>}
               </div>
             ))}
@@ -150,34 +140,33 @@ export function Holdings({ s, snap, loading, error, reload, nav }: {
                     <span>
                       {row.token0.symbol}/{row.token1.symbol}
                       <small>{row.dexName} {row.feeLabel}{row.range ? ` · ${RANGE[row.range]}` : ''}</small>
-                      <small>{amounts(row)}</small>
                     </span>
-                    <b>{money(row.usd)}</b>
+                    <b>{amounts(row)}</b>
                   </div>
                 ))}
               </details>
             )}
             {!!part.fees.length && (
               <details className="fold">
-                <summary>Uncollected <span>{part.fees.length}</span> <b>{money(part.fees.reduce((s, r) => s + (r.usd ?? 0), 0))}</b></summary>
+                <summary>Uncollected <span>{part.fees.length}</span></summary>
                 {part.fees.map((row) => (
                   <div key={`${row.pool}-${row.tokenId ?? ''}-fee`} className="fold-row">
                     <span>
                       {row.token0.symbol}/{row.token1.symbol}
-                      <small>{row.leftover ? 'Left behind when the position closed' : 'Not collected yet'} · {amounts(row)}</small>
+                      <small>{row.leftover ? 'Left behind when the position closed' : 'Not collected yet'}</small>
                     </span>
-                    <b>{money(row.usd)}</b>
+                    <b>{amounts(row)}</b>
                   </div>
                 ))}
               </details>
             )}
             {!!part.bots.length && (
               <details className="fold">
-                <summary>In grids <b>{money(part.botsUsd)}</b></summary>
+                <summary>In grids <span>{part.bots.length}</span></summary>
                 {part.bots.map((bag) => (
                   <button key={bag.bot.id} type="button" className="fold-row as-btn" onClick={() => nav(botView(bag.bot.kind, bag.bot.id))}>
-                    <span>{bag.bot.name}<small>{bag.coins.map((c) => `${formatTokenAmount(c.amount)} ${c.symbol}`).join(' · ')}</small></span>
-                    <b>{money(bag.usd)}</b>
+                    <span>{bag.bot.name}</span>
+                    <b>{bag.coins.map((c) => coinAmount(c.amount, c.symbol)).join(' · ') || '—'}</b>
                   </button>
                 ))}
               </details>

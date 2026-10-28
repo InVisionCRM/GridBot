@@ -67,7 +67,7 @@ for (const net of Object.values(NETWORKS)) {
     // Flipped "Stack … with PLS" presets are checked on the deepest pool in flipChecks().
     for (const preset of STRATEGY_PRESETS.filter((x) => !x.legs.some((l) => l.flip))) {
       for (const leg of resolvePreset(preset, spots, net.defaultQuote, SAMPLE_AMOUNTS)) {
-        const e = econFromMarket(markets[leg.quote], { ...leg, totalCapitalUsd: leg.capital! }, 'exact');
+        const e = econFromMarket(markets[leg.quote], { ...leg, totalCapitalQuote: leg.capital! }, 'exact');
         ok(e.ok, `${preset.id} PLS/${leg.quote} ±${leg.bandPct * 100}%×${leg.gridCount} with ${leg.capital!.toLocaleString('en-US')} ${leg.quote}: size ${e.levelSize.toPrecision(5)} ${leg.quote}, step ${(e.spacingPct * 100).toFixed(3)}%, impact ${(e.impactPct * 100).toFixed(3)}%, gas ${e.gasQuote.toPrecision(3)} ${leg.quote}, net ${(e.netPct * 100).toFixed(3)}% = ${e.netPerRoundTrip.toPrecision(4)} ${leg.quote}/RT${e.ok ? '' : ' ' + e.reasons.join(' ')}`);
       }
     }
@@ -173,6 +173,15 @@ async function chainCheck(hub: Hub, rt: ChainRuntime) {
   if (!rt.tradable) { console.log(`  · trading unavailable — ${c.trading.reason}`); ok(c.dexes.length === 0 || !c.trading.enabled, 'no tradable DEX configured, as documented'); return; }
   if (c.id === 369) { console.log('  · DEXes verified above'); }
   else for (const d of c.dexes) {
+    if (d.kind === 'v4') {
+      const code = async (a: string | undefined, label: string) => ok(!!a && (await r.getCode!(a)).length > 2, `${d.name}: ${label} ${a ?? 'missing'} has code`);
+      await code(d.factory, 'PoolManager');
+      await code(d.router, 'Universal Router');
+      await code(d.quoter, 'Quoter');
+      await code(d.stateView, 'StateView');
+      await code(d.permit2, 'Permit2');
+      continue;
+    }
     const iface = d.kind === 'v2' ? ROUTER : V3_ROUTER;
     const [f] = await readCall<[string]>(r, d.router, iface, 'factory');
     ok(sameAddr(f, d.factory), `${d.name}: router ${d.router}.factory() = factory ${d.factory}`);

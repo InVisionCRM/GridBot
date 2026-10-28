@@ -17,16 +17,22 @@ import { fmtFeeTier } from '../live/chains';
 import type { VersionCheck } from './system/version';
 import { runChecks } from './system/checks';
 import type { Converter } from './convert/converter';
+import type { SwapService } from './swap/service';
+import { viaFunnel } from './friends/publicHost';
 import type { PoolSearch } from './market/poolSearch';
 import type { FriendsHost } from './friends/host';
 import type { GeckoRelay } from './friends/relay';
 import type { Autopilot, AutoOptions, Budget } from './bot/autopilot';
 import type { TokenTrader, TraderOptions } from './bot/tokenTrader';
+import type { Router } from './router/router';
 import { noKey } from './words';
 import { fetchJson } from './fetchJson';
 import { StatusFeed } from './statusFeed';
 import { holdingsSnapshot } from './holdings/read';
 import { requestStore, type HaltOrigin } from './bot/audit';
+import type { LpCompoundPolicy, LpRangePolicy } from '../market/lpPolicy';
+import { redact } from './bot/logger';
+import { deskChanged, deskDelta, deskFromStatus } from './v2Desk';
 
 export interface AppOpts {
   bot: MultiBot;
@@ -43,18 +49,31 @@ export interface AppOpts {
   autopilot?: Autopilot;
   /** New-token trader and sniper (server only) */
   tokenTrader?: TokenTrader;
+  /** Capital router settings (host only). Absent in tests that don't construct one. */
+  router?: Router;
   /** A chart was opened: the candle sync keeps every timeframe of that market for a while (server only) */
   viewCandles?: (pair: string) => void;
   /** Liquidity replay over a pool's real trades (server only: reads the chain) */
   lpReplay?: (q: { market: string; capital?: number; maxImpact?: number }) => Promise<unknown>;
   /** Tools → Convert: a chain's holdings into one coin (server only: reads the explorer, signs swaps) */
   convert?: Converter;
+  /** Same-chain swap quotes. Builds calldata in live mode and never broadcasts it. */
+  swap?: SwapService;
   /** Pair search in the pair pickers (server only: asks DexScreener) */
   poolSearch?: PoolSearch;
   heartbeatMs?: number;
   statusThrottleMs?: number;
   /** Version check + self-test (server only: needs the git checkout and the build stamp; a friend's copy has no version check) */
   system?: { version: VersionCheck | null; pollMs: number };
+  /** Lock-screen Web Push. Absent in tests that don't build a push service. */
+  push?: {
+    publicKey(): string;
+    view(): unknown;
+    setPrefs(body: unknown): unknown;
+    subscribe(body: unknown, ua: string | null): unknown;
+    unsubscribe(endpoint: string): unknown;
+    test(endpoint?: string): Promise<unknown>;
+  };
   /** This process is a friend's copy. Its requests are labeled as such even if a via header says otherwise. */
   copy?: boolean;
 }
@@ -71,6 +90,14 @@ export function createApp(o: AppOpts) {
   const { bot, net } = o;
   const app = express();
   app.disable('x-powered-by');
+  // Every JSON answer goes through log redaction: a provider error can embed a keyed RPC URL, or a registered secret.
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.json = (body?: unknown) => {
+      if (!res.get('Content-Type')) res.type('json');
+      return res.send(redact(JSON.stringify(body) ?? 'null'));
+    };
+    next();
+  });
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (!LOCAL_HOST.test(req.headers.host ?? '')) return res.status(403).json({ error: 'forbidden host' });
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -95,7 +122,13 @@ export function createApp(o: AppOpts) {
       const out = await fn(req, res);
       if (!res.headersSent) res.json(out ?? { ok: true });
     } catch (e) {
-      if (!res.headersSent) res.status(400).json({ error: (e as Error).message });
+      // A live start's safety block carries a code: SAFETY_BLOCKED (completed and failed, no bypass) or SAFETY_INCOMPLETE
+      // (couldn't complete; canStartAnyway says whether the page may offer Start anyway).
+      const x = e as Error & { code?: unknown; canStartAnyway?: unknown; blockedBy?: unknown };
+      const safety = x.code === 'SAFETY_BLOCKED' || x.code === 'SAFETY_INCOMPLETE'
+        ? { code: x.code, canStartAnyway: x.canStartAnyway === true, ...(typeof x.blockedBy === 'string' ? { blockedBy: x.blockedBy } : {}) }
+        : {};
+      if (!res.headersSent) res.status(400).json({ error: x.message, ...safety });
     }
   };
   const num = (v: unknown) => (v == null || v === '' ? undefined : Number(v));
@@ -119,10 +152,12 @@ export function createApp(o: AppOpts) {
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     return {
       mode, stable: b.stable as string | undefined,
-      lowerPrice: Number(b.lowerPrice), upperPrice: Number(b.upperPrice), gridCount: Number(b.gridCount), totalCapitalUsd: Number(b.totalCapitalUsd),
+      lowerPrice: Number(b.lowerPrice), upperPrice: Number(b.upperPrice), gridCount: Number(b.gridCount), // totalCapitalUsd: the old name (it was always quote coin), still accepted
+      totalCapitalQuote: Number(b.totalCapitalQuote ?? b.totalCapitalUsd),
       limits: b.limits as never,
       recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined,
       profits: profitsBody(b.profits),
+      startAnyway: b.startAnyway === true,
     };
   }
   /** { mode: 'reinvest' } | { mode: 'send', to } — checked by the grid (checkProfitMode); omitted = keep. */
@@ -155,9 +190,16 @@ export function createApp(o: AppOpts) {
   app.get('/api/bot/econ', wrap(async (req) => {
     const lower = Number(req.query.lower), upper = Number(req.query.upper), n = Number(req.query.grids), cap = Number(req.query.capital);
     if (!(lower > 0) || !(upper > lower) || !(n >= 2) || !(cap > 0)) throw new Error('need lower, upper, grids, capital');
-    return bot.economics(String(req.query.quote ?? net.defaultQuote), { lowerPrice: lower, upperPrice: upper, gridCount: n, totalCapitalUsd: cap });
+    return bot.economics(String(req.query.quote ?? net.defaultQuote), { lowerPrice: lower, upperPrice: upper, gridCount: n, totalCapitalQuote: cap });
   }));
   app.get('/api/bot/status', wrap(async () => bot.status()));
+  // One bot's money figures (BotMetrics, src/metrics/botMetrics.ts); "token-trader" is the token trader.
+  app.get('/api/bot/:id/metrics', wrap(async (req, res) => {
+    const id = String(req.params.id);
+    const m = id === 'token-trader' && o.tokenTrader ? o.tokenTrader.status().metrics : bot.metricsFor(id);
+    if (!m) { res.status(404).json({ error: `No bot ${id}` }); return; }
+    return m;
+  }));
   app.get('/api/bot/prices', wrap(async () => ({ prices: await bot.prices() })));
   app.get('/api/bot/presets', (_req, res) => res.json({ presets: listPresets() }));
   app.get('/api/bot/presets/:id/preview', wrap(async (req) => bot.previewPreset(req.params.id, {
@@ -167,13 +209,13 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     if (mode === 'live' && !bot.hasSigner) throw new Error(noKey());
-    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined, profits: profitsBody(b.profits) });
+    const out = await bot.startPreset(req.params.id, { mode, quote: b.quote, amounts: amountsParam(b.amounts), limits: b.limits, recenter: typeof b.recenter === 'boolean' ? b.recenter : undefined, profits: profitsBody(b.profits), startAnyway: b.startAnyway === true });
     void bot.tickAll();
     return { ok: true, ...out };
   }));
   app.post('/api/bot/grids', wrap(async (req) => { const id = await bot.add(startBody(req.body ?? {})); void bot.tickAll(); return { ok: true, id }; }));
   app.post('/api/bot/grids/:id/start', wrap(async (req) => { await bot.start(req.params.id, startBody(req.body ?? {})); void bot.tickAll(); }));
-  app.post('/api/bot/grids/:id/resume', wrap((req) => { bot.resume(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/grids/:id/resume', wrap(async (req) => { await bot.resume(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/grids/:id/stop', wrap((req) => bot.stop(req.params.id)));
   app.post('/api/bot/grids/:id/close', wrap((req) => bot.closeGrid(req.params.id)));
   app.put('/api/bot/grids/:id/limits', wrap((req) => bot.setLimits(req.params.id, limitsBody(req.body ?? {}))));
@@ -256,10 +298,10 @@ export function createApp(o: AppOpts) {
     if (typeof b.id === 'string' && b.id) return { ok: true, stopped: bot.stopById(b.id) };
     throw new Error('Send { "id": "<bot id>" } to stop one bot, or { "all": true } to stop every bot.');
   }));
-  app.post('/api/bot/resume', wrap(() => {
+  app.post('/api/bot/resume', wrap(async () => {
     const g = bot.status().grids.find((x) => x.config && x.status !== 'running');
     if (!g) throw new Error('No stopped grid to resume');
-    bot.resume(g.id);
+    await bot.resume(g.id);
     void bot.tickAll();
   }));
 
@@ -268,11 +310,11 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const mode = b.mode === 'live' ? 'live' as const : 'paper' as const;
     const quote = String(b.quote ?? net.defaultQuote);
-    const id = await bot.addTrend({ mode, quote, tf: String(b.tf ?? '1h') as never, cfg: b.cfg ?? {}, capital: num(b.capital) ?? 0, name: b.name, limits: b.limits });
+    const id = await bot.addTrend({ mode, quote, tf: String(b.tf ?? '1h') as never, cfg: b.cfg ?? {}, capital: num(b.capital) ?? 0, name: b.name, limits: b.limits, startAnyway: b.startAnyway === true });
     void bot.tickAll();
     return { ok: true, id };
   }));
-  app.post('/api/bot/trends/:id/resume', wrap((req) => { bot.resumeTrend(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/trends/:id/resume', wrap(async (req) => { await bot.resumeTrend(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/trends/:id/stop', wrap((req) => bot.stopTrend(req.params.id)));
   app.post('/api/bot/trends/:id/sell', wrap((req) => bot.sellTrend(req.params.id)));
   app.post('/api/bot/trends/:id/close', wrap((req) => bot.closeTrend(req.params.id)));
@@ -286,15 +328,33 @@ export function createApp(o: AppOpts) {
     const id = await bot.addLp({
       mode: b.mode === 'live' ? 'live' : 'paper', market: String(b.market ?? ''), bandPct: Number(b.bandPct), capital: Number(b.capital ?? 0),
       baseAmount: b.baseAmount == null ? undefined : Number(b.baseAmount),
-      rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined, profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
+      rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined,
+      range: b.range && typeof b.range === 'object' ? b.range as Partial<LpRangePolicy> : undefined,
+      compound: b.compound && typeof b.compound === 'object' ? b.compound as Partial<LpCompoundPolicy> : undefined,
+      profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
+      startAnyway: b.startAnyway === true,
     });
     void bot.tickAll();
     return { ok: true, id };
   }));
-  app.post('/api/bot/lps/:id/resume', wrap((req) => { bot.resumeLp(req.params.id); void bot.tickAll(); }));
+  app.post('/api/bot/lps/:id/resume', wrap(async (req) => { await bot.resumeLp(req.params.id); void bot.tickAll(); }));
   app.post('/api/bot/lps/:id/stop', wrap((req) => bot.stopLp(req.params.id)));
   app.post('/api/bot/lps/:id/close', wrap((req) => bot.closeLp(req.params.id)));
   app.put('/api/bot/lps/:id/rerange', wrap((req) => bot.setLpRerange(req.params.id, req.body?.enabled === true)));
+  app.put('/api/bot/lps/:id/policy', wrap((req) => {
+    const b = req.body ?? {};
+    bot.setLpPolicy(req.params.id, {
+      ...(b.range && typeof b.range === 'object' ? { range: b.range as Partial<LpRangePolicy> } : {}),
+      ...(b.compound && typeof b.compound === 'object' ? { compound: b.compound as Partial<LpCompoundPolicy> } : {}),
+      ...(b.bandPct == null ? {} : { bandPct: Number(b.bandPct) }),
+    });
+    return { ok: true };
+  }));
+  app.post('/api/bot/lps/:id/compound', wrap(async (req) => {
+    await bot.compoundLp(req.params.id);
+    void bot.tickAll();
+    return { ok: true };
+  }));
   // { bandPct? }: move the range to the price now (a new width, or the same one)
   app.post('/api/bot/lps/:id/move', wrap(async (req) => {
     const b = req.body?.bandPct;
@@ -327,6 +387,21 @@ export function createApp(o: AppOpts) {
   app.get('/api/convert/job', wrap(() => ({ job: cv().job() })));
   app.post('/api/convert/stop', wrap(() => { cv().stop(); return { ok: true }; }));
 
+  // Host only. A friend's copy and a request that arrived through Tailscale Funnel never quote.
+  // Live mode returns calldata; this route never broadcasts it.
+  app.post('/api/swap/quote', wrap(async (req) => {
+    if (o.copy || !o.swap || viaFunnel(req.headers, req.socket.remoteAddress)) throw new Error('swap quoting is host-only');
+    const b = req.body ?? {};
+    if (typeof b.amountIn !== 'string' || !/^\d+$/.test(b.amountIn)) throw new Error('amountIn must be a decimal string of raw units');
+    return plain(await o.swap.quote({
+      chainId: Number(b.chainId), tokenIn: String(b.tokenIn ?? ''), tokenOut: String(b.tokenOut ?? ''),
+      amountIn: BigInt(b.amountIn), owner: String(b.owner ?? ''),
+      recipient: typeof b.recipient === 'string' ? b.recipient : undefined,
+      mode: b.mode === 'live' ? 'live' : 'paper',
+      slippageBps: num(b.slippageBps), deadlineMinutes: num(b.deadlineMinutes), maxPriceImpact: num(b.maxPriceImpact),
+    }));
+  }));
+
   // ── Smart trader ────────────────────────────────────────────────────
   const ap = () => { if (!o.autopilot) throw new Error('The smart trader is not available.'); return o.autopilot; };
   app.get('/api/autopilot', wrap(() => plain(ap().status())));
@@ -352,15 +427,34 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const patch: Partial<TraderOptions> = {};
     if (b.mode === 'paper' || b.mode === 'live') patch.mode = b.mode;
-    for (const k of ['perTradeUsd', 'totalUsd', 'minPoolAgeSec', 'maxImpact', 'maxPoolShare'] as const) if (b[k] != null) patch[k] = Number(b[k]);
+    for (const k of ['perTradeUsd', 'totalUsd', 'minPoolAgeSec', 'maxImpact', 'maxPoolShare', 'minLiquidityUsd', 'maxHolderShare', 'maxTop10Share', 'minHolderCoverage', 'sizeImpactCap'] as const) if (b[k] != null) patch[k] = Number(b[k]);
+    if (typeof b.enforceLiquidityFloor === 'boolean') patch.enforceLiquidityFloor = b.enforceLiquidityFloor;
+    if (typeof b.enforceSizeImpact === 'boolean') patch.enforceSizeImpact = b.enforceSizeImpact;
     if (b.risk === 'safe' || b.risk === 'medium' || b.risk === 'any') patch.risk = b.risk;
+    if (typeof b.enforceWashAndAge === 'boolean') patch.enforceWashAndAge = b.enforceWashAndAge;
+    if (typeof b.enforceOwnerPowers === 'boolean') patch.enforceOwnerPowers = b.enforceOwnerPowers;
+    if (typeof b.v3LpLockCheck === 'boolean') patch.v3LpLockCheck = b.v3LpLockCheck;
+    if (typeof b.v3LpLockCacheEnabled === 'boolean') patch.v3LpLockCacheEnabled = b.v3LpLockCacheEnabled;
+    if (b.v3LpLockCacheTtlMs != null) patch.v3LpLockCacheTtlMs = Number(b.v3LpLockCacheTtlMs);
+    if (b.v3LpLockCallBudget != null) patch.v3LpLockCallBudget = Number(b.v3LpLockCallBudget);
+    if (typeof b.lpUnlockCheck === 'boolean') patch.lpUnlockCheck = b.lpUnlockCheck;
+    if (typeof b.enforceHolderCheck === 'boolean') patch.enforceHolderCheck = b.enforceHolderCheck;
     if (Array.isArray(b.chains)) patch.chains = b.chains.map(Number);
     if (b.sniper && typeof b.sniper === 'object') patch.sniper = b.sniper;
     tt().configure(patch);
     return plain(tt().status());
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
-  app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
+  // { mode: 'exits' } (default): off for new buys, exits keep running. { mode: 'full' }: off completely, no exits.
+  app.post('/api/token-trader/off', wrap((req) => { tt().turnOff(req.body?.mode === 'full' ? 'full' : 'exits'); return plain(tt().status()); }));
+  app.get('/api/plays/scorecard', wrap(() => tt().scorecard()));
+
+  // ── Capital router (settings only; this does not move funds) ──
+  const router = () => { if (!o.router) throw new Error('The capital router is not available.'); return o.router; };
+  app.get('/api/router', wrap(() => router().status()));
+  app.put('/api/router', wrap((req) => router().update(req.body ?? {})));
+  app.post('/api/router/on', wrap(() => router().turnOn()));
+  app.post('/api/router/off', wrap(() => router().turnOff()));
   // After Stop all / STOP chain: new buys and snipes may happen again
   app.post('/api/token-trader/resume-entries', wrap(() => { tt().resumeEntries(); return plain(tt().status()); }));
 
@@ -461,7 +555,64 @@ export function createApp(o: AppOpts) {
   app.post('/api/alerts', wrap((req) => bot.addAlert(req.body ?? {})));
   app.put('/api/alerts/:id', wrap((req) => bot.updateAlert(req.params.id, req.body ?? {})));
   app.delete('/api/alerts/:id', wrap((req) => bot.removeAlert(req.params.id)));
+  if (o.push) {
+    const push = o.push;
+    // A friend's copy, and a request the gateway marked as a friend, never subscribe or read the owner's phones.
+    const ownerOnly = (req: Request, res: Response, next: NextFunction) => {
+      if (o.copy || headerOne(req.headers['x-gridbot-via']) === 'friend') {
+        res.status(403).json({ error: 'Push is only available on the owner login.' });
+        return;
+      }
+      next();
+    };
+    app.get('/api/push/vapid', ownerOnly, wrap(() => ({ publicKey: push.publicKey() })));
+    app.get('/api/push/status', ownerOnly, wrap(() => push.view()));
+    app.put('/api/push/prefs', ownerOnly, wrap((req) => push.setPrefs(req.body ?? {})));
+    app.post('/api/push/subscribe', ownerOnly, wrap((req) => push.subscribe(req.body ?? {}, headerOne(req.headers['user-agent']))));
+    app.post('/api/push/unsubscribe', ownerOnly, wrap((req) => push.unsubscribe(String(req.body?.endpoint ?? ''))));
+    app.post('/api/push/test', ownerOnly, wrap((req) => {
+      const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : '';
+      if (!endpoint) throw new Error('Send the test from the phone that should receive it.');
+      return push.test(endpoint);
+    }));
+  }
   app.get('/api/activity', wrap((req) => ({ events: bot.activity.recent(Math.min(400, num(req.query.n) ?? 100), num(req.query.since) ?? 0) })));
+
+  // ── v2 desk (read-only). Friend copies run this same app on their own bot, so they see
+  //    only what /api/bot/status already returns for that process. No wallet fields are copied.
+  const v2Desk = () => deskFromStatus(bot.status() as unknown as Record<string, unknown>, bot.activity.recent(80));
+  app.get('/api/v2/stream', (req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    const send = (event: string, data: unknown) => {
+      try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* client gone */ }
+    };
+    let last: ReturnType<typeof v2Desk> | null = null;
+    const publish = (hello: boolean) => {
+      let desk: ReturnType<typeof v2Desk>;
+      try { desk = v2Desk(); } catch {
+        send('problem', { error: 'Desk unavailable' });
+        return;
+      }
+      if (hello || !last) { send('snapshot', desk); last = desk; return; }
+      const delta = deskDelta(last, desk);
+      last = desk;
+      if (deskChanged(delta)) send('delta', delta);
+    };
+    publish(true);
+    const hbMs = o.heartbeatMs ?? 15_000;
+    const hb = setInterval(() => { send('hb', { t: Date.now() }); publish(false); }, hbMs);
+    const onAct = (e: ActivityEvent) => { if (e.type !== 'tick' && e.type !== 'candles') publish(false); };
+    bot.activity.on('activity', onAct);
+    req.on('close', () => {
+      clearInterval(hb);
+      bot.activity.off('activity', onAct);
+    });
+  });
 
   // ── SSE: activity + ticks + status pushes ────────────────────────────
   // The status is computed once per push for all clients (StatusFeed). v1 (no ?v): the whole status, as before.
@@ -476,7 +627,7 @@ export function createApp(o: AppOpts) {
   app.get('/api/bot/stream', (req, res) => {
     const v2 = String(req.query.v ?? '') === '2';
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
-    const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${redact(JSON.stringify(data))}\n\n`);
     const since = Number(req.headers['last-event-id'] ?? req.query.since ?? 0) || 0;
     const hbMs = o.heartbeatMs ?? (v2 ? 5_000 : 15_000);
     if (v2) {

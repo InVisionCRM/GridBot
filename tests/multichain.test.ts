@@ -52,6 +52,13 @@ describe('Chain registry', () => {
         expect(d.source, `${c.key}/${d.id}`).toMatch(/^https:\/\//);
         for (const a of [d.router, d.factory, d.quoter].filter(Boolean) as string[]) expect(getAddress(a)).toBe(a);
         if (d.kind === 'v3') { expect(d.quoter).toBeTruthy(); expect(d.feeTiers!.length).toBeGreaterThan(0); }
+        else if (d.kind === 'v4') {
+          expect(d.quoter, `${c.key}/${d.id} quoter`).toBeTruthy();
+          expect(d.stateView, `${c.key}/${d.id} stateView`).toBeTruthy();
+          expect(d.permit2, `${c.key}/${d.id} permit2`).toBeTruthy();
+          expect(d.v4StartBlock, `${c.key}/${d.id} start`).toBeGreaterThan(0);
+          for (const a of [d.stateView, d.permit2]) expect(getAddress(a!)).toBe(a);
+        }
         else expect(d.feeBps).toBeGreaterThan(0);
       }
     }
@@ -225,8 +232,8 @@ describe('Multi-chain operation', () => {
     const px = await hub.quoter(ETH_DEF.key).getPrice();
     expect(px).toBeGreaterThan(2900);
     expect(px).toBeLessThan(3000);
-    const pg = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.000009, upperPrice: 0.000011, gridCount: 10, totalCapitalUsd: 30 });
-    const bg = await bot.add({ mode: 'paper', stable: ETH_DEF.key, lowerPrice: px * 0.95, upperPrice: px * 1.05, gridCount: 8, totalCapitalUsd: 400 });
+    const pg = await bot.add({ mode: 'paper', stable: 'DAI', lowerPrice: 0.000009, upperPrice: 0.000011, gridCount: 10, totalCapitalQuote: 30 });
+    const bg = await bot.add({ mode: 'paper', stable: ETH_DEF.key, lowerPrice: px * 0.95, upperPrice: px * 1.05, gridCount: 8, totalCapitalQuote: 400 });
     const st = bot.status();
     expect(st.grids.find((g) => g.id === bg)).toMatchObject({ chainId: 1, dex: 'uniswap-v3', dexName: 'Uniswap V3', feeTier: 500 });
     expect(bot.stopChain(1)).toBe(1);
@@ -248,7 +255,7 @@ describe('Multi-chain operation', () => {
     expect(bot.hub.byChain(1).filter((m) => m.custom)).toHaveLength(1);
   });
 
-  it('a built-in pair that ships a safety report is re-checked before a live start, and refused when the fresh check fails', async () => {
+  it('a built-in pair that ships a safety report is re-checked before a live start, and refused when the fresh check can\'t complete', async () => {
     const pls = new MockChain(0.00001), eth = ethWorld();
     eth.gasPrice = 10n ** 7n;
     const TKN: Tok = { address: '0x00000000000000000000000000000000000b0b04', symbol: 'TKN', decimals: 18 };
@@ -264,9 +271,13 @@ describe('Multi-chain operation', () => {
     const bot = new MultiBot({ net: NET, reader: pls, signer: null, store: new MemoryStore<MultiState>(), log: new Logger(true), hub });
     expect(bot.marketList().find((m) => m.key === tknDef.key)).toMatchObject({ risk: 'low', liveAllowed: true, custom: false });
     const spot = await hub.quoter(tknDef.key).getPrice();
-    await expect(bot.add({ mode: 'live', stable: tknDef.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.001 })).rejects.toThrow(/LIVE blocked/);
-    expect(hub.def(tknDef.key).safety!.risk).toBe('unknown'); // the fresh check replaced the shipped report
-    expect(bot.marketList().find((m) => m.key === tknDef.key)!.liveAllowed).toBe(false);
+    // The mock reader has no eth_call state override, so the fresh simulation can't run (inconclusive) on any of the
+    // 3 tries: the start is refused as SAFETY_INCOMPLETE (Start anyway offered, the shipped report passed).
+    await expect(bot.add({ mode: 'live', stable: tknDef.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalQuote: 0.001 }))
+      .rejects.toMatchObject({ code: 'SAFETY_INCOMPLETE', canStartAnyway: true, message: expect.stringMatching(/LIVE blocked — couldn't complete the safety check/) });
+    // Nothing was measured: the shipped report stays, labelled stale (it isn't replaced by the inconclusive one).
+    expect(hub.def(tknDef.key).safety).toMatchObject({ risk: 'low', stale: expect.anything() });
+    expect(bot.status().grids).toHaveLength(0);
   });
 
   it('live trading on a custom market without a passing simulation is refused (paper allowed)', async () => {
@@ -281,7 +292,7 @@ describe('Multi-chain operation', () => {
     expect(d.safety!.liveAllowed).toBe(false);
     expect(d.quote).toMatchObject({ address: WETH.address, symbol: 'ETH', native: true }); // spends native ETH
     const spot = await bot.hub.quoter(d.key).getPrice();
-    const p = { stable: d.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalUsd: 0.01 };
+    const p = { stable: d.key, lowerPrice: spot * 0.9, upperPrice: spot * 1.1, gridCount: 6, totalCapitalQuote: 0.01 };
     await expect(bot.add({ mode: 'live', ...p })).rejects.toThrow(/safety|paper only|blocked|simulation/i);
     const gid = await bot.add({ mode: 'paper', ...p });
     // Native spend coin → the gas set-aside applies, like HEX/PLS.
@@ -294,7 +305,7 @@ describe('GeckoTerminal DEX ids (daily scan reads only these pools)', () => {
     const ids = Object.fromEntries(CHAINS.map((c) => [c.key, c.dexes.map((d) => `${d.id}=${d.gecko}`)]));
     expect(ids).toEqual({
       pulsechain: ['pulsex-v2=pulsex-v2', 'pulsex-v1=pulsex', '9mm-v2=9mm-v2', '9mm-v3=9mm-v3'],
-      robinhood: ['uniswap-v3=uniswap-v3-robinhood', 'uniswap-v2=uniswap-v2-robinhood', 'pancakeswap-v3=pancakeswap-v3-robinhood'],
+      robinhood: ['uniswap-v3=uniswap-v3-robinhood', 'uniswap-v2=uniswap-v2-robinhood', 'pancakeswap-v3=pancakeswap-v3-robinhood', 'uniswap-v4=uniswap-v4-robinhood'],
       ethereum: ['uniswap-v3=uniswap_v3', 'uniswap-v2=uniswap_v2'],
     });
   });
