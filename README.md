@@ -291,12 +291,19 @@ Tailscale deletes client-sent `Tailscale-*` headers and replaces `X-Forwarded-Fo
 
 - **Use a long, random password**, such as a password-manager-generated one of 20+ characters or a 5-6 word random passphrase. `npm run host:password` requires at least 12 characters, but that is a floor and not a recommendation. Don't reuse a password a friend might know.
 - **Consider a log-in name other than `owner`.** `npm run host:password` asks for one and stores it as `HOST_LOGIN`. Guesses are counted per name, so an unknown name means a guesser has to find the name first. This doesn't replace a strong password.
-- **What the lockout does** (`src/server/friends/accounts.ts`, shared by friend and owner log-ins):
-  - 5 wrong passwords for a name lock that name for 15 minutes. After the lock ends, 5 more tries are allowed. That is about 480 guesses a day, so the lockout slows guessing but does not stop it, which is why the password must be strong.
+- **What the lockout does** (`src/server/friends/accounts.ts` `LoginGate`, shared by friend and owner log-ins):
+  - 5 wrong passwords for a name lock that name for 15 minutes. Each lock after that doubles: 30 min, 1 h, 2 h, and so on, up to 24 h. A name with no failure for 24 hours starts again at 15 minutes. A correct password clears the name.
   - When more than 30 log-ins failed in the last minute (any names, any devices), every log-in pauses until the minute passes.
-  - The counters are kept in memory. A restart clears them.
-  - The lock is per name, not per device. Someone guessing at your name also locks **you** out for those 15 minutes. If that happens, wait it out, or restart the app to clear the lock.
+  - **The counters survive a restart.** They are kept in `data/friends/login-limits.json`, written atomically (temp file, fsync, rename) and off the event loop: a burst of failed log-ins is saved as one write a moment later, so guessing can't stall the bots. Names are stored only as sha256 hashes. The file holds no password, hash or cookie. Restarting the app no longer clears a lock.
   - A guess through Funnel is refused before the password is checked, so it never counts toward the lock.
+- **Someone else's guesses can't lock you out.** The owner log-in skips the lock and the all-logins pause, **but never the password**, from:
+  - **a known device**: a browser where you logged in as owner before. A successful owner log-in sets a signed `gb_device` cookie (HttpOnly, Secure, 400 days; it holds only the issue time and your password's session number) that stays after you log out. A signed owner session cookie for the current password, even an expired one, also counts.
+  - **this computer**: a loopback connection with a loopback Host and no forwarding or Tailscale headers. Anything `tailscale serve` forwards carries `X-Forwarded-For` and the tailnet Host, so it never qualifies.
+  - **your own tailnet login**: the `Tailscale-User-Login` that `tailscale serve` adds. The gateway learns it the first time you log in as owner from a tailnet device. You can also set it ahead of time in `.env` as `HOST_TAILNET_LOGINS=you@example.com` (comma-separated). Serve deletes any client-sent `Tailscale-*` header, so a shared device can't claim your login. Tagged devices have no login; use a known device there.
+  - **A tailnet address alone is not trusted.** A device you shared with a friend also has a `100.x` address, and that device is exactly the one that might guess. From a shared device, the lock applies even with the right password.
+  - A wrong password from any of these still counts toward the lock.
+  - **Changing the owner password revokes all of this.** `npm run host:password` bumps `HOST_SESSION`; after the restart, device cookies and owner session cookies from the old password no longer skip the lock, and learned tailnet logins are forgotten (logins set in `HOST_TAILNET_LOGINS` stay). Log in once with the new password (from this computer if the name is locked) and that browser is a known device again.
+- **To clear every lock by hand:** stop the app and delete `data/friends/login-limits.json`. This also forgets learned tailnet logins.
 - **If you suspect guessing:** run `npm run host:password` again to set a new password (it also ends existing owner log-ins after a restart), and remove the share in the [admin console](https://login.tailscale.com/admin/machines) (this computer → Share).
 
 ## Friends' copies (Tools → Friends)

@@ -56,6 +56,13 @@ export function requestHostAllowed(hostHeader: string | undefined, publicHosts: 
 // Serve deletes client-sent Tailscale-* headers first, so Tailscale-Funnel-Request can't be removed by the client.
 // Both are checked: either one marks the request as from the internet.
 
+/** 127.0.0.0/8 or ::1 (also as ::ffff:127.x). */
+export function isLoopbackIp(raw: string | null | undefined): boolean {
+  let ip = (raw ?? '').trim().toLowerCase();
+  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
+  return ip === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip);
+}
+
 /** A loopback or Tailscale (CGNAT 100.64.0.0/10, ULA fd7a:115c:a1e0::/48) address. */
 export function isLocalOrTailnetIp(raw: string | null | undefined): boolean {
   let ip = (raw ?? '').trim().toLowerCase();

@@ -171,10 +171,12 @@ describe('owner gateway', () => {
     expect(page.text + api.text).not.toContain(secret.toString('hex'));
   });
 
-  it('locks the owner name after repeated wrong passwords', async () => {
+  it('locks the owner name after repeated wrong passwords (from a device shared with a friend)', async () => {
     const { gw } = await setup();
+    // tailscale serve forwarding a shared device: tailnet address, the friend's own Tailscale login
     const post = (password: string) => raw(gw, '/login', {
-      host: `127.0.0.1`, origin: `https://${PUBLIC}`, 'content-type': 'application/x-www-form-urlencoded',
+      host: PUBLIC, origin: `https://${PUBLIC}`, 'content-type': 'application/x-www-form-urlencoded',
+      'x-forwarded-for': '100.70.1.2', 'tailscale-user-login': 'friend@example.com',
     }, `name=owner&password=${encodeURIComponent(password)}`);
     for (let i = 0; i < LOCK_AFTER; i++) {
       const r = await post('wrong-password');

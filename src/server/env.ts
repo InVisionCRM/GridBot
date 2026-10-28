@@ -52,6 +52,9 @@ export function takeHostAuth(): OwnerConfig | null {
   const hash = process.env.HOST_PASSWORD_HASH;
   const loginRaw = process.env.HOST_LOGIN;
   const sessionRaw = process.env.HOST_SESSION;
+  // HOST_TAILNET_LOGINS: the owner's Tailscale login(s), comma-separated; their tailnet devices skip a lockout
+  const tailnetRaw = process.env.HOST_TAILNET_LOGINS;
+  delete process.env.HOST_TAILNET_LOGINS;
   delete process.env.HOST_PASSWORD_HASH;
   delete process.env.HOST_LOGIN;
   delete process.env.HOST_SESSION;
@@ -59,7 +62,8 @@ export function takeHostAuth(): OwnerConfig | null {
   registerSecret(hash.trim());
   const pass = parsePassHash(hash);
   const n = Number(sessionRaw);
-  return { login: ownerLoginFrom(loginRaw), pass, session: Number.isInteger(n) && n > 0 ? n : 1 };
+  const tailnetLogins = (tailnetRaw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  return { login: ownerLoginFrom(loginRaw), pass, session: Number.isInteger(n) && n > 0 ? n : 1, ...(tailnetLogins.length ? { tailnetLogins } : {}) };
 }
 
 export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boolean }
