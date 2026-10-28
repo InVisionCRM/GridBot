@@ -7,6 +7,7 @@ import { DEFAULT_GAS_RESERVE, parseGasRes, type GasReserveCfg } from '../live/ga
 import { humanAmount } from '../live/amount';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
 import { LP_BAND, LP_MIN_SWAP_SHARE } from '../market/lp';
+import { EMPTY_POLICY, LpPolicyFields, optionalPayload } from './LpPolicyFields';
 import { rangeBaseShare } from '../live/v3Liquidity';
 import { L } from './Tip';
 import { botApi } from './api';
@@ -407,6 +408,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const [amount, setAmount] = useState('');
   const [baseAmt, setBaseAmt] = useState('');
   const [rerange, setRerange] = useState(true);
+  const [policy, setPolicy] = useState(EMPTY_POLICY);
   const [profits, setProfits] = useState<ProfitsChoice>({ mode: 'reinvest', to: '' });
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [mode, setMode] = useState<Mode>('paper');
@@ -434,7 +436,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
     if (mode === 'live' && !confirm(`Start a LIVE liquidity position on ${m.label}? It signs real transactions from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
     live.run(mode === 'live', async (extra, from) => {
       const r = await botApi('lps', 'POST', {
-        mode, market: pair, bandPct: b, capital: q, baseAmount: a, rerange, profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative), ...extra,
+        mode, market: pair, bandPct: b, capital: q, baseAmount: a, rerange, ...optionalPayload(policy), profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative), ...extra,
       }, from);
       nav({ v: 'lp', id: r.id });
     });
@@ -466,6 +468,7 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
       <ProfitsField p={profits} set={setProfits} kind="lp" />
       <details className="more">
         <summary>Advanced</summary>
+        <LpPolicyFields d={policy} set={setPolicy} onPreset={(bandPct) => setBand(String(bandPct * 100))} />
         <LimitsFields l={limits} set={setLimits} quoteNative={!!m.quoteNative} quote={m.quote} />
       </details>
       {live.banner}

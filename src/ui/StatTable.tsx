@@ -33,6 +33,8 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   const gr = f.generatedRate;
   const sym = f.quoteSym ?? '';
   // Est. = Generated ÷ age × the window, per token (the server's generatedRate); a dash and "needs …" until the history is long enough
+  // a liquidity bot has no move count of its own here (main: hidden for lp); #43 has no Realized/Unrealized rows
+  const hidden: readonly string[] = b.kind === 'lp' ? [...hide, 'Moves'] : hide;
   const rows: [string, string, string?][] = [
     ['Generated', unitsText(f.generated), calc],
     ['Est. 24h', rate(gr?.d1, gr?.needs.d1), calc],
@@ -56,7 +58,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   // no number twice: leave out the rows the page shows elsewhere, and a row whose figures the rows above already print
   const seen = new Set<string>();
   const shown = rows.filter(([k, v]) => {
-    if ((hide as readonly string[]).includes(k)) return false;
+    if (hidden.includes(k)) return false;
     const f = v.startsWith('—') ? [] : figuresOf(v);
     if (f.length && f.every((x) => seen.has(x))) return false;
     for (const x of f) seen.add(x);
