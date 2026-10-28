@@ -177,8 +177,14 @@ export function summaryJson(bots: BotSummary[], w: RunWindow, model: FittedModel
       timeInRange: { value: b.timeInRange, ...tagged('modeled') },
       feeApr: { value: b.feeApr, ...tagged('modeled') },
       priceChange: b.priceChange.map((p) => ({ symbol: p.symbol, value: p.pct, ...tagged('modeled') })),
-      onChain: b.onChain.map((n) => ({ label: n.label, value: n.value, ...(n.unit ? { unit: n.unit } : {}), ...tagged(n.source) })),
-      modelNotes: b.modelNotes.map((n) => ({ ...n, ...tagged(n.source) })),
+      onChain: b.onChain.map((n) => ({
+        label: n.label, value: n.value, ...(n.unit ? { unit: n.unit } : {}),
+        source: n.source, sourceLabel: sourceLabel(n.source),
+      })),
+      modelNotes: b.modelNotes.map((n) => ({
+        label: n.label, value: n.value, ...(n.unit ? { unit: n.unit } : {}),
+        source: n.source, sourceLabel: sourceLabel(n.source),
+      })),
     })),
   };
 }

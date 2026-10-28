@@ -475,13 +475,15 @@ function withStoredTokens(side: Side, row: Record<string, unknown>): Side {
   };
 }
 
-function configOf(kind: BotConfig['kind'], side: Side, extra: Partial<BotConfig>): BotConfig {
+function configOf(kind: BotConfig['kind'], side: Side, extra: Partial<BotConfig> & Pick<BotConfig, 'capital'>): BotConfig {
+  const { capital, ...rest } = extra;
   return {
     kind, chain: side.chain, dex: side.dex || undefined, pool: side.pool || undefined,
     base: side.base, quote: side.quote, feeBps: side.feeBps, feeTier: side.feeTier,
     gasToken: side.gasToken, spacing: side.spacing, baseIs0: side.baseIs0,
+    capital,
     ...usdOf(side.base.symbol, side.quote.symbol),
-    ...extra,
+    ...rest,
   };
 }
 

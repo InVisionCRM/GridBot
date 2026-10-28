@@ -120,7 +120,10 @@ async function findPair(cfg: BotConfig, cacheDir: string, fetchFn: FetchLike): P
 function tokenOnPair(cfg: BotConfig, pair: ScreenerPair, side: 'base' | 'quote'): { address: string; symbol: string } | null {
   const want = side === 'base' ? cfg.base.symbol : cfg.quote.symbol;
   for (const t of [pair.baseToken, pair.quoteToken]) {
-    if (t && symMatch(cfg.chain, want, t.symbol) && isAddress(t.address)) return { address: t.address, symbol: t.symbol };
+    if (!t) continue;
+    const symbol = t.symbol;
+    const address = t.address;
+    if (symbol && symMatch(cfg.chain, want, symbol) && isAddress(address)) return { address, symbol };
   }
   return null;
 }
