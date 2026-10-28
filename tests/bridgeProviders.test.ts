@@ -9,7 +9,7 @@ import {
   type BridgeId, type BridgeQuote, type HttpClient,
 } from '../src/server/bridge';
 import { BRIDGE_CAPTURED_AT, BRIDGE_CAPTURED_AT_MS } from './fixtures/bridge/captured';
-import { ERC20_TRANSFER, RELAY, encodeAcrossSwap, encodeRelayDeposit, encodeRelayErc20Deposit } from '../src/server/bridge/allow';
+import { ERC20_TRANSFER, RELAY, decodeDeposit, encodeAcrossSwap, encodeRelayDeposit, encodeRelayErc20Deposit } from '../src/server/bridge/allow';
 import { BridgeError } from '../src/server/bridge/errors';
 import {
   ETH_CAPITAL, ETH_DEST_GAS, ETH_IN, ETH_LP, ETH_OUT, FILL_TX, LEGS, NOW_MS, NOW_SEC, ORIGIN_GAS,
@@ -898,7 +898,7 @@ describe('live calldata and the guard', () => {
       [USDC_IN],
       [[usd.src.address, false, 0n, transfer]],
       SENDER,
-      RECIPIENT,
+      SENDER,
       '0x',
     ]);
     h.queue.push(ok(body));
@@ -1037,19 +1037,21 @@ describe('live calldata and the guard', () => {
   it('runs the captured 2026-10-27 quotes through the guard', async () => {
     expect(BRIDGE_CAPTURED_AT).toBe('2026-10-27T23:53:36.000Z');
     const h = harness(undefined, BRIDGE_CAPTURED_AT_MS);
-    const cases: Array<{ file: string; provider: 'across' | 'relay' | 'lifi'; leg: Leg; sameAsset: boolean; pass: boolean }> = [
+    const cases: Array<{ file: string; provider: 'across' | 'relay' | 'lifi'; leg: Leg; sameAsset: boolean; pass: boolean; error?: RegExp }> = [
       { file: 'across-usdc-1-4663.json', provider: 'across', leg: LEGS[2], sameAsset: false, pass: true },
       { file: 'across-usdc-4663-1.json', provider: 'across', leg: LEGS[3], sameAsset: false, pass: true },
-      { file: 'across-weth-1-4663.json', provider: 'across', leg: LEGS[0], sameAsset: false, pass: false },
-      { file: 'across-weth-4663-1.json', provider: 'across', leg: LEGS[1], sameAsset: false, pass: false },
+      { file: 'across-weth-1-4663.json', provider: 'across', leg: LEGS[0], sameAsset: false, pass: false, error: /deposit message is not empty|deposit calldata is not decodable/ },
+      { file: 'across-weth-4663-1.json', provider: 'across', leg: LEGS[1], sameAsset: false, pass: false, error: /deposit message is not empty|deposit calldata is not decodable/ },
       { file: 'relay-usdc-1-4663.json', provider: 'relay', leg: LEGS[2], sameAsset: false, pass: true },
       { file: 'relay-usdc-4663-1.json', provider: 'relay', leg: LEGS[3], sameAsset: false, pass: true },
-      { file: 'relay-weth-1-4663.json', provider: 'relay', leg: LEGS[0], sameAsset: true, pass: true },
-      { file: 'relay-weth-4663-1.json', provider: 'relay', leg: LEGS[1], sameAsset: true, pass: true },
+      // Relay's live WETH multicall names the solver as refundTo and nftRecipient, even when the
+      // quote request sends refundTo = sender. Those fields have to be the sender, so this route is rejected.
+      { file: 'relay-weth-1-4663.json', provider: 'relay', leg: LEGS[0], sameAsset: true, pass: false, error: /refund recipient does not match/ },
+      { file: 'relay-weth-4663-1.json', provider: 'relay', leg: LEGS[1], sameAsset: true, pass: false, error: /refund recipient does not match/ },
       { file: 'lifi-usdc-1-4663.json', provider: 'lifi', leg: LEGS[2], sameAsset: false, pass: true },
       { file: 'lifi-usdc-4663-1.json', provider: 'lifi', leg: LEGS[3], sameAsset: false, pass: true },
       { file: 'lifi-weth-1-4663.json', provider: 'lifi', leg: LEGS[0], sameAsset: true, pass: true },
-      { file: 'lifi-weth-4663-1.json', provider: 'lifi', leg: LEGS[1], sameAsset: true, pass: false },
+      { file: 'lifi-weth-4663-1.json', provider: 'lifi', leg: LEGS[1], sameAsset: true, pass: false, error: /deposit calldata is not decodable/ },
     ];
     const passed: string[] = [];
     for (const row of cases) {
@@ -1057,16 +1059,16 @@ describe('live calldata and the guard', () => {
       h.queue.push(ok(liveBody(row.file)));
       const client = row.provider === 'across' ? h.clients.across : row.provider === 'relay' ? h.clients.relay : h.clients.lifi;
       if (!row.pass) {
-        await expect(client.quote(req), row.file).rejects.toThrow(/deposit message is not empty|deposit calldata is not decodable/);
+        await expect(client.quote(req), row.file).rejects.toThrow(row.error ?? /deposit/);
         continue;
       }
       const quote = await client.quote(req);
       expect(quote.recipient, row.file).toBe(SENDER);
       expect(quote.amountIn, row.file).toBe(row.leg.amountIn);
+      const decoded = decodeDeposit(row.provider, quote.deposit.data, req, quote.deposit.to);
       const [spender, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);
-      expect(amount, row.file).toBeLessThanOrEqual(row.leg.amountIn);
-      expect(amount > 0n, row.file).toBe(true);
-      if (row.provider === 'lifi') expect(getAddress(String(spender)), row.file).toBe(lifiDiamond(row.leg.src.chainId));
+      expect(amount, row.file).toBe(decoded.pullAmount);
+      expect(getAddress(String(spender)), row.file).toBe(getAddress(quote.deposit.to));
       passed.push(row.file);
     }
     expect(passed).toEqual([
@@ -1074,8 +1076,6 @@ describe('live calldata and the guard', () => {
       'across-usdc-4663-1.json',
       'relay-usdc-1-4663.json',
       'relay-usdc-4663-1.json',
-      'relay-weth-1-4663.json',
-      'relay-weth-4663-1.json',
       'lifi-usdc-1-4663.json',
       'lifi-usdc-4663-1.json',
       'lifi-weth-1-4663.json',

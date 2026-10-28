@@ -1,11 +1,11 @@
-import { assertDepositTarget, decodeDeposit, exactApproval } from './allow';
+import { assertDepositTarget, decodeDeposit } from './allow';
 import { QUOTE_HOLD_SEC, loadQuote } from './cache';
 import type { BridgeDeps } from './deps';
 import { baseHeaders, requestJson } from './http';
 import { sanitizeText } from './errors';
 import { bad, needAddress, needChain, needHex, needId, needPositive, needToken, needUint, needUint32, needValue, normalizeRequest, normalizeStatusQuery, nowSec, quoteKey, readGasLimit, sameAddress, tokensMatch } from './parse';
 import type { BridgeProvider, BridgeQuote, BridgeQuoteRequest, BridgeStatus, BridgeStatusQuery, FeeComponent, UnsignedTx } from './types';
-import { APPROVE_SELECTOR } from './tx';
+import { APPROVE_SELECTOR, decodeApprove } from './tx';
 import { assertQuoteMatches } from './validate';
 
 /**
@@ -47,6 +47,7 @@ export class RelayClient implements BridgeProvider {
       body: JSON.stringify({
         user: norm.sender,
         recipient: norm.recipient,
+        refundTo: norm.sender,
         originChainId: norm.srcChain,
         destinationChainId: norm.dstChain,
         originCurrency: norm.tokenIn.address,
@@ -188,8 +189,14 @@ function readSteps(body: Record<string, unknown>, req: BridgeQuoteRequest): { ap
     }
   }
   if (!deposit) bad(P, 'deposit is missing');
+  if (deposit.value !== 0n) bad(P, 'deposit value must be zero for an ERC-20');
   const decoded = decodeDeposit(P, deposit.data, req, deposit.to);
-  if (approval) approval = exactApproval(P, approval, req.tokenIn.address, decoded.pullAmount, req.amountIn);
+  if (approval) {
+    const spent = decodeApprove(P, approval.data);
+    // Relay publishes the pull itself. A larger allowance, including unlimited, is rejected
+    // rather than rewritten. Across still rewrites its unlimited swap approval down to the pull.
+    if (spent.amount !== decoded.pullAmount) bad(P, 'approval does not match the deposit');
+  }
   return { approval, deposit, requestId: needId(P, requestId, 'quote id'), depositId: decoded.depositId };
 }
 

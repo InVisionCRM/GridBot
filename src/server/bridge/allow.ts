@@ -29,8 +29,16 @@ import type { BridgeId, BridgeQuoteRequest, UnsignedTx } from './types';
  *   0x4cD00E387622C35bDDB9b4c962C136462338BC31
  * depositErc20 is selector 0xe8017952. depositNative is selector 0x49290c1c
  * (https://docs.relay.link/references/protocol/contracts/evm-depository).
+ * A zero depositor credits msg.sender. That is the user only on a top-level
+ * depositErc20 sent to the depository. On an inner call msg.sender is the router,
+ * so a zero depositor would make the refund sweepable.
  * transferAndMulticall is selector 0xf9e4bab4 with call tuples
  * (address target, bool allowFailure, uint256 value, bytes callData).
+ * Accepted multicalls are an exact sequence, not a sum of wei and token units:
+ * the live WETH unwrap (approve, withdraw, native value to the router,
+ * cleanupNativeViaCall into depositNative), or one cleanupErc20s of amountIn
+ * to the requested recipient. cleanupErc20sViaCall is not accepted. refundTo
+ * and nftRecipient must be the sender.
  */
 
 const addr = (hex: string) => getAddress(hex.toLowerCase());
@@ -119,7 +127,10 @@ const ROUTER_CALLS = new Interface([
 ]);
 
 const WETH_WITHDRAW = new Interface(['function withdraw(uint256 wad)']);
-const ERC20_TRANSFER = new Interface(['function transfer(address to, uint256 amount)']);
+const ERC20_TRANSFER = new Interface([
+  'function transfer(address to, uint256 amount)',
+  'function transferFrom(address from, address to, uint256 amount)',
+]);
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 
@@ -231,8 +242,9 @@ function baseDecoded(token: string, pull: bigint): DecodedDeposit {
   };
 }
 
-function assertDepositor(provider: string, depositor: string, sender: string) {
-  if (sameAddress(depositor, ZERO)) return;
+function assertDepositor(provider: string, depositor: string, sender: string, allowZero: boolean) {
+  // Zero credits msg.sender. Inside the router that is not the user.
+  if (allowZero && sameAddress(depositor, ZERO)) return;
   if (!sameAddress(depositor, sender)) bad(provider, 'deposit depositor does not match');
 }
 
@@ -317,7 +329,7 @@ function decodeLifi(provider: string, data: string, req: BridgeQuoteRequest): De
     const bridge = bridgeFields(decoded[0]);
     const swaps = sel === relaySwap ? decoded[1] as ReadonlyArray<{ sendingAssetId: string; fromAmount: bigint; requiresDeposit: boolean }> : null;
     const extra = (sel === relaySwap ? decoded[2] : decoded[1]) as { orderId: string; depositorAddress: string };
-    assertDepositor(provider, getAddress(String(extra.depositorAddress)), req.sender);
+    assertDepositor(provider, getAddress(String(extra.depositorAddress)), req.sender, false);
     if (sameAddress(String(extra.depositorAddress), ZERO)) bad(provider, 'deposit depositor does not match');
     const pull = lifiPull(provider, req, bridge, swaps);
     return fromBridge(provider, req, bridge, pull, null, null, String(extra.orderId).toLowerCase());
@@ -330,140 +342,135 @@ function decodeLifi(provider: string, data: string, req: BridgeQuoteRequest): De
   return null;
 }
 
-function auditRelayCalls(provider: string, req: BridgeQuoteRequest, router: string, calls: ReadonlyArray<{ target: string; allowFailure: boolean; value: bigint; callData: string }>): { depositId: string | null; recipient: string | null } {
-  let funded = 0n;
-  let paid = 0n;
-  let recipient: string | null = null;
-  let depositId: string | null = null;
-  const nativeSel = RELAY_NATIVE.getFunction('depositNative')!.selector.toLowerCase();
-  const ercSel = RELAY_ERC20.getFunction('depositErc20')!.selector.toLowerCase();
-  const approveSel = APPROVE_SELECTOR;
+interface RelayCall { target: string; allowFailure: boolean; value: bigint; callData: string }
+
+type RelayAction =
+  | { kind: 'approve'; spender: string; amount: bigint }
+  | { kind: 'withdraw'; amount: bigint }
+  | { kind: 'fund'; value: bigint }
+  | { kind: 'cleanupNativeViaCall'; amount: bigint; to: string; id: string }
+  | { kind: 'cleanupErc20s'; recipient: string; amount: bigint };
+
+function classifyRelayCall(provider: string, req: BridgeQuoteRequest, router: string, call: RelayCall): RelayAction | null {
+  const target = getAddress(String(call.target));
+  const value = asBig(call.value);
+  const data = String(call.callData);
+  const sel = data.length >= 10 ? selectorOf(data) : '';
+  if (sameAddress(target, req.tokenIn.address)) {
+    if (value !== 0n) bad(provider, 'deposit amount does not match');
+    if (sel === APPROVE_SELECTOR) {
+      const approved = decodeApprove(provider, data);
+      if (!sameAddress(approved.spender, router)) bad(provider, 'approval spender is not allowlisted');
+      if (approved.amount > req.amountIn) bad(provider, 'approval is above the input');
+      if (approved.amount !== req.amountIn) bad(provider, 'deposit amount does not match');
+      return { kind: 'approve', spender: approved.spender, amount: approved.amount };
+    }
+    if (sel === WETH_WITHDRAW.getFunction('withdraw')!.selector.toLowerCase()) {
+      const wad = asBig(WETH_WITHDRAW.decodeFunctionData('withdraw', data)[0]);
+      if (wad !== req.amountIn) bad(provider, 'deposit amount does not match');
+      return { kind: 'withdraw', amount: wad };
+    }
+    if (sel === ERC20_TRANSFER.getFunction('transfer')!.selector.toLowerCase()) bad(provider, 'deposit recipient does not match');
+    if (sel === ERC20_TRANSFER.getFunction('transferFrom')!.selector.toLowerCase()) bad(provider, 'deposit recipient does not match');
+    bad(provider, 'deposit calldata is not decodable');
+  }
+  if (sameAddress(target, router)) {
+    if (emptyBytes(data) || data.length < 10) {
+      if (value !== req.amountIn) bad(provider, 'deposit amount does not match');
+      return { kind: 'fund', value };
+    }
+    if (sel === ROUTER_CALLS.getFunction('cleanupNativeViaCall')!.selector.toLowerCase()) {
+      const cleaned = ROUTER_CALLS.decodeFunctionData('cleanupNativeViaCall', data);
+      if (!sameAddress(String(cleaned.to), RELAY_DEPOSITORY)) bad(provider, 'deposit recipient does not match');
+      const inner = String(cleaned.data);
+      if (selectorOf(inner) !== RELAY_NATIVE.getFunction('depositNative')!.selector.toLowerCase()) bad(provider, 'deposit calldata is not decodable');
+      const native = RELAY_NATIVE.decodeFunctionData('depositNative', inner);
+      assertDepositor(provider, getAddress(String(native.depositor)), req.sender, false);
+      const amt = asBig(cleaned.amount);
+      if (amt !== 0n) bad(provider, 'deposit amount does not match');
+      if (value !== 0n) bad(provider, 'deposit amount does not match');
+      return { kind: 'cleanupNativeViaCall', amount: amt, to: getAddress(String(cleaned.to)), id: String(native.id).toLowerCase() };
+    }
+    if (sel === ROUTER_CALLS.getFunction('cleanupErc20s')!.selector.toLowerCase()) {
+      if (value !== 0n) bad(provider, 'deposit amount does not match');
+      const cleaned = ROUTER_CALLS.decodeFunctionData('cleanupErc20s', data);
+      const tokens = cleaned[0] as readonly string[];
+      const recipients = cleaned[1] as readonly string[];
+      const amounts = cleaned[2] as readonly bigint[];
+      if (tokens.length !== 1 || recipients.length !== 1 || amounts.length !== 1) bad(provider, 'deposit recipient does not match');
+      if (!sameAddress(String(tokens[0]), req.tokenIn.address)) bad(provider, 'deposit token does not match');
+      const paid = asBig(amounts[0]);
+      if (paid !== req.amountIn) bad(provider, 'deposit amount does not match');
+      return { kind: 'cleanupErc20s', recipient: getAddress(String(recipients[0])), amount: paid };
+    }
+    bad(provider, 'deposit calldata is not decodable');
+  }
+  if (sameAddress(target, RELAY_DEPOSITORY)) {
+    if (sel === RELAY_NATIVE.getFunction('depositNative')!.selector.toLowerCase()) {
+      const native = RELAY_NATIVE.decodeFunctionData('depositNative', data);
+      assertDepositor(provider, getAddress(String(native.depositor)), req.sender, false);
+      if (value !== req.amountIn) bad(provider, 'deposit amount does not match');
+    }
+    // A direct inner deposit is not one of the two accepted sequences. The ERC-20
+    // amount has to be paid in full by cleanupErc20s, not by a 1-unit depositErc20
+    // beside a wei self-call.
+    bad(provider, 'deposit calldata is not decodable');
+  }
+  // Reached only when the inner-target allowlist throw above this call was removed.
+  return null;
+}
+
+/**
+ * ERC-20 payment is `paid === amountIn` from cleanupErc20s. Native wei is counted only
+ * as the value forwarded to the router after withdraw(amountIn), and only in the live
+ * WETH sequence. A wei self-call never satisfies an ERC-20 deposit.
+ */
+function acceptRelaySequence(provider: string, req: BridgeQuoteRequest, router: string, actions: readonly RelayAction[]): { depositId: string | null; recipient: string | null } {
+  const weth = actions.length === 4
+    && actions[0].kind === 'approve'
+    && actions[1].kind === 'withdraw'
+    && actions[2].kind === 'fund'
+    && actions[3].kind === 'cleanupNativeViaCall';
+  if (weth) {
+    const approve = actions[0] as Extract<RelayAction, { kind: 'approve' }>;
+    const withdraw = actions[1] as Extract<RelayAction, { kind: 'withdraw' }>;
+    const fund = actions[2] as Extract<RelayAction, { kind: 'fund' }>;
+    const cleanup = actions[3] as Extract<RelayAction, { kind: 'cleanupNativeViaCall' }>;
+    if (!sameAddress(approve.spender, router) || approve.amount !== req.amountIn) bad(provider, 'approval spender is not allowlisted');
+    if (withdraw.amount !== req.amountIn || fund.value !== req.amountIn || cleanup.amount !== 0n) bad(provider, 'deposit amount does not match');
+    if (!sameAddress(cleanup.to, RELAY_DEPOSITORY)) bad(provider, 'deposit recipient does not match');
+    return { depositId: cleanup.id, recipient: null };
+  }
+  if (actions.length === 1 && actions[0].kind === 'cleanupErc20s') {
+    const paid = actions[0];
+    if (paid.amount !== req.amountIn) bad(provider, 'deposit amount does not match');
+    if (!sameAddress(paid.recipient, req.recipient)) bad(provider, 'deposit recipient does not match');
+    return { depositId: null, recipient: paid.recipient };
+  }
+  bad(provider, 'deposit calldata is not decodable');
+}
+
+function auditRelayCalls(provider: string, req: BridgeQuoteRequest, router: string, calls: readonly RelayCall[]): { depositId: string | null; recipient: string | null } {
+  const actions: RelayAction[] = [];
   for (const call of calls) {
-    if (call.allowFailure) bad(provider, 'deposit recipient does not match');
+    if (call.allowFailure) bad(provider, 'deposit calldata is not decodable');
     const target = getAddress(String(call.target));
-    const value = asBig(call.value);
-    const data = String(call.callData);
     const allowed = sameAddress(target, router) || sameAddress(target, RELAY_DEPOSITORY) || sameAddress(target, req.tokenIn.address);
-    if (!allowed) bad(provider, 'deposit recipient does not match');
-    if (sameAddress(target, req.tokenIn.address)) {
-      if (value !== 0n) bad(provider, 'deposit recipient does not match');
-      const sel = selectorOf(data);
-      if (sel === approveSel) {
-        const approved = decodeApprove(provider, data);
-        if (!sameAddress(approved.spender, router) && !sameAddress(approved.spender, RELAY_DEPOSITORY)) bad(provider, 'approval spender is not allowlisted');
-        if (approved.amount !== req.amountIn) bad(provider, 'deposit amount does not match');
-        continue;
-      }
-      if (sel === WETH_WITHDRAW.getFunction('withdraw')!.selector.toLowerCase()) {
-        const wad = asBig(WETH_WITHDRAW.decodeFunctionData('withdraw', data)[0]);
-        if (wad !== req.amountIn) bad(provider, 'deposit amount does not match');
-        continue;
-      }
-      if (sel === ERC20_TRANSFER.getFunction('transfer')!.selector.toLowerCase()) bad(provider, 'deposit recipient does not match');
-      bad(provider, 'deposit recipient does not match');
-    }
-    if (sameAddress(target, router)) {
-      if (emptyBytes(data) || data.length < 10) {
-        funded += value;
-        continue;
-      }
-      const sel = selectorOf(data);
-      if (sel === ROUTER_CALLS.getFunction('cleanupNativeViaCall')!.selector.toLowerCase()) {
-        const cleaned = ROUTER_CALLS.decodeFunctionData('cleanupNativeViaCall', data);
-        if (!sameAddress(String(cleaned.to), RELAY_DEPOSITORY)) bad(provider, 'deposit recipient does not match');
-        const inner = String(cleaned.data);
-        if (selectorOf(inner) !== nativeSel) bad(provider, 'deposit calldata is not decodable');
-        const native = RELAY_NATIVE.decodeFunctionData('depositNative', inner);
-        assertDepositor(provider, getAddress(String(native.depositor)), req.sender);
-        const amt = asBig(cleaned.amount);
-        if (amt !== 0n && amt !== req.amountIn) bad(provider, 'deposit amount does not match');
-        if (depositId) bad(provider, 'deposit id does not match');
-        depositId = String(native.id).toLowerCase();
-        funded += value;
-        continue;
-      }
-      if (sel === ROUTER_CALLS.getFunction('cleanupNative')!.selector.toLowerCase()) {
-        const cleaned = ROUTER_CALLS.decodeFunctionData('cleanupNative', data);
-        const who = getAddress(String(cleaned.recipient));
-        if (!sameAddress(who, req.recipient)) bad(provider, 'deposit recipient does not match');
-        if (asBig(cleaned.amount) !== req.amountIn) bad(provider, 'deposit amount does not match');
-        recipient = who;
-        paid += asBig(cleaned.amount);
-        continue;
-      }
-      if (sel === ROUTER_CALLS.getFunction('cleanupErc20s')!.selector.toLowerCase()) {
-        const cleaned = ROUTER_CALLS.decodeFunctionData('cleanupErc20s', data);
-        const tokens = cleaned[0] as readonly string[];
-        const recipients = cleaned[1] as readonly string[];
-        const amounts = cleaned[2] as readonly bigint[];
-        if (tokens.length !== recipients.length || tokens.length !== amounts.length || tokens.length === 0) bad(provider, 'deposit recipient does not match');
-        for (let i = 0; i < tokens.length; i++) {
-          if (!sameAddress(String(tokens[i]), req.tokenIn.address)) bad(provider, 'deposit token does not match');
-          const who = getAddress(String(recipients[i]));
-          if (!sameAddress(who, req.recipient)) bad(provider, 'deposit recipient does not match');
-          recipient = who;
-          paid += asBig(amounts[i]);
-        }
-        continue;
-      }
-      if (sel === ROUTER_CALLS.getFunction('cleanupErc20sViaCall')!.selector.toLowerCase()) {
-        const cleaned = ROUTER_CALLS.decodeFunctionData('cleanupErc20sViaCall', data);
-        const tos = cleaned[1] as readonly string[];
-        const datas = cleaned[2] as readonly string[];
-        const amounts = cleaned[3] as readonly bigint[];
-        if (tos.length !== datas.length || tos.length !== amounts.length) bad(provider, 'deposit recipient does not match');
-        for (let i = 0; i < tos.length; i++) {
-          if (!sameAddress(String(tos[i]), RELAY_DEPOSITORY)) bad(provider, 'deposit recipient does not match');
-          if (selectorOf(String(datas[i])) !== ercSel) bad(provider, 'deposit calldata is not decodable');
-          const erc = RELAY_ERC20.decodeFunctionData('depositErc20', String(datas[i]));
-          assertDepositor(provider, getAddress(String(erc.depositor)), req.sender);
-          if (!sameAddress(String(erc.token), req.tokenIn.address)) bad(provider, 'deposit token does not match');
-          if (asBig(erc.amount) !== asBig(amounts[i])) bad(provider, 'deposit amount does not match');
-          if (depositId) bad(provider, 'deposit id does not match');
-          depositId = String(erc.id).toLowerCase();
-          paid += asBig(erc.amount);
-        }
-        continue;
-      }
-      bad(provider, 'deposit calldata is not decodable');
-    }
-    if (sameAddress(target, RELAY_DEPOSITORY)) {
-      const sel = selectorOf(data);
-      if (sel === ercSel) {
-        const erc = RELAY_ERC20.decodeFunctionData('depositErc20', data);
-        assertDepositor(provider, getAddress(String(erc.depositor)), req.sender);
-        if (!sameAddress(String(erc.token), req.tokenIn.address)) bad(provider, 'deposit token does not match');
-        if (asBig(erc.amount) !== req.amountIn) bad(provider, 'deposit amount does not match');
-        if (depositId) bad(provider, 'deposit id does not match');
-        depositId = String(erc.id).toLowerCase();
-        paid += asBig(erc.amount);
-        continue;
-      }
-      if (sel === nativeSel) {
-        const native = RELAY_NATIVE.decodeFunctionData('depositNative', data);
-        assertDepositor(provider, getAddress(String(native.depositor)), req.sender);
-        if (value !== req.amountIn) bad(provider, 'deposit amount does not match');
-        if (depositId) bad(provider, 'deposit id does not match');
-        depositId = String(native.id).toLowerCase();
-        paid += value;
-        continue;
-      }
-      bad(provider, 'deposit calldata is not decodable');
-    }
+    // R5b depends on this throw. Without it, classifyRelayCall ignores the attacker
+    // call and a whitelisted sequence in front of it would be accepted.
+    if (!allowed) bad(provider, 'deposit target is not allowlisted');
+    const action = classifyRelayCall(provider, req, router, call);
+    if (action) actions.push(action);
   }
-  if (depositId) {
-    if (funded !== req.amountIn && paid !== req.amountIn) bad(provider, 'deposit amount does not match');
-    return { depositId, recipient };
-  }
-  if (paid !== req.amountIn || !recipient) bad(provider, 'deposit recipient does not match');
-  return { depositId: null, recipient };
+  return acceptRelaySequence(provider, req, router, actions);
 }
 
 function decodeRelay(provider: string, data: string, req: BridgeQuoteRequest, target: string | undefined): DecodedDeposit | null {
   const sel = selectorOf(data);
   if (sel === RELAY_ERC20.getFunction('depositErc20')!.selector.toLowerCase()) {
     const erc = RELAY_ERC20.decodeFunctionData('depositErc20', data);
-    assertDepositor(provider, getAddress(String(erc.depositor)), req.sender);
+    // Top-level call to the depository: msg.sender is the user, so address(0) is the user.
+    assertDepositor(provider, getAddress(String(erc.depositor)), req.sender, true);
     const token = getAddress(String(erc.token));
     const amount = asBig(erc.amount);
     if (!sameAddress(token, req.tokenIn.address)) bad(provider, 'deposit token does not match');
@@ -475,7 +482,7 @@ function decodeRelay(provider: string, data: string, req: BridgeQuoteRequest, ta
   }
   if (sel === RELAY_NATIVE.getFunction('depositNative')!.selector.toLowerCase()) {
     const native = RELAY_NATIVE.decodeFunctionData('depositNative', data);
-    assertDepositor(provider, getAddress(String(native.depositor)), req.sender);
+    assertDepositor(provider, getAddress(String(native.depositor)), req.sender, false);
     bad(provider, 'approval amount is missing');
   }
   if (sel !== RELAY.getFunction('transferAndMulticall')!.selector.toLowerCase()) return null;
@@ -483,12 +490,15 @@ function decodeRelay(provider: string, data: string, req: BridgeQuoteRequest, ta
   const pair = relayPair(req.srcChain, target);
   if (!pair) bad(provider, 'deposit target is not allowlisted');
   const decoded = RELAY.decodeFunctionData('transferAndMulticall', data);
+  if (!sameAddress(getAddress(String(decoded.refundTo)), req.sender) || !sameAddress(getAddress(String(decoded.nftRecipient)), req.sender)) {
+    bad(provider, 'refund recipient does not match');
+  }
   const tokens = decoded.tokens as readonly string[];
   const amounts = decoded.amounts as readonly bigint[];
   if (tokens.length !== amounts.length || tokens.length !== 1) bad(provider, 'deposit token does not match');
   if (!sameAddress(String(tokens[0]), req.tokenIn.address)) bad(provider, 'deposit token does not match');
   if (asBig(amounts[0]) !== req.amountIn) bad(provider, 'deposit amount does not match');
-  const audited = auditRelayCalls(provider, req, pair.router, decoded.calls as ReadonlyArray<{ target: string; allowFailure: boolean; value: bigint; callData: string }>);
+  const audited = auditRelayCalls(provider, req, pair.router, decoded.calls as readonly RelayCall[]);
   return {
     ...baseDecoded(getAddress(req.tokenIn.address), req.amountIn),
     recipient: audited.recipient,
