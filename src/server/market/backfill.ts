@@ -23,7 +23,7 @@ export interface CandleSource {
   /** GeckoTerminal network slug (null = no Gecko coverage, e.g. testnets) */
   network: string | null;
   pool: string;
-  kind: 'v2' | 'v3';
+  kind: 'v2' | 'v3' | 'v4';
   base: { address: string; decimals: number };
   quote: { address: string; decimals: number };
   feeBps: number;
@@ -46,6 +46,7 @@ export async function onchainBackfill(
   reader: ChainLogReader, src: CandleSource, store: CandleStore, days: number,
   onProgress?: (pct: number, msg: string) => void, chunk = src.logChunk ?? 5000,
 ): Promise<{ candles1m: number; fromSec: number; toSec: number; blocks: number }> {
+  if (src.kind === 'v4') throw new Error(`${src.label}: a V4 pool has no per-pool Sync or Swap log to rebuild candles from; use GeckoTerminal`);
   const t0 = PAIR.decodeFunctionResult('token0', await reader.call({ to: src.pool, data: PAIR.encodeFunctionData('token0') }))[0] as string;
   const token0IsQuote = t0.toLowerCase() === src.quote.address.toLowerCase();
   const latest = await reader.getBlockNumber();

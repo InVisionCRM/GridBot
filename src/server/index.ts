@@ -17,6 +17,7 @@ import { DailyScanner, localScan, scanDepsFromHub, type ScanFile } from './marke
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
+import { swapForHost } from './swap/wire';
 import { fetchJson } from './fetchJson';
 import { PoolSearch } from './market/poolSearch';
 import { TFS } from '../market/candles';
@@ -136,9 +137,19 @@ const router = new Router({
   log,
 });
 bot.routerHalt = (halt) => router.halt(halt);
+// Quotes and, in live mode, calldata only. A friend's copy does not construct this. Nothing here broadcasts.
+const swap = swapForHost(!!copy, {
+  hub,
+  allocations: () => bot.allocations().rows,
+  reservations: () => [
+    ...(tokenTrader?.reservations() ?? []),
+    ...convert.reservations(),
+    ...bot.routerReservations(),
+  ],
+});
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
-  lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
+  lpReplay: (q) => lpReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
   friends, autopilot, tokenTrader, router, copy: !!copy,
 });
