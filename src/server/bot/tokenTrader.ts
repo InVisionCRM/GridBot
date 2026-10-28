@@ -15,7 +15,8 @@ import {
   type FreshPool, type GateInput,
   effectiveEntry, sellSidePrice,
 } from '../../market/tokenTrader';
-import { blankPlay, feeTierFromBps, type PlayRecord } from '../../metrics/playScore';
+import { blankPlay, feeTierFromBps, playLeaderboard, type PlayRecord } from '../../metrics/playScore';
+import { MemoryRejects, rejectKey, type RejectSink } from './playRejects';
 import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
 import type { Emit } from './activity';
 import type { Store } from './store';
@@ -132,7 +133,8 @@ export interface TraderState {
   /** Sniper buy timestamps (ms), for the per-hour cap */
   snipesAt: number[];
   /**
-   * One row per fill and per rejected candidate. Never trimmed (the trade log's 200-row cap does not apply).
+   * Passed plays only. Never trimmed (the trade log's 200-row cap does not apply).
+   * Rejected candidates are not stored here; they go to the append-only reject log.
    * `status()` leaves this off so that payload stays the trade log.
    */
   plays: PlayRecord[];
@@ -145,8 +147,8 @@ export interface TraderState {
   lastHalt?: Halt | null;
 }
 
-export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number }
-export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number }
+export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
+export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
 
 const HOUR = 3600_000;
 const FEED_MAX = 80;
@@ -170,12 +172,17 @@ function signalOf(source: FreshPool['source']): string {
   return 'new_pool';
 }
 
-/** ETH per 1 of the spend coin is not what this returns: it is spend-coin units for 1 native coin. WETH spend is 1. A WETH-priced pool uses that pool's price. */
+/** Spend-coin units for 1 native coin. The symbols come from the chain config, so PulseChain matches WPLS and Robinhood matches WETH. */
 function nativeToSpend(pool: FreshPool): number | null {
+  const chain = chainById(pool.chainId);
+  const native = chain?.nativeSymbol.toUpperCase();
+  const wrapped = chain?.wrappedNative.symbol.toUpperCase();
   const spend = pool.spendSymbol.toUpperCase();
   const token = pool.tokenSymbol.toUpperCase();
-  if (spend === 'WETH' || spend === 'ETH') return 1;
-  if ((token === 'WETH' || token === 'ETH') && pool.price > 0) return pool.price;
+  if (native && spend === native) return 1;
+  if (wrapped && spend === wrapped) return 1;
+  if (native && token === native && pool.price > 0) return pool.price;
+  if (wrapped && token === wrapped && pool.price > 0) return pool.price;
   return null;
 }
 
@@ -184,6 +191,7 @@ export class TokenTrader {
   private busy = false;
   /** Spend coin of a live buy that has started and not yet landed or failed. Not persisted. */
   private pendingBuy: { chainId: number; address: string; amount: number } | null = null;
+  private readonly rejects: RejectSink;
   lastError: string | null = null;
 
   constructor(private readonly d: {
@@ -223,10 +231,27 @@ export class TokenTrader {
     feeNow?: (p: { chainId: number; pool: string }) => Promise<number>;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
+    /** Rejected candidates. Omitted in tests that only need the in-memory window. */
+    rejects?: RejectSink;
   }) {
     const loaded = d.store.load();
+    this.rejects = d.rejects ?? new MemoryRejects();
     this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } }, plays: Array.isArray(loaded.plays) ? loaded.plays : [] } : fresh();
+    this.spillRejects();
     this.migrateEntries();
+  }
+
+  /** Older state files kept rejects next to passed plays. Move them out so the hot file stays small. */
+  private spillRejects() {
+    const kept: PlayRecord[] = [];
+    let moved = false;
+    for (const p of this.state.plays) {
+      if (p.passed && !p.rejected) { kept.push(p); continue; }
+      moved = true;
+      const key = rejectKey(p.chain_id, p.pool_address, p.reason);
+      if (!this.rejects.has(key)) this.rejects.append(p);
+    }
+    if (moved) { this.state.plays = kept; this.save(); }
   }
 
   /**
@@ -292,8 +317,14 @@ export class TokenTrader {
     };
   }
 
-  /** Durable play records. Not trimmed, and not part of `status()`. */
+  /** Passed plays. Not trimmed, and not part of `status()`. */
   plays(): PlayRecord[] { return this.state.plays; }
+
+  /** Recent rejects kept in memory. At most 500. The scorecard reads the log, not this window. */
+  recentRejects(): readonly PlayRecord[] { return this.rejects.window(); }
+
+  /** Leaderboard. Reads the reject log here, never from tick(). */
+  scorecard() { return playLeaderboard([...this.state.plays, ...this.rejects.read()]); }
 
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
     const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
@@ -461,9 +492,10 @@ export class TokenTrader {
 
   private reject(o: { chainId: number; pool: string; token: string; signal: string; source: string; reason: string; price: number | null; feeBps: number | null; spendSymbol?: string }) {
     const pool = o.pool.toLowerCase();
-    if (this.state.plays.some((p) => p.rejected && p.chain_id === o.chainId && p.pool_address.toLowerCase() === pool && p.reason === o.reason)) return;
+    const key = rejectKey(o.chainId, pool, o.reason);
+    if (this.rejects.has(key)) return;
     const now = this.now();
-    this.state.plays.push(blankPlay({
+    this.rejects.append(blankPlay({
       play_id: `rej-${now.toString(36)}-${pool.slice(2, 8)}`,
       kind: 'play', signal_type: o.signal, source: o.source, passed: false, rejected: true, reason: o.reason,
       chain_id: o.chainId, pool_address: pool, token_contract: o.token.toLowerCase(),
@@ -473,9 +505,8 @@ export class TokenTrader {
     }));
   }
 
-  private rememberEntry(pos: Position, pool: FreshPool, impact: number, tx: string | null, gasUsed: number | null, gasPrice: number | null) {
+  private rememberEntry(pos: Position, pool: FreshPool, impact: number, tx: string | null, gasUsed: number | null, gasPrice: number | null, gasNative: number | null) {
     const now = this.now();
-    const gasNative = gasUsed != null && gasPrice != null ? (gasUsed * gasPrice) / 1e18 : null;
     this.state.plays.push(blankPlay({
       play_id: pos.id, kind: 'play', signal_type: signalOf(pool.source), source: pool.dex,
       passed: true, rejected: false, reason: null,
@@ -533,11 +564,12 @@ export class TokenTrader {
     }
     const entryNative = play.entry_gas_native;
     const exitNative = play.exit_gas_native;
-    if (play.exit_gas_gap || entryNative == null || exitNative == null || play.entry_gas_used == null) {
+    if (play.exit_gas_gap || entryNative == null || exitNative == null) {
       play.gas_used = null; play.gas_price = null; play.gas_native = null; play.gas_assumed = false; play.gas_note = 'no receipt gas';
-    } else if (play.exit_gas_mixed || play.entry_gas_price == null || play.exit_gas_price == null || play.entry_gas_price !== play.exit_gas_price) {
+    } else if (play.exit_gas_mixed || play.entry_gas_used == null || play.entry_gas_price == null || play.exit_gas_price == null || play.entry_gas_price !== play.exit_gas_price) {
       play.gas_used = null; play.gas_price = null; play.gas_native = entryNative + exitNative; play.gas_assumed = false;
-      play.gas_note = 'entry and exit gas prices differed; gas_native is the receipt sum';
+      play.gas_note = play.entry_gas_price != null && play.exit_gas_price != null && play.entry_gas_price !== play.exit_gas_price
+        ? 'entry and exit gas prices differed; gas_native is the full receipt total and gas_used is left null' : null;
     } else {
       play.gas_used = play.entry_gas_used + (play.exit_gas_used ?? 0);
       play.gas_price = play.entry_gas_price;
@@ -582,7 +614,7 @@ export class TokenTrader {
       if (impact != null) recordedImpact = impact;
     }
     let tokens = sized.tokens, spent = sized.spend, spentUsd = sized.usd;
-    let txEntry: string | null = null, gasUsed: number | null = null, gasPrice: number | null = null;
+    let txEntry: string | null = null, gasUsed: number | null = null, gasPrice: number | null = null, gasNative: number | null = null;
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('live broker missing');
       this.pendingBuy = { chainId: pool.chainId, address: pool.spend, amount: sized.spend };
@@ -591,6 +623,7 @@ export class TokenTrader {
         tokens = fill.tokens; spent = fill.spent; spentUsd = fill.spentUsd;
         txEntry = fill.tx ?? null;
         if (fill.gasUsed != null && fill.gasPriceWei != null) { gasUsed = fill.gasUsed; gasPrice = fill.gasPriceWei; }
+        if (typeof fill.gasNative === 'number' && Number.isFinite(fill.gasNative)) gasNative = fill.gasNative;
       } finally {
         this.pendingBuy = null;
       }
@@ -614,7 +647,7 @@ export class TokenTrader {
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success');
-    this.rememberEntry(pos, pool, recordedImpact, txEntry, gasUsed, gasPrice);
+    this.rememberEntry(pos, pool, recordedImpact, txEntry, gasUsed, gasPrice, gasNative);
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
   }
 
@@ -713,12 +746,14 @@ export class TokenTrader {
           quote += s.quoteOut; sold += s.tokensIn;
           if (Number.isFinite(s.impact)) { impactW += s.impact * s.tokensIn; impactN += s.tokensIn; } else impactGap = true;
           if (s.tx) exitTxs.push(s.tx);
-          if (s.gasUsed != null && s.gasPriceWei != null) {
-            gasNative += (s.gasUsed * s.gasPriceWei) / 1e18;
-            gasUsed += s.gasUsed;
-            if (gasLegs === 0) gasPrice = s.gasPriceWei;
-            else if (gasPrice !== s.gasPriceWei) { gasMixed = true; gasPrice = null; }
+          if (typeof s.gasNative === 'number' && Number.isFinite(s.gasNative)) {
+            gasNative += s.gasNative;
             gasLegs++;
+            if (s.gasUsed != null && s.gasPriceWei != null) {
+              gasUsed += s.gasUsed;
+              if (gasPrice == null) gasPrice = s.gasPriceWei;
+              else if (gasPrice !== s.gasPriceWei) { gasMixed = true; gasPrice = null; }
+            }
           } else gasGap = true;
         }
       } else {

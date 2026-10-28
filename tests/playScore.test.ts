@@ -10,7 +10,12 @@ import { describe, expect, it } from 'vitest';
 import { createApp } from '../src/server/app';
 import { Logger } from '../src/server/bot/logger';
 import { MultiBot, type MultiState } from '../src/server/bot/multi';
-import { MemoryStore } from '../src/server/bot/store';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { JsonStore, MemoryStore } from '../src/server/bot/store';
+import { PlayRejectLog, REJECT_WINDOW } from '../src/server/bot/playRejects';
+import { CHAINS } from '../src/live/chains';
 import { TokenTrader, type TraderState } from '../src/server/bot/tokenTrader';
 import { MockChain, NET } from './helpers/mockChain';
 import type { FreshPool, GateInput } from '../src/market/tokenTrader';
@@ -116,6 +121,12 @@ describe('scorePlay', () => {
   });
 
   it('flags a default gas figure and the leaderboard does not apply one on its own', () => {
+    const swapOnly = graded({
+      quote_out: 1100, gas_native: null, gas_used: 180_000, gas_price: 100_000_000, gas_note: null, play_id: 'swap-only',
+    });
+    const ignored = scorePlay(swapOnly);
+    expect(ignored.netTokens).toBeNull();
+    expect(ignored.assumptions.join(' ')).toMatch(/no receipt gas/);
     const row = graded({
       quote_out: null, gas_used: null, gas_price: null, gas_native: null, gas_note: 'no receipt gas',
       play_id: 'no-gas',
@@ -291,8 +302,9 @@ describe('token trader plays', () => {
         },
         assess: async (p) => clean({ honeypot: p.tokenSymbol === 'BAD' }),
         live: {
-          buy: async (_pool, spend) => ({ tokens: spend / 4000, spent: spend, spentUsd: spend, price: 4000, impact: 0.001, tx: '0x' + 'ab'.repeat(32), gasUsed: 100_000, gasPriceWei: 100_000_000 }),
-          sell: async (p, tokens) => ({ quoteOut: tokens * p.price, tokensIn: tokens, price: p.price, impact: 0.002, tx: '0x' + 'cd'.repeat(32), gasUsed: 80_000, gasPriceWei: 100_000_000 }),
+          // gasNative is approve + swap + L1. The swap receipt alone (180000 × 0.1 gwei) is smaller.
+          buy: async (_pool, spend) => ({ tokens: spend / 4000, spent: spend, spentUsd: spend, price: 4000, impact: 0.001, tx: '0x' + 'ab'.repeat(32), gasUsed: 100_000, gasPriceWei: 100_000_000, gasNative: 0.00004 }),
+          sell: async (p, tokens) => ({ quoteOut: tokens * p.price, tokensIn: tokens, price: p.price, impact: 0.002, tx: '0x' + 'cd'.repeat(32), gasUsed: 80_000, gasPriceWei: 100_000_000, gasNative: 0.00003 }),
         },
       });
       return { t: trader };
@@ -301,9 +313,10 @@ describe('token trader plays', () => {
     t.turnOn();
     await t.tick();
     await t.tick();
-    const rejected = t.plays().filter((p) => p.rejected);
+    const rejected = t.recentRejects();
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toMatch(/honeypot/);
+    expect(t.plays().some((p) => p.rejected)).toBe(false);
     const id = t.status().positions[0].id;
     t.mark(id, { price: t.status().positions[0].entryPrice * 0.7, feeBps: 1 });
     await t.tick();
@@ -311,13 +324,71 @@ describe('token trader plays', () => {
     expect(closed.gas_assumed).toBe(false);
     expect(closed.gas_used).toBe(180_000);
     expect(closed.gas_price).toBe(100_000_000);
+    expect(closed.gas_native).toBeCloseTo(0.00007, 12);
+    const swapOnly = (180_000 * 100_000_000) / 1e18;
+    expect(closed.gas_native!).toBeGreaterThan(swapOnly);
     expect(closed.tx_entry).toBe('0x' + 'ab'.repeat(32));
     expect(closed.tx_exit).toBe('0x' + 'cd'.repeat(32));
     const score = scorePlay(closed);
     expect(score.basis).toBe('fill');
     expect(score.measured).toBe(true);
-    expect(score.netTokens).toBeCloseTo((closed.quote_out ?? 0) - closed.size_spend - (closed.gas_native ?? 0) * (closed.native_to_spend ?? 0), 8);
+    const full = (closed.quote_out ?? 0) - closed.size_spend - 0.00007 * (closed.native_to_spend ?? 0);
+    const swapNet = (closed.quote_out ?? 0) - closed.size_spend - swapOnly * (closed.native_to_spend ?? 0);
+    expect(score.netTokens).toBeCloseTo(full, 8);
+    expect(score.netTokens).not.toBeCloseTo(swapNet, 6);
     expect(score.costs.feeEntry).toBeNull();
+  });
+
+  it('keeps rejects out of the state file, dedupes them, and bounds the in-memory window', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'play-rejects-'));
+    try {
+      const file = join(dir, 'token-trader.json');
+      const store = new JsonStore<TraderState>(file);
+      const log = new PlayRejectLog(dir);
+      let n = 0;
+      const pools = Array.from({ length: 600 }, (_, i) => pool({ tokenSymbol: 'NO', pool: '0x' + (i + 1).toString(16).padStart(40, '0') }));
+      const t = new TokenTrader({
+        store, rejects: log, now: () => T0,
+        discover: async () => [pools[Math.min(n, pools.length - 1)]],
+        assess: async () => clean({ honeypot: true }),
+      });
+      t.configure({ perTradeUsd: 50, totalUsd: 50, minPoolAgeSec: 0 });
+      t.turnOn();
+      for (let k = 0; k < 600; k++) { await t.tick(); n++; }
+      const count = () => readdirSync(dir).filter((name) => name.startsWith('play-rejects')).flatMap((name) => readFileSync(join(dir, name), 'utf8').split('\n').filter(Boolean)).length;
+      expect(count()).toBe(600);
+      await t.tick();
+      expect(count()).toBe(600);
+      expect(log.window()).toHaveLength(REJECT_WINDOW);
+      expect(t.scorecard().rejected.bySignalType[0].sample).toBe(600);
+      const saved = JSON.parse(readFileSync(file, 'utf8')) as { plays: { rejected?: boolean }[] };
+      expect(saved.plays.filter((p) => p.rejected)).toEqual([]);
+      expect(t.plays()).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('prices gas in the chain wrapped-native symbol, not a hardcoded WETH', async () => {
+    const pulse = CHAINS.find((c) => c.wrappedNative.symbol === 'WPLS');
+    expect(pulse?.nativeSymbol).toBe('PLS');
+    const now = T0;
+    let fresh = true;
+    const pls = pool({ chainId: pulse!.id, spendSymbol: 'WPLS', tokenSymbol: 'HEX', price: 2, usdPerSpend: 1 });
+    const namedEth = pool({ chainId: pulse!.id, spendSymbol: 'WETH', tokenSymbol: 'HEX', price: 2, usdPerSpend: 1 });
+    const hood = pool({ pool: POOL, tokenSymbol: 'WETH', spendSymbol: 'USDG', price: 4000, usdPerSpend: 1 });
+    const t = new TokenTrader({
+      store: new MemoryStore(), now: () => now,
+      discover: async () => (fresh ? (fresh = false, [pls, namedEth, hood]) : []),
+      assess: async () => clean(),
+    });
+    t.configure({ perTradeUsd: 100, totalUsd: 1000, minPoolAgeSec: 0 });
+    t.turnOn();
+    await t.tick();
+    const rows = t.plays();
+    expect(rows.find((p) => p.spend_symbol === 'WPLS')?.native_to_spend).toBe(1);
+    expect(rows.find((p) => p.spend_symbol === 'WETH' && p.chain_id === pulse!.id)?.native_to_spend).toBeNull();
+    expect(rows.find((p) => p.chain_id === CHAIN)?.native_to_spend).toBe(4000);
   });
 
   it('serves the scorecard and keeps a non-Robinhood row out of the groups', async () => {

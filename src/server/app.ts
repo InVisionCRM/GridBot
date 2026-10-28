@@ -24,7 +24,6 @@ import type { FriendsHost } from './friends/host';
 import type { GeckoRelay } from './friends/relay';
 import type { Autopilot, AutoOptions, Budget } from './bot/autopilot';
 import type { TokenTrader, TraderOptions } from './bot/tokenTrader';
-import { playLeaderboard } from '../metrics/playScore';
 import type { Router } from './router/router';
 import { noKey } from './words';
 import { fetchJson } from './fetchJson';
@@ -387,7 +386,7 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
   app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
-  app.get('/api/plays/scorecard', wrap(() => playLeaderboard(tt().plays())));
+  app.get('/api/plays/scorecard', wrap(() => tt().scorecard()));
 
   // ── Capital router (settings only; this does not move funds) ──
   const router = () => { if (!o.router) throw new Error('The capital router is not available.'); return o.router; };

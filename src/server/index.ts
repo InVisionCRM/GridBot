@@ -123,7 +123,7 @@ const autopilot = new Autopilot({
 });
 const tokenTrader = copy ? undefined : createTokenTrader({
   hub, gecko, store: tokenTraderStore(path.join(dataDir, 'token-trader.json')), emit: activity.emitEvent,
-  approval: cfg.approval, receiptTimeoutMs: 120_000,
+  approval: cfg.approval, receiptTimeoutMs: 120_000, dataDir,
 });
 // Stop all / STOP chain: the token trader and sniper make no new buys there; exits of positions it holds keep running.
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));

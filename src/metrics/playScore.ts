@@ -73,14 +73,14 @@ export interface PlayRecord {
   tx_entry: string | null;
   tx_exit: string | null;
 
-  /** Swap gas units from receipts. Null when the two legs were not both on a receipt, or their prices differed (see `gas_native`). */
+  /** Swap-receipt gas units, for reference. The net does not use these; a swap-only figure leaves out approve gas and the L1 fee. */
   gas_used: number | null;
-  /** Wei per gas, when one price covers every unit in `gas_used`. */
+  /** Wei per gas on the swap receipt, when one price covers `gas_used`. Reference only. */
   gas_price: number | null;
   /** True only when the units or the price were not on a receipt. */
   gas_assumed: boolean;
   gas_note: string | null;
-  /** Native coin (ETH on Robinhood) paid in gas, summed from receipts. */
+  /** Full native gas for the round trip: approve + swap + L1 on each fill, summed. Null when a receipt total is missing. */
   gas_native: number | null;
   /** Spend-coin units for 1 native coin, from a real price. Null → gas is left out of the net, not taken as zero. */
   native_to_spend: number | null;
@@ -274,14 +274,14 @@ function gasOf(p: PlayRecord, assume?: AssumeGas): GasSpend {
     if (native == null || p.native_to_spend == null) return { spend: null, assumed: true, note: p.gas_note ?? 'assumed gas could not be converted into the coin spent' };
     return { spend: native * p.native_to_spend, assumed: true, note: p.gas_note ?? 'gas is assumed' };
   }
-  const native = p.gas_native != null ? p.gas_native : (p.gas_used != null && p.gas_price != null ? (p.gas_used * p.gas_price) / 1e18 : null);
-  if (native === 0) return { spend: 0, assumed: false, note: null };
-  if (native != null && p.native_to_spend != null) return { spend: native * p.native_to_spend, assumed: false, note: null };
+  // Receipt total only. gas_used × gas_price is the swap leg and leaves out the approve and the L1 fee.
+  if (p.gas_native === 0) return { spend: 0, assumed: false, note: null };
+  if (p.gas_native != null && p.native_to_spend != null) return { spend: p.gas_native * p.native_to_spend, assumed: false, note: null };
   if (assume && assume.units >= 0 && assume.priceWei >= 0 && assume.nativeToSpend > 0) {
     const n = (assume.units * assume.priceWei) / 1e18;
     return { spend: n * assume.nativeToSpend, assumed: true, note: assume.note ?? `assumed gas: ${assume.units} units` };
   }
-  if (native == null) return { spend: null, assumed: false, note: p.gas_note ?? 'no receipt gas' };
+  if (p.gas_native == null) return { spend: null, assumed: false, note: p.gas_note ?? 'no receipt gas' };
   return { spend: null, assumed: false, note: 'gas not converted: no price of the native coin in the coin spent' };
 }
 
