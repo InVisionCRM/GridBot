@@ -23,8 +23,13 @@ export interface DexConfig {
   quoter?: string;
   /** V2 only: LP fee in bps (verified against getAmountsOut). */
   feeBps?: number;
-  /** V3 only: fee tiers in hundredths of a bip (100 = 0.01 %). */
+  /** V3 only: fee tiers in hundredths of a bip (100 = 0.01 %). Used to find pools; a pool's own fee() is its fee. */
   feeTiers?: number[];
+  /**
+   * V3 only: pools can change fee() between blocks (Aerodrome Slipstream style). Quotes read fee() every time instead
+   * of using the tier the pool was found at. No DEX configured today sets it (Uniswap/PancakeSwap/9mm fees are fixed).
+   */
+  dynamicFee?: boolean;
   source: string;
   note?: string;
   /** GeckoTerminal DEX id on this chain (verified 2026-10-17 against /networks/{slug}/dexes and a known pool) */

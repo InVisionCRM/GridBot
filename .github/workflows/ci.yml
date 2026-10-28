@@ -37,6 +37,13 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Client bundle has no key names
+        run: |
+          test -d dist/client || { echo 'dist/client is missing'; exit 1; }
+          if grep -R -E -n -e 'ACROSS_API_KEY|RELAY_API_KEY|LIFI_API_KEY|PRIVATE_KEY' dist/client; then
+            echo 'a key name is in the client bundle'
+            exit 1
+          fi
       - name: No file names that clash only by case
         if: runner.os == 'Linux'
         run: |

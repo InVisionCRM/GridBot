@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { encodeV3Mint } from '../src/market/poolEvents';
 import { gateToken, type GateInput } from '../src/market/tokenTrader';
 import {
-  BURN_ADDRESSES, clearV3LpLockCache, encodeIncreaseLiquidity, exposesLockSemantics, inspectV3LpLock,
+  BURN_ADDRESSES, clearV3LpLockCache, encodeIncreaseLiquidity, exposesLockSemantics, hasVerifiedLockerCode, inspectV3LpLock,
   KNOWN_V3_LOCKERS, LOCKER_SELECTOR, MULTICALL3, unverifiedV3Lp, v3LockSatisfies, V3_LP_IFACE,
   type V3LockLog, type V3LockRpc, type V3LpReport,
 } from '../src/market/v3LpLock';
@@ -46,6 +46,11 @@ interface Pos {
 
 function lockerCode(): string {
   return '0x' + [LOCKER_SELECTOR.unlock, LOCKER_SELECTOR.lock, LOCKER_SELECTOR.unlockDate].join('00');
+}
+
+/** Bytecode that passes the allowlisted-locker code check (getLock + getLocksLength). */
+function verifiedLockerCode(): string {
+  return '0x' + [LOCKER_SELECTOR.getLock, LOCKER_SELECTOR.getLocksLength].join('');
 }
 
 interface WorldOpts {
@@ -165,45 +170,71 @@ async function run(w: ReturnType<typeof world>, over: Partial<Parameters<typeof 
 beforeEach(() => clearV3LpLockCache());
 
 describe('V3 position lock evidence', () => {
-  it('classifies a locker contract and reads the unlock time', async () => {
+  it('counts an allowlisted locker only when its code exposes the lock table', async () => {
+    const known = KNOWN_V3_LOCKERS.find((k) => k.chainId === 4663)!;
+    expect(hasVerifiedLockerCode(verifiedLockerCode())).toBe(true);
+    expect(hasVerifiedLockerCode('0x363d3d373d3d3d363d73')).toBe(false);
     const w = world({
+      liquidity: 1000n,
+      positions: [{ tokenId: 4n, owner: known.address, liquidity: 1000n }],
+      code: { [known.address]: verifiedLockerCode() },
+      uncx: { len: 1, locks: { 1: { nft: 4n, unlock: BigInt(FUTURE), manager: NPM } } },
+    });
+    const r = await run(w, { chainId: 4663 });
+    expect(r.status).toBe('verified');
+    expect(r.positions[0]).toMatchObject({ class: 'locker', unlockAt: FUTURE, expired: false });
+    expect(r.lockedOrBurnedShare).toBe(1);
+    expect(v3LockSatisfies(r)).toBe(true);
+    expect(gateToken(clean({ lpUnlocked: null, v3Lp: r })).reason).toBeNull();
+    expect(gateToken(clean({ risk: 'medium', lpUnlocked: null, v3Lp: r })).ok).toBe(true);
+
+    const bare = world({
+      pool: '0x' + 'e1'.repeat(20),
+      liquidity: 1000n,
+      positions: [{ tokenId: 4n, owner: known.address, liquidity: 1000n }],
+      code: { [known.address]: '0x60006000' },
+      uncx: { len: 1, locks: { 1: { nft: 4n, unlock: BigInt(FUTURE), manager: NPM } } },
+    });
+    const denied = await run(bare, { pool: '0x' + 'e1'.repeat(20), chainId: 4663 });
+    expect(denied.status).toBe('unverified');
+    expect(denied.shares.locker).toBe(0);
+    expect(v3LockSatisfies(denied)).toBe(false);
+  });
+
+  it('does not treat a fake locker probe as locked, and fails closed', async () => {
+    const blind = world({
+      liquidity: 1000n,
+      positions: [{ tokenId: 7n, owner: LOCKER, liquidity: 1000n }],
+      code: { [LOCKER]: '0x60006000' },
+      unlockAt: { [LOCKER]: BigInt(FUTURE) },
+    });
+    const shaped = world({
+      pool: '0x' + 'e2'.repeat(20),
       liquidity: 1000n,
       positions: [{ tokenId: 7n, owner: LOCKER, liquidity: 1000n }],
       code: { [LOCKER]: lockerCode() },
       unlockAt: { [LOCKER]: BigInt(FUTURE) },
     });
-    const r = await run(w);
-    expect(r.status).toBe('verified');
-    expect(r.shares).toEqual({ locker: 1, burn: 0, eoa: 0, other: 0 });
-    expect(r.lockedOrBurnedShare).toBe(1);
-    expect(r.positions).toHaveLength(1);
-    expect(r.positions[0]).toMatchObject({ tokenId: '7', owner: LOCKER, class: 'locker', unlockAt: FUTURE, expired: false, permanent: false, inRange: true });
-    expect(v3LockSatisfies(r)).toBe(true);
-    expect(gateToken(clean({ lpUnlocked: true, v3Lp: r })).ok).toBe(true);
-    expect(gateToken(clean({ risk: 'medium', lpUnlocked: true, v3Lp: r })).reason).toBeNull();
+    for (const [w, over] of [[blind, {}], [shaped, { pool: '0x' + 'e2'.repeat(20) }]] as const) {
+      const r = await run(w, over);
+      expect(r.status).toBe('unverified');
+      expect(r.detail).toMatch(/not a verified locker/);
+      expect(r.shares.locker).toBe(0);
+      expect(r.lockedOrBurnedShare).toBe(0);
+      expect(r.positions[0].class).not.toBe('locker');
+      expect(v3LockSatisfies(r)).toBe(false);
+      expect(gateToken(clean({ lpUnlocked: null, v3Lp: r })).reason).toBe('V3 liquidity lock unverified');
+      expect(gateToken(clean({ risk: 'medium', lpUnlocked: true, v3Lp: r })).ok).toBe(false);
+    }
   });
 
-  it('classifies a known UNCX locker from its lock table, including on Robinhood', async () => {
+  it('treats an expired allowlisted lock as not locked', async () => {
     const known = KNOWN_V3_LOCKERS.find((k) => k.chainId === 4663)!;
     const w = world({
       liquidity: 1000n,
-      positions: [{ tokenId: 4n, owner: known.address, liquidity: 1000n }],
-      code: { [known.address]: '0x363d3d373d3d3d363d73' },
-      uncx: { len: 1, locks: { 1: { nft: 4n, unlock: BigInt(FUTURE), manager: NPM } } },
-    });
-    const r = await run(w, { chainId: 4663 });
-    expect(r.status).toBe('verified');
-    expect(r.positions[0].class).toBe('locker');
-    expect(r.positions[0].unlockAt).toBe(FUTURE);
-    expect(r.lockedOrBurnedShare).toBe(1);
-  });
-
-  it('treats an expired lock as a locker that does not satisfy the requirement', async () => {
-    const w = world({
-      liquidity: 1000n,
-      positions: [{ tokenId: 7n, owner: LOCKER, liquidity: 1000n }],
-      code: { [LOCKER]: lockerCode() },
-      unlockAt: { [LOCKER]: BigInt(PAST) },
+      positions: [{ tokenId: 7n, owner: known.address, liquidity: 1000n }],
+      code: { [known.address]: verifiedLockerCode() },
+      uncx: { len: 1, locks: { 1: { nft: 7n, unlock: BigInt(PAST), manager: NPM } } },
     });
     const r = await run(w);
     expect(r.status).toBe('verified');
@@ -211,7 +242,8 @@ describe('V3 position lock evidence', () => {
     expect(r.shares.locker).toBe(1);
     expect(r.lockedOrBurnedShare).toBe(0);
     expect(v3LockSatisfies(r)).toBe(false);
-    expect(gateToken(clean({ lpUnlocked: true, v3Lp: r })).reason).toBe('liquidity is unlocked');
+    expect(gateToken(clean({ lpUnlocked: null, v3Lp: r })).reason).toBe('liquidity is unlocked');
+    expect(gateToken(clean({ risk: 'medium', lpUnlocked: null, v3Lp: r })).reason).toBe('liquidity is unlocked');
   });
 
   it('classifies a burn address as burned liquidity', async () => {
@@ -232,23 +264,29 @@ describe('V3 position lock evidence', () => {
     expect(r.shares).toEqual({ locker: 0, burn: 0, eoa: 1, other: 0 });
     expect(r.positions[0].class).toBe('eoa');
     expect(v3LockSatisfies(r)).toBe(false);
-    expect(gateToken(clean({ lpUnlocked: true, v3Lp: r })).reason).toBe('liquidity is unlocked');
-    const unknown = gateToken(clean({ lpUnlocked: null, v3Lp: r }));
-    expect(unknown.ok).toBe(true);
-    expect(unknown.v3Lp?.shares.eoa).toBe(1);
+    const held = gateToken(clean({ lpUnlocked: null, v3Lp: r }));
+    expect(held.reason).toBe('liquidity is unlocked');
+    expect(held.ok).toBe(false);
+    expect(held.v3Lp?.shares.eoa).toBe(1);
+    expect(gateToken(clean({ mode: 'live', risk: 'medium', lpUnlocked: null, v3Lp: r })).reason).toBe('liquidity is unlocked');
+    expect(gateToken(clean({ risk: 'any', lpUnlocked: null, v3Lp: r })).ok).toBe(true);
+    const unread = gateToken(clean({ lpUnlocked: null, v3Lp: unverifiedV3Lp(POOL, NPM, 'rpc failed') }));
+    expect(unread.reason).toBe('V3 liquidity lock unverified');
+    expect(gateToken(clean({ risk: 'medium', lpUnlocked: false, v3Lp: unverifiedV3Lp(POOL, NPM, 'rpc failed') })).ok).toBe(false);
   });
 
   it('reports mixed locker, burn, EOA and other shares', async () => {
+    const known = KNOWN_V3_LOCKERS.find((k) => k.chainId === 4663)!;
     const w = world({
       liquidity: 1000n,
       positions: [
-        { tokenId: 1n, owner: LOCKER, liquidity: 500n },
+        { tokenId: 1n, owner: known.address, liquidity: 500n },
         { tokenId: 2n, owner: DEAD, liquidity: 200n },
         { tokenId: 3n, owner: EOA, liquidity: 200n },
         { tokenId: 4n, owner: OTHER, liquidity: 100n },
       ],
-      code: { [LOCKER]: lockerCode(), [OTHER]: '0x60006000' },
-      unlockAt: { [LOCKER]: BigInt(FUTURE) },
+      code: { [known.address]: verifiedLockerCode(), [OTHER]: '0x60006000' },
+      uncx: { len: 1, locks: { 1: { nft: 1n, unlock: BigInt(FUTURE), manager: NPM } } },
     });
     const r = await run(w);
     expect(r.status).toBe('verified');

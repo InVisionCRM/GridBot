@@ -3,10 +3,13 @@
  * Holder lists that report "0% locked / 0% burned" for a V3 pool are describing that missing ERC-20, so they
  * cannot see a lock. This module reads the pool's in-range positions and classifies each NFT owner.
  *
- * The token-trader gate blocks safe/medium when `lpUnlocked === true` (see gateToken). Nothing in this repo
- * calls a GoPlus-style LP-holder API. `lpRemovable` is the V2 helper. Assess leaves `lpUnlocked` null unless
- * the separate option `lpUnlockCheck` is on. This report is extra evidence, and it is attached only when
- * `v3LpLockCheck` is on (default off). With that option off the gate input never carries a report.
+ * The gate blocks safe/medium when this report is unverified, or verified but not at least 90% burned or
+ * locked by an allowlisted locker. Nothing in this repo calls a GoPlus-style LP-holder API. The report is
+ * attached only when `v3LpLockCheck` is on (default off). With that option off the gate input never carries
+ * a report, and gateToken is unchanged. Assess leaves `lpUnlocked` null unless `lpUnlockCheck` is on.
+ *
+ * Only a burn address, or an allowlisted locker whose code contains getLock and getLocksLength, counts as
+ * locked. A contract that merely answers an expiry probe does not.
  *
  * Reads are eth_call, eth_getCode, eth_getLogs and eth_getTransactionReceipt. No transaction is signed or sent.
  * A transport failure, a rate limit that does not clear, or in-range liquidity we could not attribute becomes
@@ -73,6 +76,7 @@ export const LOCKER_SELECTOR = {
   unlockTime: sel('unlockTime(uint256)'),
   locks: sel('locks(uint256)'),
   getLock: sel('getLock(uint256)'),
+  getLocksLength: sel('getLocksLength()'),
 };
 
 export const V3_LP_IFACE = {
@@ -208,6 +212,16 @@ export function isBurnAddress(address: string): boolean {
 export function knownV3Locker(chainId: number, address: string): { name: string } | null {
   const a = address.toLowerCase();
   return KNOWN_V3_LOCKERS.find((k) => k.chainId === chainId && k.address.toLowerCase() === a) ?? null;
+}
+
+/**
+ * Allowlisted locker bytecode: the UNCX views this check actually calls.
+ * An allowlisted address with empty or unrelated code is not a verified locker.
+ */
+export function hasVerifiedLockerCode(code: string | null | undefined): boolean {
+  if (!code || code === '0x' || code === '0x0') return false;
+  const c = code.toLowerCase();
+  return c.includes(LOCKER_SELECTOR.getLock) && c.includes(LOCKER_SELECTOR.getLocksLength);
 }
 
 /** True when runtime code exposes both an unlock-style entrypoint and a lock or expiry view. */
@@ -531,35 +545,37 @@ async function readGenericExpiry(ctx: ScanCtx, owner: string, tokenId: bigint, c
 
 const PROBE_VIEWS = [LOCKER_SELECTOR.unlockDate, LOCKER_SELECTOR.lockedUntil, LOCKER_SELECTOR.unlockTime].join('');
 
-async function classifyOwner(ctx: ScanCtx, req: V3LockRequest, npm: string, owner: string, tokenId: bigint): Promise<{ class: LpOwnerClass; expiry: LockExpiry | null }> {
-  if (isBurnAddress(owner)) return { class: 'burn', expiry: null };
-  const code = await cachedCode(ctx, owner);
-  if (knownV3Locker(req.chainId, owner)) {
-    const table = await uncxExpiries(ctx, owner, npm);
-    return { class: 'locker', expiry: table.get(tokenId.toString()) ?? null };
-  }
-  if (!code || code === '0x' || code === '0x0') return { class: 'eoa', expiry: null };
-  let semantics = exposesLockSemantics(code);
-  let semanticCode = code;
-  if (!semantics) {
-    const impl = minimalProxyImplementation(code);
-    if (impl) {
-      const implCode = await cachedCode(ctx, impl);
-      if (exposesLockSemantics(implCode)) { semantics = true; semanticCode = implCode; }
-    }
-  }
-  if (!semantics) {
-    // A proxy may still answer an expiry view even when the selector sits in the implementation.
-    // A revert is "not a locker". locks(uint256) is not probed here: its key is not always the NFT id.
-    const probed = await readGenericExpiry(ctx, owner, tokenId, PROBE_VIEWS);
-    if (probed) return { class: 'locker', expiry: probed };
-    return { class: 'other', expiry: null };
-  }
-  const expiry = await readGenericExpiry(ctx, owner, tokenId, semanticCode);
-  return { class: 'locker', expiry };
+async function verifiedLockerBytecode(ctx: ScanCtx, code: string): Promise<boolean> {
+  if (hasVerifiedLockerCode(code)) return true;
+  const impl = minimalProxyImplementation(code);
+  if (!impl) return false;
+  return hasVerifiedLockerCode(await cachedCode(ctx, impl));
 }
 
-function reportOf(req: V3LockRequest, poolLiq: bigint, positions: V3PositionLock[], foundInRange: bigint, countable: bigint, unreadable: bigint, shares: V3LpShares): V3LpReport {
+/**
+ * Locked or burned liquidity is only a burn address, or an allowlisted locker whose code exposes getLock.
+ * Any other contract that answers a lock or expiry probe is untrusted: its liquidity is not counted as locked,
+ * and the report fails closed.
+ */
+async function classifyOwner(ctx: ScanCtx, req: V3LockRequest, npm: string, owner: string, tokenId: bigint): Promise<{ class: LpOwnerClass; expiry: LockExpiry | null; untrusted: boolean }> {
+  if (isBurnAddress(owner)) return { class: 'burn', expiry: null, untrusted: false };
+  const code = await cachedCode(ctx, owner);
+  if (knownV3Locker(req.chainId, owner)) {
+    if (!(await verifiedLockerBytecode(ctx, code))) return { class: 'other', expiry: null, untrusted: true };
+    const table = await uncxExpiries(ctx, owner, npm);
+    return { class: 'locker', expiry: table.get(tokenId.toString()) ?? null, untrusted: false };
+  }
+  if (!code || code === '0x' || code === '0x0') return { class: 'eoa', expiry: null, untrusted: false };
+  const impl = minimalProxyImplementation(code);
+  const implCode = impl ? await cachedCode(ctx, impl) : null;
+  if (exposesLockSemantics(code) || exposesLockSemantics(implCode)) return { class: 'other', expiry: null, untrusted: true };
+  // A contract with no lock selectors can still return a timestamp-shaped word. That is not a lock.
+  const probed = await readGenericExpiry(ctx, owner, tokenId, PROBE_VIEWS);
+  if (probed) return { class: 'other', expiry: null, untrusted: true };
+  return { class: 'other', expiry: null, untrusted: false };
+}
+
+function reportOf(req: V3LockRequest, poolLiq: bigint, positions: V3PositionLock[], foundInRange: bigint, countable: bigint, unreadable: bigint, untrusted: bigint, shares: V3LpShares): V3LpReport {
   const base = {
     pool: req.pool.toLowerCase(), positionManager: req.positionManager.toLowerCase(),
     poolLiquidity: poolLiq.toString(), foundLiquidity: foundInRange.toString(), shares,
@@ -567,6 +583,9 @@ function reportOf(req: V3LockRequest, poolLiq: bigint, positions: V3PositionLock
   };
   if (!covered(foundInRange, poolLiq)) {
     return { ...base, status: 'unverified', detail: 'in-range liquidity is not fully accounted for' };
+  }
+  if (poolLiq > 0n && untrusted * 10_000n > poolLiq * COVERAGE_DUST_BPS) {
+    return { ...base, status: 'unverified', detail: 'owner is not a verified locker or burn address' };
   }
   if (meetsMin(countable, poolLiq)) return { ...base, status: 'verified', detail: null };
   if (meetsMin(countable + unreadable, poolLiq)) {
@@ -605,8 +624,10 @@ async function runInspect(ctx: ScanCtx, req: V3LockRequest): Promise<V3LpReport>
   const meta = { token0, token1, fee: Number(fee[0]), tick };
   const found = await discover(ctx, { ...req, pool, positionManager: npm }, npm, meta, poolLiq);
   const positions: V3PositionLock[] = [];
+  let untrusted = 0n;
   for (const pos of found) {
     const cls = await classifyOwner(ctx, req, npm, pos.owner, pos.tokenId);
+    if (cls.untrusted && pos.inRange) untrusted += pos.liquidity;
     const expiry = cls.class === 'locker' ? cls.expiry : null;
     const permanent = !!expiry?.permanent;
     const unlockAt = permanent ? null : expiry?.at ?? null;
@@ -630,7 +651,7 @@ async function runInspect(ctx: ScanCtx, req: V3LockRequest): Promise<V3LpReport>
       else if (p.unlockAt == null && !p.expired) unreadable += liq;
     }
   }
-  return reportOf(req, poolLiq, positions, foundInRange, countable, unreadable, {
+  return reportOf(req, poolLiq, positions, foundInRange, countable, unreadable, untrusted, {
     locker: ratio(lockerLiq, poolLiq), burn: ratio(burn, poolLiq), eoa: ratio(eoa, poolLiq), other: ratio(other, poolLiq),
   });
 }
