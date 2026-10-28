@@ -147,6 +147,10 @@ export function TokenTraderPanel({ s, seed }: { s: AnyObj; seed?: AnyObj }) {
       <p className="muted small">Wash and pool age off leaves the gate as it is. On, safe and medium enforce the minimum age above, skip a pool whose age is unknown, and skip volume over {SCAN_RULES.maxVolumeToLiquidity}× liquidity. A failed read skips those modes too. Snipes are brand-new pools, so they get only the volume check, never the age check.</p>
 
       <div className="tt-row" style={{ marginTop: 10 }}>
+        <label className="check"><input type="checkbox" checked={!!o.enforceOwnerPowers} onChange={(e) => void save({ enforceOwnerPowers: e.target.checked })} /><span>Owner powers</span></label>
+        <span className="muted small">Off leaves the gate as it is. On, safe and medium skip when a non-renounced owner can mint, blacklist, pause, or change tax or limits, or a live admin can upgrade the contract. A failed read skips those modes too.</span>
+      </div>
+      <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.enforceLiquidityFloor} onChange={(e) => void save({ enforceLiquidityFloor: e.target.checked })} /><span>{`Enforce liquidity floor (≈ ${liqEth(ENFORCED_LIQUIDITY_FLOOR_USD)})`}</span></label>
         <span className="muted small">{`In force ${liqEth(shownMinLiquidityUsd(t))}. Scan buys and the safety gate use this. A snipe still has to clear its own minimum when that is higher.`}</span>
       </div>

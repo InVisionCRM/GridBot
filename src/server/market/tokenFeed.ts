@@ -16,6 +16,7 @@ import { ERC20, ROUTER } from '../dex/abis';
 import { readCall } from '../dex/types';
 import { fetchJson } from '../fetchJson';
 import { holderApiBase, readHolderConcentration, type HolderChain } from './holderRead';
+import { readOwnerPowers } from './ownerRead';
 import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
 import type { DexConfig } from '../../live/chains';
 import type { SafetyLimits } from '../../live/limits';
@@ -151,6 +152,7 @@ export function createTokenTrader(o: {
     // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
     quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
     resolve: (hit) => resolveHit(o.hub, hit),
+    ownerPowers: (pool) => readOwnerPowers(o.hub.rt(pool.chainId).reader, pool.chainId, pool.token),
     // the signer's on-chain balance of the position's token (reconcile after a sell that stopped partway)
     balanceOf: async (p) => {
       const rt = o.hub.rt(p.chainId);

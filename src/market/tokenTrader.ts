@@ -194,6 +194,15 @@ export interface GateInput {
   /** Same setting as scan discovery (`minPoolAgeSec`). 0 means no age requirement. */
   gateMinPoolAgeSec?: number;
   /**
+   * Owner, EIP-1967 admin, and setter scan. Ignored unless this is true, so a gate call that
+   * leaves it off matches the gate from before this check existed.
+   */
+  enforceOwnerPowers?: boolean;
+  /** A read we needed failed. Safe and medium skip when the flag is on. */
+  ownerPowersUnverified?: boolean;
+  /** Skip text when a non-renounced owner holds a blocking power, or a live admin can upgrade. */
+  ownerPowersWhy?: string | null;
+  /**
    * Quote impact at the sized trade and cap it. Absent or false: `sizeImpact` is ignored, so the gate
    * matches today. The $100/$500/$1000 depth rules and the sizing cap are unchanged either way.
    */
@@ -288,6 +297,10 @@ export function gateToken(g: GateInput): GateResult {
       const h = Math.max(0, Math.round(g.poolAgeSec / 3600));
       return hard(`pool is ${h}h old (minimum ${Math.round(min / 3600)}h)`);
     }
+  }
+  if ((g.risk === 'safe' || g.risk === 'medium') && g.enforceOwnerPowers) {
+    if (g.ownerPowersUnverified) return hard(g.ownerPowersWhy || 'owner powers could not be verified');
+    if (g.ownerPowersWhy) return hard(g.ownerPowersWhy);
   }
   if (g.enforceHolderCheck && !g.holderThin && (g.risk === 'safe' || g.risk === 'medium') && g.holderConcentration != null && g.top10Concentration != null) {
     const maxHolder = clampHolderShare(g.maxHolderShare ?? DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_HOLDER_SHARE);
