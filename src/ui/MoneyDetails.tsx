@@ -14,7 +14,7 @@
  */
 import type { ReactNode } from 'react';
 import { echoes, metricsOf, unitsText } from './deskStats';
-import { pct, qty } from './fmt';
+import { pctShown, qty } from './fmt';
 
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 import type { AnyObj } from './model';
@@ -55,7 +55,14 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
   return rows;
 }
 
-export function MoneyDetails({ b, breakdown, hide = [], note }: { b: AnyObj; breakdown?: DetailRow[]; hide?: readonly DetailHide[]; note?: string }) {
+/**
+ * A value-change row a page adds after Price change: a quote-coin figure that sits outside Generated (the grid's
+ * cash-out sale at stop/close). Label, amount in the quote coin, tooltip. Merged like any other row when it prints the
+ * same as one (a stopped grid's whole Total P&L can be its stop sale).
+ */
+export type ValueChangeRow = [string, number | null | undefined, string];
+
+export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { b: AnyObj; breakdown?: DetailRow[]; changes?: readonly ValueChangeRow[]; hide?: readonly DetailHide[]; note?: string }) {
   const m = metricsOf(b);
   if (!m) return null;
   const q = m.quote, sym = q.symbol ?? '';
@@ -66,6 +73,7 @@ export function MoneyDetails({ b, breakdown, hide = [], note }: { b: AnyObj; bre
     ['Made at event prices', signed(q.made), `Fees / round-trip profit minus gas, swap fees, taxes and range-move losses, each in ${sym} at the time it happened. Generated is the same counted in coins, valued at today's price.`],
     ['Total P&L', signed(q.totalPnl), m.calc],
     ['Price change', signed(q.priceChange), `Total P&L − Generated (in ${sym} at today's price): what the coins' own price did (impermanent loss and the inventory's market move).`],
+    ...changes.map(([k, v, t]): [string, string, string] => [k, signed(v), t]),
     ['Open positions', signed(q.unrealized), 'Coins bought and not sold yet / the position\'s price side, at today\'s price minus what they cost. Not in Generated until they sell.'],
   ];
   // Made at event prices is the headline's number when everything was generated in the quote coin (prices don't matter then)
@@ -83,7 +91,7 @@ export function MoneyDetails({ b, breakdown, hide = [], note }: { b: AnyObj; bre
     rows.push([k, v, t]);
   }
   const tp = rows.find((r) => r[0].startsWith('Total P&L'));
-  if (tp && m.totalPnlPct != null) tp[1] = `${tp[1]} · ${pct(m.totalPnlPct, 2, true)} of capital in`;
+  if (tp && m.totalPnlPct != null && pctShown(m.totalPnlPct, 2) !== '—') tp[1] = `${tp[1]} · ${pctShown(m.totalPnlPct, 2, true)} of capital in`;
   const deposit = plain(q.capitalIn);
   const value: [string, string, string] = no.has('Value now')
     ? ['Deposit', `${deposit} in`, `The capital put in, in ${sym} at today's price.`]

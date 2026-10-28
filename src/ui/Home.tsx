@@ -1,8 +1,8 @@
 /** Home: net worth, the book chart, a joined strip, the bots, then the two cards that used to live only under More. */
 import { useEffect, useMemo, useState } from 'react';
 import { http } from './api';
-import { bestLiveBot, BotRow, feesTodayOf, generatedByMode, generatedParts, listBots, pnlUnits, todaySeries, totalGeneratedUsd, useRowActions } from './botRow';
-import { unitsText } from './deskStats';
+import { bestLiveBot, BotRow, feesTodayOf, generatedByMode, generatedParts, listBots, pnlUnits, sharedUnits, todaySeries, totalGeneratedUsd, useRowActions } from './botRow';
+import { metricsOf, unitsText } from './deskStats';
 import { AreaChart, Donut, Meter, Sparkline } from './charts';
 import { chainOf, chains, useChainFilter } from './chains';
 import { cls, pct } from './fmt';
@@ -85,6 +85,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
   const month = useMemo(() => portfolioSeries(bots, '1M'), [bots]);
   // Live and paper are never mixed: the headline is live bots only, in units per coin; paper is a separate small line
   const gen = generatedByMode(bots);
+  const paperGen = sharedUnits(bots.filter((b) => b.mode !== 'live').map((b) => metricsOf(b)?.generated));
   const livePnl = pnlUnits(bots, 'live');
   const genTone = totalGeneratedUsd(bots, 'live'); // sign only (colour); no dollars on screen
   const today = useMemo(() => feesTodayOf(s, bots), [s, bots]);
@@ -162,7 +163,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
           <span title={GEN_CALC}>Generated</span>
           <b className={`units ${cls(gen.live ? genTone : null)}`} data-testid="home-generated">{gen.live ? unitsText(gen.live, 3) : '—'}</b>
           <small className="muted fees-sub units" title="Total P&L of your live bots, per quote coin: current value + paid out − capital in, price change included.">P&L {livePnl ? unitsText(livePnl, 3) : '—'}</small>
-          {gen.paper && <small className="muted fees-sub units" data-testid="home-generated-paper" title="Paper bots' Generated, kept apart from the live headline.">paper {unitsText(gen.paper, 3)}</small>}
+          {paperGen && <small className="muted fees-sub units" data-testid="home-generated-paper" title="Paper bots' Generated, kept apart from the live headline: the coins two or more paper bots count in (a coin only one bot counts is on its row below).">paper {unitsText(paperGen, 3)}</small>}
           <Sparkline points={span >= 20 * 86_400_000 ? month : series} width={120} height={32} />
         </div>
         <div>

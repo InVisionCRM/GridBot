@@ -99,6 +99,9 @@ function DeskMenu({ s, nav, onGuide, onActivity, close }: { s: AnyObj; nav: Nav;
   );
 }
 
+/** Views without the net-worth chip: Holdings lists coin amounts per chain and no total across coins (Kyle, #73). */
+export const HIDE_WORTH_ON = new Set(['holdings']);
+
 export function Header({
   s, view, nav, chain, setChain, connected, ver, holdings, onActivity, onGuide,
 }: {
@@ -156,7 +159,7 @@ export function Header({
           ))}
         </nav>
         <div className="top-end">
-          <button type="button" className="worth-num" onClick={() => { shut(); nav({ v: 'holdings' }); }} title="Net worth">{worthText}</button>
+          {!HIDE_WORTH_ON.has(view.v) && <button type="button" className="worth-num" onClick={() => { shut(); nav({ v: 'holdings' }); }} title="Net worth">{worthText}</button>}
           <button type="button" className="pill-btn" aria-expanded={chainsOpen} aria-haspopup="menu" onClick={() => { setMenu(false); setMega(null); setChainsOpen((v) => !v); }}>
             {sel ? sel.short : 'All chains'} <Caret up={chainsOpen} />
           </button>

@@ -65,6 +65,7 @@ describe('pace from BotMetrics, with the one-day rule', () => {
     const s = src('LpDetail.tsx');
     expect(s).not.toMatch(/3_600_000|PositionPace|\['A month', 720\]/);
     expect(s).toMatch(/m\.generatedRate\.d7, m\.generatedRate\.needs\.d7/);
+    expect(s).toMatch(/m\.generatedRate\.d365, m\.generatedRate\.needs\.d365/);
     expect(s).not.toMatch(/generatedRate\.d30/); // no month row on screen (Kyle); d30 stays in the API
   });
 });

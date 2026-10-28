@@ -4,14 +4,15 @@ import { formatPrice } from '../lib/format';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { RangeBar } from './charts';
-import { Chart, EquityChart } from './Chart';
+import { Chart } from './Chart';
+import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
-import { MoneyDetails } from './MoneyDetails';
+import { MoneyDetails, type ValueChangeRow } from './MoneyDetails';
+import { isCloseOut } from '../live/ledger';
 import { metricsOf } from './deskStats';
 import { ago, cls, num, pct, px, qty, time, pxShort } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
-import { T } from './theme';
 import { errMsg, gridName, quoteSym, rangeState, spendFunds, type AnyObj, type Nav } from './model';
 import { AmountField, fundsProblem, isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { reserveCfg } from '../live/gasReserve';
@@ -166,8 +167,10 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
         </thead>
         <tbody>
           {g.trades.map((t: AnyObj) => {
-            const profit = t.side === 'sell' || t.failed ? net(t) : null;
-            const profitTxt = profit == null ? '' : qty(profit, q, 4);
+            // the cash-out sale at stop/close isn't a trade profit and its value change is in Details (one figure, once)
+            const stop = !t.failed && isCloseOut(t as Parameters<typeof isCloseOut>[0]);
+            const profit = stop ? null : t.side === 'sell' || t.failed ? net(t) : null;
+            const profitTxt = stop ? 'Sold at stop (see Details)' : profit == null ? '' : qty(profit, q, 4);
             return all ? (
               <tr key={t.id} className={t.failed ? 'failed-row' : ''}>
                 <td>{time(t.timestamp)}</td><td className={`side ${t.side}`} title={t.seed ? `Start-up buy for levels ${t.seed.join(', ')} above the start price` : undefined}>{t.side}{t.seed ? ' (start-up)' : ''}{t.failed ? ' ✗' : ''}</td><td className="muted">{t.intervalIndex}</td>
@@ -191,6 +194,17 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
       </table></div>
     </div>
   );
+}
+
+/**
+ * The grid's cash-out sale when it was stopped or closed (Kyle: not generated, so it stays out of Generated, but its
+ * value change belongs in Details). The server's own figure: `stats.closeOutNet` from roundTripStats (src/live/ledger.ts),
+ * what the cash-out sells got minus what those coins cost, in the quote coin. No row when the grid has none.
+ */
+export function stopSale(g: AnyObj): ValueChangeRow[] {
+  const n = g.stats?.closeOuts ?? 0;
+  if (!(n > 0) || typeof g.stats?.closeOutNet !== 'number') return [];
+  return [['Value change from the stop sale', g.stats.closeOutNet, `What the ${n === 1 ? 'sale' : `${n} sales`} of the remaining coins at stop/close got, minus what those coins cost. A change in value, not generated, so it is not in Generated.`]];
 }
 
 export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
@@ -269,7 +283,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v" title={g.price ? px(g.price) : undefined}>{g.price ? pxShort(g.price) : '—'}</div><span className="sub">{q} per {g.base}</span></div>
         <div className="kpi"><span><L tip="Pool fees paid on this grid's fills, in the quote coin.">Fees</L></span><div className="kpi-v">{qty(((g.trades ?? []) as AnyObj[]).reduce((a, t) => a + (typeof t.feeQuote === 'number' ? t.feeQuote : 0), 0), q, 4, false)}</div><span className="sub">paid on fills</span></div>
       </div>
-      <MoneyDetails b={g} note="what it holds, open positions, total P&L" hide={held > 0 ? ['Open positions'] : []} breakdown={held > 0 ? [
+      <MoneyDetails b={g} note="what it holds, open positions, total P&L" hide={held > 0 ? ['Open positions'] : []} changes={stopSale(g)} breakdown={held > 0 ? [
         ['Holding', <>{num(held, held < 10 ? 6 : 2)} {g.base}, bought for {qty(g.pnl.costQuote, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now</>, `The ${g.base} the grid bought and hasn't sold yet. It sells one level up.`],
         [`Open positions, ${q}`, open == null ? '—' : qty(open, q, 5), `What those coins are worth now minus what they cost. It moves with the price until they sell, so it is not in Generated.`],
       ] : [['Holding', 'nothing waiting to sell']]} />
@@ -308,10 +322,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <Fills s={s} g={g} />
 
-      <div className="card">
-        <h3>Value over time <span className="muted small">{q}</span></h3>
-        <EquityChart series={[{ name: `value ${q}`, data: g.equityHist ?? [], color: T.text }]} />
-      </div>
+      <ValueOverTime q={q} data={g.equityHist ?? []} />
     </main>
   );
 }

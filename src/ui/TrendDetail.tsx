@@ -2,7 +2,8 @@
 import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
-import { Chart, EquityChart } from './Chart';
+import { Chart } from './Chart';
+import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
 import { ago, cls, dur, num, pct, px, qty, time } from './fmt';
@@ -14,7 +15,6 @@ import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
 import { strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
-import { T } from './theme';
 import { quoteSym, type AnyObj, type Nav } from './model';
 import { Amt } from './money';
 import { metricsOf } from './deskStats';
@@ -151,10 +151,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="card"><h3>Log</h3><BotLog events={events} botId={t.id} /></div>
       </div>
 
-      <div className="card">
-        <h3>Value over time <span className="muted small">{q}</span></h3>
-        <EquityChart series={[{ name: `value ${q}`, data: t.equityHist ?? [], color: T.text }]} />
-      </div>
+      <ValueOverTime q={q} data={t.equityHist ?? []} />
     </main>
   );
 }

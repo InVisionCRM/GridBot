@@ -2,7 +2,8 @@
 import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { StatusDot } from './motion';
-import { Chart, EquityChart } from './Chart';
+import { Chart } from './Chart';
+import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { MoneyDetails, type DetailRow } from './MoneyDetails';
 import { ago, cls, dur, num, pct, px, qty } from './fmt';
@@ -12,13 +13,11 @@ import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
 import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { draftFrom, LpPolicyFields, payloadFrom, type PolicyDraft } from './LpPolicyFields';
-import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
-import { EST_HINT, metricsOf, unitsText } from './deskStats';
-import { isShortRun } from './runRate';
+import { metricsOf, unitsText } from './deskStats';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -173,16 +172,11 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
 }
 
 /**
- * The bot's pace: Generated so far carried to a day and a week (Generated ÷ age × the days, per coin, in
- * units), straight from the server's metrics (generatedRate). Same rule as every estimate: nothing until the bot is a day old, then
- * Generated ÷ age × the days; until then a dash and "shows after a day". No client-side extrapolation.
- */
-/**
  * Figures the LP page already shows elsewhere, left out of the chart's stat table so no number appears twice:
- * Generated (headline), its rates and Est. 24h/7d and the age (Pace), fees paid / earned (Details breakdown), the
- * range, its width and the range moves (the position card).
+ * Generated (headline), its rates and Est. 24h/7d/365d and the age (Pace), fees paid / earned (Details breakdown),
+ * the range, its width and the range moves (the position card).
  */
-const LP_SHOWN_ELSEWHERE = ['Generated', 'Age', 'Est. 24h', 'Est. 7d', 'Fees paid', 'Fees earned', 'Range', 'Spacing', 'Moves', 'Last move'] as const;
+const LP_SHOWN_ELSEWHERE = ['Generated', 'Age', 'Est. 24h', 'Est. 7d', 'Est. 365d', 'Fees paid', 'Fees earned', 'Range', 'Spacing', 'Moves', 'Last move'] as const;
 
 /**
  * Details' breakdown of the headline: per coin, fees earned − gas + swap fees − range moves = Generated, from the
@@ -207,13 +201,19 @@ function lpBreakdown(b: AnyObj): DetailRow[] {
   ];
 }
 
+/**
+ * The bot's pace: Est. a day, 7 days and 365 days (Generated ÷ age × the days, per coin, in units), straight from the
+ * server's metrics (generatedRate); hidden under a day. A window botMetrics hasn't filled yet reads "—" with its
+ * "needs … of history". No client-side extrapolation.
+ */
 function GeneratedPace({ b }: { b: AnyObj }) {
   const m = metricsOf(b);
   if (!m || !m.generated) return null;
-  const all = [['A day', m.generatedRate.d1, m.generatedRate.needs.d1], ['A week', m.generatedRate.d7, m.generatedRate.needs.d7]] as const; // a day and a week; no month (Kyle: day, 7d and 365d only; d30 stays in the API)
-  // under a day: no pace scaled up from a few hours (runRate.ts, #72)
-  const short = isShortRun(m.ageSec != null ? m.ageSec * 1000 : null);
-  const rows = short ? all.map(([label]) => [label, null, EST_HINT] as const) : all;
+  // Kyle (#73): only the Est. rows (no "So far": Generated is the headline), and no card at all under a day. The figures
+  // are botMetrics' own generatedRate (Generated ÷ age × the days, per coin, null under a day: #86); nothing is
+  // worked out here, and botMetrics' null day estimate is what hides the card.
+  if (!m.generatedRate.d1) return null;
+  const rows = [['Est. a day', m.generatedRate.d1, m.generatedRate.needs.d1], ['Est. 7 days', m.generatedRate.d7, m.generatedRate.needs.d7], ['Est. 365 days', m.generatedRate.d365, m.generatedRate.needs.d365]] as const;
   return (
     <div className="card pace" data-testid="generated-pace">
       <div className="card-head">
@@ -323,10 +323,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="split">
-        <div className="card">
-          <h3>Value over time <span className="muted small">{q}, after gas, with fees sent out counted</span></h3>
-          <EquityChart series={[{ name: `value ${q}`, data: b.equity ?? [], color: T.text }]} />
-        </div>
+        <ValueOverTime q={q} note="after gas, with fees sent out counted" data={b.equity ?? []} />
         <div className="card"><h3>Log</h3><BotLog events={events} botId={b.id} /></div>
       </div>
     </main>

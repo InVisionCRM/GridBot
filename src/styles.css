@@ -1422,3 +1422,7 @@ label.wide input { min-width: 180px; }
   .rule-tog { grid-column: 2; flex-direction: row; justify-content: flex-end; }
   .rule-head { display: none; }
 }
+
+/* collapsed Details sections (value over time; #73 on botMetrics) */
+.net-details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.net-details[open] > summary { margin-bottom: 8px; }
