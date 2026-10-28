@@ -2,7 +2,8 @@
 import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
-import { Chart, EquityChart } from './Chart';
+import { Chart } from './Chart';
+import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { ago, cls, dur, num, pct, px, qty, time } from './fmt';
 import { ChainBadge, DexTag, chainOf, dexName } from './chains';
@@ -12,7 +13,6 @@ import { BotLog } from './GridDetail';
 import { showHalt } from './haltText';
 import { strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
-import { T } from './theme';
 import { quoteSym, type AnyObj, type Nav } from './model';
 import { formatTokens, generatedOf, investedOf } from './generatedView';
 import { isShortRun, runSpan } from './runRate';
@@ -103,7 +103,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
                 emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
           <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
           {/* the cards have Invested, Generated, the win rate and fees + gas */}
-          <StatTable b={{ ...t, kind: 'trend' }} s={s} omit={['invested', 'net', 'winRate', 'feesPaid', ...(isShortRun(runMs) ? ['age' as const] : [])]} />
+          <StatTable b={{ ...t, kind: 'trend' }} s={s} omit={['invested', 'net', 'winRate', 'feesPaid', 'value', ...(isShortRun(runMs) ? ['age' as const] : [])]} />
         </div>
         <div className="stack">
           <div className="card">
@@ -146,10 +146,8 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="card"><h3>Log</h3><BotLog events={events} botId={t.id} /></div>
       </div>
 
-      <div className="card">
-        <h3>Value over time <span className="muted small">{q}</span></h3>
-        <EquityChart series={[{ name: `value ${q}`, data: t.equityHist ?? [], color: T.text }]} />
-      </div>
+      {/* value over time moves with the price: collapsed, closed by default (Kyle, #73) */}
+      <ValueOverTime q={q} data={t.equityHist ?? []}><StatTable b={{ ...t, kind: 'trend' }} s={s} only={['value']} /></ValueOverTime>
     </main>
   );
 }

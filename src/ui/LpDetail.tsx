@@ -2,7 +2,8 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { botApi } from './api';
 import { StatusDot } from './motion';
-import { Chart, EquityChart } from './Chart';
+import { Chart } from './Chart';
+import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { ago, cls, num, pct, px, qty } from './fmt';
 import { LP_BAND } from '../market/lp';
@@ -10,7 +11,6 @@ import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
 import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
-import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { formatTokenSum, formatTokens, generatedOf, generatedPctNote, investedOf, shownGeneratedPct } from './generatedView';
@@ -195,7 +195,8 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   // Each figure once per screen: the cards above have Invested and Generated, Details the fees, costs and moves, the range
   // card the range and width.
   // the pace card has the estimates (24h, 7d, 365d): not again in the table
-  const omit: StatKey[] = ['invested', 'net', 'est', 'feesEarned', 'feesPaid', 'moves', 'range', 'spacing', 'lastMove'];
+  // Value now moves with the price: in the collapsed value-over-time section, not the open table (Kyle, #73)
+  const omit: StatKey[] = ['invested', 'net', 'est', 'feesEarned', 'feesPaid', 'moves', 'range', 'spacing', 'lastMove', 'value'];
   // the headline cards have the run length under a day ("over 8.8h")
   if (isShortRun(runMs)) omit.push('age');
   const close = () => {
@@ -279,10 +280,8 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="split">
-        <div className="card">
-          <h3>Value over time <span className="muted small">{q}, after gas, with fees sent out counted</span></h3>
-          <EquityChart series={[{ name: `value ${q}`, data: b.equity ?? [], color: T.text }]} />
-        </div>
+        {/* value over time moves with the price: collapsed, closed by default (Kyle, #73) */}
+        <ValueOverTime q={q} note="after gas, with fees sent out counted" data={b.equity ?? []}><StatTable b={b} s={s} only={['value']} /></ValueOverTime>
         <div className="card"><h3>Log</h3><BotLog events={events} botId={b.id} /></div>
       </div>
     </main>

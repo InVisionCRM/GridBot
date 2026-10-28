@@ -24,12 +24,24 @@ import { Home } from '../src/ui/Home';
 import { LpDetail } from '../src/ui/LpDetail';
 import { StatTable } from '../src/ui/StatTable';
 import { TrendDetail } from '../src/ui/TrendDetail';
+import { ValueOverTime } from '../src/ui/ValueOverTime';
 import { ShowUsdCtx } from '../src/ui/money';
 
 // A rendered page shows a counting number at its end value (the static render would show where the count starts).
 vi.mock('../src/ui/motion', async (orig) => {
   const m = await orig<typeof import('../src/ui/motion')>();
   return { ...m, AnimatedNumber: ({ value, format }: { value: number | null; format: (x: number) => string }) => h('span', null, value == null ? '—' : format(value)) };
+});
+
+// The value-over-time chart draws on a canvas: here it writes its series label, last value and drawdown pane as text, so a
+// test can tell whether it rendered at all (Kyle, #73: a price-driven value only inside a collapsed Details).
+vi.mock('../src/ui/Chart', async (orig) => {
+  const m = await orig<typeof import('../src/ui/Chart')>();
+  return {
+    ...m,
+    EquityChart: ({ series, drawdown = true }: { series: { name: string; data: [number, number][] }[]; drawdown?: boolean }) =>
+      h('div', { className: 'eq-chart' }, series.map((x) => `${x.name} ${x.data[x.data.length - 1]?.[1] ?? ''}`).join(' '), drawdown ? ' drawdown' : ''),
+  };
 });
 
 const NOW = Date.UTC(2026, 9, 27, 23, 45);
@@ -532,5 +544,36 @@ describe("Holdings: coin amounts per chain, no '$', no cross-coin total, each fi
     const paper = { ...holdingsSnap, hasSigner: false, address: null, wallet: [], positions: [], fees: [], bots: [], chains: [] };
     expect(hits(holdingsPage(paper))).toEqual([]);
     expect(visibleText(holdingsPage(paper), 'desktop')).toMatch(/Paper mode/);
+  });
+});
+
+describe('Value over time (value line + drawdown) is collapsed and closed by default (Kyle, #73)', () => {
+  const closedSection = /<details class="card net-details value-details"><summary>Details: value over time/;
+  const pages: [string, () => string][] = [
+    ['LP page lp-stonkd', () => lpPage('lp-stonkd', false)], ['LP page lp-nvda', () => lpPage('lp-nvda', false)],
+    ['Grid page', () => gridPage(false)], ['Trend page', () => trendPage(false)],
+  ];
+  for (const [name, page] of pages) {
+    it(`${name}: the section is there, closed, and neither the chart, its value label nor the drawdown is rendered`, () => {
+      const html = page();
+      expect(html).toMatch(closedSection);
+      expect(html).not.toMatch(/class="eq-chart"|empty-eq/);
+      expect(html).not.toMatch(/value USDG|drawdown|Value now/);
+      // and no value figure from the chart's data on the page (e.g. the NVDA LP's last value, 5,415.1 USDG)
+      for (const view of ['desktop', 'phone'] as View[]) expect(visibleText(html, view)).not.toMatch(/5,415\.1|33,121\.6|2,000\.0748|1,057\.3/);
+    });
+  }
+  it('opened, it renders the chart with its value label and drawdown, from the same data', () => {
+    const html = renderToStaticMarkup(h(ValueOverTime, { q: 'USDG', note: 'after gas', data: nvdaLp.equityHist as [number, number][], initialOpen: true }));
+    expect(html).toMatch(/<details class="card net-details value-details" open="">/);
+    expect(html).toMatch(/<div class="eq-chart">value USDG 5415\.1 drawdown<\/div>/);
+    // the pages pass their Value now row in: shown only when opened
+    const withNow = (open: boolean) => renderToStaticMarkup(h(ValueOverTime, { q: 'USDG', data: [], initialOpen: open }, h(StatTable, { b: nvdaLp, s, only: ['value'] })));
+    expect(withNow(true)).toMatch(/<th>Value now<\/th><td class="mono">5,415\.1 USDG<\/td>/);
+    expect(withNow(false)).not.toMatch(/Value now|5,415/);
+    // closed (the default), the same component renders only its summary
+    const shut = renderToStaticMarkup(h(ValueOverTime, { q: 'USDG', data: nvdaLp.equityHist as [number, number][] }));
+    expect(shut).not.toMatch(/eq-chart|value USDG|drawdown/);
+    expect(shut).toMatch(/Details: value over time/);
   });
 });

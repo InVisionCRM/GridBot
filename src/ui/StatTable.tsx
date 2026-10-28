@@ -48,7 +48,8 @@ function poolText(pool: string | null) {
 
 interface Row { k: string; v: ReactNode; cls?: string }
 
-export function StatTable({ b, s, inRow = false, omit = [] }: { b: AnyObj; s: AnyObj; inRow?: boolean; omit?: StatKey[] }) {
+/** `only`: just those rows, no note (the detail pages show Value now inside the collapsed value-over-time section). */
+export function StatTable({ b, s, inRow = false, omit = [], only }: { b: AnyObj; s: AnyObj; inRow?: boolean; omit?: StatKey[]; only?: StatKey[] }) {
   const key = (b.stable || b.market || b.quote) as string | undefined;
   const market = key ? mk(s, key) : null;
   const chain = chainOf(s, b.chainId ?? s.legacyChainId)?.short ?? (typeof b.chainShort === 'string' ? b.chainShort : null);
@@ -114,12 +115,12 @@ export function StatTable({ b, s, inRow = false, omit = [] }: { b: AnyObj; s: An
   return (
     <div className="stat-table">
       {/* the note explains the Est. rows: none when they're left out (the LP page's pace card has them) */}
-      {!skip.has('est') && <p className="stat-note">{short
+      {!only && !skip.has('est') && <p className="stat-note">{short
         ? 'Estimates (24h, 7d, 365d) show once the bot has run a day. Until then: what it generated over the run.'
         : 'Estimates: what it generated so far, per token, carried over 24h, 7d and 365d at the same pace. Not a forecast.'}</p>}
       <table>
         <tbody>
-          {rows.filter((r) => !r.id || !skip.has(r.id)).map((r) => (
+          {rows.filter((r) => (only ? !!r.id && only.includes(r.id) : !r.id || !skip.has(r.id))).map((r) => (
             <tr key={r.k} className={r.cls}><th>{r.k}</th><td className="mono">{r.v}</td></tr>
           ))}
         </tbody>

@@ -4,12 +4,12 @@ import { formatPrice } from '../lib/format';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { RangeBar } from './charts';
-import { Chart, EquityChart } from './Chart';
+import { Chart } from './Chart';
+import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { ago, cls, num, pct, px, qty, time } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx, feeLabel, mk } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
-import { T } from './theme';
 import { errMsg, gridName, quoteSym, rangeState, spendFunds, type AnyObj, type Nav } from './model';
 import { AmountField, fundsProblem, isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { reserveCfg } from '../live/gasReserve';
@@ -247,7 +247,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         )}
         <p className="muted small"><Orientation m={{ base: g.base ?? 'PLS', quote: q, flipped: g.flipped, label: g.label }} compact /> · dashed lines are the grid levels · solid lines are the range · B and S mark fills · pool fee {feeLabel(mk(s, g.stable))} per swap</p>
         {/* the cards below have Invested, Generated and the range */}
-        <StatTable b={{ ...g, kind: 'grid' }} s={s} omit={['invested', 'net', 'range', ...(isShortRun(runMs) ? ['age' as const] : [])]} />
+        <StatTable b={{ ...g, kind: 'grid' }} s={s} omit={['invested', 'net', 'range', 'value', ...(isShortRun(runMs) ? ['age' as const] : [])]} />
       </div>
 
       {running && <div className="card live-strip"><LiveLevels g={g} price={livePrice(ticks, g.stable, g.price)} /></div>}
@@ -307,10 +307,8 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <Fills s={s} g={g} />
 
-      <div className="card">
-        <h3>Value over time <span className="muted small">{q}</span></h3>
-        <EquityChart series={[{ name: `value ${q}`, data: g.equityHist ?? [], color: T.text }]} />
-      </div>
+      {/* value over time moves with the price: collapsed, closed by default (Kyle, #73) */}
+      <ValueOverTime q={q} data={g.equityHist ?? []}><StatTable b={{ ...g, kind: 'grid' }} s={s} only={['value']} /></ValueOverTime>
     </main>
   );
 }
