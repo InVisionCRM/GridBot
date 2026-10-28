@@ -76,11 +76,12 @@ export function Donut({ slices }: { slices: { key: string; label: string; usd: n
             return el;
           })}
         </svg>
-        <span className="donut-total">{usd(total)}</span>
+        {/* the total is the net worth beside it, so the middle counts the slices instead (each figure once per screen) */}
+        <span className="donut-total">{slices.length === 1 ? '1 chain' : `${slices.length} chains`}</span>
       </div>
       <ul>
         {slices.map((s) => (
-          <li key={s.key}><i style={{ background: s.color }} />{s.label}<b>{usd(s.usd)}</b></li>
+          <li key={s.key}><i style={{ background: s.color }} />{s.label}<b>{slices.length === 1 ? 'all of it' : usd(s.usd)}</b></li>
         ))}
         {!slices.length && <li className="muted">No balances yet</li>}
       </ul>

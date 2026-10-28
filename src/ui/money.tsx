@@ -20,10 +20,16 @@ export function saveShowUsd(on: boolean) {
   try { localStorage.setItem('showUsd', on ? '1' : '0'); } catch { /* storage unavailable */ }
 }
 
-/** " ≈ $12.50" with the switch on and a dollar price for the coin (k = dollars per coin); nothing otherwise. */
+/** A coin worth about a dollar (within 2%, as the LP page's price pill already treats it): its dollars repeat its amount. */
+export const pegged = (k: number | null | undefined) => typeof k === 'number' && Math.abs(k - 1) <= 0.02;
+
+/**
+ * " ≈ $12.50" with the switch on and a dollar price for the coin (k = dollars per coin); nothing otherwise. Nothing for
+ * a coin worth about a dollar either: "−866 USDG ≈ −$866.00" says the same figure twice.
+ */
 export function Usd({ v, k, sign = true }: { v: number | null | undefined; k: number | null | undefined; sign?: boolean }) {
   const { on } = useShowUsd();
-  if (!on || k == null || v == null || !Number.isFinite(v)) return null;
+  if (!on || k == null || v == null || !Number.isFinite(v) || pegged(k)) return null;
   return <span className="usd"> ≈ {usd(v * k, sign)}</span>;
 }
 

@@ -243,7 +243,8 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           </div>
         )}
         <p className="muted small"><Orientation m={{ base: g.base ?? 'PLS', quote: q, flipped: g.flipped, label: g.label }} compact /> · dashed lines are the grid levels · solid lines are the range · B and S mark fills · pool fee {feeLabel(mk(s, g.stable))} per swap</p>
-        <StatTable b={g} s={s} />
+        {/* the cards below have Earned (realized), Not sold yet, Total and the range */}
+        <StatTable b={g} s={s} omit={['realized', 'unrealized', 'net', 'range']} />
       </div>
 
       {running && <div className="card live-strip"><LiveLevels g={g} price={livePrice(ticks, g.stable, g.price)} /></div>}

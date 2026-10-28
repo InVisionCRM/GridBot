@@ -3,7 +3,10 @@ import { useMemo, useState } from 'react';
 import { BotRow } from './botRow';
 import { chainOf } from './chains';
 import { bucketItems, emptyQuery, nextSort, type DeskQuery, type DeskSort, deskItems } from './deskTableModel';
-import { cls, usd } from './fmt';
+import { cls, qty, usd } from './fmt';
+import { pegged } from './money';
+import { quoteSym } from './model';
+import type { DeskBucket } from './deskTableModel';
 import type { AnyObj, Nav } from './model';
 
 const TYPES: [DeskQuery['type'], string][] = [['all', 'All'], ['grid', 'Grid'], ['trend', 'Trend'], ['lp', 'Liquidity'], ['trader', 'Token trader'], ['paper', 'Paper']];
@@ -17,16 +20,42 @@ function Chip({ on, children, onClick }: { on: boolean; children: string; onClic
   return <button type="button" className={`chip-btn${on ? ' on' : ''}`} aria-pressed={on} onClick={onClick}>{children}</button>;
 }
 
-export function DeskTable({ s, bots, nav, pause, close }: {
+/**
+ * A group's totals. One bot: nothing (its row has the figures; each figure once per screen). Several in one coin: the
+ * coin first, dollars small (left out for a coin worth about a dollar, where they'd repeat it). Mixed coins: dollars.
+ */
+export function GroupTotals({ g }: { g: DeskBucket }) {
+  if (g.rows.length < 2) return null;
+  const syms = new Set(g.rows.map((it) => String(quoteSym(it.b) ?? '')));
+  const ks = g.rows.map((it) => it.b.usdPerQuote);
+  const sym = syms.size === 1 ? [...syms][0] : '';
+  const k = sym && ks.every((x) => typeof x === 'number' && x > 0) ? ks[0] as number : null;
+  const one = k != null && ks.every((x) => Math.abs((x as number) - k) < 1e-9 * k);
+  if (!sym || !one) {
+    return <>
+      <span className="mono">{g.value == null ? '—' : usd(g.value)}</span>
+      <span className={cls(g.pnl)}>{g.pnl == null ? '—' : usd(g.pnl, true)}</span>
+    </>;
+  }
+  const small = !pegged(k);
+  return <>
+    <span className="mono">{g.value == null ? '—' : qty(g.value / k, sym, 5, false)}{small && g.value != null && <small className="muted"> {usd(g.value)}</small>}</span>
+    <span className={cls(g.pnl)}>{g.pnl == null ? '—' : qty(g.pnl / k, sym, 4)}{small && g.pnl != null && <small> {usd(g.pnl, true)}</small>}</span>
+  </>;
+}
+
+export function DeskTable({ s, bots, nav, pause, close, initialOpen = null }: {
   s: AnyObj;
   bots: AnyObj[];
   nav: Nav;
   pause: (b: AnyObj) => void;
   close: (b: AnyObj) => void;
+  /** A bot whose row starts open (the duplicate-figure test renders it this way). */
+  initialOpen?: string | null;
 }) {
   const [q, setQ] = useState<DeskQuery>(emptyQuery());
   const [closed, setClosed] = useState<Set<string>>(new Set());
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(initialOpen);
   const items = useMemo(() => deskItems(bots, (b) => chainOf(s, b.chainId ?? s.legacyChainId)?.short ?? b.chainShort ?? '', Date.now()), [bots, s]);
   const buckets = useMemo(() => bucketItems(items, q), [items, q]);
   const chains = useMemo(() => {
@@ -93,8 +122,7 @@ export function DeskTable({ s, bots, nav, pause, close }: {
               <b>{g.name}</b>
               <span className="muted">{g.rows.length}</span>
               <span className="grow" />
-              <span className="mono">{g.value == null ? '—' : usd(g.value)}</span>
-              <span className={cls(g.pnl)}>{g.pnl == null ? '—' : usd(g.pnl, true)}</span>
+              <GroupTotals g={g} />
             </button>
             {!shut && g.rows.map((it) => (
               <BotRow key={it.b.id} s={s} b={it.b} nav={nav} pause={pause} close={close} columns metrics expandable open={open === it.b.id} onToggle={() => setOpen((id) => id === it.b.id ? null : it.b.id)} />

@@ -4,7 +4,7 @@ import { botApi } from './api';
 import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
 import { botFacts } from './deskStats';
-import { isShortRun, runSpan } from './runRate';
+import { isShortRun } from './runRate';
 import { cls, dur, pct, px, qty, usd } from './fmt';
 import { ChainMark, TokenMark } from './icons';
 import { useShowUsd } from './money';
@@ -185,7 +185,11 @@ function RowMenu({ b, nav, pause, close }: { b: AnyObj; nav: Nav; pause: (b: Any
   );
 }
 
-function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
+/**
+ * What opens under a row. `compact`: the Bots list, where the stat table below already has the range, the fees and the
+ * row's columns have the rest, so those aren't repeated here (each figure once per screen).
+ */
+function Expanded({ b, nav, compact = false }: { b: AnyObj; nav: Nav; compact?: boolean }) {
   if (isTrader(b)) return null;
   const sym = String(quoteSym(b) ?? '');
   const fees = feeQuote(b);
@@ -193,8 +197,8 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
     const pos = b.position;
     return (
       <div className="bot-more">
-        <p>{b.inRange === false ? 'Out of range' : b.inRange ? 'In range' : 'No position'}{pos ? ` · ${px(pos.lower)} – ${px(pos.upper)}` : ''}</p>
-        <p>Fees {qty(fees, sym, 4, false)}</p>
+        <p>{b.inRange === false ? 'Out of range' : b.inRange ? 'In range' : 'No position'}{pos && !compact ? ` · ${px(pos.lower)} – ${px(pos.upper)}` : ''}</p>
+        {!compact && <p>Fees {qty(fees, sym, 4, false)}</p>}
         <button type="button" className="text-link" onClick={() => nav(botView(b.kind, b.id))}>Open</button>
       </div>
     );
@@ -202,8 +206,8 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
   if (b.kind === 'trend') {
     return (
       <div className="bot-more">
-        <p>{b.tf} · {b.cfg?.strategy ?? 'trend'} · {b.position ? 'in a trade' : 'flat'}</p>
-        <p>Fees {qty(fees, sym, 4, false)}</p>
+        <p>{b.tf} candles · {b.cfg?.strategy ?? 'trend'} · {b.position ? 'in a trade' : 'flat'}</p>
+        {!compact && <p>Fees {qty(fees, sym, 4, false)}</p>}
         <button type="button" className="text-link" onClick={() => nav(botView(b.kind, b.id))}>Open</button>
       </div>
     );
@@ -212,8 +216,8 @@ function Expanded({ b, nav }: { b: AnyObj; nav: Nav }) {
   const levels = (b.intervals ?? []) as AnyObj[];
   return (
     <div className="bot-more">
-      <p>Range {b.config ? `${px(b.config.lowerPrice)} – ${px(b.config.upperPrice)}` : '—'}{rs ? ` · ${rs}` : ''} · {b.config?.gridCount ?? levels.length} levels</p>
-      <p>Fees {qty(fees, sym, 4, false)} · {b.stats?.roundTrips ?? 0} round trips</p>
+      <p>{compact ? '' : `Range ${b.config ? `${px(b.config.lowerPrice)} – ${px(b.config.upperPrice)}` : '—'} · `}{rs ? `${rs} · ` : ''}{b.config?.gridCount ?? levels.length} levels</p>
+      <p>{compact ? '' : `Fees ${qty(fees, sym, 4, false)} · `}{b.stats?.roundTrips ?? 0} round trips</p>
       {levels.slice(0, 6).map((iv) => (
         <p key={iv.index} className="lvl">{px(iv.buyPrice)} → {px(iv.sellPrice)} · {iv.status === 'holding' ? 'filled' : iv.status === 'waitingBuy' ? 'waiting' : iv.status}</p>
       ))}
@@ -284,9 +288,9 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           {metrics && facts && <>
             <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
-            <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'Ran under a day: the net for the run, not a yearly rate' : undefined}>{isShortRun(facts.ageMs)
-              // under a day: the run's net % with its length (two lines: the column is narrow), not a yearly rate
-              ? facts.pnlPct == null ? '—' : <>{pct(facts.pnlPct, 1, true)}<small className="desk-run">{runSpan(facts.ageMs)}</small></>
+            <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'APR shows once the bot has run a day. Until then P&L % is the net for the run, and Age its length.' : undefined}>{isShortRun(facts.ageMs)
+              // under a day: no yearly rate; P&L % and Age beside it already say net-over-run (each figure once)
+              ? '—'
               : facts.est.d365?.pct == null ? '—' : pct(facts.est.d365.pct, 1, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
             <span className="desk-fees">{facts.feesEarnedUsd == null ? '—' : usd(facts.feesEarnedUsd)}</span>
@@ -294,7 +298,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
         </div>
         {bad && <p className="line-note">{b.lastError}</p>}
-        {open && <div className="desk-expand"><Expanded b={b} nav={nav} /><StatTable b={b} s={s} /></div>}
+        {open && <div className="desk-expand"><Expanded b={b} nav={nav} compact /><StatTable b={b} s={s} inRow={!!metrics} rowPnlUsd={pnl.usd} /></div>}
       </div>
     );
   }

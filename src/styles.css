@@ -1268,7 +1268,6 @@ label.wide input { min-width: 180px; }
 .desk-group .mono, .desk-group .pos, .desk-group .neg { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .desk-chev { color: var(--muted); width: 12px; }
 .desk-pct, .desk-age, .desk-apr, .desk-moves, .desk-fees { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
-.desk-apr .desk-run { display: block; font-size: 10px; color: var(--muted); white-space: nowrap; }
 .desk-expand { padding: 4px 0 12px; }
 .stat-table { margin-top: 8px; }
 .stat-note { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
@@ -1276,6 +1275,12 @@ label.wide input { min-width: 180px; }
 .stat-table th, .stat-table td { text-align: left; padding: 7px 0; border-bottom: 1px solid var(--line); font-weight: 400; font-size: 13px; }
 .stat-table th { color: var(--muted); width: 42%; }
 .stat-table td { text-align: right; color: var(--text); }
+/* Under a Bots-list row: figures the row's columns already show (hidden there on a phone, so shown here instead). */
+.desk-expand .stat-table .in-row { display: none; }
+@media (max-width: 860px) {
+  .desk-expand .stat-table tr.in-row { display: table-row; }
+  .desk-expand .stat-table span.in-row { display: inline; }
+}
 @media (max-width: 860px) {
   .desk-tools { flex-wrap: wrap; overflow: visible; }
   .desk-search, .desk-chips, .desk-sort-select { flex: 1 1 100%; min-width: 0; max-width: 100%; }

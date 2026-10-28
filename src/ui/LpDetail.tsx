@@ -13,9 +13,10 @@ import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewB
 import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
-import { Usd } from './money';
+import { pegged, Usd } from './money';
 import { showHalt } from './haltText';
-import { isShortRun, rateOrRun, runLength } from './runRate';
+import { isShortRun, runSpan } from './runRate';
+import { sameFigure, type StatKey } from './StatTable';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -62,7 +63,8 @@ function RangeControls({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: b
       <button type="button" className="btn primary" disabled={busy || !!why} title={why} onClick={move}>
         {same ? 'Move to the price now' : ok ? `Change to ±${+(band * 100).toFixed(2)}%` : 'Change range'}
       </button>
-      <p className="muted small">Moved {b.reranges} time{b.reranges === 1 ? '' : 's'}{b.lastRerangeAt ? `, last ${ago(b.lastRerangeAt)}` : ''}.</p>
+      {/* the count is on the Lost to range moves card (each figure once) */}
+      <p className="muted small">{b.lastRerangeAt ? `Last moved ${ago(b.lastRerangeAt)}.` : 'Not moved yet.'}</p>
     </div>
   );
 }
@@ -107,9 +109,23 @@ function usdPrices(b: AnyObj, k: number | null): { base: number | null; quote: n
  * What the open position earns at its own pace: its fees since it opened (collected + waiting), per hour, carried to a
  * day, a week and a month. Only this position's history; the time it spent out of range is in the pace.
  */
+/** Two moments that are the same event (within 2 minutes): the position opening and the run starting or the last move. */
+const sameTime = (a: number | null | undefined, c: number | null | undefined) => typeof a === 'number' && typeof c === 'number' && Math.abs(a - c) < 120_000;
+/**
+ * When the open position opened, said without repeating a time already on the page: at the run's start (its age is the
+ * run's, on the Earned after costs card or in the table) or at the last range move ("Last moved 19h ago").
+ */
+function openedWhen(b: AnyObj, at: number, words: [start: string, move: string], opened: (ms: number) => string): string {
+  if (sameTime(at, b.startedAt)) return words[0];
+  if (sameTime(at, b.lastRerangeAt)) return words[1];
+  return opened(at);
+}
+
 function PositionPace({ b, k }: { b: AnyObj; k: number | null }) {
   const pf = b.positionFees, base = b.base, q = b.quote;
   if (!b.position || !pf) return null;
+  // its fees so far are all the bot's fees (the Fees earned card): say so rather than repeat the coins
+  const allFees = b.pnl?.feeCoins && sameFigure(pf.coins.base, b.pnl.feeCoins.base) && sameFigure(pf.coins.quote, b.pnl.feeCoins.quote);
   const ms = Date.now() - pf.since, hours = ms / 3_600_000;
   const valQuote = pf.coins.base * (b.price ?? 0) + pf.coins.quote;
   const per = (h: number) => ({ base: (pf.coins.base / hours) * h, quote: (pf.coins.quote / hours) * h, value: (valQuote / hours) * h });
@@ -119,11 +135,13 @@ function PositionPace({ b, k }: { b: AnyObj; k: number | null }) {
     <div className="card pace">
       <div className="card-head">
         <h3><L tip={`Fees this position has earned since it opened (collected plus waiting), carried forward at the same pace. It counts only this position: a range move starts a new one. Time the price spent outside the range is in the pace, so a pace from a calm stretch can run high. Valued at today's ${base} price.`}>This position's pace</L></h3>
-        <span className="muted small">open {dur(ms)}</span>
+        <span className="muted small">open {openedWhen(b, pf.since, ['since the start', 'since the last move'], () => dur(ms))}</span>
       </div>
-      <p className="small">So far: <b>{px(pf.coins.base, 4)} {base}</b> + <b>{px(pf.coins.quote, 4)} {q}</b> ≈ <b className="pos">{$(valQuote)}</b></p>
+      {allFees
+        ? <p className="small">So far: the fees earned above (this is the bot's first position).</p>
+        : <p className="small">So far: <b>{px(pf.coins.base, 4)} {base}</b> + <b>{px(pf.coins.quote, 4)} {q}</b> ≈ <b className="pos">{$(valQuote)}</b></p>}
       {isShortRun(ms)
-        ? <p className="small muted">Open {runLength(Math.max(0, ms))} so far: the pace (a day, a week, a month) shows once the position has been open a day.</p>
+        ? <p className="small muted">The pace (a day, a week, a month) shows once the position has been open a day.</p>
         : <div className="pace-rows">{rows.map(([label, h]) => {
           const x = per(h);
           return (
@@ -153,6 +171,14 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const closing = !!b.closing || step?.action === 'close';
   // a daily rate only once it has run a full day; under a day, the net over the run (runRate.ts)
   const runMs = b.startedAt ? Date.now() - b.startedAt : null;
+  // Each figure once per screen: the cards above have the net (= Realized), fees, costs and moves, the range card the
+  // range and width. The table's Net (net + the coins' price move) shows only when it differs from the card's net.
+  const omit: StatKey[] = ['realized', 'feesEarned', 'feesPaid', 'moves', 'range', 'spacing', 'lastMove'];
+  if (pnl && k != null && sameFigure((pnl.net + (pnl.price ?? 0)) * k, pnl.net * k)) omit.push('net');
+  // the Earned after costs card has the % of what was put in and, under a day, "over 8.8h"
+  omit.push('netPct', 'netSpan');
+  if (isShortRun(runMs)) omit.push('age');
+  const pinned = pegged(k); // the price pill shows the base in dollars; for a dollar coin that is the pool price
   const close = () => {
     if (b.mode === 'live' && !confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
     act(() => botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close'));
@@ -208,7 +234,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={`Fees earned minus costs and what range moves lost, in ${q}. The coins' own price move isn't in it: that happens whether or not the bot runs.`}>Earned after costs</L></span>
           <div className={`kpi-v ${cls(pnl?.net)}`}>{pnl ? <AnimatedNumber value={pnl.net} format={(x) => qty(x, q, 5)} /> : '—'}</div>
-          <span className="sub">{pnl && b.startValue ? <>{pct(pnl.net / b.startValue, 2, true)} of what you put in · {rateOrRun(pnl.net, runMs, (x) => qty(x, q, 3), (d) => `${qty(d, q, 3)} a day`)}<Usd v={pnl.net} k={k} /></> : ''}</span>
+          <span className="sub">{pnl && b.startValue ? <>{pct(pnl.net / b.startValue, 2, true)} of what you put in{isShortRun(runMs) ? ` ${runSpan(runMs)}` : ` · ${qty(pnl.net / (runMs! / 86_400_000), q, 3)} a day`}<Usd v={pnl.net} k={k} /></> : ''}</span>
         </div>
         <div className="kpi">
           <span><L tip="The coins in the position right now (they change as the price moves inside the range), and its share of the liquidity trading at today's price, which is its share of every trade's fee. Out of range the share is 0.">Liquidity provided</L></span>
@@ -223,18 +249,17 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="card">
           <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact desk height={480} />
           <p className="muted small">The amber lines are the position's range. It earns fees while the price is between them.</p>
-          <StatTable b={b} s={s} />
+          <StatTable b={b} s={s} omit={omit} />
         </div>
         <div className="stack">
           <div className="card">
             <h3>{pos ? (b.inRange ? 'In range, earning' : 'Out of range') : closed ? 'Closed' : 'No position open'}</h3>
             {pos ? <>
-              <p className="small">{px(pos.lower)} – {px(pos.upper)} {q}/{base} · price {px(b.price)}</p>
+              <p className="small">{px(pos.lower)} – {px(pos.upper)} {q}/{base}{pinned && prices.base != null ? '' : ` · price ${px(b.price)}`}</p>
               <RangeGauge lower={pos.lower} upper={pos.upper} price={b.price} />
               {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
-              <p className="small">In the position: <b>{num(b.coins?.base, 6)} {base}</b> + <b>{num(b.coins?.quote, 6)} {q}</b></p>
-              <p className="small">Fees waiting: {num(b.owed?.base, 8)} {base} + {num(b.owed?.quote, 8)} {q}</p>
-              <p className="muted small">Opened {ago(pos.openedAt)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>
+              {/* the coins in it and the fees waiting are on the Liquidity provided and Fees earned cards */}
+              <p className="muted small">Opened {openedWhen(b, pos.openedAt, ['at the start', 'at the last move'], (t) => ago(t))} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>
             </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
             {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
           </div>

@@ -133,7 +133,8 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
       <section className="join" aria-label="Summary">
         <div>
           <span>{pnlLabel}</span>
-          <b className={cls(pnl30)}>{pnl30 == null ? '—' : <AnimatedNumber value={pnl30} format={(x) => usd(x, true)} />}</b>
+          {/* one bot and no 30-day window: its row below has this same P&L (each figure once per screen) */}
+          <b className={cls(pnl30)}>{pnl30 == null ? '—' : bots.length === 1 && pnlLabel === 'P&L' ? <span className="muted">in its row</span> : <AnimatedNumber value={pnl30} format={(x) => usd(x, true)} />}</b>
           <Sparkline points={span >= 20 * 86_400_000 ? month : series} width={120} height={32} />
         </div>
         <div>
