@@ -149,7 +149,10 @@ const fresh = (): TraderState => ({ version: 1, on: false, options: structuredCl
 
 export class TokenTrader {
   private state: TraderState;
-  private busy = false;
+  /** Held only while exits run, so a buy-path LP check cannot block the next stop. */
+  private exitBusy = false;
+  /** In-flight buy path (snipes and the entry scan). The next tick still runs exits. */
+  private entryTask: Promise<void> | null = null;
   lastError: string | null = null;
 
   constructor(private readonly d: {
@@ -304,18 +307,37 @@ export class TokenTrader {
   }
 
   async tick() {
-    if (this.busy || !this.state.on) return;
-    this.busy = true;
+    if (!this.state.on || this.exitBusy) return;
+    this.exitBusy = true;
+    let exitsOk = true;
+    try {
+      await this.exits();
+      this.lastError = null;
+    } catch (e) {
+      this.lastError = (e as Error).message;
+      exitsOk = false;
+    } finally {
+      this.save();
+      this.exitBusy = false;
+    }
+    // Buys, including LP checks, never share this lock. A tick that arrives while they run still exits.
+    if (!exitsOk || this.entryTask) return;
+    let task!: Promise<void>;
+    task = this.runEntries().finally(() => { if (this.entryTask === task) this.entryTask = null; });
+    this.entryTask = task;
+    await task;
+  }
+
+  /** Snipes and the entry scan. LP reads happen in here, on the buy path only. */
+  private async runEntries() {
     try {
       await this.takeSnipes();
-      await this.exits();
       await this.scanEntries();
       this.lastError = null;
     } catch (e) {
       this.lastError = (e as Error).message;
     } finally {
       this.save();
-      this.busy = false;
     }
   }
 
@@ -432,7 +454,21 @@ export class TokenTrader {
     const pools = await this.d.discover();
     const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: 0 });
     for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
-    for (const p of keep) await this.consider(p, 'scan');
+    const eligible: FreshPool[] = [];
+    for (const p of keep) {
+      const label = `${p.tokenSymbol}/${p.spendSymbol}`;
+      if (!this.wantChain(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'chain is off' }); continue; }
+      if (p.kind === 'v4') { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: "this app doesn't swap V4" }); continue; }
+      if (this.entriesStopped(p.chainId)) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); continue; }
+      eligible.push(p);
+    }
+    // Safety reads, including LP checks, overlap. Each check has its own timeout, so one pool cannot stall the rest.
+    const checked = await Promise.all(eligible.map(async (p) => ({ p, a: await this.assess(p) })));
+    for (const { p, a } of checked) {
+      const label = `${p.tokenSymbol}/${p.spendSymbol}`;
+      if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); continue; }
+      await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate);
+    }
   }
 
   private hourRoom() {

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { Interface } from 'ethers';
-import { applyLpUnlock, clearLpUnlockCache, lpUnlockFromV3, readV2LpUnlock, type LpUnlockRpc } from '../src/market/lpUnlock';
+import { applyLpUnlock, cachedTokenLp, clearLpUnlockCache, clearTokenLpCache, lpUnlockFromV3, readV2LpUnlock, unverifiedLpUnlock, type LpUnlockRpc } from '../src/market/lpUnlock';
 import { encodeV3Mint } from '../src/market/poolEvents';
-import { gateToken, type GateInput } from '../src/market/tokenTrader';
+import { gateToken, type FreshPool, type GateInput } from '../src/market/tokenTrader';
 import {
   BURN_ADDRESSES, clearV3LpLockCache, encodeIncreaseLiquidity, inspectV3LpLock, MULTICALL3, unverifiedV3Lp,
   V3_LP_IFACE, type V3LockLog, type V3LockRpc,
@@ -143,26 +143,26 @@ async function v3Evidence(o: { liquidity: bigint; owner: string; fail?: boolean 
   return { report, evidence: lpUnlockFromV3(report) };
 }
 
-beforeEach(() => { clearLpUnlockCache(); clearV3LpLockCache(); });
+beforeEach(() => { clearLpUnlockCache(); clearTokenLpCache(); clearV3LpLockCache(); });
 
 describe('live lpUnlocked', () => {
-  it('maps a V2 pair the owner can pull to lpUnlocked true and blocks a live buy', async () => {
+  it('does not trust the token contract when the pair is not burned', async () => {
     const { evidence, calls } = await readV2({ total: 1000n, burned: 100n, owner: OWNER, ownerBalance: 600n, multicall: true });
-    expect(evidence).toMatchObject({ kind: 'v2', status: 'verified', lpUnlocked: true });
+    expect(evidence).toMatchObject({ kind: 'v2', status: 'unverified', lpUnlocked: null });
+    expect(calls.every((c) => c.to.toLowerCase() !== TOKEN)).toBe(true);
     const agg = V3_LP_IFACE.multicall.getFunction('aggregate3')!.selector.toLowerCase();
     expect(calls.some((c) => selector(c.data) === agg)).toBe(true);
-    expect(calls.some((c) => selector(c.data) === ERC.getFunction('totalSupply')!.selector.toLowerCase())).toBe(false);
-    const gate = applyLpUnlock(clean({ mode: 'live', risk: 'medium' }), true, evidence);
-    const result = gateToken(gate);
+    const result = gateToken(applyLpUnlock(clean({ mode: 'live', risk: 'safe' }), true, evidence));
     expect(result.ok).toBe(false);
     expect(result.liveOk).toBe(false);
-    expect(result.reason).toBe('liquidity is unlocked');
-    expect(gateToken(applyLpUnlock(clean({ mode: 'live', risk: 'safe' }), true, evidence)).reason).toBe('liquidity is unlocked');
+    expect(result.reason).toBe('liquidity lock unverified');
+    expect(gateToken(applyLpUnlock(clean({ mode: 'live', risk: 'medium' }), true, evidence)).reason).toBe('liquidity lock unverified');
   });
 
   it('maps a V2 pair that is at least 90% burned to lpUnlocked false', async () => {
-    const { evidence } = await readV2({ total: 1000n, burned: 950n, owner: OWNER, ownerBalance: 10n, multicall: false });
+    const { evidence, calls } = await readV2({ total: 1000n, burned: 950n, owner: OWNER, ownerBalance: 10n, multicall: false });
     expect(evidence).toMatchObject({ kind: 'v2', status: 'verified', lpUnlocked: false });
+    expect(calls.every((c) => c.to.toLowerCase() !== TOKEN)).toBe(true);
     const result = gateToken(applyLpUnlock(clean({ mode: 'live' }), true, evidence));
     expect(result.reason).toBeNull();
     expect(result.ok).toBe(true);
@@ -256,5 +256,57 @@ describe('live lpUnlocked', () => {
     const store = new MemoryStore<TraderState>();
     store.data = { version: 1, on: false, options, positions: [], trades: [], feed: [], cursors: {}, snipesAt: [] };
     expect(new TokenTrader({ store }).status().options.lpUnlockCheck).toBe(false);
+  });
+
+  it('a slow LP check does not delay the hard stop', async () => {
+    const now = 1_700_000_000_000;
+    const bought: FreshPool = {
+      chainId: 4663, pool: '0x' + 'ab'.repeat(20), dex: 'uni-v3', kind: 'v3',
+      token: TOKEN, spend: '0x' + '22'.repeat(20), tokenSymbol: 'NEW', spendSymbol: 'WETH',
+      liquidityUsd: 80_000, volumeUsd: 10_000, createdAt: now - 48 * 3600_000, source: 'new',
+      quoteReserve: 40, tokenReserve: 1_000_000, feeBps: 30, price: 0.00004, usdPerSpend: 2_000,
+    };
+    let hang = false;
+    let release = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const t = new TokenTrader({
+      store: new MemoryStore(),
+      now: () => now,
+      discover: async () => [bought],
+      assess: async () => { if (hang) await gate; return clean({ liquidityUsd: 80_000, minLiquidityUsd: 0 }); },
+    });
+    t.configure({ perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 24 * 3600, risk: 'safe', lpUnlockCheck: true });
+    t.turnOn();
+    await t.tick();
+    expect(t.status().positions).toHaveLength(1);
+    hang = true;
+    const slowBuy = t.tick();
+    await new Promise((r) => setImmediate(r));
+    const open = t.status().positions[0];
+    t.mark(open.id, { price: open.entryPrice * 0.7 });
+    const started = Date.now();
+    await t.tick();
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(t.status().positions).toHaveLength(0);
+    expect(t.status().trades[0].why).toMatch(/hard stop/);
+    release();
+    await slowBuy;
+  });
+
+  it('times out a slow per-token read and then uses the cached result', async () => {
+    let calls = 0;
+    const key = '4663:0x' + 'ab'.repeat(20);
+    const first = await cachedTokenLp(key, () => new Promise((resolve) => {
+      calls += 1;
+      setTimeout(() => resolve({ lp: { kind: 'v2', status: 'verified', lpUnlocked: false, detail: 'burned' } }), 40);
+    }), { timeoutMs: 10, clock: () => 0, fallback: () => ({ lp: unverifiedLpUnlock('v2', 'lp check timed out') }) });
+    expect(first.lp?.status).toBe('unverified');
+    expect(first.lp?.detail).toMatch(/timed out/);
+    await new Promise((r) => setTimeout(r, 50));
+    const second = await cachedTokenLp(key, () => { calls += 1; return Promise.resolve({ lp: unverifiedLpUnlock('v2', 'should not run') }); }, {
+      timeoutMs: 10, clock: () => 0, fallback: () => ({ lp: unverifiedLpUnlock('v2', 'lp check timed out') }),
+    });
+    expect(calls).toBe(1);
+    expect(second.lp).toMatchObject({ status: 'verified', lpUnlocked: false });
   });
 });

@@ -7,8 +7,8 @@ import { JsonRpcProvider } from 'ethers';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
-import { applyLpUnlock, unverifiedLpUnlock } from '../../market/lpUnlock';
-import { unverifiedV3Lp, type V3LpReport } from '../../market/v3LpLock';
+import { applyLpUnlock, cachedTokenLp, LP_CHECK_TIMEOUT_MS, tokenLpKey, unverifiedLpUnlock, type TokenLpSnapshot } from '../../market/lpUnlock';
+import { unverifiedV3Lp } from '../../market/v3LpLock';
 import { readLiveLpUnlock } from './lpUnlockRead';
 import { readV3LpLock, type V3LockReader } from './v3LpLockRead';
 import { ROUTER } from '../dex/abis';
@@ -236,35 +236,44 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
     liveAllowed: s?.liveAllowed ?? false,
   };
   // Both flags off: do not attach v3Lp or lpUnlock, so gateToken sees the same input it always has.
+  // This read runs only from assess, which the trader calls on the buy path. Exits do not come through here.
   if (!lpUnlockCheck && (!v3LpLockCheck || pool.kind !== 'v3')) return gate;
+  const kind = pool.kind === 'v3' ? 'v3' : pool.kind === 'v2' ? 'v2' : 'other';
+  const snap = await cachedTokenLp(tokenLpKey(pool.chainId, pool.token), () => lpSnapshot(hub, pool, v3LpLockCheck, lpUnlockCheck), {
+    timeoutMs: LP_CHECK_TIMEOUT_MS,
+    fallback: () => ({
+      ...(v3LpLockCheck && pool.kind === 'v3' ? { v3: unverifiedV3Lp(pool.pool, '', 'lp check timed out') } : {}),
+      ...(lpUnlockCheck ? { lp: unverifiedLpUnlock(kind, 'lp check timed out') } : {}),
+    }),
+  });
+  if (v3LpLockCheck && snap.v3) gate.v3Lp = snap.v3;
+  if (lpUnlockCheck && snap.lp) applyLpUnlock(gate, true, snap.lp);
+  return gate;
+}
+
+async function lpSnapshot(hub: Hub, pool: FreshPool, v3LpLockCheck: boolean, lpUnlockCheck: boolean): Promise<TokenLpSnapshot> {
   const timing = () => {
     const rt = hub.rt(pool.chainId);
-    return {
-      rt,
-      nowSec: Math.floor(Date.now() / 1000),
-      blockTimeSec: rt.cfg.blockTimeSec,
-      logChunk: rt.cfg.logChunk,
-    };
+    return { rt, nowSec: Math.floor(Date.now() / 1000), blockTimeSec: rt.cfg.blockTimeSec, logChunk: rt.cfg.logChunk };
   };
-  let v3: V3LpReport | undefined;
+  const snap: TokenLpSnapshot = {};
   if (v3LpLockCheck && pool.kind === 'v3') {
     try {
       const t = timing();
-      v3 = await readV3LpLock(t.rt.reader as V3LockReader, pool, t.rt.cfg.dexes, t);
+      snap.v3 = await readV3LpLock(t.rt.reader as V3LockReader, pool, t.rt.cfg.dexes, t);
     } catch (e) {
-      v3 = unverifiedV3Lp(pool.pool, '', `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
+      snap.v3 = unverifiedV3Lp(pool.pool, '', `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
     }
-    gate.v3Lp = v3;
   }
-  if (!lpUnlockCheck) return gate;
+  if (!lpUnlockCheck) return snap;
   try {
     const t = timing();
-    applyLpUnlock(gate, true, await readLiveLpUnlock(t.rt.reader as V3LockReader, pool, t.rt.cfg.dexes, t, v3));
+    snap.lp = await readLiveLpUnlock(t.rt.reader as V3LockReader, pool, t.rt.cfg.dexes, t, snap.v3);
   } catch (e) {
     const kind = pool.kind === 'v3' ? 'v3' : pool.kind === 'v2' ? 'v2' : 'other';
-    applyLpUnlock(gate, true, unverifiedLpUnlock(kind, `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`));
+    snap.lp = unverifiedLpUnlock(kind, `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
   }
-  return gate;
+  return snap;
 }
 
 async function resolveHit(hub: Hub, hit: import('./sniper').SnipeHit): Promise<FreshPool | null> {
