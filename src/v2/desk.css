@@ -208,6 +208,7 @@
 }
 .v2 .hero-gen { font-size: 28px; display: block; }
 .v2 .hero-rate { margin: 2px 0 0; font-family: var(--mono); font-size: 16px; color: var(--secondary); }
+.v2 .bag-coin { white-space: nowrap; }
 .v2 .hero-rate span { margin-left: 4px; color: var(--label); font-family: var(--font); font-size: 13px; }
 .v2 .hero-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 2px; }
 .v2 .hero-stat { margin: 0; font-size: 13px; color: var(--label); }

@@ -40,6 +40,47 @@ export function formatUsd(x: number | null | undefined, sign = false): string {
   return usd(x, sign);
 }
 
+/** Round half away from zero to a fixed number of decimal places. */
+export function roundAmt(n: number, places: number): number {
+  const f = 10 ** places;
+  const x = Math.round((Math.abs(n) + Number.EPSILON) * f) / f;
+  return n < 0 ? -x : x;
+}
+
+/** Decimal places `formatAmt` starts from. Amounts of 1 or more start at 2. */
+export function naturalPlaces(n: number): number {
+  const a = Math.abs(n);
+  if (!(a > 0) || a >= 1) return 2;
+  return Math.min(6, Math.max(0, 3 - Math.floor(Math.log10(a))));
+}
+
+/**
+ * Places at which the rounded parts equal the rounded generated figure.
+ * Starts at the formatter's count for `generated` and stops at 8.
+ */
+export function sumPlaces(parts: number[], generated: number): number {
+  let places = naturalPlaces(generated);
+  for (; places <= 8; places++) {
+    const sum = parts.reduce((total, part) => total + roundAmt(part, places), 0);
+    if (roundAmt(sum, places) === roundAmt(generated, places)) return places;
+  }
+  return 8;
+}
+
+/** Signed amount at a fixed decimal count, with thousands commas. Large amounts stay compact. */
+export function formatPlaces(n: number, places: number): string {
+  const r = roundAmt(n, places);
+  if (r === 0) return '0';
+  const sign = r < 0 ? '−' : '+';
+  const a = Math.abs(r);
+  if (a >= 1e9) return `${sign}${(a / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `${sign}${(a / 1e6).toFixed(2)}M`;
+  if (a >= 1e4) return `${sign}${(a / 1e3).toFixed(a >= 1e5 ? 0 : 1)}k`;
+  const min = a >= 1 ? Math.min(2, places) : 0;
+  const body = a.toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: Math.max(min, places) });
+  return `${sign}${body}`;
+}
+
 function trimFraction(text: string): string {
   if (!text.includes('.')) return text;
   const trimmed = text.replace(/0+$/, '').replace(/\.$/, '');
@@ -83,9 +124,16 @@ export function formatQuotePx(amount: number | null | undefined, quote: string):
   return unit ? `${formatUnitPx(amount)} ${unit}` : formatUnitPx(amount);
 }
 
-/** `2,307.72 – 2,356.69 USDC per ETH`. */
+function rangeBound(n: number): string {
+  const a = Math.abs(n);
+  if (!(a > 0)) return '0.00';
+  if (a >= 1) return a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return formatUnitPx(n);
+}
+
+/** `2,307.72 – 2,356.69 USDC per ETH`. Bounds of 1 or more always show 2 decimals. */
 export function formatRangePx(lower: number, upper: number, quote: string, base: string): string {
-  return `${formatUnitPx(lower)} – ${formatUnitPx(upper)} ${quote} per ${base}`;
+  return `${rangeBound(lower)} – ${rangeBound(upper)} ${quote} per ${base}`;
 }
 
 function plainAmt(n: number): string {
@@ -99,11 +147,15 @@ export function formatBag(tokens: { symbol: string; amount: number }[] | null | 
   return tokens.map((t) => `${plainAmt(t.amount)} ${t.symbol}`).join(' + ');
 }
 
-/** One line of signed token amounts. Every caller uses formatAmt. */
-export function formatTokenLine(tokens: { symbol: string; amount: number }[] | null | undefined): string {
+/** One line of signed token amounts. A per-coin place count overrides the shared rule. */
+export function formatTokenLine(
+  tokens: { symbol: string; amount: number }[] | null | undefined,
+  places?: ReadonlyMap<string, number> | null,
+): string {
   if (!tokens?.length) return '—';
   return tokens.map((t, i) => {
-    const amt = formatAmt(t.amount);
+    const count = places?.get(t.symbol);
+    const amt = count == null ? formatAmt(t.amount) : formatPlaces(t.amount, count);
     if (i === 0) return `${amt} ${t.symbol}`;
     if (t.amount < 0) return `${amt} ${t.symbol}`;
     return `+ ${amt.replace(/^\+/, '')} ${t.symbol}`;

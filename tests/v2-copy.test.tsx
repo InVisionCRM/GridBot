@@ -1,8 +1,11 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ActivityTape } from '../src/v2/activity-tape';
 import { BotView } from '../src/v2/bot-view';
-import { figureAtoms, ledgerLines, normFigure, sheetRows } from '../src/v2/figures';
-import { formatAmt, formatTokenLine } from '../src/v2/format';
+import { adaptStatus } from '../src/v2/adapt-status';
+import { figureAtoms, ledgerLines, normFigure, placesForBot, sheetRows } from '../src/v2/figures';
+import { formatRangePx, formatTokenLine } from '../src/v2/format';
+import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
+import type { BotMetrics } from '../src/v2/metrics';
 import { HoldingsView } from '../src/v2/holdings-view';
 import { HomeView, Ticker } from '../src/v2/home-view';
 import { loadDesk } from '../src/v2/load-owner';
@@ -69,13 +72,8 @@ describe('v2 copy stays in token units', () => {
         const moveRaw = raw(bot.metrics.moveLoss, symbol);
         const madeRaw = raw(bot.metrics.generated, symbol);
         expect(grossRaw - Math.abs(paidRaw) - Math.abs(moveRaw), `${bot.pair} ${symbol} raw`).toBeCloseTo(madeRaw, 8);
-        const flat = (line: string) => line.replace(/\s+/g, '');
-        if (grossRaw) expect(flat(fee), bot.pair).toContain(flat(formatAmt(grossRaw)));
-        if (paidRaw) expect(flat(paid), bot.pair).toContain(flat(formatAmt(-Math.abs(paidRaw))));
-        if (moveRaw) expect(flat(move), bot.pair).toContain(flat(formatAmt(-Math.abs(moveRaw))));
-        if (madeRaw) expect(flat(generated), bot.pair).toContain(flat(formatAmt(madeRaw)));
         const parts = (coins(fee).get(symbol) ?? 0) + (coins(paid).get(symbol) ?? 0) + (coins(move).get(symbol) ?? 0);
-        expect(parts, `${bot.pair} ${symbol}`).toBeCloseTo(coins(generated).get(symbol) ?? 0, 4);
+        expect(parts, `${bot.pair} ${symbol}`).toBeCloseTo(coins(generated).get(symbol) ?? 0, 8);
       }
       const free = [...coins(generated).keys()].filter((symbol) => !costSymbols.has(symbol));
       if (free.length) expect(note, bot.pair).toContain('no costs taken out');
@@ -111,7 +109,7 @@ describe('v2 copy stays in token units', () => {
         for (const token of botTokens) {
           const homeToken = homeTokens.find((t) => t.symbol === token.symbol);
           if (!homeToken || !same(homeToken.amount, token.amount)) continue;
-          const atom = figureAtoms(formatTokenLine([token]))[0];
+          const atom = figureAtoms(formatTokenLine([token], placesForBot(bot.metrics)))[0];
           if (!atom) continue;
           const key = normFigure(atom);
           expect(botAtoms.has(key), `${bot.pair} ${bot.metrics.mode} bot ${atom}`).toBe(true);
@@ -126,8 +124,78 @@ describe('v2 copy stays in token units', () => {
         const got = rows.find((r) => r.label === label)?.value;
         const tokens = label === 'Est. 7d' ? bot.metrics.est.d7 : bot.metrics.est.d365;
         if (!got || !tokens?.length) continue;
-        expect(got, `${bot.pair} ${bot.metrics.mode} ${label}`).toBe(formatTokenLine(tokens));
+        expect(got, `${bot.pair} ${bot.metrics.mode} ${label}`).toBe(formatTokenLine(tokens, placesForBot(bot.metrics)));
       }
     }
+  });
+
+  it('shows a visible sum for every built-in LP and grid, including rounding edges', () => {
+    const coins = (line: string) => {
+      const map = new Map<string, number>();
+      const re = /([+\u2212-])?\s*(\d[\d,]*(?:\.\d+)?)\s+([A-Z][A-Z0-9]*)/g;
+      for (const match of line.matchAll(re)) {
+        const sign = match[1] === '−' || match[1] === '-' ? -1 : 1;
+        map.set(match[3], (map.get(match[3]) ?? 0) + sign * Number(match[2].replace(/,/g, '')));
+      }
+      return map;
+    };
+    const check = (metrics: BotMetrics, label: string) => {
+      const rows = sheetRows(metrics, { base: 'ETH', quote: 'USDC' });
+      const parts = [
+        rows.find((r) => r.label === 'Trade profit before gas' || r.label.endsWith(' fees earned'))?.value ?? '',
+        rows.find((r) => r.label === 'Gas + swap fees')?.value ?? '',
+        rows.find((r) => r.label === 'Range-move loss')?.value ?? '',
+      ];
+      const generated = rows.find((r) => r.label === 'Generated')?.value ?? '';
+      expect(generated, label).not.toBe('');
+      const made = coins(generated);
+      const sum = new Map<string, number>();
+      for (const line of parts) {
+        for (const [symbol, amount] of coins(line)) sum.set(symbol, (sum.get(symbol) ?? 0) + amount);
+      }
+      for (const [symbol, amount] of made) {
+        if (!sum.has(symbol)) continue;
+        expect(sum.get(symbol), `${label} ${symbol}`).toBeCloseTo(amount, 8);
+      }
+    };
+    const sample = adaptStatus(sanitizedStatus, sanitizedActivity, sanitizedStatus.spotsAt, 'fixture');
+    for (const bot of sample.bots) {
+      if (bot.metrics.kind !== 'lp' && bot.metrics.kind !== 'grid') continue;
+      if (!bot.metrics.generated.length) continue;
+      check(bot.metrics, bot.metrics.botId);
+    }
+    const gross = 0.02683694099017285;
+    const paid = 0.0026334039034537535;
+    const move = 0.022472881717407633;
+    const edge = ledgerLines({
+      kind: 'lp',
+      grossFees: [{ symbol: 'ETH', amount: gross, usd: null }],
+      feesPaid: [{ symbol: 'ETH', amount: paid, usd: null }],
+      moveLoss: [{ symbol: 'ETH', amount: move, usd: null }],
+      generated: [{ symbol: 'ETH', amount: gross - paid - move, usd: null }],
+    } as BotMetrics);
+    expect(edge?.gross).toContain('0.026837');
+    expect(edge?.paid).toContain('0.002633');
+    expect(edge?.move).toContain('0.022473');
+    expect(edge?.generated).toContain('0.001731');
+    check({
+      kind: 'lp',
+      grossFees: [{ symbol: 'ETH', amount: gross, usd: null }],
+      feesPaid: [{ symbol: 'ETH', amount: paid, usd: null }],
+      moveLoss: [{ symbol: 'ETH', amount: move, usd: null }],
+      generated: [{ symbol: 'ETH', amount: gross - paid - move, usd: null }],
+    } as BotMetrics, 'live ETH edge');
+    const quoteGross = 0.027928200555731086;
+    const quotePaid = 0.000004965597670816732;
+    const quoteMove = 0.012612938837774562;
+    check({
+      kind: 'lp',
+      grossFees: [{ symbol: 'ETH', amount: quoteGross, usd: null }],
+      feesPaid: [{ symbol: 'ETH', amount: quotePaid, usd: null }],
+      moveLoss: [{ symbol: 'ETH', amount: quoteMove, usd: null }],
+      generated: [{ symbol: 'ETH', amount: quoteGross - quotePaid - quoteMove, usd: null }],
+    } as BotMetrics, 'paper ETH edge');
+    expect(formatRangePx(2213.3, 2446.3, 'USDC', 'ETH')).toBe('2,213.30 – 2,446.30 USDC per ETH');
+    expect(formatRangePx(2307.72, 2356.69, 'USDC', 'ETH')).toBe('2,307.72 – 2,356.69 USDC per ETH');
   });
 });

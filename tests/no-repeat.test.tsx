@@ -31,9 +31,31 @@ function renderAt(node: ReactElement, width: number): string {
   return textOf(renderToStaticMarkup(node));
 }
 
+function sectionRepeats(html: string): string[] {
+  const problems: string[] = [];
+  const heroAt = html.indexOf('class="hero');
+  const groupAt = html.indexOf('class="group-title"');
+  if (heroAt >= 0) {
+    problems.push(...repeatedFigures(textOf(html.slice(heroAt, groupAt === -1 ? undefined : groupAt))));
+  }
+  for (const [index, part] of html.split('class="group-title"').slice(1).entries()) {
+    const cards = part.split(/class="bot-card/);
+    const scope = new Set(figureAtoms(textOf(index === 0 && heroAt >= 0 ? html.slice(heroAt, groupAt) : cards[0])).map(normFigure));
+    for (const card of cards.slice(1)) {
+      const cardText = textOf(card);
+      problems.push(...repeatedFigures(cardText));
+      for (const fig of figureAtoms(cardText).map(normFigure)) {
+        if (scope.has(fig)) problems.push(fig);
+      }
+    }
+  }
+  return [...new Set(problems)];
+}
+
 function screen(node: ReactElement, width: number, label: string) {
-  const text = renderAt(node, width);
-  const repeats = repeatedFigures(text);
+  const html = renderToStaticMarkup(node);
+  const text = textOf(html);
+  const repeats = html.includes('class="hero') ? sectionRepeats(html) : repeatedFigures(text);
   expect(repeats, `${label} @ ${width}: ${repeats.join(', ')}`).toEqual([]);
   return text;
 }
@@ -173,7 +195,48 @@ describe('no money or token figure is repeated on a screen', () => {
     const text = renderAt(<HomeView portfolio={sample.portfolio} bots={sample.bots} prices={sample.prices} onOpen={() => {}} />, 390);
     expect(repeatedFigures(text), text).toEqual([]);
     expect(text.match(/1\.00 ETH/g)).toHaveLength(1);
+    expect(text).toContain('All live ETH');
     expect(text).toContain('All of the live total');
+  });
+
+  it('keeps the same invested amount on different bots and names a coin that is the whole section', () => {
+    const now = 1_700_000_000_000;
+    const shared = {
+      mode: 'paper', status: 'running', chainId: 1, base: 'ETH', quoteSym: 'ETH', usdPerQuote: 2000, price: 2000,
+      startedAt: now - 3 * 86_400_000, config: { totalCapitalUsd: 3.5 },
+      pnl: { realized: 1, unrealized: 0, gasUsd: 0 }, stats: { roundTrips: 1, totalFees: 0 },
+    };
+    const desk = adaptStatus({
+      spotsAt: now,
+      grids: [
+        { ...shared, id: 'a', label: 'AAA/ETH' },
+        { ...shared, id: 'b', label: 'BBB/ETH' },
+      ],
+    }, [], now);
+    const text = renderAt(<HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} />, 390);
+    expect(text.match(/3\.50 ETH/g)?.length).toBeGreaterThan(1);
+    expect(text).not.toContain('All of the paper total');
+    const sole = adaptStatus({
+      spotsAt: now,
+      grids: [
+        {
+          id: 'hex', mode: 'live', status: 'running', chainId: 369, label: 'HEX/PLS', base: 'HEX', quoteSym: 'PLS',
+          usdPerQuote: 0.0001, price: 0.00002, startedAt: now - 3 * 86_400_000,
+          config: { totalCapitalUsd: 14_000_000, lowerPrice: 0.00001, upperPrice: 0.00003 },
+          pnl: { realized: 10, unrealized: 0, gasUsd: 0 }, stats: { roundTrips: 1, totalFees: 0 },
+        },
+        {
+          id: 'eth', mode: 'live', status: 'running', chainId: 1, label: 'ETH/USDC', base: 'ETH', quoteSym: 'ETH',
+          usdPerQuote: 2000, price: 2000, startedAt: now - 3 * 86_400_000,
+          config: { totalCapitalUsd: 3.5 },
+          pnl: { realized: 1, unrealized: 0, gasUsd: 0 }, stats: { roundTrips: 1, totalFees: 0 },
+        },
+      ],
+    }, [], now);
+    const live = renderAt(<HomeView portfolio={sole.portfolio} bots={sole.bots} onOpen={() => {}} />, 390);
+    expect(live.match(/14\.00M PLS/g)).toHaveLength(1);
+    expect(live).toContain('All live PLS');
+    expect(live).toContain('3.50 ETH');
   });
 
   it('does not repeat a coin amount across breakdown rows', () => {
