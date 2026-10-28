@@ -10,7 +10,8 @@ import { ChainBadge, DexTag, chainOf, dexName } from './chains';
 import { STRATEGIES } from '../market/strategy';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
-import { showHalt } from './haltText';
+import { overrideText, showHalt } from './haltText';
+import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
 import { strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
 import { quoteSym, type AnyObj, type Nav } from './model';
@@ -38,6 +39,7 @@ function StopGauge({ pos, price }: { pos: AnyObj; price: number | null }) {
 export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const t: AnyObj | undefined = (s.trends ?? []).find((x: AnyObj) => x.id === id);
   const [, tick] = useState(0);
+  const chk = useSafetyChecking();
   useEffect(() => { const i = setInterval(() => tick((x) => x + 1), 30_000); return () => clearInterval(i); }, []);
   if (!t) return null;
 
@@ -73,13 +75,15 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="detail-actions">
           {running
             ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
-            : <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/resume`, 'POST'))}>Resume</button>}
+            : <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => chk.run(t.mode === 'live', () => botApi(`trends/${t.id}/resume`, 'POST')))}>Resume</button>}
           <button type="button" className="btn" disabled={busy || !pos || !running || closing} onClick={closePos}>Sell now</button>
           <button type="button" className="btn danger" disabled={busy || closing} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
           <button type="button" className="btn danger" disabled={busy || running || !!t.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
         </div>
       </div>
       {showHalt(t, closing) && <p className="bot-why">{showHalt(t, closing)}</p>}
+      {overrideText(t) && <p className="bot-why">{overrideText(t)}</p>}
+      {(chk.on || heldForSafety(s, t.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… exits (stop-loss, take-profit, sells) still run; no new buys until it passes.'} />}
 
       <div className="notices">
         {t.lastError && <div className="banner error"><span className="grow">{t.lastError}</span></div>}
