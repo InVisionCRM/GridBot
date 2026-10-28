@@ -5,8 +5,9 @@ import { bestLiveBot, BotRow, feesTodayOf, generatedByMode, generatedParts, list
 import { unitsText } from './deskStats';
 import { AreaChart, Donut, Meter, Sparkline } from './charts';
 import { chainOf, chains, useChainFilter } from './chains';
-import { cls, pct, usd } from './fmt';
-import { formatUsdAmount, type HoldingsSnapshot } from '../live/holdingsMath';
+import { cls, pct } from './fmt';
+import type { HoldingsSnapshot } from '../live/holdingsMath';
+import { coinNum, holdingsByToken, inEth, useEthUsd } from './units';
 import { useCount } from './motion';
 import type { Opportunity } from '../market/scan';
 import { isSafe, tryIt, useOpportunities, wayOf } from './Opportunities';
@@ -30,16 +31,30 @@ function useJson(path: string) {
   return data;
 }
 
+/** Net worth in ETH: the dollar total ÷ ETH's price (see units.tsx for which price). */
 function HeroWorth({ value }: { value: number | null }) {
-  const shown = useCount(value);
-  if (value == null || shown == null) return <p className="home-num">—</p>;
-  const text = formatUsdAmount(shown);
+  const ethUsd = useEthUsd();
+  const eth = value != null && ethUsd ? value / ethUsd : null;
+  const shown = useCount(eth);
+  if (eth == null || shown == null) return <p className="home-num">—</p>;
+  const text = coinNum(shown, 5);
   const dot = text.lastIndexOf('.');
   return (
-    <p className="home-num">
-      {dot < 0 ? text : <>{text.slice(0, dot)}<span className="cents">{text.slice(dot)}</span></>}
+    <p className="home-num" data-testid="home-networth">
+      {dot < 0 ? text : <>{text.slice(0, dot)}<span className="cents">{text.slice(dot)}</span></>}<span className="cents"> ETH</span>
     </p>
   );
+}
+
+/** Bots only (paper, or no wallet read): each bot's current value in its own quote coin, summed per coin. */
+function botsByToken(bots: AnyObj[]): { sym: string; amount: number }[] {
+  const m = new Map<string, number>();
+  for (const b of bots) {
+    const q = b.metrics?.quote;
+    if (!q?.symbol || typeof q.currentValue !== 'number' || !(q.currentValue > 0)) continue;
+    m.set(q.symbol, (m.get(q.symbol) ?? 0) + q.currentValue);
+  }
+  return [...m.entries()].map(([sym, amount]) => ({ sym, amount }));
 }
 
 export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings: HoldingsSnapshot | null; act: (fn: () => Promise<unknown>) => void }) {
@@ -53,6 +68,8 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
     : (holdings.chains.find((c) => c.chainId === chain)?.usd ?? null);
   const book = useMemo(() => bots.reduce((a, b) => a + (bookUsd(b) ?? 0), 0), [bots]);
   const shownWorth = worth ?? (holdings?.hasSigner === false ? book : null);
+  const ethUsd = useEthUsd();
+  const tokens = useMemo(() => (holdings?.hasSigner ? holdingsByToken(holdings, chain).slice(0, 6) : botsByToken(bots)), [holdings, chain, bots]);
   const series = useMemo(() => {
     const hist = portfolioSeries(bots, range);
     if (hist.length > 2 && hist.some((p) => p !== hist[0])) return hist;
@@ -77,7 +94,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
     if (holdings?.hasSigner) {
       return holdings.chains
         .filter((c) => (chain === 'all' || c.chainId === chain) && c.usd > 0)
-        .map((c) => ({ key: String(c.chainId), label: c.short, usd: c.usd, color: c.color }));
+        .map((c) => ({ key: String(c.chainId), label: c.short, usd: c.usd, color: c.color, units: holdingsByToken(holdings, c.chainId).map((t) => `${coinNum(t.amount)} ${t.sym}`).join(' + ') }));
     }
     const map = new Map<number, number>();
     for (const b of bots) {
@@ -88,7 +105,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
     }
     return [...map.entries()].filter(([, v]) => v > 0).map(([id, v]) => {
       const c = chainOf(s, id) ?? chains(s).find((x) => x.id === id);
-      return { key: String(id), label: c?.short ?? String(id), usd: v, color: c?.color ?? '#F0B90B' };
+      return { key: String(id), label: c?.short ?? String(id), usd: v, color: c?.color ?? '#F0B90B', units: botsByToken(bots.filter((b) => (b.chainId ?? s.legacyChainId) === id)).map((t) => `${coinNum(t.amount)} ${t.sym}`).join(' + ') };
     });
   }, [holdings, chain, bots, s]);
   const { p } = useOpportunities();
@@ -116,9 +133,14 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
                 {holdings == null && 'Reading…'}
                 {paper && 'Paper'}
                 {holdings && (
-                  <span className={`chip ${cls(chg.delta)}`}>{usd(chg.delta, true)} {chg.pct == null ? '' : pct(chg.pct, 2, true)}</span>
+                  <span className={`chip ${cls(chg.delta)}`}>{inEth(chg.delta, ethUsd, true, 3)} {chg.pct == null ? '' : pct(chg.pct, 2, true)}</span>
                 )}
               </p>
+              {tokens.length > 0 && (
+                <p className="home-sub units" data-testid="home-networth-tokens" title="What the net worth is made of, per coin (wallet, positions and fees owed; dust left out)">
+                  {tokens.map((t) => `${coinNum(t.amount)} ${t.sym}`).join(' · ')}
+                </p>
+              )}
             </div>
             <div className="seg" role="tablist" aria-label="Range">
               {RANGES.map((r) => (

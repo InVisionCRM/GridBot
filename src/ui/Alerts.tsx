@@ -1,4 +1,5 @@
 /** Alerts (server-evaluated: price above/below, RSI threshold, grid out of range) + opt-in browser notifications. */
+import { ethToUsd, useEthUsd } from './units';
 import { useState } from 'react';
 import { PairPicker, lbl, mk } from './chains';
 import { http } from './api';
@@ -31,6 +32,7 @@ export function notify(title: string, body: string, tag?: string) {
 }
 
 export function Alerts({ status: s, prefs, setPrefs }: { status: AnyObj; prefs: NotifyPrefs; setPrefs: (p: NotifyPrefs) => void }) {
+  const ethUsd = useEthUsd();
   const [f, setF] = useState({ type: 'price_above', pair: 'DAI', value: '', tf: '1h', botId: '', repeat: false });
   const [err, setErr] = useState<string | null>(null);
   const perm = typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
@@ -66,7 +68,7 @@ export function Alerts({ status: s, prefs, setPrefs }: { status: AnyObj; prefs: 
           {([['fills', 'Fills (grid + trend)'], ['stops', 'Stops / trailing / take-profit hit'], ['errors', 'Bot stopped / errors / skipped sells'], ['range', 'Price leaves a grid range'], ['alerts', 'Alerts below'], ['pnl', 'Large PnL change']] as const).map(([k, l]) => (
             <label key={k}><input type="checkbox" checked={!!prefs[k]} onChange={() => tog(k)} /> {l}</label>
           ))}
-          <label>Large PnL change ≥ $<input type="number" value={prefs.pnlUsd} style={{ width: 70 }} onChange={(e) => setPrefs({ ...prefs, pnlUsd: Math.max(1, +e.target.value) })} /> (Σ realized + unrealized)</label>
+          <label>Large P&amp;L change ≥ <input type="number" value={ethUsd ? +(prefs.pnlUsd / ethUsd).toPrecision(3) : ''} disabled={!ethUsd} step="any" style={{ width: 80 }} onChange={(e) => { const v = ethToUsd(+e.target.value, ethUsd); if (v != null) setPrefs({ ...prefs, pnlUsd: Math.max(0.01, v) }); }} /> ETH (all live bots, trades + open positions)</label>
         </div>
         {err && <div className="banner warn">{err}</div>}
       </div>

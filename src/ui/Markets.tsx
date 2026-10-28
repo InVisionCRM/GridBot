@@ -5,11 +5,11 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { http } from './api';
 import { px } from './fmt';
+import { Eth, inEthShort, useEthUsd } from './units';
 import { ChainBadge, RiskBadge, chainOf, chains, explorerAddr, feeLabel, flipKey, marketsOf, mk, useChainFilter, type MarketInfo } from './chains';
 
 type AnyObj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const usd = (x: number | null | undefined) => (x == null ? '—' : x >= 1e6 ? `$${(x / 1e6).toFixed(2)}M` : x >= 1e3 ? `$${(x / 1e3).toFixed(1)}k` : `$${x.toFixed(x < 10 ? 2 : 0)}`);
 const pct = (x: number | null | undefined, d = 2) => (x == null ? '—' : `${(x * 100).toFixed(d)}%`);
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
@@ -33,7 +33,7 @@ function SafetyCard({ r, probe }: { r: AnyObj; probe?: AnyObj | null }) {
         <div><span className="k">Sell tax</span>{tax(r.sellTaxPct)}</div>
         <div><span className="k">Honeypot</span>{r.honeypot == null ? '—' : r.honeypot ? <b className="neg">YES</b> : 'no'}</div>
         <div><span className="k">Proxy</span>{r.proxy ? <span className="warn-t" title={r.proxy.implementation ?? ''}>{r.proxy.kind}</span> : 'no'}</div>
-        <div><span className="k">Liquidity</span>{usd(r.liquidityUsd)}</div>
+        <div><span className="k">Liquidity</span><Eth usd={r.liquidityUsd} /></div>
         <div><span className="k">Tax mode</span>{r.taxMode ?? '—'}</div>
         <div><span className="k">Max tx</span>{r.maxTxTokens != null ? r.maxTxTokens.toPrecision(6) : '—'}</div>
         <div><span className="k">Max wallet</span>{r.maxWalletTokens != null ? r.maxWalletTokens.toPrecision(6) : '—'}</div>
@@ -42,7 +42,7 @@ function SafetyCard({ r, probe }: { r: AnyObj; probe?: AnyObj | null }) {
         <div><span className="k">Decimals</span>{r.decimals ?? '—'}</div>
       </div>
       {r.depth?.length > 0 && (
-        <table className="depth"><thead><tr><th>Size</th>{r.depth.map((d: AnyObj) => <th key={d.usd}>${d.usd}</th>)}</tr></thead>
+        <table className="depth"><thead><tr><th>Size</th>{r.depth.map((d: AnyObj) => <th key={d.usd}><Eth usd={d.usd} /></th>)}</tr></thead>
           <tbody>
             <tr><td className="muted">buy impact</td>{r.depth.map((d: AnyObj) => <td key={d.usd} className={d.buyImpactPct > 0.03 ? 'neg' : ''}>{pct(d.buyImpactPct)}</td>)}</tr>
             <tr><td className="muted">sell impact</td>{r.depth.map((d: AnyObj) => <td key={d.usd} className={d.sellImpactPct > 0.03 ? 'neg' : ''}>{pct(d.sellImpactPct)}</td>)}</tr>
@@ -56,8 +56,9 @@ function SafetyCard({ r, probe }: { r: AnyObj; probe?: AnyObj | null }) {
 
 const feeOf = (p: AnyObj) => (p.kind === 'v3' && p.feeTier != null ? `${+(p.feeTier / 10000).toFixed(2)}%` : `${+(p.feeBps / 100).toFixed(2)}%`);
 
-/** Every pool for one market across the chain's DEXes, ranked by the quote for a ≈$250 buy; switch / auto / reset. */
+/** Every pool for one market across the chain's DEXes, ranked by the quote for a buy of the reference size (the API's 250-dollar reference, shown in ETH); switch / auto / reset. */
 function PoolPicker({ s, m, act, busy }: { s: AnyObj; m: MarketInfo & AnyObj; act: (fn: () => Promise<unknown>) => void; busy: boolean }) {
+  const ethUsd = useEthUsd();
   const [r, setR] = useState<AnyObj | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const load = () => { setErr(null); void http(`/api/markets/${encodeURIComponent(m.key)}/pools`).then(setR).catch((e) => setErr((e as Error).message)); };
@@ -70,7 +71,7 @@ function PoolPicker({ s, m, act, busy }: { s: AnyObj; m: MarketInfo & AnyObj; ac
   return (
     <div className="pool-picker">
       <table className="pools">
-        <thead><tr><th>DEX</th><th>Fee</th><th>Pool</th><th>TVL</th><th>Mid</th><th title={`${m.base} received for ≈$250 of ${m.quote}`}>Out @ ≈$250</th><th>vs best</th><th>Impact</th><th></th></tr></thead>
+        <thead><tr><th>DEX</th><th>Fee</th><th>Pool</th><th>TVL</th><th>Mid</th><th title={`${m.base} received for ≈${inEthShort(250, ethUsd)} of ${m.quote}`}>Out @ ≈{inEthShort(250, ethUsd)}</th><th>vs best</th><th>Impact</th><th></th></tr></thead>
         <tbody>
           {r.pools.map((p: AnyObj) => {
             const cur = !!m.pool && p.address.toLowerCase() === m.pool.toLowerCase();
@@ -80,7 +81,7 @@ function PoolPicker({ s, m, act, busy }: { s: AnyObj; m: MarketInfo & AnyObj; ac
                 <td>{p.dexName}{p.address.toLowerCase() === best && <span className="tag pos">best</span>}</td>
                 <td>{feeOf(p)}</td>
                 <td><Addr s={s} chainId={m.chainId} a={p.address} /></td>
-                <td>{usd(p.tvlUsd)}</td>
+                <td><Eth usd={p.tvlUsd} /></td>
                 <td>{p.mid && !p.error ? px(p.mid, 6) : '—'}</td>
                 <td>{p.refOut != null ? px(p.refOut, 6) : '—'}</td>
                 <td className={bestOut && p.refOut != null && p.refOut < bestOut ? 'neg' : ''}>{bestOut && p.refOut != null ? pct(p.refOut / bestOut - 1, 3) : '—'}</td>
@@ -98,13 +99,14 @@ function PoolPicker({ s, m, act, busy }: { s: AnyObj; m: MarketInfo & AnyObj; ac
         <button type="button" className="btn small-btn" disabled={busy || !r.best} onClick={() => put({ auto: true })}>Auto: best quote</button>
         {!m.custom && <button type="button" className="btn small-btn" disabled={busy || m.poolMode === 'default'} onClick={() => put({ reset: true })}>Reset to default</button>}
         <button type="button" className="btn small-btn" onClick={load}>Refresh</button>
-        <span className="muted small">mode: {m.poolMode} · ranked by output for a ≈$250 buy (fee + depth), then TVL · candles stay on the original pool · switching is refused while a tx is in flight</span>
+        <span className="muted small">mode: {m.poolMode} · ranked by output for a ≈{inEthShort(250, ethUsd)} buy (fee + depth), then TVL · candles stay on the original pool · switching is refused while a tx is in flight</span>
       </div>
     </div>
   );
 }
 
 export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: () => Promise<unknown>) => void; busy: boolean }) {
+  const ethUsd = useEthUsd();
   const { chain } = useChainFilter();
   const tradable = chains(s).filter((c) => c.tradable);
   const [f, setF] = useState({ chainId: '', address: '', quote: '', pool: '' });
@@ -185,7 +187,7 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
                       <td>{p.dexName}</td>
                       <td>{p.kind === 'v3' ? `${+(p.feeTier / 10000).toFixed(2)}%` : `${+(p.feeBps / 100).toFixed(2)}%`}</td>
                       <td><Addr s={s} chainId={res.chainId} a={p.address} /></td>
-                      <td>{usd(p.tvlUsd)}</td>
+                      <td><Eth usd={p.tvlUsd} /></td>
                       <td>{p.mid && !p.error ? px(p.mid, 6) : '—'}</td>
                       <td>{pct(p.refImpact, 3)}</td>
                       <td className="small">{p.error ? <span className="neg">{p.error.slice(0, 50)}</span> : p.offMarket ? <span className="neg">off-market</span> : on ? <b>selected</b> : ''}</td>
@@ -195,7 +197,7 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
                 {res.pools.length === 0 && <tr><td colSpan={8} className="muted">no pool found for {res.token.symbol}/{res.quote.symbol}</td></tr>}
               </tbody>
             </table>
-            <p className="muted small">Default = deepest pool by output for the reference size (≈$25), then TVL. Pick another pool to override; safety is re-run on it.</p>
+            <p className="muted small">Default = deepest pool by output for the reference size (≈{inEthShort(25, ethUsd)}), then TVL. Pick another pool to override; safety is re-run on it.</p>
             {res.safety && <SafetyCard r={res.safety} probe={res.probe} />}
             {res.draft && (() => {
               const ex = res.existing ? marketsOf(s).find((x) => x.key === res.existing) : null;
@@ -217,7 +219,7 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
         <h3>Markets <span className="muted small">{list.length} · sell-side price = quote per base after the LP fee · every pair trades either way round (⇄)</span>{' '}
           <button type="button" className={`flip-btn ${flipAll ? 'on' : ''}`} aria-pressed={flipAll} title="Show every market flipped (token/PLS: spend PLS, stack the token)" onClick={() => { setFlipAll((v) => !v); setFlipRow({}); }}>⇄ {flipAll ? 'flipped' : 'as configured'}</button></h3>
         <div className={`table-wrap ${poolsFor ? 'open-picker' : 'tall'}`}><table className="markets-table">
-          <thead><tr><th>Chain</th><th>Market</th><th>DEX</th><th>Fee</th><th>Pool</th><th>Spot</th><th>≈$/quote</th><th>Risk</th><th title="Buy / sell tax measured by the eth_call safety probe; re-checked while bots run">Tax b/s</th><th></th></tr></thead>
+          <thead><tr><th>Chain</th><th>Market</th><th>DEX</th><th>Fee</th><th>Pool</th><th>Spot</th><th>≈ETH/quote</th><th>Risk</th><th title="Buy / sell tax measured by the eth_call safety probe; re-checked while bots run">Tax b/s</th><th></th></tr></thead>
           <tbody>
             {list.map((m: MarketInfo & AnyObj) => {
               const ch = chainOf(s, m.chainId);
@@ -236,7 +238,7 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
                   <td>{feeLabel(m)}</td>
                   <td><Addr s={s} chainId={m.chainId} a={m.pool} /></td>
                   <td title={`${v.quote} per ${v.base}`}>{v.spot != null ? px(v.spot, 6) : '—'}</td>
-                  <td className="small">{v.usdPerQuote != null ? px(v.usdPerQuote, 4) : '—'}</td>
+                  <td className="small">{v.usdPerQuote != null && ethUsd ? px(v.usdPerQuote / ethUsd, 4) : '—'}</td>
                   <td>{m.risk ? <><RiskBadge risk={m.risk} title={`${m.liveAllowed ? 'Live allowed' : 'Paper only'}. ${m.riskWhy ?? ''}`} />{m.safetyStale ? <span className="tag risk-mid" title={`The last re-check didn't measure (${m.safetyStale.why}). These are the last known results${m.safetyAt ? ` from ${new Date(m.safetyAt).toLocaleString()}` : ''}. Bots keep running.`}>stale</span> : null}{m.risk !== 'low' && m.riskWhy ? <div className="muted small risk-why">{m.riskWhy}</div> : null}</> : <span className="muted small" title="Built-in market without a token safety report (the chain's own coin, stablecoins or PulseChain's original markets)">—</span>}</td>
                   <td className="small">{m.buyTaxPct != null || m.sellTaxPct != null ? `${((m.buyTaxPct ?? 0) * 100).toFixed(1)}% / ${((m.sellTaxPct ?? 0) * 100).toFixed(1)}%` : <span className="muted">—</span>}</td>
                   <td className="nowrap">

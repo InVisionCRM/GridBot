@@ -3,14 +3,15 @@ import { useMemo, useState } from 'react';
 import { BotRow } from './botRow';
 import { chainOf } from './chains';
 import { bucketItems, emptyQuery, nextSort, type DeskQuery, type DeskSort, deskItems } from './deskTableModel';
-import { cls, usd } from './fmt';
+import { cls } from './fmt';
+import { unitsText } from './deskStats';
 import type { AnyObj, Nav } from './model';
 
 const TYPES: [DeskQuery['type'], string][] = [['all', 'All'], ['grid', 'Grid'], ['trend', 'Trend'], ['lp', 'Liquidity'], ['trader', 'Token trader'], ['paper', 'Paper']];
 const STATUSES: [DeskQuery['status'], string][] = [['all', 'Any status'], ['running', 'Running'], ['paused', 'Paused'], ['stopped', 'Stopped'], ['out', 'Out of range']];
 const MODES: [DeskQuery['mode'], string][] = [['all', 'Live + paper'], ['live', 'Live'], ['paper', 'Paper']];
 const SORTS: [DeskSort, string][] = [
-  ['name', 'Name'], ['value', 'Value'], ['generated', 'Generated'], ['pnl', 'P&L $'], ['pnlPct', 'P&L %'], ['fees', 'Fees earned'], ['age', 'Age'], ['apr', 'Est. APR'], ['moves', 'Moves'],
+  ['name', 'Name'], ['value', 'Value'], ['generated', 'Generated'], ['pnl', 'P&L'], ['pnlPct', 'P&L %'], ['fees', 'Fees earned'], ['age', 'Age'], ['apr', 'Est. APR'], ['moves', 'Moves'],
 ];
 
 function Chip({ on, children, onClick }: { on: boolean; children: string; onClick: () => void }) {
@@ -76,7 +77,7 @@ export function DeskTable({ s, bots, nav, pause, close }: {
           <span>Range</span>
           {head('value', 'Value', true)}
           {head('generated', 'Generated', true)}
-          {head('pnl', 'P&L $', true)}
+          {head('pnl', 'P&L', true)}
           {head('pnlPct', 'P&L %', true)}
           {head('fees', 'Fees earned', true)}
           {head('age', 'Age', true)}
@@ -94,8 +95,8 @@ export function DeskTable({ s, bots, nav, pause, close }: {
               <b>{g.name}</b>
               <span className="muted">{g.rows.length}</span>
               <span className="grow" />
-              <span className="mono">{g.value == null ? '—' : usd(g.value)}</span>
-              <span className={cls(g.pnl)}>{g.pnl == null ? '—' : usd(g.pnl, true)}</span>
+              <span className="mono units" title="Value now, per quote coin">{g.valueUnits ? unitsText(g.valueUnits, 3, false) : '—'}</span>
+              <span className={`units ${cls(g.pnl)}`} title="Total P&L, per quote coin">{g.pnlUnits ? unitsText(g.pnlUnits, 3) : '—'}</span>
             </button>
             {!shut && g.rows.map((it) => (
               <BotRow key={it.b.id} s={s} b={it.b} nav={nav} pause={pause} close={close} columns metrics expandable open={open === it.b.id} onToggle={() => setOpen((id) => id === it.b.id ? null : it.b.id)} />

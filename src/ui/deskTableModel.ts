@@ -109,7 +109,21 @@ export function sortItems(items: DeskItem[], key: DeskSort, dir: SortDir): DeskI
   });
 }
 
-export interface DeskBucket { name: DeskGroup; rows: DeskItem[]; value: number | null; pnl: number | null }
+/** value/pnl are dollar sums (sorting only, never shown); valueUnits/pnlUnits are what the group header shows, per quote coin. */
+export interface DeskBucket { name: DeskGroup; rows: DeskItem[]; value: number | null; pnl: number | null; valueUnits: Record<string, number> | null; pnlUnits: Record<string, number> | null }
+
+/** Per-coin sum of one quote-coin field of each bot's metrics (src/metrics/botMetrics.ts). */
+function unitsOf(rows: DeskItem[], k: 'currentValue' | 'totalPnl'): Record<string, number> | null {
+  let out: Record<string, number> | null = null;
+  for (const r of rows) {
+    const q = (r.b as AnyObj).metrics?.quote;
+    const v = q?.[k];
+    if (!q?.symbol || typeof v !== 'number' || !Number.isFinite(v)) continue;
+    out ??= {};
+    out[q.symbol] = (out[q.symbol] ?? 0) + v;
+  }
+  return out;
+}
 
 function sumOf(xs: (number | null)[]): number | null {
   const n = xs.filter((x): x is number => x != null && Number.isFinite(x));
@@ -126,7 +140,7 @@ export function bucketItems(items: DeskItem[], q: DeskQuery): DeskBucket[] {
   }
   return GROUPS.filter((name) => by.has(name)).map((name) => {
     const rows = by.get(name)!;
-    return { name, rows, value: sumOf(rows.map((r) => r.facts.valueUsd)), pnl: sumOf(rows.map((r) => r.facts.pnlUsd)) };
+    return { name, rows, value: sumOf(rows.map((r) => r.facts.valueUsd)), pnl: sumOf(rows.map((r) => r.facts.pnlUsd)), valueUnits: unitsOf(rows, 'currentValue'), pnlUnits: unitsOf(rows, 'totalPnl') };
   });
 }
 

@@ -6,7 +6,7 @@
  * (impact, fee, tax). Live is opt-in: it needs a signing key and the existing safety classifier, and sends
  * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
  */
-import { tokenMetrics } from '../../metrics/botMetrics';
+import { tokenMetrics, tokenSpendTotals } from '../../metrics/botMetrics';
 import { chainById } from '../../live/chains';
 import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, DEFAULT_MIN_HOLDER_COVERAGE, clampHolderCoverage, clampHolderShare } from '../../market/holders';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
@@ -113,7 +113,11 @@ export interface Position {
   exitPlan: string;
 }
 
-export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null }
+/**
+ * One fill. `usd`/`pnlUsd` are dollars (kept for the API); `spendSym`, `amount` (spend coin bought with / received) and
+ * `pnl` (spend coin) are the same fill in the coin it spends, for the crypto-units screens. Older lines have only dollars.
+ */
+export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null; spendSym?: string; amount?: number; pnl?: number | null }
 export interface FeedItem { t: number; chainId: number; pool: string; label: string; verdict: 'bought' | 'skipped'; why: string }
 
 export interface TraderState {
@@ -255,7 +259,9 @@ export class TokenTrader {
     const positions = this.state.positions.map((p) => {
       const pnlUsd = this.pnl(p);
       const cost = p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0);
-      return { ...p, pnlUsd, pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p) };
+      // the same open result in the spend coin (display only)
+      const pnl = p.usdPerSpend > 0 ? pnlUsd / p.usdPerSpend : null;
+      return { ...p, pnlUsd, pnl, spendSym: p.label.split('/').pop(), pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p) };
     });
     const out = {
       ...this.state, id: 'token-trader', kind: 'token' as const,
@@ -267,7 +273,7 @@ export class TokenTrader {
       exitsManaged: this.state.on ? this.state.positions.length : 0,
       positions,
     };
-    return { ...out, metrics: tokenMetrics(out, Date.now()) };
+    return { ...out, metrics: tokenMetrics(out, Date.now()), spendTotals: tokenSpendTotals(out) };
   }
 
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
@@ -486,7 +492,7 @@ export class TokenTrader {
     };
     this.state.positions.push(pos);
     const why = warn ? `buy ${sized.why}; ${warn}` : `buy ${sized.why}`;
-    this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null });
+    this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success');
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
@@ -530,7 +536,7 @@ export class TokenTrader {
       if (hit.kind === 'v4') continue;
       const pool = await this.d.resolve?.(hit) ?? null;
       if (!pool) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: hit.pool.slice(0, 8), verdict: 'skipped', why: 'could not price the new pool' }); continue; }
-      if (pool.liquidityUsd < sn.minLiquidityUsd) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${sn.minLiquidityUsd.toLocaleString('en-US')}` }); continue; }
+      if (pool.liquidityUsd < sn.minLiquidityUsd) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: "liquidity under the sniper's minimum" }); continue; }
       if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); continue; }
       const before = this.state.positions.length;
       await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');
@@ -579,7 +585,8 @@ export class TokenTrader {
       p.tokens -= sold;
       const usd = quote * p.usdPerSpend;
       const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
-      this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why: d.why, pnlUsd: usd - cost });
+      const costCoin = p.spent * (p.entryTokens > 0 ? sold / p.entryTokens : 0); // the same cost in the spend coin (log only)
+      this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why: d.why, pnlUsd: usd - cost, spendSym: p.label.split('/').pop(), amount: quote, pnl: quote - costCoin });
       this.say(`sold ${p.label}: ${d.why}`, usd - cost >= 0 ? 'success' : 'warn');
       if (d.why.startsWith('take profit') && !p.tp1Done) p.tp1Done = true;
       else if (d.why.startsWith('take profit')) p.tp2Done = true;
