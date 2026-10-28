@@ -54,30 +54,64 @@ export function naturalPlaces(n: number): number {
   return Math.min(6, Math.max(0, 3 - Math.floor(Math.log10(a))));
 }
 
-/**
- * Places at which the rounded parts equal the rounded generated figure.
- * Starts at the formatter's count for `generated` and stops at 8.
- */
-export function sumPlaces(parts: number[], generated: number): number {
-  let places = naturalPlaces(generated);
-  for (; places <= 8; places++) {
-    const sum = parts.reduce((total, part) => total + roundAmt(part, places), 0);
-    if (roundAmt(sum, places) === roundAmt(generated, places)) return places;
-  }
-  return 8;
+/** Step size of `formatAmt` for this amount. Breakdown rows for a coin share its Generated step. */
+export function standardUnit(n: number): number {
+  const a = Math.abs(n);
+  if (!(a > 0)) return 1;
+  if (a >= 1e9) return 1e7;
+  if (a >= 1e6) return 1e4;
+  if (a >= 1e5) return 1e3;
+  if (a >= 1e4) return 1e2;
+  return 10 ** -naturalPlaces(n);
 }
 
-/** Signed amount at a fixed decimal count, with thousands commas. Large amounts stay compact. */
-export function formatPlaces(n: number, places: number): string {
-  const r = roundAmt(n, places);
-  if (r === 0) return '0';
+/** The number `formatAmt` actually shows, so parts can be aimed at that figure. */
+export function displayedValue(n: number): number {
+  if (!Number.isFinite(n) || n === 0) return 0;
+  const text = formatAmt(n).replace(/^[+−-]/, '').replace(/,/g, '');
+  const suffix = text.match(/[kMB]$/)?.[0];
+  const scale = suffix === 'B' ? 1e9 : suffix === 'M' ? 1e6 : suffix === 'k' ? 1e3 : 1;
+  const mantissa = Number(text.replace(/[kMB]$/, ''));
+  return (n < 0 ? -1 : 1) * mantissa * scale;
+}
+
+/**
+ * Largest-remainder rounding. Each part moves by at most one `unit`,
+ * and the parts then equal `target`.
+ */
+export function apportion(parts: number[], target: number, unit: number): number[] {
+  if (!parts.length || !(unit > 0)) return parts.slice();
+  const scaled = parts.map((part) => part / unit);
+  const goal = roundAmt(target / unit, 0);
+  const base = scaled.map((value) => {
+    const nearest = Math.round(value);
+    return Math.abs(value - nearest) < 1e-6 ? nearest : Math.floor(value);
+  });
+  const remainders = scaled.map((value, i) => value - base[i]);
+  let gap = goal - base.reduce((sum, value) => sum + value, 0);
+  const order = remainders.map((remainder, index) => ({ remainder, index }));
+  order.sort((a, b) => gap >= 0 ? b.remainder - a.remainder || a.index - b.index : a.remainder - b.remainder || a.index - b.index);
+  const step = gap >= 0 ? 1 : -1;
+  let left = Math.abs(gap);
+  let pass = 0;
+  while (left > 0 && pass < 4) {
+    for (const item of order) {
+      if (left <= 0) break;
+      base[item.index] += step;
+      left -= 1;
+    }
+    pass += 1;
+  }
+  return base.map((value) => value * unit);
+}
+
+/** Fixed fraction digits for a breakdown part. Amounts of 1 or more stay at 2 when `places` is 2. */
+export function formatFixedDecimals(n: number, places: number): string {
+  const r = roundAmt(n, Math.max(0, places));
+  if (!Number.isFinite(r) || r === 0) return '0';
   const sign = r < 0 ? '−' : '+';
-  const a = Math.abs(r);
-  if (a >= 1e9) return `${sign}${(a / 1e9).toFixed(2)}B`;
-  if (a >= 1e6) return `${sign}${(a / 1e6).toFixed(2)}M`;
-  if (a >= 1e4) return `${sign}${(a / 1e3).toFixed(a >= 1e5 ? 0 : 1)}k`;
-  const min = a >= 1 ? Math.min(2, places) : 0;
-  const body = a.toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: Math.max(min, places) });
+  const [whole, frac] = Math.abs(r).toFixed(Math.max(0, places)).split('.');
+  const body = `${Number(whole).toLocaleString('en-US')}${frac != null ? `.${frac}` : ''}`;
   return `${sign}${body}`;
 }
 
@@ -147,15 +181,11 @@ export function formatBag(tokens: { symbol: string; amount: number }[] | null | 
   return tokens.map((t) => `${plainAmt(t.amount)} ${t.symbol}`).join(' + ');
 }
 
-/** One line of signed token amounts. A per-coin place count overrides the shared rule. */
-export function formatTokenLine(
-  tokens: { symbol: string; amount: number }[] | null | undefined,
-  places?: ReadonlyMap<string, number> | null,
-): string {
+/** One line of signed token amounts, always in the standard format. */
+export function formatTokenLine(tokens: { symbol: string; amount: number }[] | null | undefined): string {
   if (!tokens?.length) return '—';
   return tokens.map((t, i) => {
-    const count = places?.get(t.symbol);
-    const amt = count == null ? formatAmt(t.amount) : formatPlaces(t.amount, count);
+    const amt = formatAmt(t.amount);
     if (i === 0) return `${amt} ${t.symbol}`;
     if (t.amount < 0) return `${amt} ${t.symbol}`;
     return `+ ${amt.replace(/^\+/, '')} ${t.symbol}`;

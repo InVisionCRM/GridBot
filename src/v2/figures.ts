@@ -4,7 +4,7 @@
  */
 import type { BotMetrics, RangeBlock, TapePrice, TokenQty } from './metrics';
 import { estimates } from '../shared/generated';
-import { formatAge, formatAmt, formatBag, formatPlaces, formatRangePx, formatTokenLine, showsNoFills, sumPlaces } from './format';
+import { apportion, displayedValue, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, showsNoFills, standardUnit } from './format';
 
 const SUBSCRIPT_PRICE = /\$0\.0[₀₁₂₃₄₅₆₇₈₉]+\d+/g;
 const FIGURE = /[+−-]?\s*\$\d[\d,]*(?:\.\d+)?|[+−-]?\s*\d[\d,]*(?:\.\d+)?[kMB]\s+[A-Z][A-Z0-9]*|[+−-]\s*\d[\d,]*(?:\.\d+)?\s+[A-Z][A-Z0-9]*|[+−-]?\d+(?:\.\d+)?%/g;
@@ -33,10 +33,23 @@ export function coverFigures(text: string, used: Set<string>) {
   for (const atom of figureAtoms(text)) used.add(normFigure(atom));
 }
 
-function tokenKey(t: TokenQty, places?: ReadonlyMap<string, number> | null): string {
-  const count = places?.get(t.symbol);
-  const amt = count == null ? formatAmt(t.amount) : formatPlaces(t.amount, count);
-  return normFigure(`${amt} ${t.symbol}`);
+function tokenKey(t: TokenQty): string {
+  return normFigure(`${formatAmt(t.amount)} ${t.symbol}`);
+}
+
+/** Every generated coin stays on the card: a number, or `All paper BUN` when it is that coin's section total. */
+export function generatedCardLine(bot: TokenQty[], section: TokenQty[], scope: 'live' | 'paper'): string | null {
+  const shown = bot.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
+  if (!shown.length) return null;
+  const sectionShown = section.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
+  const line = formatTokenLine(shown);
+  if (line !== '—' && normFigure(line) === normFigure(formatTokenLine(sectionShown))) return `All of the ${scope} total`;
+  const totals = new Map(sectionShown.map((t) => [t.symbol, normFigure(formatTokenLine([t]))]));
+  const word = scope === 'live' ? 'live' : 'paper';
+  return shown.map((t) => {
+    const text = formatTokenLine([t]);
+    return totals.get(t.symbol) === normFigure(text) ? `All ${word} ${t.symbol}` : text;
+  }).join(' · ');
 }
 
 /**
@@ -63,30 +76,15 @@ export function rangeWords(range: RangeBlock | null): string {
 export type CardReadout =
   | { kind: 'empty' }
   | { kind: 'note'; text: string }
-  | { kind: 'figures'; tokens: TokenQty[]; usd: string | null };
+  | { kind: 'line'; text: string };
 
-/**
- * What a card may say without repeating a figure already on the screen.
- * `used` is updated with whatever this card actually displays.
- */
-export function cardReadout(
-  metrics: BotMetrics,
-  sectionTokens: TokenQty[],
-  scope: 'live' | 'paper',
-  used: Set<string>,
-  places?: ReadonlyMap<string, number> | null,
-  sectionPlaces?: ReadonlyMap<string, number> | null,
-): CardReadout {
+/** Generated text for a card. Coins that match the section hero are named, not dropped. */
+export function cardReadout(metrics: BotMetrics, sectionTokens: TokenQty[], scope: 'live' | 'paper'): CardReadout {
   if (showsNoFills(metrics)) return { kind: 'empty' };
-  const line = formatTokenLine(metrics.generated, places);
-  const sectionLine = formatTokenLine(sectionTokens, sectionPlaces ?? places);
-  if (line !== '—' && sectionLine !== '—' && normFigure(line) === normFigure(sectionLine)) {
-    return { kind: 'note', text: `All of the ${scope} total` };
-  }
-  const tokens = metrics.generated.filter((t) => !used.has(tokenKey(t, places)));
-  if (!tokens.length) return { kind: 'note', text: rangeWords(metrics.range) };
-  for (const t of tokens) used.add(tokenKey(t, places));
-  return { kind: 'figures', tokens, usd: null };
+  const text = generatedCardLine(metrics.generated, sectionTokens, scope);
+  if (!text) return { kind: 'note', text: rangeWords(metrics.range) };
+  if (text === `All of the ${scope} total`) return { kind: 'note', text };
+  return { kind: 'line', text };
 }
 
 export function uniqueTape(prices: TapePrice[]): TapePrice[] {
@@ -105,9 +103,9 @@ export function heroFigureText(m: BotMetrics): string {
   if (showsNoFills(m)) return '';
   const day = estimates(m.generated, m.ageSec).perDay;
   return [
-    ledgerLines(m)?.generated || formatTokenLine(m.generated, placesForBot(m)),
+    ledgerLines(m)?.generated || formatTokenLine(m.generated),
     formatBagSafe(m.invested),
-    day ? formatTokenLine(day, placesForBot(m)) : '',
+    day ? formatTokenLine(day) : '',
   ].join(' ');
 }
 
@@ -132,48 +130,36 @@ function amountOf(tokens: TokenQty[], symbol: string): number {
   return tokens.find((t) => t.symbol === symbol)?.amount ?? 0;
 }
 
-function ledgerLine(entries: { symbol: string; amount: number; places: number }[]): string {
-  const shown = entries.filter((e) => e.amount !== 0 && formatPlaces(e.amount, e.places) !== '0');
+function partText(amount: number, places: number): string {
+  if (places <= 0 || amount === 0) return formatAmt(amount);
+  return formatFixedDecimals(amount, places);
+}
+
+function joinParts(entries: { symbol: string; amount: number; places: number }[]): string {
+  const shown = entries.filter((e) => e.amount !== 0 && partText(e.amount, e.places) !== '0');
   if (!shown.length) return '';
-  return formatTokenLine(shown, new Map(shown.map((e) => [e.symbol, e.places])));
+  return shown.map((e, i) => {
+    const text = partText(e.amount, e.places);
+    if (i === 0) return `${text} ${e.symbol}`;
+    if (e.amount < 0) return `${text} ${e.symbol}`;
+    return `+ ${text.replace(/^\+/, '')} ${e.symbol}`;
+  }).join(' ');
 }
 
-/** One decimal count per coin so that coin's parts and Generated round to the same total. */
-export function placesForBot(m: BotMetrics): Map<string, number> {
-  const symbols = [...new Set([
-    ...m.grossFees.map((t) => t.symbol),
-    ...m.feesPaid.map((t) => t.symbol),
-    ...m.moveLoss.map((t) => t.symbol),
-    ...m.generated.map((t) => t.symbol),
-  ])];
-  const out = new Map<string, number>();
-  for (const symbol of symbols) {
-    const generated = amountOf(m.generated, symbol);
-    const paid = Math.abs(amountOf(m.feesPaid, symbol));
-    const move = Math.abs(amountOf(m.moveLoss, symbol));
-    const gross = amountOf(m.grossFees, symbol);
-    if (!gross && !paid && !move && !generated) continue;
-    const parts = m.kind === 'grid' && paid !== 0
-      ? [generated + paid, -paid]
-      : [gross, -paid, -move];
-    out.set(symbol, sumPlaces(parts, generated));
+function roundedCoin(m: BotMetrics, symbol: string): { gross: number; paid: number; move: number; profit: number; places: number } {
+  const generated = amountOf(m.generated, symbol);
+  const paid = Math.abs(amountOf(m.feesPaid, symbol));
+  const move = Math.abs(amountOf(m.moveLoss, symbol));
+  const gross = amountOf(m.grossFees, symbol);
+  const anchor = generated !== 0 ? generated : Math.max(gross, paid, move, Math.abs(generated + paid));
+  const unit = standardUnit(anchor);
+  const places = unit >= 1 ? 0 : naturalPlaces(anchor);
+  if (m.kind === 'grid' && paid !== 0) {
+    const [profit, gas] = apportion([generated + paid, -paid], displayedValue(generated), unit);
+    return { gross: 0, paid: gas, move: 0, profit, places };
   }
-  return out;
-}
-
-/** Finest per-coin count among these bots, so a sole contributor matches that bot's string. */
-export function displayPlaces(bots: BotMetrics[]): Map<string, number> {
-  const out = new Map<string, number>();
-  for (const m of bots) {
-    const places = placesForBot(m);
-    for (const t of m.generated) {
-      if (t.amount === 0) continue;
-      const count = places.get(t.symbol);
-      if (count == null) continue;
-      out.set(t.symbol, Math.max(out.get(t.symbol) ?? 0, count));
-    }
-  }
-  return out;
+  const [g, p, mv] = apportion([gross, -paid, -move], displayedValue(generated), unit);
+  return { gross: g, paid: p, move: mv, profit: 0, places };
 }
 
 function coinList(symbols: string[]): string {
@@ -185,48 +171,40 @@ function coinList(symbols: string[]): string {
 /** Fees in the coins that pay costs, costs as negatives, and the generated total. */
 export function ledgerLines(m: BotMetrics): LedgerLines | null {
   if (!m.grossFees.length && !m.feesPaid.length && !m.moveLoss.length) return null;
-  const places = placesForBot(m);
-  const symbols = [...places.keys()];
-  const at = (symbol: string) => places.get(symbol) ?? naturalFallback(symbol, m);
-  const entry = (tokens: TokenQty[], sign: 1 | -1) => symbols
-    .map((symbol) => ({ symbol, amount: sign * Math.abs(amountOf(tokens, symbol)), places: at(symbol) }))
-    .filter((e) => amountOf(tokens, e.symbol) !== 0);
-  const generated = m.generated
-    .filter((t) => t.amount !== 0)
-    .map((t) => ({ symbol: t.symbol, amount: t.amount, places: at(t.symbol) }));
+  const symbols = [...new Set([
+    ...m.grossFees.map((t) => t.symbol),
+    ...m.feesPaid.map((t) => t.symbol),
+    ...m.moveLoss.map((t) => t.symbol),
+    ...m.generated.map((t) => t.symbol),
+  ])];
+  const rounded = new Map(symbols.map((symbol) => [symbol, roundedCoin(m, symbol)]));
   const costSymbols = symbols.filter((symbol) => amountOf(m.feesPaid, symbol) !== 0 || amountOf(m.moveLoss, symbol) !== 0);
-  const freeSymbols = generated.map((e) => e.symbol).filter((symbol) => !costSymbols.includes(symbol));
-  const gridProfit = m.kind === 'grid'
-    ? costSymbols
-      .filter((symbol) => amountOf(m.generated, symbol) !== 0 || amountOf(m.feesPaid, symbol) !== 0)
-      .map((symbol) => ({
-        symbol,
-        amount: amountOf(m.generated, symbol) + Math.abs(amountOf(m.feesPaid, symbol)),
-        places: at(symbol),
-      }))
-    : [];
-  const earned = entry(m.grossFees, 1).filter((e) => costSymbols.includes(e.symbol));
+  const generated = m.generated.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
+  const freeSymbols = generated.map((t) => t.symbol).filter((symbol) => !costSymbols.includes(symbol));
+  const row = (pick: (coin: ReturnType<typeof roundedCoin>) => number) => joinParts(
+    costSymbols.map((symbol) => {
+      const coin = rounded.get(symbol);
+      return { symbol, amount: coin ? pick(coin) : 0, places: coin?.places ?? 0 };
+    }),
+  );
+  const grid = m.kind === 'grid';
   const untouched = freeSymbols.length === 0
     ? ''
     : freeSymbols.length === 1
       ? `${freeSymbols[0]} has no costs taken out.`
       : `${coinList(freeSymbols)} have no costs taken out.`;
   return {
-    gross: gridProfit.length ? ledgerLine(gridProfit) : ledgerLine(earned),
-    feeLabel: gridProfit.length
+    gross: grid ? row((coin) => coin.profit) : row((coin) => coin.gross),
+    feeLabel: grid
       ? 'Trade profit before gas'
       : costSymbols.length === 1
         ? `${costSymbols[0]} fees earned`
         : costSymbols.length ? `${coinList(costSymbols)} fees earned` : '',
-    paid: ledgerLine(entry(m.feesPaid, -1)),
-    move: ledgerLine(entry(m.moveLoss, -1)),
-    generated: ledgerLine(generated),
+    paid: row((coin) => coin.paid),
+    move: row((coin) => coin.move),
+    generated: formatTokenLine(generated),
     untouched,
   };
-}
-
-function naturalFallback(symbol: string, m: BotMetrics): number {
-  return sumPlaces([amountOf(m.generated, symbol)], amountOf(m.generated, symbol));
 }
 
 export function isLedgerLabel(label: string): boolean {
@@ -261,7 +239,6 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
     rows.push({ label, value: next });
   };
   const ledger = ledgerLines(m);
-  const places = placesForBot(m);
   const beforeParts = rows.length;
   if (ledger?.gross) add(ledger.feeLabel, ledger.gross, !details);
   if (ledger?.paid) add('Gas + swap fees', ledger.paid, !details);
@@ -270,10 +247,13 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
   if (details && rows.length > beforeParts) {
     rows.push({ label: 'Adds', value: 'These add up to the Generated above.' });
   }
+  if (!details && rows.length > beforeParts) {
+    rows.push({ label: 'Round', value: 'Rows are rounded to add up exactly.' });
+  }
   if (ledger?.untouched) add('Note', ledger.untouched);
   const est = estimates(m.generated, m.ageSec);
-  add('Est. 7d', est.d7 == null ? '—' : est.d7.length ? formatTokenLine(est.d7, places) : '—', true);
-  add('Est. 365d', est.d365 == null ? '—' : est.d365.length ? formatTokenLine(est.d365, places) : '—', true);
+  add('Est. 7d', est.d7 == null ? '—' : est.d7.length ? formatTokenLine(est.d7) : '—', true);
+  add('Est. 365d', est.d365 == null ? '—' : est.d365.length ? formatTokenLine(est.d365) : '—', true);
   add('Age', formatAge(m.ageSec));
   add('Moves', m.moveCount == null ? '—' : String(m.moveCount));
   add('Fills', m.fillCount == null ? '—' : String(m.fillCount));

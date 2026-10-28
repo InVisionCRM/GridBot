@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { ActivityTape } from '../src/v2/activity-tape';
 import { BotView } from '../src/v2/bot-view';
 import { adaptStatus } from '../src/v2/adapt-status';
-import { figureAtoms, ledgerLines, normFigure, placesForBot, sheetRows } from '../src/v2/figures';
+import { figureAtoms, generatedCardLine, ledgerLines, normFigure, sheetRows } from '../src/v2/figures';
 import { formatRangePx, formatTokenLine } from '../src/v2/format';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
 import type { BotMetrics } from '../src/v2/metrics';
@@ -109,7 +109,7 @@ describe('v2 copy stays in token units', () => {
         for (const token of botTokens) {
           const homeToken = homeTokens.find((t) => t.symbol === token.symbol);
           if (!homeToken || !same(homeToken.amount, token.amount)) continue;
-          const atom = figureAtoms(formatTokenLine([token], placesForBot(bot.metrics)))[0];
+          const atom = figureAtoms(formatTokenLine([token]))[0];
           if (!atom) continue;
           const key = normFigure(atom);
           expect(botAtoms.has(key), `${bot.pair} ${bot.metrics.mode} bot ${atom}`).toBe(true);
@@ -124,7 +124,7 @@ describe('v2 copy stays in token units', () => {
         const got = rows.find((r) => r.label === label)?.value;
         const tokens = label === 'Est. 7d' ? bot.metrics.est.d7 : bot.metrics.est.d365;
         if (!got || !tokens?.length) continue;
-        expect(got, `${bot.pair} ${bot.metrics.mode} ${label}`).toBe(formatTokenLine(tokens, placesForBot(bot.metrics)));
+        expect(got, `${bot.pair} ${bot.metrics.mode} ${label}`).toBe(formatTokenLine(tokens));
       }
     }
   });
@@ -197,5 +197,80 @@ describe('v2 copy stays in token units', () => {
     } as BotMetrics, 'paper ETH edge');
     expect(formatRangePx(2213.3, 2446.3, 'USDC', 'ETH')).toBe('2,213.30 – 2,446.30 USDC per ETH');
     expect(formatRangePx(2307.72, 2356.69, 'USDC', 'ETH')).toBe('2,307.72 – 2,356.69 USDC per ETH');
+    for (const bot of sample.bots) {
+      const rows = sheetRows(bot.metrics, { base: bot.base, quote: bot.quote });
+      const generated = rows.find((r) => r.label === 'Generated');
+      if (generated) {
+        expect(generated.value, bot.metrics.botId).toBe(formatTokenLine(bot.metrics.generated.filter((t) => t.amount !== 0 && t.amount !== undefined)));
+      }
+      for (const label of ['Est. 7d', 'Est. 365d'] as const) {
+        const got = rows.find((r) => r.label === label)?.value;
+        const tokens = label === 'Est. 7d' ? bot.metrics.est.d7 : bot.metrics.est.d365;
+        if (!got || !tokens?.length) continue;
+        expect(got, `${bot.metrics.botId} ${label}`).toBe(formatTokenLine(tokens));
+      }
+      for (const row of rows) {
+        if (row.label !== 'Generated' && !row.label.startsWith('Est.')) continue;
+        for (const amount of row.value.matchAll(/[+\u2212-]?\d[\d,]*(?:\.\d+)?[kMB]?/g)) {
+          expect(overPrecise(amount[0]), `${bot.metrics.botId} ${row.label} ${amount[0]}`).toBe(false);
+        }
+      }
+      if (rows.some((r) => r.label === 'Trade profit before gas' || r.label.endsWith(' fees earned'))) {
+        expect(rows.some((r) => r.value === 'Rows are rounded to add up exactly.'), bot.metrics.botId).toBe(true);
+      }
+    }
+  });
+
+  it('shows every generated coin on the card as a number or All text', () => {
+    const now = 1_700_000_000_000;
+    const desk = adaptStatus({
+      spotsAt: now,
+      lps: [
+        {
+          id: 'bun', mode: 'paper', status: 'running', chainId: 1, label: 'BUN/ETH', base: 'BUN', quote: 'ETH',
+          dexName: 'Example', usdPerQuote: 2000, price: 0.00005, startedAt: now - 3 * 86_400_000,
+          inRange: true, startValue: 1, config: { capital: 1 },
+          position: { lower: 0.00004, upper: 0.00006 },
+          pnl: {
+            net: 0, price: 0, fees: 0, gas: 0.02051, swapCost: 0, moveLoss: 0, equity: 1,
+            feeCoins: { base: 233.06, quote: 0.01 },
+          },
+        },
+        {
+          id: 'other', mode: 'paper', status: 'running', chainId: 1, label: 'USDC/ETH', base: 'USDC', quote: 'ETH',
+          dexName: 'Example', usdPerQuote: 2000, price: 0.0005, startedAt: now - 3 * 86_400_000,
+          inRange: true, startValue: 1, config: { capital: 1 },
+          position: { lower: 0.0004, upper: 0.0006 },
+          pnl: {
+            net: 0, price: 0, fees: 0, gas: 0, swapCost: 0, moveLoss: 0, equity: 1,
+            feeCoins: { base: 10, quote: 0.05 },
+          },
+        },
+      ],
+    }, [], now);
+    const html = renderToStaticMarkup(
+      <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />,
+    );
+    const card = html.split('data-bot="bun"')[1]?.split('card-details')[0] ?? '';
+    const text = card.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    expect(text).toContain('All paper BUN');
+    expect(text).toContain('−0.01051 ETH');
+    expect(generatedCardLine(
+      desk.bots.find((b) => b.metrics.botId === 'bun')!.metrics.generated,
+      desk.portfolio.paperTokens,
+      'paper',
+    )).toBe('All paper BUN · −0.01051 ETH');
   });
 });
+
+function overPrecise(raw: string): boolean {
+  const body = raw.replace(/^[+\u2212-]/, '').replace(/,/g, '');
+  const suffix = body.match(/[kMB]$/)?.[0] ?? '';
+  const mantissa = body.replace(/[kMB]$/, '');
+  const frac = mantissa.split('.')[1] ?? '';
+  if (suffix) return frac.length > 2;
+  const n = Number(mantissa);
+  if (n >= 1) return frac.length > 2;
+  const sig = mantissa.replace('.', '').replace(/^0+/, '').replace(/0+$/, '');
+  return sig.length > 4 || frac.length > 6;
+}

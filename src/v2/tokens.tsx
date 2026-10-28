@@ -26,17 +26,10 @@ export function headlinePx(
   return null;
 }
 
-export function TokenLine({
-  tokens, usd = null, className = '', places = null,
-}: {
-  tokens: TokenQty[] | null;
-  usd?: number | null;
-  className?: string;
-  places?: ReadonlyMap<string, number> | null;
-}) {
+export function TokenLine({ tokens, usd = null, className = '' }: { tokens: TokenQty[] | null; usd?: number | null; className?: string }) {
   if (tokens == null) return <span className={className}>—</span>;
   if (!tokens.length) return <span className={className}>{usd === 0 ? '0' : '—'}</span>;
-  return <span className={className}>{formatTokenLine(tokens, places)}</span>;
+  return <span className={className}>{formatTokenLine(tokens)}</span>;
 }
 
 function mainToken(tokens: TokenQty[]): TokenQty {
@@ -55,17 +48,11 @@ function measureLine(sample: HTMLElement, text: string, px: number): number {
 }
 
 /** Full token line on one row. Shrink once, then a small pill, only when the measured line does not fit. */
-export function TokenHeadline({
-  tokens, usd = null, places = null,
-}: {
-  tokens: TokenQty[] | null;
-  usd?: number | null;
-  places?: ReadonlyMap<string, number> | null;
-}) {
+export function TokenHeadline({ tokens, usd = null }: { tokens: TokenQty[] | null; usd?: number | null }) {
   const host = useRef<HTMLSpanElement>(null);
   const [px, setPx] = useState<number | 'fold' | null>(null);
   const [open, setOpen] = useState(false);
-  const text = tokens?.length ? formatTokenLine(tokens, places) : '';
+  const text = tokens?.length ? formatTokenLine(tokens) : '';
   useLayoutEffect(() => {
     const el = host.current;
     if (!el) return;
@@ -85,7 +72,7 @@ export function TokenHeadline({
     ro.observe(el);
     return () => ro.disconnect();
   }, [open, text, tokens]);
-  if (!tokens?.length) return <TokenLine tokens={tokens} usd={usd} places={places} />;
+  if (!tokens?.length) return <TokenLine tokens={tokens} usd={usd} />;
   const folded = px === 'fold' && !open && tokens.length >= 2;
   return (
     <span
@@ -95,13 +82,13 @@ export function TokenHeadline({
     >
       {folded ? (
         <span className="token-fold">
-          <TokenLine tokens={[mainToken(tokens)]} places={places} />
+          <TokenLine tokens={[mainToken(tokens)]} />
           <button type="button" className="chip more" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen(true); }}>
             +{tokens.length - 1} more
           </button>
         </span>
       ) : (
-        <TokenLine tokens={tokens} usd={usd} places={places} />
+        <TokenLine tokens={tokens} usd={usd} />
       )}
     </span>
   );
