@@ -33,7 +33,7 @@ import { readCall, sameAddr } from '../dex/types';
 import { LpPool, type Coins, type PoolView } from '../lp/lpPool';
 import { collectAllData, collectData, exitData, mintTx } from '../lp/npmCalls';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type Quote, type ReceiptLike, type TxSender } from './chain';
-import { checkProfitMode, type Mode, type ProfitMode } from './engine';
+import { checkProfitMode, GAS_UNKNOWN_NOTE, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
 import { requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
@@ -71,7 +71,11 @@ export interface LpStep {
   hash?: string;
   sentAt?: number;
   /** A swap that was broadcast but not confirmed when the executor gave up waiting */
-  swap?: { hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number };
+  swap?: {
+    hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number;
+    /** Base per native coin from the quote at send time (gas in base units on settle). Old saves omit it: read again. */
+    basePerNative?: number;
+  };
   tries: number;
   /** close: after taking the position out, sell the base coin back to the quote coin ("close to cash") */
   toCash?: boolean;
@@ -112,7 +116,14 @@ export interface LpState {
    * the swaps to the range's mix cost (pool fee + impact, at the mid price) and what taking positions out locked in
    * (lost to moves: see exited), all quote
    */
-  totals: { fees: number; gas: number; sent: number; feeCoins: Coins; swapCost: number; moveLoss: number };
+  totals: {
+    fees: number; gas: number; sent: number; feeCoins: Coins; swapCost: number; moveLoss: number;
+    /**
+     * Native gas of swaps settled by hash after a restart whose base/native rate could be read neither from the save
+     * nor now: not in `gas` (booked as 0, never at the starting rate 1). Old saves omit it.
+     */
+    gasUnknownNative?: number;
+  };
   startedAt: number | null;
   /** Price when the bot started */
   startPrice: number | null;
@@ -722,6 +733,20 @@ export class LpEngine {
   private async receiptGas(r: ReceiptLike, v: PoolView) {
     return fromUnits(r.gasUsed * (r.gasPrice ?? 0n), 18) * (await this.hub.quoter(this.state.market).basePerNative()) * v.price;
   }
+  /**
+   * Gas of a swap settled by hash (restart reconcile), in quote at today's price. When no base/native rate could be
+   * read (gasUnknown: gasPls is 0), its native gas is kept apart in totals.gasUnknownNative and a warning is logged,
+   * as the grid and trend bots do.
+   */
+  private bookRecoveredGas(hash: string, r: { gasPls: number; gasNative: number; gasUnknown?: true }, v: PoolView) {
+    this.state.totals.gas += r.gasPls * v.price;
+    if (!r.gasUnknown) return;
+    this.state.totals.gasUnknownNative = (this.state.totals.gasUnknownNative ?? 0) + r.gasNative;
+    const nat = this.def ? this.hub.rt(this.def.chainId).cfg.nativeSymbol : 'native';
+    const msg = `swap ${hash}: gas ${r.gasNative.toPrecision(4)} ${nat} not booked — ${GAS_UNKNOWN_NOTE}`;
+    this.log('warn', msg);
+    this.ev('info', `Liquidity ${this.label}: ${msg}`, { level: 'warn' });
+  }
   private addIdle(c: Coins) { this.state.idle = { base: this.state.idle.base + c.base, quote: this.state.idle.quote + c.quote }; }
 
   private noteOnce(msg: string) {
@@ -856,9 +881,9 @@ export class LpEngine {
   private async swap(pool: LpPool, v: PoolView, s: LpStep) {
     const c = this.state.config!;
     if (s.swap) {
-      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut);
+      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut, s.swap.basePerNative);
       if (!r) return;
-      this.state.totals.gas += r.gasPls * v.price;
+      this.bookRecoveredGas(s.swap.hash, r, v);
       if (r.ok) this.applySwap(s.swap.side, s.swap.amountIn, r.amountOutHuman, v.price);
       s.swap = undefined;
       s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
@@ -900,7 +925,7 @@ export class LpEngine {
         const o = e instanceof ExecError ? e.opts : {};
         if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
         if (o.aborted) return;
-        if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price }; return; }
+        if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
         throw e;
       }
     }
@@ -926,9 +951,9 @@ export class LpEngine {
    */
   private async sellToCash(v: PoolView, s: LpStep) {
     if (s.swap) {
-      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut);
+      const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut, s.swap.basePerNative);
       if (!r) return;
-      this.state.totals.gas += r.gasPls * v.price;
+      this.bookRecoveredGas(s.swap.hash, r, v);
       if (r.ok) this.applySwap('sell', s.swap.amountIn, r.amountOutHuman, v.price);
       s.swap = undefined;
       return;
@@ -966,7 +991,7 @@ export class LpEngine {
       const o = e instanceof ExecError ? e.opts : {};
       if (o.gasPls) this.state.totals.gas += o.gasPls * v.price;
       if (o.aborted) return;
-      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price }; return; }
+      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
       throw e;
     }
   }

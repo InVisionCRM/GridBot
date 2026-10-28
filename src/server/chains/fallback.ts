@@ -8,6 +8,7 @@
  * Activity log (see checkHealth).
  */
 import { FetchRequest, JsonRpcProvider } from 'ethers';
+import { redact } from '../bot/logger';
 import type { ChainReader, ReceiptLike } from '../bot/chain';
 import type { LogReader } from '../market/onchain';
 
@@ -78,8 +79,10 @@ export function isTransportError(e: unknown): boolean {
 /** One-line reason for logs and the UI: the RPC's own error when ethers wrapped it as "missing revert data". */
 export function rpcErrorText(e: unknown): string {
   const inner = (e as CallErr)?.info?.error;
-  if ((e as CallErr)?.code === 'CALL_EXCEPTION' && inner?.message) return `RPC error ${inner.code ?? ''} ${inner.message}`.replace(/\s+/g, ' ').trim().slice(0, 160);
-  return String((e as Error)?.message ?? e).slice(0, 160);
+  // Redacted before it is cut: ethers puts the request URL (which can hold an API key) in its messages, and a cut in
+  // the middle of a key would leave a piece no redaction matches.
+  if ((e as CallErr)?.code === 'CALL_EXCEPTION' && inner?.message) return redact(`RPC error ${inner.code ?? ''} ${inner.message}`).replace(/\s+/g, ' ').trim().slice(0, 160);
+  return redact(String((e as Error)?.message ?? e)).slice(0, 160);
 }
 
 /** Cooldown after an endpoint fails: 30 s, doubling per failure in a row, at most 10 min. */
