@@ -81,8 +81,8 @@ function DeskMenu({ s, nav, onGuide, onActivity, close }: { s: AnyObj; nav: Nav;
   );
 }
 
-/** Views that show crypto units only (no dollars): Home, Bots, the grid, trend and LP pages, and the smart/token trader page. */
-export const CRYPTO_ONLY = new Set(['home', 'bots', 'grid', 'trend', 'lp', 'auto']);
+/** Views that show crypto units only (no dollars, so no net-worth chip): Home, Bots, the grid, trend and LP pages, the smart/token trader page and Holdings. */
+export const CRYPTO_ONLY = new Set(['home', 'bots', 'grid', 'trend', 'lp', 'auto', 'holdings']);
 
 export function Header({
   s, view, nav, chain, setChain, showUsd, setShowUsd, connected, ver, holdings, onActivity, onGuide,

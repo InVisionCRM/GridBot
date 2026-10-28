@@ -16,7 +16,7 @@ import type { ReactNode } from 'react';
 import { chainOf, mk } from './chains';
 import { botFacts } from './deskStats';
 import { ago, dur, pct, px, qty } from './fmt';
-import { formatTokens, generatedOf, generatedPct, investedOf, quoteSymbolOf } from './generatedView';
+import { formatTokens, generatedOf, generatedPct, investedOf, quoteSymbolOf, shownGeneratedPct } from './generatedView';
 import { quoteSym, type AnyObj } from './model';
 import { isShortRun, runSpan } from './runRate';
 import { estimates } from '../shared/generated';
@@ -78,7 +78,9 @@ export function StatTable({ b, s, inRow = false, omit = [] }: { b: AnyObj; s: An
   // under a day the Generated row carries the run length ("over 8.8h"), so no separate Age row
   if (short && showNet && !skip.has('netSpan') && f.ageMs != null && f.ageMs > 0) skip.add('age');
   const span = short && !skip.has('netSpan') ? ` ${runSpan(f.ageMs)}` : '';
-  const share = skip.has('netPct') || gp == null ? '' : `${pct(gp, 2, true)} of what was put in`;
+  // the share is left out when it rounds to 0.0% (Gen. % reads "—" then, everywhere)
+  const gpShown = shownGeneratedPct(b);
+  const share = skip.has('netPct') || gpShown == null ? '' : `${pct(gpShown, 2, true)} of what was put in`;
   const netText = inRow
     ? `${share || '—'}${span}`
     : [formatTokens(gen?.tokens, true), share].filter(Boolean).join(' · ') + span;

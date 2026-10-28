@@ -13,7 +13,7 @@ import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewB
 import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
-import { formatTokenSum, formatTokens, generatedOf, generatedPct, generatedPctNote, investedOf } from './generatedView';
+import { formatTokenSum, formatTokens, generatedOf, generatedPctNote, investedOf, shownGeneratedPct } from './generatedView';
 import { showHalt } from './haltText';
 import { isShortRun, runSpan } from './runRate';
 import { estimates } from '../shared/generated';
@@ -114,31 +114,29 @@ function openedWhen(b: AnyObj, at: number, words: [start: string, move: string],
 }
 
 /**
- * The bot's pace (Kyle, #73): "So far" is Generated, net of costs — the same tokens as the headline and the Bots list's
- * Generated column (shared generatedTokens) — and the estimates are the shared estimates(): each token ÷ days run × 1, 7,
- * 365, hidden until it has run a day. Crypto units only.
+ * The bot's pace (Kyle, #73): only the estimates, the shared estimates() — Generated, net of costs, per token ÷ days run
+ * × 1, 7, 365. No "So far" line: that is Generated, already the headline (each figure once per screen). Under a day there
+ * are no estimates, so the card is left out.
  */
 function BotPace({ b }: { b: AnyObj }) {
   const gen = generatedOf({ ...b, kind: 'lp' });
   const runMs = typeof b.startedAt === 'number' ? Date.now() - b.startedAt : null;
   if (!gen || runMs == null || !(runMs > 0)) return null;
   const est = estimates(gen.tokens, runMs / 1000);
-  const pace = est.h24 && est.d7 && est.d365 ? { d1: est.h24, d7: est.d7, d365: est.d365 } : null;
+  if (!est.h24 || !est.d7 || !est.d365) return null;
+  const pace = { d1: est.h24, d7: est.d7, d365: est.d365 };
   return (
     <div className="card pace">
       <div className="card-head">
         <h3><L tip="Generated, net of costs, in each coin, carried forward at the pace it has had since the bot started: an estimate, not a forecast. Time the price spent outside the range is in the pace.">This bot's pace</L></h3>
-        <span className="muted small">since the start</span>
+        <span className="muted small">estimates</span>
       </div>
-      <p className="small pace-so-far">So far: <b>{gen.tokens.length ? formatTokenSum(gen.tokens, 5) : `0 ${b.quote}`}</b></p>
-      {!pace
-        ? <p className="small muted">The estimate (a day, 7 days, 365 days) shows once the bot has run a day.</p>
-        : <div className="pace-rows">{([['Est. a day', pace.d1], ['Est. 7 days', pace.d7], ['Est. 365 days', pace.d365]] as const).map(([label, x]) => (
-            <div key={label} className="pace-row">
-              <span className="k">{label}</span>
-              <b className={x.every((t) => t.amount >= 0) ? 'pos' : x.every((t) => t.amount <= 0) ? 'neg' : ''}>{formatTokenSum(x, 4)}</b>
-            </div>
-          ))}</div>}
+      <div className="pace-rows">{([['Est. a day', pace.d1], ['Est. 7 days', pace.d7], ['Est. 365 days', pace.d365]] as const).map(([label, x]) => (
+        <div key={label} className="pace-row">
+          <span className="k">{label}</span>
+          <b className={x.every((t) => t.amount >= 0) ? 'pos' : x.every((t) => t.amount <= 0) ? 'neg' : ''}>{formatTokenSum(x, 4)}</b>
+        </div>
+      ))}</div>
       <p className="muted small">If it keeps generating as it has since it started{b.inRange === false ? '. It is out of range now, so it earns nothing until the price is back inside or the range moves' : ''}.</p>
     </div>
   );
@@ -152,7 +150,7 @@ function BotPace({ b }: { b: AnyObj }) {
 const sameCoins = (a: unknown, c: unknown) => typeof a === 'number' && typeof c === 'number' && Math.abs(a - c) <= 1e-12 + 1e-6 * Math.abs(c);
 
 function NetDetails({ b, pnl, q, base }: { b: AnyObj; pnl: AnyObj; q: string; base: string }) {
-  const share = generatedPct(b);
+  const share = shownGeneratedPct(b); // "—" when it rounds to 0.0%
   const rows: [string, ReactNode][] = [
     // the base-coin fees are Generated's base amount above (no cost comes out of them): named, not repeated
     ['Fees earned', <><b className={cls(pnl.feeCoins.quote)}>{qty(pnl.feeCoins.quote, q, 5, false)}</b><span className="muted"> + the {base} in Generated above</span></>],

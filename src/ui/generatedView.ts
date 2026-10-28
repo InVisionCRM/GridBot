@@ -107,6 +107,15 @@ export function generatedPct(b: AnyObj): number | null {
   return v == null ? null : v / inv.amount;
 }
 
+/**
+ * Gen. % as shown (Kyle, #73): null — shown as "—" — when it rounds to 0.0%, so a near-zero share never reads as a figure
+ * ("0.0%", "−0.0%"). Sorting and Est. APR keep the exact generatedPct.
+ */
+export function shownGeneratedPct(b: AnyObj): number | null {
+  const x = generatedPct(b);
+  return x == null || Math.abs(x) < 0.0005 ? null : x;
+}
+
 /** Add token amounts by symbol, keeping first-seen order. */
 export function sumTokens(lists: (TokenQty[] | null | undefined)[]): TokenQty[] {
   const out = new Map<string, number>();

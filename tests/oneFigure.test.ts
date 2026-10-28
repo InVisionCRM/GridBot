@@ -11,15 +11,15 @@
  * "Seen on a desktop": the stat table's `in-row` cells are hidden (the row's columns show them). "Seen on a phone": the
  * row's value/% /age/APR/moves/fees columns are hidden (styles.css, max-width 860px) and the `in-row` cells show.
  * A closed <details> shows only its summary (a label); the LP page's net breakdown is checked closed and open.
- * One figure repeats by Kyle's own rule: the LP pace card's "So far" is Generated, net of costs (rule 4, "So far: 0.02 SPY
- * + 26.1 USDG"), the same tokens as the headline. It is left out of the repeat check here, and the tests below assert it
- * equals the headline and the Bots list's Generated column.
+ * No exemptions (Kyle, #73): the LP pace card has no "So far" line (that was Generated again), only the Est. rows.
+ * Holdings is covered too: coin amounts per chain, no dollar figure and no total across coins.
  */
 import { createElement as h, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DeskTable } from '../src/ui/DeskTable';
 import { GridDetail } from '../src/ui/GridDetail';
+import { Holdings } from '../src/ui/Holdings';
 import { Home } from '../src/ui/Home';
 import { LpDetail } from '../src/ui/LpDetail';
 import { StatTable } from '../src/ui/StatTable';
@@ -141,8 +141,6 @@ export function repeats(figs: Fig[]): string[] {
 const wrap = (el: ReactElement, usdOn: boolean) => h(ShowUsdCtx.Provider, { value: { on: usdOn, set: () => undefined } }, el);
 const noop = () => undefined;
 const desk = (open: string | null, usdOn: boolean) => renderToStaticMarkup(wrap(h(DeskTable, { s, bots, nav: noop, pause: noop, close: noop, initialOpen: open }), usdOn));
-/** The pace card's "So far" line (Generated again by Kyle's rule 4): out of the repeat check, asserted equal below. */
-const noSoFar = (html: string) => html.replace(/<p class="small pace-so-far">[\s\S]*?<\/p>/g, '');
 const lpPage = (id: string, usdOn: boolean) => renderToStaticMarkup(wrap(h(LpDetail, { s, id, events: [], ticks: null, nav: noop, act: noop, busy: false }), usdOn));
 /** The same page with its collapsed Details opened. */
 const opened = (html: string) => html.replace(/<details(?![^>]*\sopen)/g, '<details open=""');
@@ -192,12 +190,12 @@ describe('each figure once per screen', () => {
       });
       for (const id of ['lp-stonkd', 'lp-nvda']) {
         it(`LP page ${id} (${tag})`, () => {
-          const text = visibleText(noSoFar(lpPage(id, usdOn)), view);
+          const text = visibleText(lpPage(id, usdOn), view);
           expect(text).toMatch(/Generated, net of costs/);
           expect(repeats(figures(text))).toEqual([]);
         });
         it(`LP page ${id}, Details opened (${tag})`, () => {
-          const html = noSoFar(opened(lpPage(id, usdOn)));
+          const html = opened(lpPage(id, usdOn));
           expect(html).toMatch(/Costs paid/);
           const text = visibleText(html, view);
           expect(repeats(figures(text))).toEqual([]);
@@ -248,16 +246,17 @@ describe('LP page: headline Invested + Generated, the parts in Details (Kyle, #7
       expect(text).not.toMatch(/[−-]2\.55%/);
     });
   }
-  it('the pace card reads in coins: "So far:" is Generated, net of costs (1.1 NVDA + 172.4 USDG), not the position\'s gross fees', () => {
-    const text = visibleText(lpPage('lp-nvda', true), 'desktop');
-    expect(text).toMatch(/So far: 1\.1 NVDA \+ 172\.4 USDG /);
-    expect(text).not.toMatch(/0\.41 NVDA|88\.2 USDG/); // positionFees: gross, this position only
-    // a negative quote side reads as a minus, never "+ −"
-    expect(visibleText(lpPage('lp-stonkd', true), 'desktop')).toMatch(/So far: 0\.0531 SPY − 884\.83 USDG /);
+  it('the pace card has no "So far" line (Generated is the headline): only the Est. rows, never the position\'s gross fees', () => {
+    for (const id of ['lp-stonkd', 'lp-nvda']) {
+      const html = opened(lpPage(id, true));
+      expect(html, id).not.toMatch(/So far|pace-so-far/);
+      expect(visibleText(html, 'desktop'), id).not.toMatch(/0\.41 NVDA|88\.2 USDG/); // positionFees: gross, this position only
+    }
+    expect(lpPage('lp-nvda', true)).toMatch(/This bot&#x27;s pace/);
   });
   it('the pace estimates are Generated ÷ days run × 1, 7, 365 (shared estimates), hidden under a day', () => {
-    // STONKD has run 8.8h: no estimates
-    expect(lpPage('lp-stonkd', true)).toMatch(/The estimate \(a day, 7 days, 365 days\) shows once the bot has run a day/);
+    // STONKD has run 8.8h: no estimates, so no pace card at all
+    expect(lpPage('lp-stonkd', true)).not.toMatch(/This bot&#x27;s pace|class="card pace"|Est\. a day/);
     // NVDA LP has run 3.2d: 1.1 NVDA and 172.4 USDG ÷ 3.2 × 1, 7, 365
     const text = visibleText(lpPage('lp-nvda', true), 'desktop');
     expect(text).toMatch(/Est\. a day 0\.34\d* NVDA \+ 53\.88 USDG Est\. 7 days 2\.406 NVDA \+ 377\.1 USDG Est\. 365 days 125\.5 NVDA \+ 19,660 USDG/);
@@ -412,14 +411,13 @@ describe('So far == Generated column == LP headline; Gen. % and Est. APR from th
   };
 
   for (const b of cases) {
-    it(`${b.label}: pace "So far" == LP headline Generated == the Bots list's Generated column`, () => {
+    it(`${b.label}: LP headline Generated == the Bots list's Generated column, and no pace "So far" repeating it`, () => {
       const text = page(b);
-      const soFar = coins(between(text, /So far:/, /The estimate|Est\. a day|If it keeps/));
+      expect(text).not.toMatch(/So far/);
       const headline = coins(between(text, /Generated, net of costs i/, /Liquidity provided/));
       const column = coins(row(b).pnl);
       const want = truth(b);
       same(headline, want, 'headline');
-      same(soFar, want, 'So far');
       same(column, want, 'Generated column');
     });
     it(`${b.label}: Gen. % == the Generated column ÷ Invested (base part at the pool price), and Est. APR from it`, () => {
@@ -428,6 +426,8 @@ describe('So far == Generated column == LP headline; Gen. % and Est. APR from th
       const valued = [...column].reduce((a, [k, x]) => a + (k === 'USDG' ? x.v : x.v * b.price), 0);
       const tolV = [...column].reduce((a, [k, x]) => a + (k === 'USDG' ? x.tol : x.tol * b.price), 0);
       const inv = b.startValue;
+      // rounds to 0.0%: Gen. % reads "—" (Kyle, #73)
+      if (Math.abs(valued / inv) < 0.0005 - tolV / inv) { expect(r.pct.trim()).toBe('—'); return; }
       const shown = pctOf(r.pct);
       expect(Math.abs(shown.v - valued / inv), `${r.pct} vs ${valued}/${inv}`).toBeLessThanOrEqual(shown.tol + tolV / inv + 1e-12);
       // and never the engine net when that disagrees
@@ -443,10 +443,94 @@ describe('So far == Generated column == LP headline; Gen. % and Est. APR from th
     const html = renderToStaticMarkup(wrap(h(Home, { s: { ...s0, trends: [trend], lps: [still] }, nav: noop, holdings: null, act: noop }), false));
     expect(visibleText(html, 'desktop')).toMatch(/Best bot EMA NVDA\/USDG-HOOD 1h/);
   });
-  it('the NVDA LP still reads about 0.0% Gen. % and a small negative Est. APR, not +8.2% and +939.9%', () => {
+  it('the NVDA LP still: Gen. % rounds to 0.0% so reads "—", a small negative Est. APR, not +8.2% and +939.9%', () => {
     const r = row(still);
-    expect(r.pct.trim()).toMatch(/^[−-]?0\.0%$/);
+    expect(r.pct.trim()).toBe('—');
     expect(r.apr.trim()).toMatch(/^[−-]3\.\d%$/);
-    expect(page(still)).toMatch(/So far: 0\.00016568 NVDA − 1\.4052 USDG /);
+    expect(page(still)).toMatch(/Generated, net of costs i \+0\.00016568 NVDA −1\.4052 USDG/);
+    expect(page(still)).not.toMatch(/So far/);
+  });
+  it('Gen. % that rounds to 0.0% shows nowhere: Bots row (desktop and phone), the row opened, the LP Details, grid and trend pages', () => {
+    const tiny = { ...still, id: 'lp-tiny', label: 'Tiny LP' };
+    const flatGrid = { ...grid, id: 'g-flat', pnl: { ...grid.pnl, realized: 0.0004, gas: 0 } }; // 0.0004 ÷ 2,000 ≈ 0.00002%
+    const flatTrend = { ...trend, id: 't-flat', pnl: { ...trend.pnl, realized: 0.2, gas: 0 } }; // 0.2 ÷ 1,000 = 0.02%
+    const sx = { ...s0, grids: [flatGrid], trends: [flatTrend], lps: [tiny] };
+    const zero = /(?<![±\d.])[+\-−]?0\.0+%/; // a Gen. % of 0.0% (not a range width like ±10.00%)
+    for (const open of [null, tiny.id, flatGrid.id, flatTrend.id]) {
+      const html = renderToStaticMarkup(wrap(h(DeskTable, { s: sx, bots: [{ ...flatGrid, kind: 'grid' }, { ...flatTrend, kind: 'trend' }, tiny], nav: noop, pause: noop, close: noop, initialOpen: open }), false));
+      for (const view of ['desktop', 'phone'] as View[]) expect(visibleText(html, view), `${open} ${view}`).not.toMatch(zero);
+      expect(html).toMatch(/<span class="desk-pct"[^>]*><span class="">—<\/span><\/span>/);
+    }
+    const lp = opened(renderToStaticMarkup(wrap(h(LpDetail, { s: sx, id: tiny.id, events: [], ticks: null, nav: noop, act: noop, busy: false }), false)));
+    expect(lp).toMatch(/<th>Generated as a share of what you put in<\/th><td class="mono">—<\/td>/);
+    expect(visibleText(lp, 'desktop')).not.toMatch(zero);
+    for (const el of [h(GridDetail, { s: sx, id: flatGrid.id, events: [], ticks: null, nav: noop, act: noop, busy: false }), h(TrendDetail, { s: sx, id: flatTrend.id, events: [], ticks: null, nav: noop, act: noop, busy: false })]) {
+      const html = opened(renderToStaticMarkup(wrap(el, false)));
+      expect(html).toMatch(/Generated/);
+      expect(visibleText(html, 'desktop')).not.toMatch(zero);
+      expect(html).not.toMatch(/of what was put in/);
+    }
+  });
+});
+
+// ---------------------------------------------------------------- Holdings (Kyle, #73): coin amounts only
+const coin = (chainId: number, symbol: string, amount: number, usdEach: number | null, address: string | null = `0x${symbol}`) =>
+  ({ chainId, address, symbol, decimals: 18, amount, usdEach, usd: usdEach == null ? null : amount * usdEach });
+const ref = (id: string, kind: 'grid' | 'lp', name: string) => ({ id, kind, name, status: 'running', mode: 'live' as const });
+const holdingsSnap = {
+  address: '0x1234567890abcdef1234567890abcdef12345678', at: NOW - 60_000, hasSigner: true,
+  netWorthUsd: 61_234.5, netWorthExDustUsd: 61_200, unpriced: 0, walletUsd: 40_000, freeUsd: 38_000, botsUsd: 2_000, lpUsd: 21_000, feesUsd: 34.5,
+  overdrawn: false,
+  chains: [{ chainId: 4663, name: 'Robinhood Chain', short: 'HOOD', color: '#ccff00', address: null, usd: 61_000, walletUsd: 40_000, botsUsd: 2_000, lpUsd: 21_000, feesUsd: 34.5 }],
+  wallet: [
+    { coin: coin(4663, 'USDG', 34_000, 1), dust: false, bots: [{ bot: ref('g-eth', 'grid', 'ETH grid'), amount: 1_200 }] },
+    { coin: coin(4663, 'ETH', 2.5, 2_348.87, null), dust: false, bots: [] },
+    { coin: coin(4663, 'SPY', 0.75, 771.33), dust: false, bots: [] },
+    { coin: coin(369, 'PLS', 1_234_567, 0.00003, null), dust: false, bots: [] },
+    { coin: coin(4663, 'NVDA', 0.00001, 217.97), dust: true, bots: [] },
+  ],
+  positions: [{
+    chainId: 4663, kind: 'v3', dexName: 'Uniswap V3', pool: '0xpool', feeLabel: '0.05%', tokenId: '77', range: 'in',
+    token0: coin(4663, 'SPY', 21.3, 771.33), token1: coin(4663, 'USDG', 16_950.2, 1), usd: 33_379.33, partial: false, dust: false,
+    bot: ref('lp-stonkd', 'lp', 'STONKD LP #2'), stranded: false, idleNote: null,
+  }],
+  fees: [{
+    chainId: 4663, dexName: 'Uniswap V3', pool: '0xpool', feeLabel: '0.05%', tokenId: '77', token0: coin(4663, 'SPY', 0.0102, 771.33),
+    token1: coin(4663, 'USDG', 4.31, 1), usd: 12.18, partial: false, dust: false, bot: null, stranded: false, leftover: false,
+  }],
+  bots: [{ bot: ref('g-eth', 'grid', 'ETH grid'), chainId: 4663, coins: [coin(4663, 'USDG', 1_200, 1), coin(4663, 'ETH', 0.4, 2_348.87, null)], usd: 2_139.5, dust: false }],
+  errors: [], how: ['How it is counted.'],
+};
+const sH = { ...s0, chains: [...s0.chains, { id: 369, key: 'pulse', name: 'PulseChain', short: 'PLS', color: '#f0f', status: 'live' }] };
+const holdingsPage = (snap: unknown = holdingsSnap) =>
+  opened(renderToStaticMarkup(h(Holdings, { s: sH, snap: snap as never, loading: false, error: null, reload: noop, nav: noop })));
+
+describe("Holdings: coin amounts per chain, no '$', no cross-coin total, each figure once (Kyle, #73)", () => {
+  it('shows each coin in its own units, stablecoins as "34,000 USDG"', () => {
+    const text = visibleText(holdingsPage(), 'desktop');
+    for (const want of ['34,000 USDG', '2.5 ETH', '0.75 SPY', '1,234,570 PLS', '21.3 SPY · 16,950.2 USDG', '0.0102 SPY · 4.31 USDG', '1,200 USDG · 0.4 ETH']) expect(text).toContain(want);
+    expect(text).toMatch(/Robinhood Chain[\s\S]*PulseChain|PulseChain[\s\S]*Robinhood Chain/);
+  });
+  it("no '$' anywhere (text, tooltips, labels), and no dollar total: not the net worth, a chain's, the fees' or the grids'", () => {
+    for (const html of [holdingsPage(), renderToStaticMarkup(h(Holdings, { s: sH, snap: holdingsSnap as never, loading: false, error: null, reload: noop, nav: noop }))]) {
+      expect(hits(html)).toEqual([]);
+      const text = visibleText(html, 'desktop');
+      for (const usd of ['61,234', '61,200', '61,000', '40,000', '33,379', '2,139', '12.18', '34.5']) expect(text, usd).not.toContain(usd);
+      expect(text).not.toMatch(/\b\d+(\.\d+)?K\b/); // full amounts, not "34K"
+    }
+  });
+  for (const view of ['desktop', 'phone'] as View[]) {
+    it(`each figure once (${view}), folds opened`, () => {
+      expect(repeats(figures(visibleText(holdingsPage(), view)))).toEqual([]);
+    });
+  }
+  it("the header's dollar net-worth chip is off on Holdings, as on the other crypto-only views", async () => {
+    const { CRYPTO_ONLY } = await import('../src/ui/Header');
+    expect(CRYPTO_ONLY.has('holdings')).toBe(true);
+  });
+  it('paper mode (no wallet): still no dollar figure', () => {
+    const paper = { ...holdingsSnap, hasSigner: false, address: null, wallet: [], positions: [], fees: [], bots: [], chains: [] };
+    expect(hits(holdingsPage(paper))).toEqual([]);
+    expect(visibleText(holdingsPage(paper), 'desktop')).toMatch(/Paper mode/);
   });
 });

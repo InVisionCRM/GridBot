@@ -6,7 +6,7 @@ import { chainOf, RefreshCtx } from './chains';
 import { botFacts } from './deskStats';
 import { estYearly, isShortRun } from './runRate';
 import { cls, dur, pct, px, qty } from './fmt';
-import { formatTokens, generatedOf, generatedPct, generatedPctNote, investedOf, quoteSymbolOf } from './generatedView';
+import { formatTokens, generatedOf, generatedPct, generatedPctNote, investedOf, quoteSymbolOf, shownGeneratedPct } from './generatedView';
 import { ChainMark, TokenMark } from './icons';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { botSpark } from './series';
@@ -256,6 +256,8 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   // Generated, net of costs, in tokens (generated.ts); crypto units only. Token traders have no such field yet.
   const gen = generatedOf(b);
   const genPct = generatedPct(b);
+  // Gen. % on screen: "—" when it rounds to 0.0% (Est. APR below still works from the exact share)
+  const genPctShown = shownGeneratedPct(b);
   const inv = investedOf(b);
   // one line per coin, each in its own colour, so "+0.02 SPY" and "−907.2 USDG" never wrap into each other
   // nothing generated yet (the shared module leaves zero amounts out): 0 in the quote coin
@@ -287,10 +289,10 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           <span className="desk-val">{inv ? formatTokens([inv], false) : '—'}</span>
           <span className="desk-pnl" title={noGen}>
             {money}
-            {!metrics && <small className={cls(genPct)} title={generatedPctNote(b)}>{pct(genPct, 1, true)}</small>}
+            {!metrics && <small className={cls(genPctShown)} title={generatedPctNote(b)}>{pct(genPctShown, 1, true)}</small>}
           </span>
           {metrics && facts && <>
-            <span className="desk-pct" title={generatedPctNote(b)}><span className={cls(genPct)}>{pct(genPct, 1, true)}</span></span>
+            <span className="desk-pct" title={generatedPctNote(b)}><span className={cls(genPctShown)}>{pct(genPctShown, 1, true)}</span></span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
             <span className="desk-apr" title={isShortRun(facts.ageMs) ? 'Est. APR shows once the bot has run a day. Until then Gen. % is what it generated over the run, and Age its length.' : 'An estimate: Gen. % carried over a year at the same pace. Not a forecast.'}>{isShortRun(facts.ageMs)
               // under a day: no yearly rate; Gen. % and Age beside it already say generated-over-run (each figure once)
@@ -326,7 +328,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           </span>
           <span className="bot-pnl" title={noGen}>
             {money}
-            <small className={cls(genPct)} title={generatedPctNote(b)}>{pct(genPct, 1, true)}</small>
+            <small className={cls(genPctShown)} title={generatedPctNote(b)}>{pct(genPctShown, 1, true)}</small>
           </span>
         </button>
         <RowMenu b={b} nav={nav} pause={pause} close={close} />
