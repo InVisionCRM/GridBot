@@ -22,7 +22,7 @@ import type { SharedNonce, TxGate } from './txGate';
 import type { Emit } from './activity';
 import { pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
-import { RECENTER_AFTER_MS, RECENTER_COOLDOWN_MS, type RecenterState } from '../../live/recenter';
+import { RECENTER_AFTER_MS, shouldRecenter, type RecenterState } from '../../live/recenter';
 import { noKey } from '../words';
 import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
 
@@ -529,12 +529,11 @@ export class GridEngine {
   private async followUp(price: number) {
     const r = this.state.recenter, c = this.state.config;
     if (!r?.enabled || !c) return;
-    if (price <= c.upperPrice) { r.aboveSince = null; return; }
     const now = this.now();
-    r.aboveSince ??= now;
-    if (now - r.aboveSince < RECENTER_AFTER_MS) return;
-    if (r.lastAt != null && now - r.lastAt < RECENTER_COOLDOWN_MS) return;
-    if (this.state.inFlight || this.state.queue.length || this.state.intervals.some((i) => i.status !== 'inactive' && i.status !== 'waitingBuy')) return;
+    const flat = !this.state.inFlight && this.state.queue.length === 0 && this.state.intervals.every((i) => i.status === 'inactive' || i.status === 'waitingBuy');
+    const d = shouldRecenter(r, price, c.upperPrice, now, flat);
+    r.aboveSince = d.aboveSince;
+    if (!d.move) return;
     const band = (c.upperPrice - c.lowerPrice) / (c.upperPrice + c.lowerPrice);
     const next: GridConfig = { ...c, lowerPrice: +(price * (1 - band)).toPrecision(6), upperPrice: +(price * (1 + band)).toPrecision(6) };
     const { summary: econ } = await gridEconomics(this.hub.quoter(this.state.stable), next, this.d.approval ?? 'exact');

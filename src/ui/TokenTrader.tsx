@@ -75,6 +75,13 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       </div>
 
       <div className="tt-row" style={{ marginTop: 10 }}>
+        <label className="check"><input type="checkbox" checked={o.enforceHolderCheck === true} onChange={(e) => void save({ enforceHolderCheck: e.target.checked })} /><span>Holder concentration</span></label>
+        <label className="smart-field"><span className="k">Max holder %</span><input value={Math.round((o.maxHolderShare ?? 0.1) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxHolderShare: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxHolderShare: o.maxHolderShare })} /></label>
+        <label className="smart-field"><span className="k">Max top 10 %</span><input value={Math.round((o.maxTop10Share ?? 0.4) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxTop10Share: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxTop10Share: o.maxTop10Share })} /></label>
+        <label className="smart-field"><span className="k">Min coverage %</span><input value={Math.round((o.minHolderCoverage ?? 0.9) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, minHolderCoverage: numIn(e.target.value) / 100 } })} onBlur={() => void save({ minHolderCoverage: o.minHolderCoverage })} /></label>
+        <span className="muted small">Off unless checked, and off changes nothing. When on, safe and medium skip a largest holder over the max holder % (default 10) or a top 10 over the max top 10 % (default 40), after ignoring pools, burn addresses and known lockers. No holder source, or a failed read, skips those modes and says which.</span>
+      </div>
+      <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={o.enforceSizeImpact === true} onChange={(e) => void save({ enforceSizeImpact: e.target.checked })} /><span>Cap impact at the trade size</span></label>
         <span className="muted small">Off unless checked, and off changes nothing. The impact cap above still sizes the trade. When this is on, that sized trade is quoted again (V3 through the quoter) and skipped if the move is over the trade-size cap. The default cap is 1%. A quote that fails skips the buy.</span>
       </div>

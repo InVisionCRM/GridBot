@@ -21,6 +21,7 @@ import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { feesOwed } from '../../live/v3Liquidity';
 import { gasInBase, LP_BAND, LP_GAS, LP_MIN_SWAP_SHARE } from '../../market/lp';
+import { lpShouldMove } from '../../market/lpMove';
 import { DEFAULT_MAX_POOL_SHARE } from '../../market/poolSize';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
@@ -566,9 +567,12 @@ export class LpEngine {
   private async watchRange(pool: LpPool, v: PoolView) {
     const p = this.state.position!, c = this.state.config!;
     const out = v.tick < p.tickLower || v.tick >= p.tickUpper;
+    const now = this.now();
     if (!out) { this.state.outSince = null; return; }
-    this.state.outSince ??= this.now();
-    if (!c.rerange || await this.moveBlock(pool, v, c.bandPct)) return;
+    const blocked = !c.rerange || (await this.moveBlock(pool, v, c.bandPct)) != null;
+    const d = lpShouldMove({ rerange: c.rerange, outOfRange: true, blocked, now, outSince: this.state.outSince, lastMoveAt: this.state.lastRerangeAt });
+    this.state.outSince = d.outSince;
+    if (!d.move) return;
     this.state.step = { action: 'rerange', stage: 'exit', tries: 0 };
     this.ev('range', `Liquidity ${this.label}: price ${v.price.toPrecision(6)} is outside ${p.lower.toPrecision(6)}–${p.upper.toPrecision(6)}; moving the range to the price`, { level: 'info', notify: true });
   }

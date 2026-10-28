@@ -114,7 +114,7 @@ export class PoolSearch {
     for (const p of pairs.values()) {
       const cfg = bySlug.get(p.chainId)!;
       const dex = cfg.dexes.find((d) => d.screener === `${p.dexId}:${(p.labels?.[0] ?? '').toLowerCase()}`);
-      if (!dex) continue;
+      if (!dex || (dex.kind !== 'v2' && dex.kind !== 'v3')) continue;
       const side = this.orient(cfg.id, p.baseToken, p.quoteToken, known.get(cfg.id)!);
       if (!side) continue;
       out.push({
