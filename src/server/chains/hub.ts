@@ -10,9 +10,12 @@ import { Quoter, type ChainReader, type TxSender } from '../bot/chain';
 import type { Store } from '../bot/store';
 import type { SharedNonce, TxGate } from '../bot/txGate';
 import { ChainRuntime } from './runtime';
-import { discoverPools, type DiscoveredPool } from '../dex/discovery';
+import { discoverPools, rankPools, type DiscoveredPool } from '../dex/discovery';
 import { readTokenMeta, type TokenMeta } from '../dex/tokens';
 import { classify, depthAt, hopFor, simulateRoundTrip, type ProbeResult } from '../dex/safety';
+import { assessHook } from '../dex/v4Hooks';
+import { V4_CURRENCY_MISMATCH, v4PoolMatches, v4QuoteForPool } from '../dex/v4';
+import { simulateV4RoundTrip, v4Leg } from '../dex/v4Safety';
 import { isInconclusive } from '../bot/taxWatch';
 import { sameAddr } from '../dex/types';
 import { toUnits } from '../../live/swapMath';
@@ -39,7 +42,27 @@ export interface InspectResult {
   existing: string | null;
 }
 
+/** How many tries a live start's safety check gets (Hub.liveCheck). */
+export const LIVE_CHECK_TRIES = 3;
+/** One safety-check try is cut off after this long (counts as not completed). */
+export const SAFETY_TRY_TIMEOUT_MS = 20_000;
+/** What a Start anyway went ahead on (audited on the bot: who, when and why it was blocked). */
+export interface StartAnywayInfo { blockedBy: string; tries: number; lastKnownAt: number; lastKnownRisk: SafetyReport['risk'] }
+/** A live start whose safety check completed and failed. There is no Start anyway for this. */
+export class SafetyBlocked extends Error { readonly code = 'SAFETY_BLOCKED'; }
+/** A live start whose safety check couldn't complete (RPC trouble). `canStartAnyway`: the last measured report passed. */
+export class SafetyIncomplete extends Error {
+  readonly code = 'SAFETY_INCOMPLETE';
+  constructor(msg: string, readonly blockedBy: string, readonly canStartAnyway: boolean) { super(msg); }
+}
+
+/** One safety re-check's claim on writing the stored report. `cancelled`: its caller gave up (timed out). */
+export interface CheckTicket { cancelled: boolean }
+
 export class Hub {
+  /** Safety re-checks get increasing numbers; per market, the number of the last one that wrote the stored report. */
+  private checkSeq = 0;
+  private readonly wroteSeq = new Map<string, number>();
   readonly spots: Record<string, number> = {};
   readonly spotAt: Record<string, number> = {};
   private readonly rts = new Map<number, ChainRuntime>();
@@ -48,7 +71,7 @@ export class Hub {
   private custom: CustomFile = { version: 1, tokens: [], markets: [] };
   private tvlCache = new Map<string, { at: number; v: number | null }>();
 
-  constructor(private readonly o: { runtimes: ChainRuntime[]; markets: MarketDef[]; legacyNet: LiveNetwork; custom?: Store<CustomFile>; now?: () => number }) {
+  constructor(private readonly o: { runtimes: ChainRuntime[]; markets: MarketDef[]; legacyNet: LiveNetwork; custom?: Store<CustomFile>; now?: () => number; safetyRetryMs?: number[]; safetyTryTimeoutMs?: number }) {
     for (const r of o.runtimes) this.rts.set(r.cfg.id, r);
     // Shallow copies: the hub owns its defs (pool switches replace d.pool in place so live Quoters follow).
     for (const m of o.markets) if (this.rts.has(m.chainId)) this.defs.set(m.key, { ...m });
@@ -292,7 +315,21 @@ export class Hub {
     let best: { q: (typeof quoteOptions)[number]; pools: DiscoveredPool[]; usd: number | null } | null = null;
     for (const q of candidates) {
       const usd = await this.quoteTokenUsd(rt.cfg.id, q);
-      const pools = await discoverPools(rt, base, { address: q.address, symbol: q.symbol, decimals: await this.decimalsOf(rt, q.address) }, { refQuote: usd ? 1000 / usd : 1000, quoteUsd: usd });
+      const quoteTok = { address: q.address, symbol: q.symbol, decimals: await this.decimalsOf(rt, q.address) };
+      const disc = { refQuote: usd ? 1000 / usd : 1000, quoteUsd: usd };
+      const pools = await discoverPools(rt, base, quoteTok, disc);
+      // A wrapped quote is either currency on V4. Search address(0) as well, and keep a pool's quoting row.
+      if (sameAddr(q.address, rt.cfg.wrappedNative.address)) {
+        const nativeHits = await discoverPools(rt, base, { ...quoteTok, native: true }, { ...disc, onlyKind: 'v4' });
+        for (const p of nativeHits) {
+          if (p.kind !== 'v4') continue;
+          const id = `${p.dex}:${p.address.toLowerCase()}`;
+          const prev = pools.findIndex((x) => `${x.dex}:${x.address.toLowerCase()}` === id);
+          if (prev >= 0) { if (pools[prev].refOut == null && p.refOut != null) pools[prev] = p; }
+          else pools.push(p);
+        }
+        pools.splice(0, pools.length, ...rankPools(pools));
+      }
       const top = pools[0]?.tvlUsd ?? pools[0]?.tvlQuote ?? -1;
       const cur = best ? best.pools[0]?.tvlUsd ?? best.pools[0]?.tvlQuote ?? -1 : -2;
       if (!best || (pools.length && top > cur)) best = { q, pools, usd };
@@ -304,6 +341,10 @@ export class Hub {
     if (req.pool && !chosen) throw new Error(`Pool ${req.pool} not found for ${token.symbol}/${q.symbol}`);
     const result: InspectResult = { chainId: rt.cfg.id, token, quoteOptions, quote, pools, chosen, draft: null, safety: null, probe: null, existing };
     if (!chosen || chosen.mid == null) return result;
+    if (chosen.kind === 'v4' && !v4PoolMatches(chosen, base, v4QuoteForPool(chosen, { address: quote.address }, rt.cfg.wrappedNative.address))) {
+      if (req.pool) throw new Error(`Pool ${req.pool} ${V4_CURRENCY_MISMATCH}`);
+      return result;
+    }
 
     const quoteUsd = best!.usd;
     const baseUsd = quoteUsd != null ? chosen.mid * quoteUsd : null;
@@ -311,7 +352,7 @@ export class Hub {
     const draft: MarketDef = {
       key: marketKey(rt.cfg, token.symbol, q.symbol, (k) => this.defs.has(k)), chainId: rt.cfg.id,
       base, quote: { address: quote.address, symbol: quote.symbol, decimals: quote.decimals, name: quote.name },
-      pool: { dex: chosen.dex, kind: chosen.kind, address: chosen.address, feeBps: chosen.feeBps, ...(chosen.feeTier != null ? { feeTier: chosen.feeTier } : {}) },
+      pool: takenPool(chosen),
       probe, quoteKind: q.kind, custom: true, candlePool: chosen.address, addedAt: this.now(),
     };
     result.draft = draft;
@@ -319,9 +360,14 @@ export class Hub {
     result.safety = report;
     result.probe = pr ? { stage: pr.stage, err: pr.err, quoteIn: pr.quoteIn.toString(), expectedBuy: pr.expectedBuy.toString(), gotBuy: pr.gotBuy.toString(), transferSent: pr.transferSent.toString(), transferGot: pr.transferGot.toString(), sellIn: pr.sellIn.toString(), expectedSell: pr.expectedSell.toString(), gotSell: pr.gotSell.toString(), gasBuy: Number(pr.gasBuy), gasSell: Number(pr.gasSell) } : null;
     draft.safety = report;
-    // TOKEN/WPLS (or /WETH): buys spend the native coin the wallet holds, wrapped inside the swap, like the flipped
-    // HEX/PLS market. Set after the safety probe, which measures the token itself.
-    if (sameAddr(draft.quote.address, rt.cfg.wrappedNative.address)) draft.quote = { ...draft.quote, symbol: rt.cfg.nativeSymbol, native: true };
+    // TOKEN/WPLS (or /WETH): V2/V3 wrap the native coin inside the router, like the flipped HEX/PLS market.
+    // Set after the safety probe, which measures the token itself.
+    // V4 is exact. The market currency is the pool's: address(0) becomes native, the wrapped address stays WETH.
+    if (sameAddr(draft.quote.address, rt.cfg.wrappedNative.address)) {
+      const v4 = draft.pool.v4;
+      const v4Wrapped = draft.pool.kind === 'v4' && !!v4 && [v4.currency0, v4.currency1].some((c) => sameAddr(c, rt.cfg.wrappedNative.address));
+      if (!v4Wrapped) draft.quote = { ...draft.quote, symbol: rt.cfg.nativeSymbol, native: true };
+    }
     return result;
   }
 
@@ -384,19 +430,35 @@ export class Hub {
       let prep = null;
       if (!sameAddr(d.quote.address, wn)) {
         const pools = await discoverPools(rt, { address: wn, symbol: 'W', decimals: 18 }, d.quote, { refQuote: nat ? 20 / (quoteUsd ?? 1) : 1, quoteUsd });
-        const p = pools.find((x) => x.refOut != null);
+        // Prep is a V2/V3 hop inside the probe. Skip a V4 pool here so the funding route stays the one V2/V3 would have used.
+        const p = pools.find((x) => x.refOut != null && x.kind !== 'v4');
         if (!p) throw new Error(`no ${rt.cfg.wrappedNative.symbol}/${d.quote.symbol} pool to fund the simulation`);
         prep = hopFor(rt.adapter(p.dex), p, wn, d.quote.address);
       }
-      probe = await simulateRoundTrip(rt, { weth: wn, wethIn, prep, buy: hopFor(ad, d.pool, d.quote.address, d.base.address), sell: hopFor(ad, d.pool, d.base.address, d.quote.address) });
+      if (d.pool.kind === 'v4') {
+        probe = await simulateV4RoundTrip(rt, {
+          weth: wn, wethIn, prep,
+          buy: v4Leg(d.pool, d.quote.address, d.base.address, ad.cfg, wn),
+          sell: v4Leg(d.pool, d.base.address, d.quote.address, ad.cfg, wn),
+        });
+      } else {
+        probe = await simulateRoundTrip(rt, { weth: wn, wethIn, prep, buy: hopFor(ad, d.pool, d.quote.address, d.base.address), sell: hopFor(ad, d.pool, d.base.address, d.quote.address) });
+      }
     } catch (e) {
       simError = (e as { shortMessage?: string }).shortMessage ?? (e as Error).message;
       simError = simError.slice(0, 140);
     }
-    return {
-      report: classify({ probe, simError, proxy: token.proxy, depth, liquidityUsd, now: this.now(), poolKind: d.pool.kind, flags: token.flags ?? null, decimals: token.decimals }),
-      probe,
-    };
+    const report = classify({ probe, simError, proxy: token.proxy, depth, liquidityUsd, now: this.now(), poolKind: d.pool.kind, flags: token.flags ?? null, decimals: token.decimals });
+    if (d.pool.kind === 'v4') {
+      const decision = assessHook(d.pool.v4?.hooks, ad.cfg.hookAllowlist);
+      if (!decision.allowed) {
+        report.risk = 'blocked';
+        report.liveAllowed = false;
+        report.taxMode = 'blocked';
+        report.reasons = [decision.reason ?? 'V4 hook rejected', ...report.reasons];
+      }
+    }
+    return { report, probe };
   }
 
   /** Persist a custom market (re-inspects server-side; the client's data is never trusted). */
@@ -431,17 +493,25 @@ export class Hub {
    * Being stale only labels the report: `liveAllowed` and the taxes keep their last known values, and nothing here
    * pauses or stops a bot.
    */
-  async recheck(key: string, o: { keepMeasured?: boolean } = {}): Promise<SafetyReport> {
+  async recheck(key: string, o: { keepMeasured?: boolean; ticket?: CheckTicket } = {}): Promise<SafetyReport> {
     key = unflipKey(key);
     const d = this.def(key);
     if (!d.safety) throw new Error(`${this.label(key)} has no safety check (built-in PulseChain market)`);
+    // Late answers never overwrite: a check whose caller gave up on it (liveCheck timed it out) or that started
+    // before the one whose answer was already stored is discarded (#58 review). Only the stored report is protected;
+    // the caller (if still waiting) gets its own result.
+    const seq = ++this.checkSeq;
+    const late = () => !!o.ticket?.cancelled || seq < (this.wroteSeq.get(key) ?? 0);
+    const wrote = () => { this.wroteSeq.set(key, seq); };
     let r: InspectResult;
     try {
       r = await this.inspect({ chainId: d.chainId, address: d.base.address, quote: d.quote.address, pool: d.pool.address });
     } catch (e) {
-      this.markStale(key, `re-check failed: ${(e as Error).message}`);
+      if (!late()) { this.markStale(key, `re-check failed: ${(e as Error).message}`); wrote(); }
       throw e;
     }
+    if (late()) return r.safety ?? d.safety;
+    wrote();
     const fresh = r.safety ?? null;
     if (!fresh) return this.markStale(key, r.chosen ? 'the re-check measured nothing' : 'the re-check found no usable pool');
     if (o.keepMeasured && isInconclusive(fresh) && !isInconclusive(d.safety)) {
@@ -453,6 +523,58 @@ export class Hub {
     this.persist();
     if (was) this.onSafetyFresh?.(key, fresh);
     return fresh;
+  }
+
+  /**
+   * The safety check a LIVE start needs: a fresh check that completes. Up to 3 tries, waiting `safetyRetryMs` between
+   * them (each read already rotates across the chain's RPCs, #41). A try "doesn't complete" when it throws, returns no
+   * report, or its simulation didn't run (and found no honeypot / paused flag); the stored measured report is then kept,
+   * labelled stale (keepMeasured).
+   * - Completed and passing → returned.
+   * - Completed and failing (honeypot, tax over the cap, paused, thin pool, …) → SafetyBlocked. Never bypassable.
+   * - Didn't complete after 3 tries → SafetyIncomplete. `startAnyway` lets the start go ahead on the last known report,
+   *   but only when that report was measured and passed; a token that never passed a check can't be started live.
+   */
+  async liveCheck(key: string, o: { startAnyway?: boolean; deadlineMs?: number } = {}): Promise<{ report: SafetyReport; override: StartAnywayInfo | null }> {
+    key = unflipKey(key);
+    const label = this.label(key);
+    const waits = this.o.safetyRetryMs ?? [1000, 2000];
+    // Each try is cut off after safetyTryTimeoutMs (a hung RPC can't hold a start, resume or boot); `deadlineMs` caps
+    // all tries together (boot). A try cut off counts as not completed.
+    const tryMs = this.o.safetyTryTimeoutMs ?? SAFETY_TRY_TIMEOUT_MS;
+    const end = o.deadlineMs != null ? Date.now() + o.deadlineMs : Infinity;
+    let why = 'no answer', tries = 0;
+    for (let n = 0; n < LIVE_CHECK_TRIES; n++) {
+      if (n > 0 && waits[n - 1]) await new Promise((r) => setTimeout(r, Math.min(waits[n - 1], Math.max(0, end - Date.now()))));
+      const left = Math.min(tryMs, end - Date.now());
+      if (left <= 0) { why = `${why}; out of time`; break; }
+      tries++;
+      let r: SafetyReport;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      // Promise.race doesn't stop the slow try; the ticket makes its late answer a no-op (never stored).
+      const ticket: CheckTicket = { cancelled: false };
+      try {
+        r = await Promise.race([
+          this.recheck(key, { keepMeasured: true, ticket }),
+          new Promise<never>((_, rej) => { timer = setTimeout(() => { ticket.cancelled = true; rej(new Error(`safety check timed out after ${Math.round(left / 1000)} s`)); }, left); }),
+        ]);
+      } catch (e) {
+        why = (e as Error).message.slice(0, 160);
+        if (/safety check timed out/.test(why) && this.def(key).safety) this.markStale(key, why);
+        continue;
+      } finally { clearTimeout(timer); }
+      if (r.stale) { why = r.stale.why; continue; }
+      if (isInconclusive(r) && r.honeypot !== true && r.paused !== true) { why = (r.reasons[0] ?? 'simulation unavailable').slice(0, 160); continue; }
+      if (!r.liveAllowed) throw new SafetyBlocked(`LIVE blocked — ${label} safety ${r.risk}: ${r.reasons.join(' ') || 'failed the safety check'}`);
+      return { report: r, override: null };
+    }
+    const known = this.def(key).safety ?? null;
+    const canStartAnyway = !!known && !isInconclusive(known) && known.liveAllowed;
+    if (o.startAnyway && canStartAnyway) return { report: known!, override: { blockedBy: why, tries, lastKnownAt: known!.at, lastKnownRisk: known!.risk } };
+    const tail = canStartAnyway
+      ? `It last passed on ${new Date(known!.at).toISOString()} (${known!.risk} risk): you can Start anyway.`
+      : 'It has never passed a safety check, so it can\'t be started live.';
+    throw new SafetyIncomplete(`LIVE blocked — couldn't complete the safety check for ${label} after ${tries} ${tries === 1 ? 'try' : 'tries'} (${why}). ${tail}`, why, canStartAnyway);
   }
 
   /** Keep the stored report's values, label them stale. */
@@ -472,7 +594,8 @@ export class Hub {
   marketOnPool(chainId: number, dex: string, pool: string, a: string, b: string): string | null {
     const pair = (x: string, y: string) => (sameAddr(x, a) && sameAddr(y, b)) || (sameAddr(x, b) && sameAddr(y, a));
     return this.byChain(chainId).find((m) => m.pool.dex === dex
-      && (m.pool.kind === 'v3' ? sameAddr(m.pool.address, pool) : pair(m.base.address, m.quote.address)))?.key ?? null;
+      && (m.pool.kind === 'v4' ? sameAddr(m.pool.address, pool)
+        : m.pool.kind === 'v3' ? sameAddr(m.pool.address, pool) : pair(m.base.address, m.quote.address)))?.key ?? null;
   }
   /** This app's market for two coins on any pool, turned to spend `quote`; null when it has none */
   marketForCoins(chainId: number, base: string, quote: string): string | null {
@@ -520,7 +643,7 @@ export class Hub {
     key = unflipKey(key);
     this.tvlCache.delete(key + '~');
     const d = this.def(key);
-    if (!d.candleKind) d.candleKind = d.pool.kind;
+    if (!d.candleKind && d.pool.kind !== 'v4') d.candleKind = d.pool.kind;
     if (req.reset) {
       if (d.custom) throw new Error('Custom markets have no registry default; pick a pool');
       const orig = this.o.markets.find((m) => m.key === key);
@@ -534,8 +657,9 @@ export class Hub {
     const choice = await this.poolOptions(key);
     const pick = req.auto ? choice.best : choice.pools.find((p) => req.pool && sameAddr(p.address, req.pool));
     if (!pick) throw new Error(req.auto ? `No quotable pool for ${this.label(key)}` : `Pool ${req.pool} is not a ${d.base.symbol}/${d.quote.symbol} pool on ${this.chain(d.chainId).name}`);
+    if (pick.kind === 'v4' && !v4PoolMatches(pick, d.base, d.quote)) throw new Error(`${pick.dexName} pool ${pick.address}: ${V4_CURRENCY_MISMATCH}`);
     if (pick.refOut == null || pick.mid == null) throw new Error(`${pick.dexName} pool ${pick.address} cannot be quoted${pick.error ? `: ${pick.error}` : ''}`);
-    d.pool = { dex: pick.dex, kind: pick.kind, address: pick.address, feeBps: pick.feeBps, ...(pick.feeTier != null ? { feeTier: pick.feeTier } : {}) };
+    d.pool = takenPool(pick);
     d.poolMode = req.auto ? 'auto' : 'manual';
     if (!d.custom) (this.custom.pools ??= {})[key] = { pool: { ...d.pool }, mode: d.poolMode, candleKind: d.candleKind };
     this.tvlCache.delete(key);
@@ -566,7 +690,8 @@ export class Hub {
     key = unflipKey(key); // flipped series are derived (inverted) from the original's candles
     const d = this.def(key), c = this.chain(d.chainId);
     return {
-      key, label: this.label(key), network: c.geckoSlug, pool: d.candlePool || d.pool.address, kind: d.candlePool ? (d.candleKind ?? d.pool.kind) : d.pool.kind,
+      key, label: this.label(key), network: c.geckoSlug, pool: d.candlePool || d.pool.address,
+      kind: d.candlePool ? (d.candleKind ?? (d.pool.kind === 'v4' ? 'v4' : d.pool.kind)) : (d.pool.kind === 'v4' ? 'v4' : d.pool.kind),
       base: { address: d.base.address, decimals: d.base.decimals }, quote: { address: d.quote.address, decimals: d.quote.decimals },
       feeBps: d.pool.feeBps, logChunk: c.logChunk,
     };
@@ -592,4 +717,13 @@ export class Hub {
       taxOf: (addr) => this.taxOf(d.chainId, addr),
     });
   }
+}
+
+/** Pool fields copied onto a market. V2/V3 stay dex/kind/address/fee; a V4 pool also keeps its PoolKey. */
+function takenPool(p: DiscoveredPool): MarketDef['pool'] {
+  return {
+    dex: p.dex, kind: p.kind, address: p.address, feeBps: p.feeBps,
+    ...(p.feeTier != null ? { feeTier: p.feeTier } : {}),
+    ...(p.v4 ? { v4: { ...p.v4 } } : {}),
+  };
 }

@@ -2,12 +2,16 @@
  * The owner's login on the gateway: a scrypt hash kept outside data/friends (HOST_PASSWORD_HASH in .env).
  * An invite cannot create this login, and its cookie is a different subject (`host`) from any friend's.
  */
-import { loginOf, LoginGate } from './accounts';
+import { loginOf, LoginGate, tailnetIdOf } from './accounts';
 import { checkPassword, HOST_ID, type PassHash, type Session } from './auth';
 
 export const OWNER_MIN_PASSWORD = 12;
 
-export interface OwnerConfig { login: string; pass: PassHash; session: number }
+export interface OwnerConfig {
+  login: string; pass: PassHash; session: number;
+  /** HOST_TAILNET_LOGINS: the owner's Tailscale login(s) (Tailscale-User-Login), trusted from the start */
+  tailnetLogins?: string[];
+}
 
 /** salt.hash, both standard base64, as written by npm run host:password. */
 export function formatPassHash(h: PassHash): string {
@@ -33,7 +37,13 @@ export function ownerLoginFrom(raw: string | undefined): string {
 }
 
 export class OwnerLogin {
-  constructor(private readonly cfg: OwnerConfig | null, private readonly gate: LoginGate) {}
+  constructor(private readonly cfg: OwnerConfig | null, private readonly gate: LoginGate) {
+    // A password change (new HOST_SESSION) forgets the tailnet logins learned under the old password (#62 review).
+    if (cfg) gate.ownerCredential(cfg.session);
+  }
+
+  /** The owner's current session number (HOST_SESSION), or null when no owner password is set. */
+  get session(): number | null { return this.cfg?.session ?? null; }
 
   get enabled(): boolean { return this.cfg != null; }
   /** Normalized login, or null when no owner password is set. */
@@ -44,16 +54,31 @@ export class OwnerLogin {
   }
 
   /** The signed cookie's subject. Caller checks the name is the owner's first. */
-  async login(name: string, password: string): Promise<{ id: typeof HOST_ID; session: number }> {
+  /**
+   * A device of the owner's own tailnet login: configured (HOST_TAILNET_LOGINS) or learned from an earlier owner log-in.
+   * Only meaningful for a request tailscale serve forwarded (it deletes client-sent Tailscale-* headers).
+   */
+  isOwnerTailnet(id: string | null | undefined): boolean {
+    if (!id?.trim()) return false;
+    return (this.cfg?.tailnetLogins ?? []).some((x) => tailnetIdOf(x) === tailnetIdOf(id)) || this.gate.isOwnerId(id);
+  }
+
+  /**
+   * `trusted` (decided by the gateway: a known owner device, this computer, or the owner's own tailnet login) skips the
+   * lockout and the all-logins pause, so guesses by someone else can't lock the owner out. The password is always
+   * checked, and a wrong one always counts. `tailnetId` is remembered after a correct password.
+   */
+  async login(name: string, password: string, o: { trusted?: boolean; tailnetId?: string | null } = {}): Promise<{ id: typeof HOST_ID; session: number }> {
     if (!this.cfg || !this.isOwnerName(name)) throw new Error('Wrong name or password.');
     const login = this.cfg.login;
-    this.gate.begin(login);
+    this.gate.begin(login, { trusted: o.trusted });
     const ok = password.length <= 256 && await checkPassword(password, this.cfg.pass);
     if (!ok) {
       this.gate.fail(login);
       throw new Error('Wrong name or password.');
     }
     this.gate.ok(login);
+    if (o.tailnetId?.trim()) this.gate.trustOwnerId(o.tailnetId);
     return { id: HOST_ID, session: this.cfg.session };
   }
 

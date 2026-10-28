@@ -48,8 +48,8 @@ Dev: `npm run dev` (UI :5173, API :3847).
   - A call that fails inside a batch is re-run on its own, so its error is the same as a direct call's.
   - A chain without the contract reads direct. A batch that fails as a whole runs its reads direct.
   - `MULTICALL=0` turns batching off. Tested in `tests/multicall.test.ts`.
-- **Keys.** One `PRIVATE_KEY` signs on every chain (same EVM address). The optional `PRIVATE_KEY_<SLUG>` (e.g. `PRIVATE_KEY_ETHEREUM`) overrides it for that chain. Keys are read only in `src/server/env.ts`, removed from `process.env` immediately, redacted from logs, and never sent to the UI (`tests/noSecrets.test.ts`).
-- **Queues.** Each chain has its own `TxGate` + nonce queue, so chains trade in parallel while one chain never has two txs in flight. **Stop all** stops everything; with a chain selected it stops only that chain. It also stops the Smart trader there (it opens, swaps and closes nothing until **Carry on**) and the token trader's new buys and snipes (until **Resume new buys**); the token trader keeps managing the exits of positions it already holds. A start that is still in progress when Stop all is pressed is refused. `POST /api/bot/stop` takes `{ "id": "<bot id>" }` for one bot, or `{ "all": true }` for every bot.
+- **Keys.** One `PRIVATE_KEY` signs on every chain (same EVM address). The optional `PRIVATE_KEY_<SLUG>` (e.g. `PRIVATE_KEY_ETHEREUM`) overrides it for that chain. Optional quote keys `ACROSS_API_KEY`, `RELAY_API_KEY` and `LIFI_API_KEY` are for the capital router. Keys are read only in `src/server/env.ts`, removed from `process.env` immediately, redacted from logs, and never sent to the UI (`tests/noSecrets.test.ts`). A quote key shorter than 6 characters is refused: it is not stored, that provider stays keyless, and the server warns with the variable name only. The router API reports only whether each quote key is set.
+- **Queues.** Each chain has its own `TxGate` + nonce queue, so chains trade in parallel while one chain never has two txs in flight. **Stop all** stops everything; with a chain selected it stops only that chain. It also stops the Smart trader there (it opens, swaps and closes nothing until **Carry on**) and the token trader's new buys and snipes (until **Resume new buys**); the token trader keeps managing the exits of positions it already holds. Stop all also turns the capital router off. A start that is still in progress when Stop all is pressed is refused. `POST /api/bot/stop` takes `{ "id": "<bot id>" }` for one bot, or `{ "all": true }` for every bot.
 - **Gas.** The gas balance is polled per chain, with a warning in the feed when it drops below the chain's threshold (50k PLS; 0.01 ETH on Ethereum; 0.0005 ETH on Robinhood). Gas is converted to the market's base and quote units through the chain's native/USD market. On Robinhood (an Arbitrum Orbit L2) the cost and start gates add the L1 component from `NodeInterface.gasEstimateL1Component`.
 - **Markets.** The key `chain:BASE/QUOTE` (e.g. `ethereum:ETH/USDC`) is used by every feature: grids, trend bots, backtests, charts, market panels, alerts, analytics and the journal. The existing PulseChain keys (`DAI`, `HEX`, …) and `data/state.json` load unchanged as chain 369.
 - **UI.** The chain filter in the top bar applies to every screen. Chain badges and explorer links per chain. Tools → Analytics shows aggregated ≈USD with a per-chain breakdown. DEX/version + fee tags appear on each grid, trend bot, pool and fill.
@@ -142,7 +142,7 @@ Tools → Markets → *Add custom token*: pick a chain, paste an address, option
 
 **Fee-on-transfer policy: support on V2, prove-or-block on V3.** Buy / transfer / sell taxes are measured separately. On V2 forks (PulseX V1/V2, 9mm V2, Uniswap V2) a tax up to `MAX_TOKEN_TAX_PCT` (default 10%) per side is allowed live: swaps use the router's `*SupportingFeeOnTransferTokens` methods, `amountOutMin` is set **after** tax, both taxes are part of every cost / start / spacing / trend / backtest gate, and PnL is booked from the wallet's balance change (actual received). On V3, a taxed token is live only if the simulated buy → transfer → sell through that exact pool succeeded (`v3-proven`); otherwise paper-only. A tax above the cap, a honeypot, paused trading, or an unverifiable simulation is paper-only. While a bot runs on a custom token the tax test re-runs every `TAX_RECHECK_MIN` minutes (default 30) and immediately after a reverted swap or a fill short of the post-tax quote; a rising tax (or honeypot / pause) pauses every bot on that market with an alert. Tested in `tests/decimalsTaxes.test.ts` + `tests/multichain.test.ts`; on-chain, STA (Statera, Ethereum) is measured as a 1% tax token.
 
-**Stale safety reports.** A re-check that fails (RPC error), finds no usable pool, or (on the 30-minute schedule) can't run its simulation measures nothing new. It doesn't silently reuse the old report:
+**Stale safety reports.** A re-check that fails (RPC error), finds no usable pool, or (on the 30-minute schedule or from the **Re-check** button) can't run its simulation measures nothing new. It doesn't silently reuse the old report:
 
 - The last known values stay. They are shown, and their taxes are still used in quotes.
 - The values are labelled **stale**, with when the problem started and why. The labels show in:
@@ -154,11 +154,41 @@ Tools → Markets → *Add custom token*: pick a chain, paste an address, option
 
 What doesn't change:
 
-- A live start (grid, trend) decides on the last known report, as it already did when the re-check threw, and logs that the report is stale.
-- A liquidity-bot live start is still refused when the re-check throws.
 - A re-check that runs and finds a problem (honeypot, tax rise, paused, blocked) still pauses as before.
-- After a suspicious event (a reverted swap, a short fill) or a manual re-check, a re-check that throws still fails closed and pauses, as before. One that returns nothing only warns.
-- The next measured re-check replaces the stale report and clears the label. Tested in `tests/safetyStale.test.ts`.
+- **Re-check button:** an RPC hiccup (transport error, timeout, rate limit, the simulation not running) marks the market stale and shows the warning. It does **not** pause. Any other error from a manual re-check still pauses.
+- After a suspicious event (a reverted swap, a short fill), a re-check that throws or can't run its simulation still fails closed and pauses, as before. One that returns nothing only warns.
+- The next measured re-check replaces the stale report and clears the label. Tested in `tests/safetyStale.test.ts` and `tests/liveStartSafety.test.ts`.
+
+**Live starts need a fresh, completed safety check** (grid, preset, trend, liquidity; `Hub.liveCheck`). Paper starts are unchanged and don't check.
+
+- Up to **3 tries**, 1 s then 2 s apart. Each try already rotates across the chain's RPCs, and is cut off after 20 s (a hung RPC can't hold the start). The page shows **Checking safety…** meanwhile.
+- A try *doesn't complete* when it throws, returns no report, or its simulation doesn't run. A real honeypot or `paused()` found by an inconclusive run counts as completed.
+- **Completed and passing:** the bot starts.
+- **Completed and failing** (honeypot, tax over the cap, paused, thin pool, …): refused with the reasons, API `400 {code: 'SAFETY_BLOCKED'}`. There is **no** Start anyway.
+- **Not completed after 3 tries:** refused with the reason, API `400 {code: 'SAFETY_INCOMPLETE', canStartAnyway, blockedBy}`. The stored measured report is kept, labelled stale.
+  - `canStartAnyway` is true only when the last known report was a measured pass. A token that never passed (or last failed) can't be started live.
+  - New bot then shows the reason with a **Start anyway** button. It asks for a confirm, then sends the same start with `startAnyway: true` (header `X-GridBot-From: start-anyway`). The server still runs the 3 tries first.
+  - The bot stores `startOverride`: who pressed it (origin: this computer / phone / friend copy, endpoint, browser), when, why the check was blocked, the tries and the last report's date and risk. It shows on the bot's page, in `status`, and as a notifying warning in the activity log.
+- The autopilot's own live opens never use Start anyway.
+- **Conservative rule:** a token whose last report isn't a measured pass (its simulation never ran, or it last failed) can't go live at all, with or without Start anyway.
+
+**Resume of a stopped LIVE bot** (grid, trend, liquidity) runs the same fresh check (3 tries; *Checking safety…* on the page). Paper resumes don't check.
+
+- **Completed and failing:** refused with the reasons (`SAFETY_BLOCKED`). The bot stays stopped.
+- **Not completed:** it resumes on the last passing report, which is marked **stale** (banner, Markets tag). No Start anyway click: the bot was already vetted and running. It gets `startOverride` with `kind: 'resume'` and who resumed it, plus a notifying warning in the activity log.
+- **Not completed and no passing report** (never passed, or last failed): refused (`SAFETY_INCOMPLETE`).
+- The token trader's *Resume new buys* and the smart trader's *carry on* aren't per-market bots: each new buy there runs its own safety gate, so they're unchanged.
+
+**After an app restart** (bots restored from `state.json` as running), the same rule applies, per market, with one check shared by the market's bots:
+
+- Live bots on a market with a safety report are **held** until the check answers. `status.safetyChecking` lists them; their pages show *Checking safety after the restart…*.
+  - **Grid and trend bots keep watching their exits and may execute them:** stop-loss, take-profit, trailing stop, exit signals, max-hold, and grid sells of levels they hold. They make **no new entries**: no trend entry (the signal is logged as filtered), no grid buy (a crossed buy level goes back to waiting and triggers again after a pass), no follow-the-price reseed, no profit payout. A buy that was queued when the app stopped is dropped.
+  - **Liquidity bots** have no stop-loss / take-profit exits: held, they only settle a tx already sent (no open, re-range or send).
+- Bots that are closing aren't held: they only unwind.
+- **Passes:** released to normal ticking.
+- **Completed and failing:** an exit already queued or in flight still **settles**; nothing new fires (no new exit or entry), then the bot is **stopped** (a safety pause with the reasons, and a notifying alert). With nothing pending it stops at once; a liquidity bot stops at once (a sent tx still settles). A bot whose check fails is never resumed. A bot stopped by hand meanwhile stays as it was stopped.
+- **Not completed:** released on the last passing report (stale), with `startOverride.kind: 'boot'` (the app, `origin: system`) and a notifying warning per bot. With no passing report they stay stopped.
+- **Never stuck:** all tries for one market stop after 45 s (`bootCheckMs`); each try is cut off at 20 s. Out of time counts as not completed.
 
 Custom markets persist in `data/custom.json` and work in grids, trend bots, backtests (GeckoTerminal with on-chain V2/V3 rebuild fallback), charts, market panels, alerts and analytics. **Re-check** re-runs the safety probe. **Remove** works once no bot or alert uses the market. A pool that is already a pair can't be added a second time (before, re-adding a coin's second pool made a duplicate pair).
 
@@ -243,6 +273,13 @@ Give it an amount on a chain and turn it on; it runs that money as grid and liqu
     - Turned off with *close*, all six came back and the PLS and ETH were swapped back: 992.79 USDG and 495.89 DAI, after ~10 minutes of opening and closing costs.
     - That run found a bug: a few wei of a coin left after a liquidity close made the sale's quote fail ("rounds to zero"), so the close never finished. Dust is now checked before quoting (test reproduces it).
 
+## Capital router (settings only)
+
+Off, and in paper (dry-run), until you turn it on. Settings live in `data/router.json`. This does not move funds: there is no swap or bridge send on these routes. `maxEtaMin` (default 60) is compared to a route's p90 ETA. `canonical-slow` is never an allowed bridge. Live mode refuses to turn on while `maxPerMoveUsd` or `maxPerDayUsd` is 0, while allowed chains or bridges are empty, while `minNetGainPct` is 0, or while any allowed coin's `minNetGainTok` is missing or not above 0. A restart does not turn the router back on: a file left on (paper or live) boots off until you turn it on again in this process. It runs on the host app only; a friend's copy stays off (`readCopy()`). Stop all sets `on` to false and stores the halt with subject `router`. A failure saving that halt is logged and does not fail Stop all. `maxGasPriceWei` is a per-chain wei-per-gas cap (defaults: 500 gwei on Ethereum, 30 gwei on Robinhood, 2,000,000 gwei on PulseChain). A router send aborts when the price is above it. `maxPriorityFeeWei` is the per-chain tip cap (defaults: 50 gwei on Ethereum, 2 gwei on Robinhood, 1,000,000 gwei on PulseChain, else a tenth of the gas-price cap). The send pays the network's suggested tip when it is within that cap, and aborts when the suggestion is higher, so a router tx is not left underpriced on the shared nonce.
+
+- **API:** `GET /api/router` · `PUT /api/router` · `POST /api/router/on` · `POST /api/router/off`
+- The GET body has `configured.across` / `relay` / `lifi` booleans and never the quote keys.
+
 ## Phone access
 
 Your own dashboard stays on this computer. To open it from your iPhone, reach the gateway over your tailnet only. That is private to machines logged into your Tailscale account. It is not published to the internet.
@@ -265,7 +302,7 @@ Your own dashboard stays on this computer. To open it from your iPhone, reach th
 
 **On your iPhone**
 
-Install the Tailscale app and log in to the same tailnet. Open `https://<mac>.<tailnet>.ts.net`, log in as `owner` with the password from step 2, and add the page to the home screen if you want. You need the Tailscale app running so the phone is on the tailnet; Safari alone cannot see a tailnet address.
+Install the Tailscale app and log in to the same tailnet. Open `https://<mac>.<tailnet>.ts.net`, log in as `owner` with the password from step 2, then add the page to the Home Screen. Lock-screen alerts (iOS 16.4 or later) are delivered only to that installed app, not to a Safari tab. You need the Tailscale app running so the phone is on the tailnet; Safari alone cannot see a tailnet address. Open Alerts, turn push on, and send a test. The steps are in the pull request that added Web Push, and under Notifications below.
 
 `tailscale serve` forwards with `Host: <mac>.<tailnet>.ts.net` and `X-Forwarded-*` headers. The gateway allows that hostname (from `GATEWAY_HOST` or the address saved under Tools → Friends) and refuses any other public host. It does not trust `X-Forwarded-Host`. It then calls your app on `127.0.0.1:3847` with a localhost Host, and sets a localhost Origin only after its own same-origin check. The app still refuses any other Host or Origin on a direct connection, so opening port 3847 does not skip the gateway.
 
@@ -279,6 +316,25 @@ The owner log-in is not a friend. Invite links cannot create it. A friend's cook
 | `X-Forwarded-Host`, `X-Forwarded-Proto` | the ts.net name, `https` | same |
 
 Tailscale deletes client-sent `Tailscale-*` headers and replaces `X-Forwarded-For`, so a visitor can't hide either sign. The gateway treats a request with the Funnel header **or** a forwarded address that is not loopback/tailnet as Funnel. (Funnel in raw TCP mode, `tailscale funnel --tcp`, sets no headers at all; don't use it for the gateway.)
+
+**People you share this computer with can reach the owner log-in page.** Tailscale node sharing (how friends get in, see "Friends" below) gives the friend's device the same `https://<mac>.<tailnet>.ts.net` address. The gateway shows that device the same log-in page, and it accepts the owner name there just as it does from your phone. Funnel is the only thing it refuses. Tailscale stops strangers on the internet, but it does not stop anyone you shared with from guessing the owner password. Treat the password as the only thing between a shared device and your bots and keys:
+
+- **Use a long, random password**, such as a password-manager-generated one of 20+ characters or a 5-6 word random passphrase. `npm run host:password` requires at least 12 characters, but that is a floor and not a recommendation. Don't reuse a password a friend might know.
+- **Consider a log-in name other than `owner`.** `npm run host:password` asks for one and stores it as `HOST_LOGIN`. Guesses are counted per name, so an unknown name means a guesser has to find the name first. This doesn't replace a strong password.
+- **What the lockout does** (`src/server/friends/accounts.ts` `LoginGate`, shared by friend and owner log-ins):
+  - 5 wrong passwords for a name lock that name for 15 minutes. Each lock after that doubles: 30 min, 1 h, 2 h, and so on, up to 24 h. A name with no failure for 24 hours starts again at 15 minutes. A correct password clears the name.
+  - When more than 30 log-ins failed in the last minute (any names, any devices), every log-in pauses until the minute passes.
+  - **The counters survive a restart.** They are kept in `data/friends/login-limits.json`, written atomically (temp file, fsync, rename) and off the event loop: a burst of failed log-ins is saved as one write a moment later, so guessing can't stall the bots. Names are stored only as sha256 hashes. The file holds no password, hash or cookie. Restarting the app no longer clears a lock.
+  - A guess through Funnel is refused before the password is checked, so it never counts toward the lock.
+- **Someone else's guesses can't lock you out.** The owner log-in skips the lock and the all-logins pause, **but never the password**, from:
+  - **a known device**: a browser where you logged in as owner before. A successful owner log-in sets a signed `gb_device` cookie (HttpOnly, Secure, 400 days; it holds only the issue time and your password's session number) that stays after you log out. A signed owner session cookie for the current password, even an expired one, also counts.
+  - **this computer**: a loopback connection with a loopback Host and no forwarding or Tailscale headers. Anything `tailscale serve` forwards carries `X-Forwarded-For` and the tailnet Host, so it never qualifies.
+  - **your own tailnet login**: the `Tailscale-User-Login` that `tailscale serve` adds. The gateway learns it the first time you log in as owner from a tailnet device. You can also set it ahead of time in `.env` as `HOST_TAILNET_LOGINS=you@example.com` (comma-separated). Serve deletes any client-sent `Tailscale-*` header, so a shared device can't claim your login. Tagged devices have no login; use a known device there.
+  - **A tailnet address alone is not trusted.** A device you shared with a friend also has a `100.x` address, and that device is exactly the one that might guess. From a shared device, the lock applies even with the right password.
+  - A wrong password from any of these still counts toward the lock.
+  - **Changing the owner password revokes all of this.** `npm run host:password` bumps `HOST_SESSION`; after the restart, device cookies and owner session cookies from the old password no longer skip the lock, and learned tailnet logins are forgotten (logins set in `HOST_TAILNET_LOGINS` stay). Log in once with the new password (from this computer if the name is locked) and that browser is a known device again.
+- **To clear every lock by hand:** stop the app and delete `data/friends/login-limits.json`. This also forgets learned tailnet logins.
+- **If you suspect guessing:** run `npm run host:password` again to set a new password (it also ends existing owner log-ins after a restart), and remove the share in the [admin console](https://login.tailscale.com/admin/machines) (this computer → Share).
 
 ## Friends' copies (Tools → Friends)
 
@@ -545,7 +601,7 @@ Trend bots run next to the grids (New bot → Trend bot; default 4h candles; the
 - **Cost gate.** The expected move (TP distance, or k×ATR) must clear the 0.579% round-trip fee + impact both ways from live reserves + gas + slippage allowance + min edge. Blocked signals are logged with the numbers.
 - **Safety checks.** The same units guard, impact cap, slippage, deadline and decimals handling as the grids. A broadcast tx is reconciled by hash.
 - **Inventory.** Separate from the grids: a bot only spends its own cash and only sells PLS it bought. A live start checks that the address balance covers every live allocation (grids + trend bots).
-- **State.** Persisted in `data/state.json` (v3; migrates v1/v2) and resumed on boot. Stop is per bot; Stop all stops grids, trend and liquidity bots, the Smart trader's opens, and the token trader's new buys (its exits keep running).
+- **State.** Persisted in `data/state.json` (v3; migrates v1/v2) and resumed on boot. Stop is per bot; Stop all stops grids, trend and liquidity bots, the Smart trader's opens, and the token trader's new buys (its exits keep running), and turns the capital router off. Router settings are `data/router.json`.
 
 ## Candles
 
@@ -581,6 +637,12 @@ Tools → Charts also has backfill buttons when a pair has no data.
 - **Sweep.** Two-parameter heatmap with an in-sample/overfitting warning. "Use these settings" starts a paper bot.
 - **Grid configs.** Can be backtested too; fills at exact level prices are optimistic.
 
+### Harness
+
+`npm run backtest:harness` replays the bots saved in `data/state.json` (the file the app reads and writes). It loads each bot's config and its recorded fills, fits the fee scale and the fill slippage so a replay of that config reproduces those fills, and prints the calibration error. The lead number is net units per day in the bot's quote coin, after swap fees, gas, taxes and realized rebalancing losses. USD/day is a smaller line under that. The default window is the last 30 days. A longer, shorter or in-sample window is a footnote.
+
+If `data/state.json` is missing, the command says so and runs two built-in examples instead of a saved bot: ETH/USDC 0.05% on Ethereum and HEX/WPLS 0.25% on 9mm V3. It does not read the process environment. A router imports `scoreOpportunity` from `src/backtest/index.ts`.
+
 ### Real backtest: PLS/DAI, Oct 8 2026
 
 **Data.** On-chain rebuild of the PulseX V2 WPLS/DAI pair: blocks ~26.99M–27.74M, 66,551 1m candles. That gives 2,184 1h candles (Jul 9 04:00 → Oct 8 03:00 EDT, 1 empty hour) and 546 4h candles.
@@ -614,7 +676,7 @@ Tools → Charts also has backfill buttons when a pair has no data.
 - **Charts.** lightweight-charts v5 with pair/timeframe switches; EMA/Donchian/Bollinger overlays; RSI/MACD panes; grid levels and fills; trend entries/exits; stop/TP/trail lines; equity + drawdown per bot and for the whole portfolio. The last candle follows live ticks.
 - **Analytics.** Portfolio ≈USD (live PLS/DAI cross), today/7d/all-time, vs HODL, allocation, funds coverage, per-bot stats, journal with filters and `/api/analytics/journal.csv`. Market panels show depth, volume, ATR%, trend and a regime hint (efficiency ratio).
 - **Live.** Server-sent events (`/api/bot/stream?v=2`): one snapshot, then only the changes, plus a 5 s heartbeat; see [docs/stream-v2.md](docs/stream-v2.md). If nothing arrives for 15 s, a banner says the data may be stale. There is a 3 s polling fallback; Activity drawer; status dots that dim when a price read is stale; a short highlight when a fill lands. Routine price ticks update quietly.
-- **Notifications and alerts.** Opt-in browser notifications (tab must be open). Alerts: price above/below, RSI above/below, grid out of range. All motion respects `prefers-reduced-motion`.
+- **Notifications and alerts.** Lock-screen Web Push is off until you subscribe on the Alerts screen. The Mac sends straight to the browser’s own push service (Apple or Google). Nothing new is exposed on the internet, and Tailscale Funnel stays off. Types: grid fills (a digest when more than six land inside ten minutes), LP near an edge or out of range, bot halted, a failed transaction, low gas, a sniper hit, and an optional daily summary at 21:00 US Eastern (generated, in the coin; live first, paper labeled Paper). In-tab notifications still work while the tab is open. Price, RSI, and grid-range alerts are unchanged. The VAPID key is created on first run at `data/push-vapid.json` (mode 600), not in `.env`, and is not written to the log. A bad or unreadable key, or a subscription file that cannot be read, turns push off and leaves the server and the bots running. Its contact defaults to `mailto:gridbot@localhost`; `VAPID_SUBJECT` (a `mailto:` or `https:` address) changes that. Push routes answer only for the owner login. A friend session gets 403. Deleting that file rotates the key; each phone then has to subscribe again. The Mac has to be awake to send. All motion respects `prefers-reduced-motion`.
 
 ## Checks
 

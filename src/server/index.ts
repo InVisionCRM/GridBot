@@ -6,7 +6,8 @@ import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
 import { DurableJsonStore } from './bot/durableStore';
 import { ActivityBus } from './bot/activity';
-import { createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, takeFriendsSecret, takeHostAuth } from './env';
+import { createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, shortQuoteKeyWarnings, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
+import { Router, type RouterFile } from './router/router';
 import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
@@ -16,6 +17,7 @@ import { DailyScanner, localScan, scanDepsFromHub, type ScanFile } from './marke
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
+import { swapForHost } from './swap/wire';
 import { fetchJson } from './fetchJson';
 import { PoolSearch } from './market/poolSearch';
 import { TFS } from '../market/candles';
@@ -25,13 +27,19 @@ import { FriendsHost } from './friends/host';
 import { GeckoRelay, hostScan, relayFetch } from './friends/relay';
 import { Autopilot, type AutopilotState, type ScanView } from './bot/autopilot';
 import { createTokenTrader, tokenTraderStore } from './market/tokenFeed';
+import { tryStartPush } from './push/service';
+import { lpSnapsFromStatus } from './push/lpWatch';
+import { dailySummary } from './push/summary';
 
 loadEnv();
 const friendsSecret = takeFriendsSecret();
 const hostAuth = takeHostAuth();
+// Before anything copies process.env (a friend's copy must not inherit quote keys).
+const bridgeKeyStatus = takeBridgeKeys();
 const cfg = readSettings();
 const isProd = process.env.NODE_ENV === 'production';
 const log = new Logger();
+for (const msg of shortQuoteKeyWarnings()) log.warn(msg);
 // A friend's copy (started by the host app, friends/copies.ts) shares the host's candles budget and daily scan.
 const copy = readCopy();
 
@@ -118,17 +126,50 @@ const autopilot = new Autopilot({
 });
 const tokenTrader = copy ? undefined : createTokenTrader({
   hub, gecko, store: tokenTraderStore(path.join(dataDir, 'token-trader.json')), emit: activity.emitEvent,
-  approval: cfg.approval, receiptTimeoutMs: 120_000,
+  approval: cfg.approval, receiptTimeoutMs: 120_000, dataDir,
 });
 // Stop all / STOP chain: the token trader and sniper make no new buys there; exits of positions it holds keep running.
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));
+const push = tryStartPush({
+  dir: dataDir,
+  subject: cfg.vapidSubject,
+  log: (level, msg) => log[level](msg),
+  positions: () => { try { return lpSnapsFromStatus(bot.status()); } catch { return []; } },
+  summary: () => { try { return dailySummary(bot.status()); } catch { return { title: 'GridBot · daily summary', body: 'No generated profit to report.' }; } },
+});
+if (push) activity.on('activity', (ev) => { void push.onActivity(ev).catch(() => log.warn('push: event was not sent')); });
+// ROUTER HOOK: host only (a friend's copy has readCopy() set). Stop all calls router.halt.
+const router = new Router({
+  store: new JsonStore<RouterFile>(path.join(dataDir, 'router.json')),
+  host: copy == null,
+  configured: bridgeKeyStatus,
+  chainIds: hub.runtimes().map((r) => r.cfg.id),
+  emit: activity.emitEvent,
+  log,
+});
+bot.routerHalt = (halt) => router.halt(halt);
+// Quotes and, in live mode, calldata only. A friend's copy does not construct this. Nothing here broadcasts.
+const swap = swapForHost(!!copy, {
+  hub,
+  allocations: () => bot.allocations().rows,
+  reservations: () => [
+    ...(tokenTrader?.reservations() ?? []),
+    ...convert.reservations(),
+    ...bot.routerReservations(),
+  ],
+});
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
-  lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
+  lpReplay: (q) => lpReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader, copy: !!copy,
+  friends, autopilot, tokenTrader, router, copy: !!copy, ...(push ? { push } : {}),
 });
 if (isProd) {
+  app.get('/sw.js', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('js');
+    res.sendFile(path.join(clientDir, 'sw.js'));
+  });
   app.use(express.static(clientDir));
   app.get('*', (_req, res) => res.sendFile(path.join(clientDir, 'index.html')));
 }
@@ -148,6 +189,10 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   void autopilot.tick();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
+  if (push) {
+    pushTimer = setInterval(() => { void push.tick().catch(() => log.warn('push: tick failed')); }, 15_000);
+    log.info('Web push ready');
+  }
   if (friends instanceof FriendsHost) {
     for (const rt of hub.runtimes()) if (rt.signer) hostAddresses.push(await rt.signer.getAddress());
     await friends.start().catch((e: Error) => { log.error(e.message); process.exit(1); });
@@ -163,9 +208,11 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 });
 let autopilotTimer: ReturnType<typeof setInterval> | null = null;
 let tokenTimer: ReturnType<typeof setInterval> | null = null;
+let pushTimer: ReturnType<typeof setInterval> | null = null;
 const shutdown = () => {
   if (autopilotTimer) clearInterval(autopilotTimer);
   if (tokenTimer) clearInterval(tokenTimer);
+  if (pushTimer) clearInterval(pushTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
   try { bot.flush(); } catch { /* logged by the store */ }
   if (friends instanceof FriendsHost) friends.stop();

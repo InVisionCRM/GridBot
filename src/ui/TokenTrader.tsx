@@ -7,6 +7,8 @@ import { ago, num, pct } from './fmt';
 import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj } from './model';
 import { haltText } from './haltText';
+import { ENFORCED_LIQUIDITY_FLOOR_USD, shownMinLiquidityUsd } from '../market/liquidityFloor';
+import { inEth, useEthUsd } from './units';
 
 const usd = (n: number) => `$${num(Math.abs(n), Math.abs(n) >= 100 ? 0 : 2)}`;
 
@@ -25,6 +27,8 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
   const o = t.options;
   const chains: AnyObj[] = (s.chains ?? []).filter((c: AnyObj) => c.tradable);
   const save = (patch: AnyObj) => run(() => http('/api/token-trader', 'PUT', patch));
+  const ethUsd = useEthUsd();
+  const liqEth = (usd: number) => inEth(usd, ethUsd);
 
   return (
     <section className="card" id="token-trader">
@@ -37,7 +41,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
           ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/token-trader/off', 'POST'))}>Off</button>
           : <button type="button" className="btn small-btn primary" disabled={busy} onClick={() => void start(o, run)}>On</button>}
       </div>
-      <p className="small">New and trending pools, sized from the pool's depth, under your per-trade and total limits. Exits: a third at +50%, a third at +100%, a 20% trail after +30%, a hard stop at −25%, plus liquidity pulled, a tax that appears, a failed sell, a 6h time stop and volume dying. The sniper buys a pool when liquidity is added and ignores the minimum age. Paper fills the same way, with the pool's fee, impact and tax.</p>
+      <p className="small">New and trending pools, sized from the pool's depth, under your per-trade and total limits. Exits: a third at +50%, a third at +100%, a 20% trail after +30%, a hard stop at −25% (all measured from the effective entry, spend per token received after the pool fee, impact and tax, to what a token fetches after the exit fee and sell tax: with 1% each way, break-even is +2.03%, +7.40% with a 5% sell tax), plus liquidity pulled, a tax that appears, a failed sell, a 6h time stop and volume dying. The sniper buys a pool when liquidity is added and ignores the minimum age. Paper fills the same way, with the pool's fee, impact and tax.</p>
       {err && <div className="banner error" role="alert"><span className="grow">{err}</span></div>}
       {t.lastError && <div className="banner"><span className="grow">{t.lastError}</span></div>}
       {t.entriesHalt && (
@@ -57,6 +61,8 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         <label className="smart-field"><span className="k">Min pool age (hours)</span><input value={Math.round(o.minPoolAgeSec / 3600)} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, minPoolAgeSec: numIn(e.target.value) * 3600 } })} onBlur={() => void save({ minPoolAgeSec: o.minPoolAgeSec })} /></label>
         <label className="smart-field"><span className="k">Max pool share %</span><input value={Math.round(o.maxPoolShare * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxPoolShare: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxPoolShare: o.maxPoolShare })} /></label>
         <label className="smart-field"><span className="k">Impact cap %</span><input value={Math.round(o.maxImpact * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxImpact: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxImpact: o.maxImpact })} /></label>
+        <label className="smart-field"><span className="k">Trade-size cap %</span><input value={Math.round((o.sizeImpactCap ?? 0.01) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sizeImpactCap: numIn(e.target.value) / 100 } })} onBlur={() => void save({ sizeImpactCap: o.sizeImpactCap })} /></label>
+        <label className="smart-field"><span className="k">{`Min liquidity (≈ ${liqEth(o.minLiquidityUsd ?? 0)})`}</span><input value={o.minLiquidityUsd ?? 0} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, minLiquidityUsd: numIn(e.target.value) } })} onBlur={() => void save({ minLiquidityUsd: o.minLiquidityUsd ?? 0 })} /></label>
         <label className="smart-field"><span className="k">Risk</span>
           <select value={o.risk} onChange={(e) => void save({ risk: e.target.value })}>
             <option value="safe">Safe</option>
@@ -73,8 +79,23 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       </div>
 
       <div className="tt-row" style={{ marginTop: 10 }}>
+        <label className="check"><input type="checkbox" checked={!!o.enforceLiquidityFloor} onChange={(e) => void save({ enforceLiquidityFloor: e.target.checked })} /><span>{`Enforce liquidity floor (≈ ${liqEth(ENFORCED_LIQUIDITY_FLOOR_USD)})`}</span></label>
+        <span className="muted small">{`In force ${liqEth(shownMinLiquidityUsd(t))}. Scan buys and the safety gate use this. A snipe still has to clear its own minimum when that is higher.`}</span>
+      </div>
+      <div className="tt-row" style={{ marginTop: 10 }}>
+        <label className="check"><input type="checkbox" checked={o.enforceHolderCheck === true} onChange={(e) => void save({ enforceHolderCheck: e.target.checked })} /><span>Holder concentration</span></label>
+        <label className="smart-field"><span className="k">Max holder %</span><input value={Math.round((o.maxHolderShare ?? 0.1) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxHolderShare: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxHolderShare: o.maxHolderShare })} /></label>
+        <label className="smart-field"><span className="k">Max top 10 %</span><input value={Math.round((o.maxTop10Share ?? 0.4) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxTop10Share: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxTop10Share: o.maxTop10Share })} /></label>
+        <label className="smart-field"><span className="k">Min coverage %</span><input value={Math.round((o.minHolderCoverage ?? 0.9) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, minHolderCoverage: numIn(e.target.value) / 100 } })} onBlur={() => void save({ minHolderCoverage: o.minHolderCoverage })} /></label>
+        <span className="muted small">Off unless checked, and off changes nothing. When on, safe and medium skip a largest holder over the max holder % (default 10) or a top 10 over the max top 10 % (default 40), after ignoring pools, burn addresses and known lockers. No holder source, or a failed read, skips those modes and says which.</span>
+      </div>
+      <div className="tt-row" style={{ marginTop: 10 }}>
+        <label className="check"><input type="checkbox" checked={o.enforceSizeImpact === true} onChange={(e) => void save({ enforceSizeImpact: e.target.checked })} /><span>Cap impact at the trade size</span></label>
+        <span className="muted small">Off unless checked, and off changes nothing. The impact cap above still sizes the trade. When this is on, that sized trade is quoted again (V3 through the quoter) and skipped if the move is over the trade-size cap. The default cap is 1%. A quote that fails skips the buy.</span>
+      </div>
+      <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.sniper.on} onChange={(e) => void save({ sniper: { ...o.sniper, on: e.target.checked } })} /><span>Sniper</span></label>
-        <label className="smart-field"><span className="k">Min liquidity</span><input value={o.sniper.minLiquidityUsd} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, minLiquidityUsd: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>
+        <label className="smart-field"><span className="k">Sniper min liquidity</span><input value={o.sniper.minLiquidityUsd} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, minLiquidityUsd: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>
         <label className="smart-field"><span className="k">Delay blocks</span><input value={o.sniper.delayBlocks} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, delayBlocks: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>
         <label className="smart-field"><span className="k">Delay seconds</span><input value={o.sniper.delaySec} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, delaySec: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>
         <label className="smart-field"><span className="k">Max / hour</span><input value={o.sniper.maxPerHour} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, maxPerHour: numIn(e.target.value) } } })} onBlur={() => void save({ sniper: o.sniper })} /></label>
@@ -94,7 +115,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         {t.positions.map((p: AnyObj) => (
           <div key={p.id} className="smart-bot" style={{ cursor: 'default' }}>
             <span className="smart-bot-name"><b>{p.label}</b> <ChainBadge c={chainOf(s, p.chainId)} testnet={false} /> <span className="tag">{p.source}</span></span>
-            <span className="small muted">in {num(p.entryPrice, 6)} · now {num(p.price, 6)} · {p.exitPlan}</span>
+            <span className="small muted" title="Entry = spend per token received, after the pool fee, price impact and buy tax (paper and live alike). Take profit and stops are also net of the exit fee and the sell tax measured at entry.">entry {num(p.entryPrice, 6)} after fees &amp; tax · now {num(p.price, 6)} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''} · {p.exitPlan}</span>
             <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.spentUsd ? p.pnlUsd / p.spentUsd : 0, 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
           </div>
         ))}
@@ -116,6 +137,11 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
       </ul>
     </section>
   );
+}
+
+/** bps → "0.01%", "0.05%", "0.3%", "1%" */
+export function feePct(bps: number | null | undefined): string {
+  return bps == null || !Number.isFinite(bps) ? '?' : `${+(bps / 100).toFixed(4)}%`;
 }
 
 function numIn(v: string) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
