@@ -1309,3 +1309,8 @@ label.wide input { min-width: 180px; }
   .desk.desk-book .desk-row .desk-fees { display: none; }
   .desk-group { width: calc(100% + 24px); margin-inline: -12px; padding-inline: 12px; }
 }
+
+/* Home summary on a phone: an amount in its coin ("−847.1 USDG") wraps instead of being cut to "−847…" */
+@media (max-width: 860px) {
+  .join b { white-space: normal; overflow: visible; font-size: 20px; overflow-wrap: anywhere; }
+}
