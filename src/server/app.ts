@@ -413,7 +413,8 @@ export function createApp(o: AppOpts) {
     return plain(tt().status());
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
-  app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
+  // { mode: 'exits' } (default): off for new buys, exits keep running. { mode: 'full' }: off completely, no exits.
+  app.post('/api/token-trader/off', wrap((req) => { tt().turnOff(req.body?.mode === 'full' ? 'full' : 'exits'); return plain(tt().status()); }));
   app.get('/api/plays/scorecard', wrap(() => tt().scorecard()));
 
   // ── Capital router (settings only; this does not move funds) ──

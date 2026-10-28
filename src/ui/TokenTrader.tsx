@@ -12,6 +12,54 @@ import { inEth, useEthUsd } from './units';
 
 const usd = (n: number) => `$${num(Math.abs(n), Math.abs(n) >= 100 ? 0 : 2)}`;
 
+/** Banner text for an update that loaded live positions off completely (server: TokenTrader.migrateOffMode). */
+export function choiceText(c: { livePositions: number }): string {
+  return `Token trader has ${c.livePositions} live positions unwatched — choose: run exits / keep fully off`;
+}
+
+/** The confirm before "Run exits" restarts live selling on positions nobody watched since the update. */
+export function runExitsConfirmText(n: number): string {
+  return `Run exits now? ${n} live position${n === 1 ? '' : 's'} will be sold by ${n === 1 ? 'its' : 'their'} exit rules (take profit, trailing stop, stop-loss, time stop) with real money, starting on the next tick. No new buys.`;
+}
+
+/**
+ * The banner's choice. "Run exits" resumes real sells on positions nobody watched since the update, so it asks first;
+ * "Keep fully off" changes nothing and needs no confirm. null = cancelled (nothing posted).
+ */
+export async function pickChoice(mode: 'exits' | 'full', livePositions: number,
+  d: { confirm: (msg: string) => boolean; post: (mode: 'exits' | 'full') => Promise<AnyObj> }): Promise<AnyObj | null> {
+  if (mode === 'exits' && !d.confirm(runExitsConfirmText(livePositions))) return null;
+  return d.post(mode);
+}
+
+/**
+ * App-wide, until chosen: an old "off" token-trader file with LIVE positions loads off completely, so no real sell
+ * goes out before Kyle picks. "Run exits" = off for new buys (exits running); "Keep fully off" = off completely.
+ * Either choice is a POST /api/token-trader/off, so it is in the stop audit, and it clears the banner.
+ */
+export function TokenTraderChoiceBanner() {
+  const [c, setC] = useState<{ livePositions: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const load = useCallback(() => http('/api/token-trader').then((x) => setC(x?.pendingChoice ?? null)).catch(() => setC(null)), []);
+  useEffect(() => { void load(); const id = setInterval(load, 10_000); return () => clearInterval(id); }, [load]);
+  if (!c) return null;
+  const pick = async (mode: 'exits' | 'full') => {
+    setBusy(true);
+    try {
+      const x = await pickChoice(mode, c.livePositions, { confirm: (m) => confirm(m), post: (m) => http('/api/token-trader/off', 'POST', { mode: m }) });
+      if (x) { setC(x?.pendingChoice ?? null); setErr(null); }
+    } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
+  };
+  return (
+    <div className="banner error" role="alert">
+      <span className="grow">{choiceText(c)}{err ? ` (${err})` : ''}</span>
+      <button type="button" className="btn small-btn" disabled={busy} onClick={() => void pick('exits')}>Run exits</button>
+      <button type="button" className="btn small-btn" disabled={busy} onClick={() => void pick('full')}>Keep fully off</button>
+    </div>
+  );
+}
+
 export function TokenTraderPanel({ s }: { s: AnyObj }) {
   const [t, setT] = useState<AnyObj | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -34,12 +82,12 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
     <section className="card" id="token-trader">
       <div className="card-head">
         <h2>Token trader</h2>
-        <span className={`tag ${t.on ? (o.mode === 'live' ? 'live' : 'pos') : ''}`}>{t.on ? `On · ${o.mode}` : 'Off'}</span>
+        <span className={`tag ${t.on ? (o.mode === 'live' ? 'live' : 'pos') : ''}`}>{modeLabel(t, o)}</span>
         <span className="muted small">{usd(t.openUsd ?? 0)} open of {usd(o.totalUsd)}</span>
         <span className="grow" />
-        {t.on
-          ? <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/token-trader/off', 'POST'))}>Off</button>
-          : <button type="button" className="btn small-btn primary" disabled={busy} onClick={() => void start(o, run)}>On</button>}
+        {t.runMode !== 'exits' && <button type="button" className="btn small-btn" disabled={busy} title="No new buys, discovery or snipes. Stop-loss and take-profit exits keep running." onClick={() => void run(() => http('/api/token-trader/off', 'POST', { mode: 'exits' }))}>Off for new buys</button>}
+        {t.runMode !== 'full' && <button type="button" className="btn small-btn" disabled={busy} title="Runs nothing: no exits, no discovery, no buys." onClick={() => void offCompletely(t, run)}>Off completely, no exits</button>}
+        {!t.on && <button type="button" className="btn small-btn primary" disabled={busy} onClick={() => void start(o, run)}>On</button>}
       </div>
       <p className="small">New and trending pools, sized from the pool's depth, under your per-trade and total limits. Exits: a third at +50%, a third at +100%, a 20% trail after +30%, a hard stop at −25% (all measured from the effective entry, spend per token received after the pool fee, impact and tax, to what a token fetches after the exit fee and sell tax: with 1% each way, break-even is +2.03%, +7.40% with a 5% sell tax), plus liquidity pulled, a tax that appears, a failed sell, a 6h time stop and volume dying. The sniper buys a pool when liquidity is added and ignores the minimum age. Paper fills the same way, with the pool's fee, impact and tax.</p>
       {err && <div className="banner error" role="alert"><span className="grow">{err}</span></div>}
@@ -49,7 +97,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
           <span className="grow">
             New buys and snipes stopped{t.entriesHalt.chains ? ` on ${t.entriesHalt.chains.map((c: number) => chainOf(s, c)?.name ?? c).join(', ')}` : ''}
             {t.entriesHalt.halt ? ` (${haltText(t.entriesHalt.halt)})` : ''}.
-            {' '}{t.on ? <b>Exits still managed: {t.exitsManaged ?? t.positions.length}</b> : `It is off: the exits of its ${t.positions.length} position(s) are not watched.`}
+            {' '}{t.runMode !== 'full' ? <b>Exits still managed: {t.exitsManaged ?? 0}</b> : `It is off completely: the exits of its ${t.positions.length} position(s) are not watched.`}
           </span>
           <button type="button" className="btn small-btn" disabled={busy} onClick={() => void run(() => http('/api/token-trader/resume-entries', 'POST'))}>Resume new buys</button>
         </div>
@@ -115,7 +163,7 @@ export function TokenTraderPanel({ s }: { s: AnyObj }) {
         {t.positions.map((p: AnyObj) => (
           <div key={p.id} className="smart-bot" style={{ cursor: 'default' }}>
             <span className="smart-bot-name"><b>{p.label}</b> <ChainBadge c={chainOf(s, p.chainId)} testnet={false} /> <span className="tag">{p.source}</span></span>
-            <span className="small muted" title="Entry = spend per token received, after the pool fee, price impact and buy tax (paper and live alike). Take profit and stops are also net of the exit fee and the sell tax measured at entry.">entry {num(p.entryPrice, 6)} after fees &amp; tax · now {num(p.price, 6)} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''} · {p.exitPlan}</span>
+            <span className="small muted" title="Entry = spend per token received, after the pool fee, price impact and buy tax (paper and live alike). Take profit and stops are also net of the exit fee and the sell tax measured at entry.">entry {num(p.entryPrice, 6)} after fees &amp; tax · now {num(p.price, 6)} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''} · {p.exitsBlocked ? <b className="neg" role="alert">{blockedNote(p)}</b> : p.exitPlan}</span>
             <span className="smart-bot-v"><b className={p.pnlUsd >= 0 ? 'pos' : 'neg'}>{pct(p.spentUsd ? p.pnlUsd / p.spentUsd : 0, 1, true)}</b><span className="small muted">{usd(p.pnlUsd)}</span></span>
           </div>
         ))}
@@ -144,7 +192,30 @@ export function feePct(bps: number | null | undefined): string {
   return bps == null || !Number.isFinite(bps) ? '?' : `${+(bps / 100).toFixed(4)}%`;
 }
 
+/** A live position whose exits are blocked until the wallet balance can be read: shown on its row until it clears. */
+export function blockedNote(p: AnyObj): string | null {
+  if (!p.exitsBlocked) return null;
+  return `${p.exitsBlocked}${p.blockedSince ? ` since ${ago(p.blockedSince)}` : ''}`;
+}
+
 function numIn(v: string) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
+
+/**
+ * "On · paper" / "Off for new buys · exits running (N)" / "Off completely, no exits".
+ * Each number once per card: when the new-buys-stopped banner is up it carries "Exits still managed: N", so the tag
+ * drops its (N).
+ */
+export function modeLabel(t: AnyObj, o: AnyObj): string {
+  if (t.runMode === 'on' || (t.runMode == null && t.on)) return `On · ${o.mode}`;
+  if (t.runMode === 'full') return 'Off completely, no exits';
+  return t.entriesHalt ? 'Off for new buys · exits running' : `Off for new buys · exits running (${t.exitsManaged ?? 0})`;
+}
+
+async function offCompletely(t: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<void>) {
+  const n = t.positions?.length ?? 0;
+  if (!confirm(`Turn the token trader off completely? Nothing will run: no buys, no snipes and no exits.${n ? ` The stop-losses and take-profits of its ${n} open position(s) will NOT be watched until you turn it on or back to "Off for new buys".` : ''}`)) return;
+  await run(() => http('/api/token-trader/off', 'POST', { mode: 'full' }));
+}
 
 async function start(o: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<void>) {
   if (o.mode === 'live' && !confirm(`Turn the token trader on with real money? Up to $${o.perTradeUsd} a trade and $${o.totalUsd} open. The sniper is ${o.sniper.on ? 'on' : 'off'}.`)) return;
