@@ -180,7 +180,19 @@ function BagLine({ tokens }: { tokens: TokenQty[] }) {
 function CardMade({ readout }: { readout: CardReadout }) {
   if (readout.kind === 'empty') return <p className="card-made"><span>Generated</span> No fills yet</p>;
   if (readout.kind === 'note') return <p className="card-made"><span>Generated</span> <em className="card-note">{readout.text}</em></p>;
-  return <p className="card-made"><span>Generated</span> {readout.text}</p>;
+  return (
+    <p className="card-made">
+      <span>Generated</span>
+      <span className="card-gen bag-line">
+        {readout.parts.map((part, i) => (
+          <span key={`${part}-${i}`} className="bag-part">
+            {i > 0 && ' '}
+            <span className="bag-coin">{part}</span>
+          </span>
+        ))}
+      </span>
+    </p>
+  );
 }
 
 function BotCard({

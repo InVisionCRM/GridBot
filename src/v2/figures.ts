@@ -4,7 +4,7 @@
  */
 import type { BotMetrics, RangeBlock, TapePrice, TokenQty } from './metrics';
 import { estimates } from '../shared/generated';
-import { apportion, displayedValue, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, showsNoFills, standardUnit } from './format';
+import { apportion, displayedValue, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, showsNoFills, standardUnit, tokenLineParts } from './format';
 
 const SUBSCRIPT_PRICE = /\$0\.0[₀₁₂₃₄₅₆₇₈₉]+\d+/g;
 const FIGURE = /[+−-]?\s*\$\d[\d,]*(?:\.\d+)?|[+−-]?\s*\d[\d,]*(?:\.\d+)?[kMB]\s+[A-Z][A-Z0-9]*|[+−-]\s*\d[\d,]*(?:\.\d+)?\s+[A-Z][A-Z0-9]*|[+−-]?\d+(?:\.\d+)?%/g;
@@ -38,18 +38,24 @@ function tokenKey(t: TokenQty): string {
 }
 
 /** Every generated coin stays on the card: a number, or `All paper BUN` when it is that coin's section total. */
-export function generatedCardLine(bot: TokenQty[], section: TokenQty[], scope: 'live' | 'paper'): string | null {
+export function generatedCardLine(bot: TokenQty[], section: TokenQty[], scope: 'live' | 'paper'): { text: string; parts: string[] } | null {
   const shown = bot.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
   if (!shown.length) return null;
   const sectionShown = section.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
   const line = formatTokenLine(shown);
-  if (line !== '—' && normFigure(line) === normFigure(formatTokenLine(sectionShown))) return `All of the ${scope} total`;
+  if (line !== '—' && normFigure(line) === normFigure(formatTokenLine(sectionShown))) {
+    const text = `All of the ${scope} total`;
+    return { text, parts: [text] };
+  }
   const totals = new Map(sectionShown.map((t) => [t.symbol, normFigure(formatTokenLine([t]))]));
   const word = scope === 'live' ? 'live' : 'paper';
-  return shown.map((t) => {
-    const text = formatTokenLine([t]);
-    return totals.get(t.symbol) === normFigure(text) ? `All ${word} ${t.symbol}` : text;
-  }).join(' · ');
+  const replaced = shown.some((t) => totals.get(t.symbol) === normFigure(formatTokenLine([t])));
+  if (!replaced) return { text: line, parts: tokenLineParts(shown) };
+  const parts = shown.map((t, i) => {
+    if (totals.get(t.symbol) === normFigure(formatTokenLine([t]))) return `All ${word} ${t.symbol}`;
+    return tokenLineParts(shown.slice(0, i + 1)).at(-1) ?? formatTokenLine([t]);
+  });
+  return { text: parts.join(' '), parts };
 }
 
 /**
@@ -76,15 +82,15 @@ export function rangeWords(range: RangeBlock | null): string {
 export type CardReadout =
   | { kind: 'empty' }
   | { kind: 'note'; text: string }
-  | { kind: 'line'; text: string };
+  | { kind: 'line'; text: string; parts: string[] };
 
 /** Generated text for a card. Coins that match the section hero are named, not dropped. */
 export function cardReadout(metrics: BotMetrics, sectionTokens: TokenQty[], scope: 'live' | 'paper'): CardReadout {
   if (showsNoFills(metrics)) return { kind: 'empty' };
-  const text = generatedCardLine(metrics.generated, sectionTokens, scope);
-  if (!text) return { kind: 'note', text: rangeWords(metrics.range) };
-  if (text === `All of the ${scope} total`) return { kind: 'note', text };
-  return { kind: 'line', text };
+  const line = generatedCardLine(metrics.generated, sectionTokens, scope);
+  if (!line) return { kind: 'note', text: rangeWords(metrics.range) };
+  if (line.text === `All of the ${scope} total`) return { kind: 'note', text: line.text };
+  return { kind: 'line', text: line.text, parts: line.parts };
 }
 
 export function uniqueTape(prices: TapePrice[]): TapePrice[] {
@@ -155,6 +161,7 @@ function roundedCoin(m: BotMetrics, symbol: string): { gross: number; paid: numb
   const unit = standardUnit(anchor);
   const places = unit >= 1 ? 0 : naturalPlaces(anchor);
   if (m.kind === 'grid' && paid !== 0) {
+    if (m.fillCount === 0) return { gross: 0, paid: -paid, move: 0, profit: 0, places };
     const [profit, gas] = apportion([generated + paid, -paid], displayedValue(generated), unit);
     return { gross: 0, paid: gas, move: 0, profit, places };
   }
@@ -188,22 +195,28 @@ export function ledgerLines(m: BotMetrics): LedgerLines | null {
     }),
   );
   const grid = m.kind === 'grid';
+  const noFills = grid && m.fillCount === 0;
   const untouched = freeSymbols.length === 0
     ? ''
     : freeSymbols.length === 1
       ? `${freeSymbols[0]} has no costs taken out.`
       : `${coinList(freeSymbols)} have no costs taken out.`;
+  const gasLine = noFills
+    ? formatTokenLine(costSymbols
+      .map((symbol) => ({ symbol, amount: -Math.abs(amountOf(m.feesPaid, symbol)), usd: null }))
+      .filter((t) => t.amount !== 0))
+    : row((coin) => coin.paid);
   return {
-    gross: grid ? row((coin) => coin.profit) : row((coin) => coin.gross),
+    gross: noFills ? '0' : grid ? row((coin) => coin.profit) : row((coin) => coin.gross),
     feeLabel: grid
       ? 'Trade profit before gas'
       : costSymbols.length === 1
         ? `${costSymbols[0]} fees earned`
         : costSymbols.length ? `${coinList(costSymbols)} fees earned` : '',
-    paid: row((coin) => coin.paid),
-    move: row((coin) => coin.move),
-    generated: formatTokenLine(generated),
-    untouched,
+    paid: gasLine,
+    move: noFills ? '' : row((coin) => coin.move),
+    generated: noFills && !generated.length ? '0' : formatTokenLine(generated),
+    untouched: noFills ? '' : untouched,
   };
 }
 
@@ -247,7 +260,7 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
   if (details && rows.length > beforeParts) {
     rows.push({ label: 'Adds', value: 'These add up to the Generated above.' });
   }
-  if (!details && rows.length > beforeParts) {
+  if (!details && rows.length > beforeParts && !(m.kind === 'grid' && m.fillCount === 0)) {
     rows.push({ label: 'Round', value: 'Rows are rounded to add up exactly.' });
   }
   if (ledger?.untouched) add('Note', ledger.untouched);

@@ -181,15 +181,21 @@ export function formatBag(tokens: { symbol: string; amount: number }[] | null | 
   return tokens.map((t) => `${plainAmt(t.amount)} ${t.symbol}`).join(' + ');
 }
 
-/** One line of signed token amounts, always in the standard format. */
-export function formatTokenLine(tokens: { symbol: string; amount: number }[] | null | undefined): string {
-  if (!tokens?.length) return '—';
+/** Pieces of a generated line. The first keeps its sign; later positives read `+ 1.00 ETH`. */
+export function tokenLineParts(tokens: { symbol: string; amount: number }[]): string[] {
   return tokens.map((t, i) => {
     const amt = formatAmt(t.amount);
     if (i === 0) return `${amt} ${t.symbol}`;
     if (t.amount < 0) return `${amt} ${t.symbol}`;
     return `+ ${amt.replace(/^\+/, '')} ${t.symbol}`;
-  }).join(' ');
+  });
+}
+
+/** One line of signed token amounts, always in the standard format. `+65.04 USDG + 0.01531 ETH`. */
+export function formatTokenLine(tokens: { symbol: string; amount: number }[] | null | undefined): string {
+  if (!tokens?.length) return '—';
+  const parts = tokenLineParts(tokens);
+  return parts.length ? parts.join(' ') : '—';
 }
 
 export function formatAge(sec: number | null): string {

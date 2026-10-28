@@ -259,7 +259,60 @@ describe('v2 copy stays in token units', () => {
       desk.bots.find((b) => b.metrics.botId === 'bun')!.metrics.generated,
       desk.portfolio.paperTokens,
       'paper',
-    )).toBe('All paper BUN · −0.01051 ETH');
+    )?.text).toBe('All paper BUN −0.01051 ETH');
+  });
+
+  it('uses the same multi-coin generated string on the card and the hero', () => {
+    const now = 1_700_000_000_000;
+    const lp = (id: string, baseAmt: number, quoteAmt: number) => ({
+      id, mode: 'paper' as const, status: 'running', chainId: 1, label: 'USDG/ETH', base: 'USDG', quote: 'ETH',
+      dexName: 'Example', usdPerQuote: 2000, price: 0.0005, startedAt: now - 3 * 86_400_000,
+      inRange: true, startValue: 1, config: { capital: 1 },
+      position: { lower: 0.0004, upper: 0.0006 },
+      pnl: {
+        net: 0, price: 0, fees: 0, gas: 0, swapCost: 0, moveLoss: 0, equity: 1,
+        feeCoins: { base: baseAmt, quote: quoteAmt },
+      },
+    });
+    const desk = adaptStatus({ spotsAt: now, lps: [lp('one', 65.04, 0.01531), lp('two', 6, 0.01)] }, [], now);
+    const bot = desk.bots.find((b) => b.metrics.botId === 'one');
+    const line = formatTokenLine(bot?.metrics.generated ?? []);
+    expect(line).toBe('+65.04 USDG + 0.01531 ETH');
+    const home = textOf(renderToStaticMarkup(
+      <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />,
+    ));
+    const hero = textOf(renderToStaticMarkup(
+      <BotView bot={bot!} activity={[]} prices={[]} onBack={() => {}} onActivity={() => {}} showFeed={false} breakdown />,
+    ));
+    expect(home).toContain(line);
+    expect(hero).toContain(line);
+    expect(generatedCardLine(bot!.metrics.generated, desk.portfolio.paperTokens, 'paper')?.text).toBe(line);
+  });
+
+  it('does not invent trade profit for a grid with no fills', () => {
+    const lines = ledgerLines({
+      kind: 'grid',
+      fillCount: 0,
+      grossFees: [],
+      feesPaid: [{ symbol: 'PLS', amount: 20300, usd: null }],
+      moveLoss: [],
+      generated: [],
+    } as BotMetrics);
+    expect(lines?.gross).toBe('0');
+    expect(lines?.paid).toBe('−20.3k PLS');
+    expect(lines?.generated).toBe('0');
+    expect(lines?.gross).not.toContain('20.3k');
+    const rows = sheetRows({
+      kind: 'grid',
+      fillCount: 0,
+      grossFees: [],
+      feesPaid: [{ symbol: 'PLS', amount: 20300, usd: null }],
+      moveLoss: [],
+      generated: [],
+    } as BotMetrics, { base: 'HEX', quote: 'PLS' });
+    expect(rows.find((r) => r.label === 'Trade profit before gas')?.value).toBe('0');
+    expect(rows.find((r) => r.label === 'Generated')?.value).toBe('0');
+    expect(rows.map((r) => r.value).join(' ')).not.toContain('+20.3k');
   });
 });
 

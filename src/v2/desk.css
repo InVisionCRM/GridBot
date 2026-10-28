@@ -306,7 +306,8 @@
 @keyframes v2-draw { to { stroke-dashoffset: 0; } }
 .v2 .card-made {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: baseline;
   gap: 8px;
   margin: 8px 0 2px;
   min-width: 0;
@@ -315,6 +316,8 @@
   line-height: 1.35;
 }
 .v2 .card-made > span:first-child { flex: none; font-family: var(--font); font-size: 12px; color: var(--label); letter-spacing: 0.06em; text-transform: uppercase; }
+.v2 .card-gen { flex: 1 1 8em; min-width: 0; white-space: normal; }
+.v2 .card-gen .bag-coin { display: inline-block; white-space: nowrap; }
 .v2 .card-made > .token-headline { flex: 1 1 auto; width: auto; min-width: 0; }
 .v2 .card-chart { position: relative; }
 
