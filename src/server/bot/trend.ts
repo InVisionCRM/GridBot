@@ -10,7 +10,7 @@ import type { LiveNetwork } from '../../live/networks';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { Hub } from '../chains/hub';
-import { legacyTradeNames, upgradeQuoteNames, type LiveTrade } from '../../live/ledger';
+import { legacyTradeNames, roundTripCosts, upgradeQuoteNames, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
 import { TF_SEC, bucketStart, closedOnly, fillGaps, isTF, type Candle, type TF } from '../../market/candles';
 import { DEFAULT_COSTS, type CostModel } from '../../market/costs';
@@ -797,6 +797,8 @@ export class TrendEngine {
       nextCloseAt: (bucketStart(Math.floor(this.now() / 1000), s.tf) + tfSec) * 1000,
       trades: trades.slice(-100).reverse().map(legacyTradeNames),
       pnl: { realized, unrealized, equity, returnPct: s.capital ? equity / s.capital - 1 : 0, gas: trades.reduce((a, t) => a + t.gasQuote, 0), fees: trades.reduce((a, t) => a + (t.feeQuote ?? 0), 0) },
+      // costs of the closed trades in realized, for the per-coin breakdown (display only; botMetrics breakdownByCoin)
+      rtCosts: roundTripCosts(trades, 'all'),
       stats: { ...tradeStats(closed), maxDrawdown: drawdown(s.equity).max, timeInMarket: s.startedAt ? inMarketMs / Math.max(1, this.now() - s.startedAt) : 0 },
       moveCount: trades.filter((t) => !t.failed).length,
       lastMoveAt: trades.reduce((m, t) => (!t.failed ? Math.max(m, t.timestamp || 0) : m), 0) || null,

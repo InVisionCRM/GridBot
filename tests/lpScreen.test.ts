@@ -18,7 +18,7 @@ const bot = {
   owed: { base: 1.25, quote: 3.5 },
   coins: { base: 100, quote: 40 },
   idle: { base: 0, quote: 0 },
-  totals: { sent: 0, gas: 0.1, swapCost: 0.2 },
+  totals: { sent: 0, gas: 0.1, swapCost: 0.2, moveLoss: 0.4 },
   pnl: { feeCoins: { base: 2, quote: 4 }, fees: 4.1, gas: 0.1, swapCost: 0.2, moveLoss: 0.4, net: 3.4 },
   equity: [],
 };
@@ -37,9 +37,10 @@ describe('LP screen figures', () => {
     expect(html.match(/2 range moves/g)).toHaveLength(1);
     expect(html).not.toMatch(/Realized|Unrealized/);
     const waiting = html.slice(html.indexOf('Fees waiting'), html.indexOf('Compound at'));
-    // #43: the range-move loss and its count are in Details' breakdown (gas · swaps · range moves), not a KPI of their own
-    expect(html).toContain('gas · swaps · range moves');
-    const moves = html.slice(html.indexOf('gas · swaps · range moves'), html.indexOf('= Generated'));
+    // #43: the range-move loss and its count are in Details' per-coin breakdown (− Range moves, DAI), not a KPI of their own
+    expect(html).toContain('− Range moves, DAI');
+    expect(html).toContain('−0.4 DAI');
+    const moves = html.slice(html.indexOf('− Range moves, DAI'), html.indexOf('= Generated, DAI'));
     expect(waiting).not.toContain('$');
     expect(moves).not.toContain('$');
   });
