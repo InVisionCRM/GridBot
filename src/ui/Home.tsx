@@ -179,7 +179,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
         </div>
         <div>
           <span title={FEES_TODAY_CALC}>Fees earned today</span>
-          <b className="units">{unitsText(today.liveEarned, 3)}</b>
+          <b className="units">{Object.keys(today.liveEarned).length ? unitsText(today.liveEarned, 3) : '—'}</b>
           {(Object.keys(today.paperEarned).length > 0 || Object.keys(today.livePaid).length > 0) && (
             <small className="muted fees-sub units">
               {[Object.keys(today.paperEarned).length ? `paper ${unitsText(today.paperEarned, 3)}` : '', Object.keys(today.livePaid).length ? `trade fees paid ${unitsText(today.livePaid, 3, false)}` : ''].filter(Boolean).join(' · ')}

@@ -61,4 +61,8 @@ describe('Home net worth chip is live only', () => {
     expect(h).not.toMatch(/\d[\d,.]* (DAI|USDG|USDC|ETH)/);
     expect(text(alloc(null))).toContain('No balances yet');
   });
+  it('with no live bots, Fees earned today is a dash like Generated, not a bare 0', () => {
+    const join = /<section class="join"[\s\S]*?<\/section>/.exec(page(PRICED))![0];
+    expect(text(join)).toContain('Fees earned today—');
+  });
 });

@@ -14,7 +14,7 @@ import { BotLog } from './GridDetail';
 import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { draftFrom, LpPolicyFields, payloadFrom, type PolicyDraft } from './LpPolicyFields';
 import { L } from './Tip';
-import { type AnyObj, type Nav } from './model';
+import { lpName, type AnyObj, type Nav } from './model';
 import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
 import { metricsOf, unitsText } from './deskStats';
@@ -101,7 +101,7 @@ function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boo
   const outFor = b.outSince ? Math.max(0, Math.round((Date.now() - b.outSince) / 60_000)) : 0;
   const widen = b.hold?.suggestedBand as number | undefined;
   const compound = () => act(async () => {
-    if (b.mode === 'live' && !confirm(`Add the waiting fees back into the ${b.label} position? It collects them and increases this range. Gas applies.`)) return;
+    if (b.mode === 'live' && !confirm(`Add the waiting fees back into the ${lpName(b)} position? It collects them and increases this range. Gas applies.`)) return;
     await botApi(`lps/${b.id}/compound`, 'POST');
   });
   const doWiden = () => act(async () => {
@@ -271,10 +271,10 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const running = b.status === 'running', closed = b.status === 'closed';
   const closing = !!b.closing || step?.action === 'close';
   const close = () => {
-    if (b.mode === 'live' && !confirm(`Take the ${b.label} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
+    if (b.mode === 'live' && !confirm(`Take the ${lpName(b)} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
     act(() => botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close'));
   };
-  const remove = () => act(async () => { if (confirm(`Remove the ${b.label} liquidity bot and its history?`)) { await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' }); } });
+  const remove = () => act(async () => { if (confirm(`Remove the ${lpName(b)} liquidity bot and its history?`)) { await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' }); } });
 
   return (
     <main className="stack">
@@ -282,7 +282,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="detail-head">
         <div className="detail-id">
           <StatusDot beat={b.priceAt} state={closing ? 'closing' : b.lastError ? 'error' : b.status} />
-          <h2>{b.label}</h2>
+          <h2>{lpName(b)}</h2>
           <ChainBadge c={chainOf(s, b.chainId)} testnet={false} />
           <span className="tag">Liquidity</span>
           {b.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}

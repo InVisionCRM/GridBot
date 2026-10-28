@@ -8,7 +8,7 @@ import { isShortRun } from './runRate';
 import type { FeesToday } from '../metrics/feesToday';
 import { cls, dur, pctShown, px, qty, qtyFixed } from './fmt';
 import { ChainMark, TokenMark } from './icons';
-import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
+import { botView, gridName, lpName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { botSpark } from './series';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
@@ -31,7 +31,7 @@ function pairOf(b: AnyObj): { base: string; quote: string; title: string } {
   const quote = String(quoteSym(b) ?? '');
   const base = String(b.base ?? '');
   if (b.kind === 'grid') return { base, quote, title: gridName(b) };
-  if (b.kind === 'lp') return { base, quote, title: b.label ? String(b.label) : `${base}/${quote}` };
+  if (b.kind === 'lp') return { base, quote, title: lpName(b) };
   if (b.kind === 'trader' || b.kind === 'sniper') {
     const name = String(b.label || b.name || '');
     return { base: String(b.token || b.base || name), quote: String(b.spend || quote), title: name || 'Token trader' };
@@ -110,9 +110,11 @@ export function feesTodayOf(s: AnyObj, bots: AnyObj[]): FeesTodayView {
   const all = Object.keys(ft.byBot ?? {}).every((id) => ids.has(id));
   let liveEarnedUsd = 0, paperEarnedUsd = 0, livePaidUsd = 0;
   const add = (to: Record<string, number>, sym: string | null | undefined, v: number | undefined) => { if (sym && v) to[sym] = (to[sym] ?? 0) + v; };
+  // the live headline names every live bot's coin, so a day with no fees reads "0 USDG" and no live bots reads "—"
+  const name = (to: Record<string, number>, sym: string | null | undefined, v: number | undefined) => { if (sym) to[sym] = (to[sym] ?? 0) + (v ?? 0); };
   for (const [id, r] of Object.entries(ft.byBot ?? {})) {
     if (!ids.has(id)) continue;
-    if (r.mode === 'live') { liveEarnedUsd += r.earnedUsd; livePaidUsd += r.paidUsd; add(liveEarned, r.sym, r.earned); add(livePaid, r.sym, r.paid); }
+    if (r.mode === 'live') { liveEarnedUsd += r.earnedUsd; livePaidUsd += r.paidUsd; name(liveEarned, r.sym, r.earned); add(livePaid, r.sym, r.paid); }
     else { paperEarnedUsd += r.earnedUsd; add(paperEarned, r.sym, r.earned); }
   }
   return { liveEarnedUsd, paperEarnedUsd, livePaidUsd, liveSeries: all ? ft.liveSeries : [0, liveEarnedUsd], liveEarned, paperEarned, livePaid };
