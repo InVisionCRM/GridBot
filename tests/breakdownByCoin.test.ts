@@ -130,7 +130,9 @@ describe('grid / trend: trade profit before costs', () => {
     expect(trendMetrics({ ...t, rtCosts: { gas: 1, poolFees: 0, taxes: 0, lostGas: 0, roundTrips: 1, unmatched: 0 } }, AS_OF).breakdownByCoin!.USDC.earned).toBe(9);
   });
   it('token trader: the closed sells per coin, costs inside (not itemized); an old dollar log has no lines', () => {
-    const tt = tokenMetrics({ on: true, trades: [{ t: 1, side: 'buy', label: 'PEPE/WETH', amount: 1, usd: 3000 }, { t: 2, side: 'sell', label: 'PEPE/WETH', amount: 1.1, usd: 3300, pnl: 0.1 }], positions: [] }, AS_OF);
+    // the trader's own ledger is the source (one mode at a time); the log only names the fills
+    const weth = { chainId: 1, address: null, symbol: 'WETH', native: true };
+    const tt = tokenMetrics({ on: true, options: { mode: 'paper' }, generated: [{ mode: 'paper', coin: weth, amount: 0.1, proceeds: 1.1, cost: 1, gasNative: 0, gasInAmount: true, closed: 1, basis: 'closed' }], trades: [{ t: 1, mode: 'paper', side: 'buy', label: 'PEPE/WETH', amount: 1, usd: 3000 }, { t: 2, mode: 'paper', side: 'sell', label: 'PEPE/WETH', amount: 1.1, usd: 3300, pnl: 0.1 }], positions: [] }, AS_OF);
     expect(tt.breakdownByCoin).toEqual({ WETH: { earned: 0.1, gasSwap: 0, rangeMoveLoss: 0, taxes: 0, bridge: 0, generated: 0.1 } });
     expect(tt.breakdownBasis!.itemized).toBe(false);
     const old = tokenMetrics({ on: true, trades: [{ t: 1, side: 'sell', usd: 30, pnlUsd: 2 }], positions: [] }, AS_OF);
