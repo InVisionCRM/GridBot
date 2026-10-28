@@ -25,6 +25,7 @@ import { WRAPPED } from '../dex/abis';
 import type { FetchJson } from '../fetchJson';
 import { holdings, type Coin, type Unreadable } from './holdings';
 import { noKey } from '../words';
+import type { ReservedBalance } from '../swap/holds';
 
 /** A plan older than this must be made again before it runs (prices and balances move). */
 export const PLAN_TTL_MS = 10 * 60_000;
@@ -231,6 +232,19 @@ export class Converter {
   }
 
   job(): Job | null { return this.current; }
+
+  /** Coins an unfinished conversion still intends to spend (waiting or the one running now). */
+  reservations(): ReservedBalance[] {
+    const job = this.current;
+    if (!job || job.finishedAt) return [];
+    return job.rows.filter((r) => r.status === 'waiting' || r.status === 'running').map((r) => ({
+      chainId: job.chainId,
+      address: r.coin.address ?? NATIVE,
+      native: r.coin.address == null,
+      amount: r.amount,
+      source: 'converter' as const,
+    }));
+  }
   /** Finish the coin being converted (one whose first transaction is out goes all the way to the target), then stop. */
   stop() { if (this.current && !this.current.finishedAt) this.current.stopping = true; }
 
