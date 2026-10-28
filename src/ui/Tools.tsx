@@ -1,11 +1,10 @@
-/** Tools: charts, backtest, analytics, markets (custom tokens, pools), converting a chain's coins to one, and alerts. */
+/** Tools: charts, backtest, analytics, markets (custom tokens, pools), and converting a chain's coins to one. Alerts is its own screen. */
 import { useEffect, useState } from 'react';
 import { http } from './api';
 import { Chart } from './Chart';
 import { Backtest } from './Backtest';
 import { Analytics, MarketPanels } from './Analytics';
 import { Markets } from './Markets';
-import { Alerts, type NotifyPrefs } from './Alerts';
 import { lbl, marketsOf, useChainFilter } from './chains';
 import type { Ticks } from './useStream';
 import { TOOL_TABS, type AnyObj, type Nav, type View } from './model';
@@ -34,9 +33,9 @@ function ChartTab({ s, ticks }: { s: AnyObj; ticks: Ticks | null }) {
   );
 }
 
-export function Tools({ s, view, ticks, nav, act, busy, prefs, setPrefs, ver }: {
+export function Tools({ s, view, ticks, nav, act, busy, ver }: {
   s: AnyObj; view: Extract<View, { v: 'tools' }>; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean;
-  prefs: NotifyPrefs; setPrefs: (p: NotifyPrefs) => void; ver: ReturnType<typeof useVersion>;
+  ver: ReturnType<typeof useVersion>;
 }) {
   const tab = view.tab;
   return (
@@ -50,7 +49,6 @@ export function Tools({ s, view, ticks, nav, act, busy, prefs, setPrefs, ver }: 
       {tab === 'analytics' && <Analytics key={view.analytics ?? 'live'} status={s} initial={view.analytics ?? 'live'} />}
       {tab === 'markets' && <Markets status={s} act={act} busy={busy} />}
       {tab === 'convert' && <Convert s={s} />}
-      {tab === 'alerts' && <Alerts status={s} prefs={prefs} setPrefs={setPrefs} />}
       {tab === 'system' && <SystemTab ver={ver} copy={!!s.copy} />}
       {tab === 'friends' && !s.copy && <Friends />}
     </main>

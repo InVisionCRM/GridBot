@@ -77,3 +77,37 @@ export function cookieValue(header: string | undefined, name: string): string | 
 export function sessionCookie(value: string | null, maxAgeMs = SESSION_MS): string {
   return `${COOKIE}=${value ?? ''}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${value ? Math.floor(maxAgeMs / 1000) : 0}`;
 }
+
+// ── Owner device ──────────────────────────────────────────────────────
+/**
+ * Set on every successful owner log-in and kept after log-out: marks the browser as one the owner used before, so it
+ * skips a lockout that someone else's guesses caused (it never skips the password). Signed with a key derived from the
+ * session key; holds the owner's session number (HOST_SESSION, bumped by `npm run host:password`) and the issue time.
+ * A cookie from before a password change carries the old number and no longer counts (#62 review).
+ */
+export const DEVICE_COOKIE = 'gb_device';
+export const DEVICE_MS = 400 * 86_400_000;
+const deviceKey = (sessionKey: Buffer) => createHmac('sha256', sessionKey).update('owner-device-v1').digest();
+
+export function signDevice(sessionKey: Buffer, issuedAt: number, session: number): string {
+  const body = `d2.${Math.floor(session)}.${Math.floor(issuedAt)}`;
+  return `${body}.${b64(mac(deviceKey(sessionKey), body))}`;
+}
+
+/**
+ * Issue time of a genuine owner-device cookie for the current owner password, or null (missing, forged, wrong shape,
+ * older than DEVICE_MS, or signed for another session number, i.e. before a password change).
+ */
+export function readDevice(sessionKey: Buffer, value: string | undefined, now: number, session: number): number | null {
+  const m = /^d2\.(\d{1,9})\.(\d{1,16})\.([A-Za-z0-9_-]+)$/.exec(value ?? '');
+  if (!m) return null;
+  const want = mac(deviceKey(sessionKey), `d2.${m[1]}.${m[2]}`), got = Buffer.from(m[3], 'base64url');
+  if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+  if (Number(m[1]) !== session) return null;
+  const at = Number(m[2]);
+  return at <= now && now - at < DEVICE_MS ? at : null;
+}
+
+export function deviceCookie(value: string): string {
+  return `${DEVICE_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${Math.floor(DEVICE_MS / 1000)}`;
+}
