@@ -68,7 +68,10 @@ describe('real snapshot: closed Robinhood ETH/USDG LP move loss is rebuilt at lo
   it('the saved state shows 12 moves and no loss (zeroed by the v5 upgrade)', () => {
     expect(saved.reranges).toBe(12);
     expect(saved.totals.moveLoss).toBe(0);
-    expect(lpClosedStatus(clone(saved)).metrics.generated.USDG).toBeCloseTo(89.51, 2); // what the app showed
+    // what the app showed (+89.51 = fees − gas, no move loss) …
+    expect(saved.totals.fees - saved.totals.gas).toBeCloseTo(89.51, 2);
+    // … and what botMetrics now gives for that payload even when no server rebuilt it (an older build): −16.31 (#43 regression guard)
+    expect(lpClosedStatus(clone(saved)).metrics.generated.USDG).toBeCloseTo(-16.31, 2);
   });
   it('load rebuilds ≈105.8 USDG lost to moves, so it generated ≈ −16.31 USDG (actual)', () => {
     const before = clone(saved);

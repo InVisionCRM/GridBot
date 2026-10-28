@@ -21,6 +21,7 @@
 
 import { isCloseOut, roundTripCosts, type RoundTripCosts } from '../live/ledger';
 import { keySymbols, unitOf } from '../lib/marketKey';
+import { zeroedMoveLoss, type MoveLossInput } from '../live/lpMoveLoss';
 
 export const DAY_MS = 86_400_000;
 /** Kyle's rule: every estimate (day, 7d, 30d, 365d, APR) needs one day of history, and nothing else. */
@@ -354,6 +355,9 @@ function tradeParts(sym: string, gen: number | null, rt: RoundTripCosts | null, 
   };
 }
 
+/** No fill yet (no trade logged, no move counted): it has generated 0, not "unknown". */
+const noFills = (b: Obj) => (!Array.isArray(b.trades) || b.trades.length === 0) && !((num(b.moveCount) ?? 0) > 0) && !((num(b.stats?.roundTrips) ?? 0) > 0);
+
 /** Grid status (engine.status() + usdPerQuote). All grid amounts are in the quote coin. */
 export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   // Invested: totalCapitalQuote; a grid saved before the *Usd→*Quote rename has only totalCapitalUsd, which always held
@@ -371,7 +375,7 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   const sym = String(unitOf(b.quoteSym) ?? unitOf(b.stable) ?? 'quote'); // never a market key as the unit
   // Generated = completed round trips (minus gas lost on failed / manual trades). A close / stop cash-out sale is a
   // liquidation at the day's price, so it is in Total P&L (price change) but not here. Older payloads: realized.
-  const gen = num(b.stats?.generated) ?? realized;
+  const gen = num(b.stats?.generated) ?? realized ?? (noFills(b) ? 0 : null);
   const fromStats = num(b.stats?.generated) != null;
   const rt = fromStats && b.stats?.rtCosts ? b.stats.rtCosts as RoundTripCosts : Array.isArray(b.trades) && fromStats ? roundTripCosts(b.trades, 'grid') : null;
   return finish({
@@ -390,7 +394,7 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
 
 export function trendMetrics(b: Obj, now = Date.now()): BotMetrics {
   const cap = num(b.capital);
-  const realized = num(b.pnl?.realized), unrealized = num(b.pnl?.unrealized);
+  const realized = num(b.pnl?.realized) ?? (noFills(b) ? 0 : null), unrealized = num(b.pnl?.unrealized);
   const equity = num(b.pnl?.equity) ?? (cap == null ? null : cap + (realized ?? 0) + (unrealized ?? 0));
   const n = num(b.moveCount);
   const sym = String(unitOf(b.quoteSym) ?? unitOf(b.quote) ?? 'quote'); // never a market key as the unit
@@ -441,6 +445,20 @@ export function lpGenerated(b: Obj): { generated: Record<string, number> | null;
   };
 }
 
+/**
+ * A closed LP from a server that never rebuilt its zeroed range-move loss (saved before the rebuild, or an older build):
+ * the same rebuild the engine runs at load (lpMoveLoss.ts), so its Generated is net of the moves either way (#43: the
+ * Robinhood ETH/USDG LP is −16.31 USDG, not +89.51).
+ */
+function withMoveLoss(b: Obj): Obj {
+  if (b?.status !== 'closed' || !b.totals) return b;
+  const price = num(b.price) ?? num(b.lastPrice);
+  const loss = zeroedMoveLoss(b as MoveLossInput, price);
+  if (loss == null) return b;
+  const t = b.totals, mc = coinsOf(t.moveCoins) ?? { base: 0, quote: 0 };
+  return { ...b, totals: { ...t, moveLoss: loss, moveCoins: { base: mc.base, quote: mc.quote + loss }, moveLossBackfill: { loss, price, at: num(b.lastPriceAt) ?? num(b.priceAt) ?? 0 } } };
+}
+
 /** Closed, nothing open: its figures come from the totals and the idle coins at the exit price. */
 const lpClosed = (b: Obj) => !b.pnl && !b.position && b.status === 'closed' && !!b.totals;
 
@@ -457,6 +475,7 @@ function closedLpPnl(b: Obj): Obj | null {
 
 /** LP status (lpEngine.status()). `pnl` is LpEngine.pnl(): equity = value + sent − gas. */
 export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
+  b = withMoveLoss(b);
   const start = num(b.startValue) ?? num(b.config?.capital);
   const closed = closedLpPnl(b);
   const p = b.pnl ?? closed;

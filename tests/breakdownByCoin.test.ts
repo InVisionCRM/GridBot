@@ -154,3 +154,32 @@ describe('Invested fallback: legacy grid config.totalCapitalUsd (quote-coin unit
     expect(m).toMatchObject({ capitalInQuote: null, capitalInSource: null });
   });
 });
+
+describe('#43 regression: the closed Robinhood ETH/USDG LP is −16.31 USDG, never +89.51', () => {
+  const F = JSON.parse(readFileSync(new URL('./fixtures/real-2026-10-27.json', import.meta.url), 'utf8')) as Obj;
+  const saved = F.lpClosedLegacy.state as Obj; // saved state: 12 moves, totals.moveLoss 0 (zeroed by the v5 upgrade)
+  const fromOldServer = { ...F.lpClosedLegacy.status, ...saved, kind: 'lp', pnl: null, value: null }; // no load-time rebuild
+  it('a payload that never had the rebuild: botMetrics rebuilds the move loss (same math as the engine)', () => {
+    const m = lpMetrics(fromOldServer, F.now);
+    expect(m.generated!.USDG).toBeCloseTo(-16.31, 2);
+    expect(m.breakdownByCoin!.USDG.rangeMoveLoss).toBeCloseTo(105.82, 2);
+    identity(m);
+  });
+  it('a payload the server already rebuilt is not charged twice', () => {
+    const l = R.lps.find((x: Obj) => x.id === 'lp-mvfv3g7g-to6l');
+    expect(l.totals.moveLossBackfill).toBeDefined();
+    expect(lpMetrics(l, AS_OF).generated!.USDG).toBeCloseTo(-16.311152863527596, 9);
+  });
+});
+
+describe('no fills: 0, not null', () => {
+  it('a grid with no stats, no realized and no trades', () => {
+    expect(gridMetrics({ id: 'g', kind: 'grid', status: 'running', quoteSym: 'DAI', config: { totalCapitalQuote: 10 } }, AS_OF).generated).toEqual({ DAI: 0 });
+  });
+  it('a trend with no pnl and no trades', () => {
+    expect(trendMetrics({ id: 't', kind: 'trend', status: 'running', quoteSym: 'USDC', capital: 10 }, AS_OF).generated).toEqual({ USDC: 0 });
+  });
+  it('but a bot with fills and no figure stays unknown (null)', () => {
+    expect(gridMetrics({ id: 'g', kind: 'grid', status: 'running', quoteSym: 'DAI', moveCount: 3 }, AS_OF).generated).toBeNull();
+  });
+});
