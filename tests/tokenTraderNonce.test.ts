@@ -152,8 +152,16 @@ describe('a token-trader send queued behind another is refused after a stop', ()
   it('buy refused after Stop all on that chain', async () => {
     await queued((t) => t.stopEntries(369, systemHalt('stop-chain', 'test', 1)), 'buy');
   });
-  it('sell refused after the token trader is turned off', async () => {
-    await queued((t) => t.turnOff(), 'sell');
+  it('sell refused after the token trader is turned off completely', async () => {
+    await queued((t) => t.turnOff('full'), 'sell');
+  });
+  it('#42: "off for new buys" (exits only) still lets a queued exit sell go out; a buy is refused', async () => {
+    const t = trader();
+    t.turnOff('exits');
+    expect(sendChecks(t).sell()()).toBe(true);
+    expect(sendChecks(t).buy(369)()).toBe(false);
+    t.turnOff('full');
+    expect(sendChecks(t).sell()()).toBe(false);
   });
   it('a buy that is not stopped goes out after the queued grid send, at the next nonce', async () => {
     const { c, signer, quoter } = fakeChain();

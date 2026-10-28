@@ -4,6 +4,7 @@
  * on the trader, is used only to broadcast the signed transaction.
  */
 import { JsonRpcProvider } from 'ethers';
+import { readDecimals } from '../../live/decimals';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
@@ -144,6 +145,14 @@ export function createTokenTrader(o: {
     quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
     resolve: (hit) => resolveHit(o.hub, hit),
     ownerPowers: (pool) => readOwnerPowers(o.hub.rt(pool.chainId).reader, pool.chainId, pool.token),
+    // the signer's on-chain balance of the position's token (reconcile after a sell that stopped partway)
+    balanceOf: async (p) => {
+      const rt = o.hub.rt(p.chainId);
+      if (!rt.signer) return null;
+      const owner = await rt.signer.getAddress();
+      const [raw, dec] = await Promise.all([rt.tokenBalance(owner, p.token), readDecimals(rt.reader, p.chainId, p.token)]);
+      return Number(raw) / 10 ** dec;
+    },
     // dynamic-fee pools: the fee at quote time (never cached)
     feeNow: (p) => readV3FeeBps(o.hub.rt(p.chainId).reader, p.pool),
     rejects: o.dataDir ? new PlayRejectLog(o.dataDir) : undefined,
@@ -170,10 +179,11 @@ export function createTokenTrader(o: {
 }
 
 /** The halt checks a token-trader send runs right before it takes a nonce (and again between approve and swap). */
-export function sendChecks(trader: Pick<TokenTrader, 'canBuy' | 'status'>) {
+export function sendChecks(trader: Pick<TokenTrader, 'canBuy' | 'canSell'>) {
   return {
     buy: (chainId: number) => () => trader.canBuy(chainId),
-    sell: () => () => trader.status().on,
+    // Exits: allowed on and in "off for new buys" (exits only), never when off completely.
+    sell: () => () => trader.canSell(),
   };
 }
 

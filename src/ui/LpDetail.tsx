@@ -14,7 +14,8 @@ import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { Usd } from './money';
-import { showHalt } from './haltText';
+import { overrideText, showHalt } from './haltText';
+import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
 import { historyEnd } from './deskStats';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -142,6 +143,7 @@ function PositionPace({ b, k }: { b: AnyObj; k: number | null }) {
 export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const b: AnyObj | undefined = (s.lps ?? []).find((x: AnyObj) => x.id === id);
   const [, tick] = useState(0);
+  const chk = useSafetyChecking();
   useEffect(() => { const i = setInterval(() => tick((x) => x + 1), 30_000); return () => clearInterval(i); }, []);
   if (!b) return null;
 
@@ -175,12 +177,14 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
         <div className="detail-actions">
           {running && <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`lps/${b.id}/stop`, 'POST', undefined, 'row-pause'))}>Pause</button>}
-          {b.status === 'stopped' && <button type="button" className="btn primary" disabled={busy || b.available === false} onClick={() => act(() => botApi(`lps/${b.id}/resume`, 'POST'))}>Resume</button>}
+          {b.status === 'stopped' && <button type="button" className="btn primary" disabled={busy || b.available === false} onClick={() => act(() => chk.run(b.mode === 'live', () => botApi(`lps/${b.id}/resume`, 'POST')))}>Resume</button>}
           {!closed && <button type="button" className="btn danger" disabled={busy || closing || b.available === false} title={step?.hash ? 'A transaction is still being confirmed' : 'Take everything out and end the bot'} onClick={close}>{closing ? 'Closing…' : 'Close'}</button>}
           <button type="button" className="btn danger" disabled={busy || !!pos || !!step} title={pos || step ? 'Close the position first' : ''} onClick={remove}>Remove</button>
         </div>
       </div>
       {showHalt(b, closing) && <p className="bot-why">{showHalt(b, closing)}</p>}
+      {overrideText(b) && <p className="bot-why">{overrideText(b)}</p>}
+      {(chk.on || heldForSafety(s, b.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… no open, re-range or send until it passes.'} />}
 
       <div className="notices">
         {b.lastError && <div className="banner error"><span className="grow">{b.lastError}</span></div>}

@@ -188,7 +188,11 @@ export interface Executor {
   quote(side: Side, amount: number, limits: SafetyLimits): Promise<Quote>;
   execute(q: Quote, hooks: ExecHooks): Promise<Fill>;
   /** Look up a swap sent before a restart. null = not mined (yet). */
-  recover(swapTxHash: string, tokenOut: string, decimalsOut: number): Promise<{ ok: boolean; amountOutHuman: number; gasPls: number; gasNative: number } | null>;
+  /**
+   * Settle a broadcast swap by hash (restart reconcile). `basePerNative`: the rate saved when the swap was sent; old
+   * records without it read the rate now. gasUnknown: no rate could be read, so gasPls is 0 (gasNative is still exact).
+   */
+  recover(swapTxHash: string, tokenOut: string, decimalsOut: number, basePerNative?: number): Promise<RecoverResult | null>;
   /** Gas (base units) of one transfer of the spend coin, for the profit payout threshold */
   transferGasPls(): Promise<number>;
   /** Send `amountHuman` of the spend coin to `to`; returns the tx hash without waiting for it (paper: a simulated id) */
@@ -204,6 +208,16 @@ function shortErr(e: unknown): string {
   const a = e as { shortMessage?: string; reason?: string; message?: string };
   const m = a?.shortMessage ?? a?.reason ?? a?.message ?? String(e);
   return m.length > 300 ? m.slice(0, 300) + '…' : m;
+}
+
+/** A swap settled by hash: gas in base units (gasPls) and in the chain's native coin (gasNative). */
+export interface RecoverResult {
+  ok: boolean;
+  amountOutHuman: number;
+  gasPls: number;
+  gasNative: number;
+  /** No base-per-native rate was saved with the swap or readable now: gasPls is 0, not native gas booked 1:1. */
+  gasUnknown?: true;
 }
 
 export interface QuoterCtx {
@@ -230,6 +244,8 @@ export class Quoter {
   private readonly ctx: QuoterCtx;
   get adapter(): DexAdapter { return this.ctx.resolve ? this.ctx.resolve(this.def.pool.dex) : this.ctx.adapter; }
   lastBasePerNative = 1;
+  /** lastBasePerNative was read in this process (it starts at 1, which is only right when the base is native). */
+  private basePerNativeRead = false;
 
   /** new Quoter(reader, net, quoteToken) = legacy PulseX market; new Quoter(reader, market, ctx) = any market. */
   constructor(readonly reader: ChainReader, a: LiveNetwork | MarketDef, b: QuoteToken | QuoterCtx) {
@@ -273,8 +289,21 @@ export class Quoter {
   async basePerNative(): Promise<number> {
     if (this.def.base.native || !this.ctx.basePerNative) return 1;
     const v = await this.ctx.basePerNative();
-    if (v > 0 && Number.isFinite(v)) this.lastBasePerNative = v;
+    if (v > 0 && Number.isFinite(v)) { this.lastBasePerNative = v; this.basePerNativeRead = true; }
     return this.lastBasePerNative;
+  }
+
+  /**
+   * Base per native for gas on a receipt read later (a swap reconciled after a restart). Null when the rate can't be
+   * read now and none was read in this process: never the starting 1, which books native gas as base units 1:1.
+   */
+  async basePerNativeForGas(): Promise<number | null> {
+    if (this.def.base.native || !this.ctx.basePerNative) return 1;
+    try {
+      const v = await this.ctx.basePerNative();
+      if (v > 0 && Number.isFinite(v)) { this.lastBasePerNative = v; this.basePerNativeRead = true; return v; }
+    } catch { /* fall through to the last good reading */ }
+    return this.basePerNativeRead ? this.lastBasePerNative : null;
   }
 
   /** Legacy helpers (V2 only) */
@@ -771,13 +800,17 @@ export class LiveExecutor implements Executor {
     };
   }
 
-  async recover(hash: string, tokenOut: string, decimalsOut: number) {
+  async recover(hash: string, tokenOut: string, decimalsOut: number, basePerNative?: number): Promise<RecoverResult | null> {
     const r = await this.quoter.reader.getTransactionReceipt(hash);
     if (!r) return null;
-    const gasNative = fromUnits(gasOf(r), 18), gasPls = gasNative * this.quoter.lastBasePerNative;
-    if (r.status !== 1) return { ok: false, amountOutHuman: 0, gasPls, gasNative };
+    // The rate saved at send time; an older record (or a bad value) reads it now. Never the Quoter's starting 1.
+    const saved = basePerNative != null && basePerNative > 0 && Number.isFinite(basePerNative) ? basePerNative : null;
+    const k = saved ?? await this.quoter.basePerNativeForGas();
+    const gasNative = fromUnits(gasOf(r), 18), gasPls = k != null ? gasNative * k : 0;
+    const unknown = k == null ? { gasUnknown: true as const } : {};
+    if (r.status !== 1) return { ok: false, amountOutHuman: 0, gasPls, gasNative, ...unknown };
     const out = parseAmountOut(r, await this.address(), tokenOut, this.quoter.chain.wrappedNative.address);
-    return { ok: true, amountOutHuman: out != null ? fromUnits(out, decimalsOut) : 0, gasPls, gasNative };
+    return { ok: true, amountOutHuman: out != null ? fromUnits(out, decimalsOut) : 0, gasPls, gasNative, ...unknown };
   }
 }
 
