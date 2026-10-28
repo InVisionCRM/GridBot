@@ -30,6 +30,22 @@ function go(nav: Nav, id: (typeof TABS)[number]['id']) {
   else nav({ v: 'more' });
 }
 
+const PHONE: { id: 'home' | 'bots' | 'holdings' | 'alerts' | 'more'; label: string; icon: IconName }[] = [
+  { id: 'home', label: 'Home', icon: 'home' },
+  { id: 'bots', label: 'Bots', icon: 'grid' },
+  { id: 'holdings', label: 'Holdings', icon: 'wallet' },
+  { id: 'alerts', label: 'Alerts', icon: 'bell' },
+  { id: 'more', label: 'More', icon: 'more' },
+];
+
+function phoneGo(nav: Nav, id: (typeof PHONE)[number]['id']) {
+  if (id === 'home') nav({ v: 'home' });
+  else if (id === 'bots') nav({ v: 'bots' });
+  else if (id === 'holdings') nav({ v: 'holdings' });
+  else if (id === 'alerts') nav({ v: 'alerts' });
+  else nav({ v: 'more' });
+}
+
 function Caret({ up }: { up?: boolean }) {
   return (
     <svg className={up ? 'up' : ''} width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
@@ -66,6 +82,7 @@ function DeskMenu({ s, nav, onGuide, onActivity, close }: { s: AnyObj; nav: Nav;
           <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'chart' })}>Charts<small>Candles for a pair</small></button>
           <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'analytics' })}>Analytics<small>What the bots made</small></button>
           <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'convert' })}>Convert<small>Swap a coin you hold</small></button>
+          <button type="button" className="mega-link" onClick={() => jump({ v: 'alerts' })}>Alerts<small>Lock screen and this tab</small></button>
           <button type="button" className="mega-link" onClick={() => { close(); onGuide(); }}>Guide<small>What each bot does</small></button>
           <button type="button" className="mega-link" onClick={() => { close(); onActivity(); }}>Activity<small>Trades and stops</small></button>
         </div>
@@ -102,6 +119,7 @@ export function Header({
   const [mega, setMega] = useState<null | 'bots' | 'more' | 'phone'>(null);
   const root = useRef<HTMLElement>(null);
   const current = tabOf(view);
+  const phoneCurrent = view.v === 'alerts' ? 'alerts' : current;
   const cs = chains(s);
   const sel = chain === 'all' ? null : chainOf(s, chain);
   const worth = !holdings ? null : !holdings.hasSigner ? null : holdings.netWorthExDustUsd ?? holdings.netWorthUsd;
@@ -168,8 +186,8 @@ export function Header({
       </header>
       {mega && <div className="shade" onClick={() => setMega(null)} />}
       <nav className="tabbar" aria-label="Main">
-        {TABS.map((t) => (
-          <button key={t.id} type="button" className={current === t.id ? 'on' : ''} aria-current={current === t.id ? 'page' : undefined} onClick={() => { shut(); go(nav, t.id); }}>
+        {PHONE.map((t) => (
+          <button key={t.id} type="button" className={phoneCurrent === t.id ? 'on' : ''} aria-current={phoneCurrent === t.id ? 'page' : undefined} onClick={() => { shut(); phoneGo(nav, t.id); }}>
             <Icon name={t.icon} size={22} />
             <span>{t.label}</span>
           </button>

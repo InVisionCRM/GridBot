@@ -20,6 +20,8 @@ export interface ActivityEvent {
   chainId?: number;
   /** Suggest a browser notification (fills, stops, errors, alerts, range exits) */
   notify?: boolean;
+  /** The bot that emitted this. Paper and live stay distinct on the lock screen. */
+  mode?: 'paper' | 'live';
   data?: Record<string, unknown>;
 }
 export type ActivityInput = Omit<ActivityEvent, 'id' | 't' | 'level'> & { level?: ActivityEvent['level'] };

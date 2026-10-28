@@ -6,7 +6,8 @@
 import http from 'node:http';
 import { join } from 'node:path';
 import { JsonStore } from '../bot/store';
-import { Friends, LoginGate, loginOf, type Friend, type FriendsFile } from './accounts';
+import { DurableJsonStore } from '../bot/durableStore';
+import { Friends, LoginGate, loginOf, type Friend, type FriendsFile, type LoginGateFile } from './accounts';
 import { Copies, portFree, type CopySpec, type CopyStatus } from './copies';
 import { createGateway, proxyUpgrade, type GatewayDeps } from './gateway';
 import { OwnerLogin, type OwnerConfig } from './owner';
@@ -21,6 +22,16 @@ export interface FriendsView {
   friends: FriendRow[];
 }
 
+/**
+ * data/friends/login-limits.json. A burst of wrong passwords must not stall the event loop that ticks the bots (#62
+ * review), so saves are debounced and coalesced, and written off the event loop: temp file, fsync, rename (and a .bak),
+ * like state.json. A crash loses at most the last ~250 ms of counters; the file itself is never half-written.
+ * FriendsHost.stop() flushes what is pending.
+ */
+export function loginGateStore(file: string): DurableJsonStore<LoginGateFile> {
+  return new DurableJsonStore<LoginGateFile>(file, { delayMs: 250 });
+}
+
 export class FriendsHost {
   readonly friends: Friends;
   readonly copies: Copies;
@@ -28,7 +39,8 @@ export class FriendsHost {
   private server: http.Server | null = null;
   /** Ports handed out by sign-ups still in progress, so two at once can't get the same one */
   private reserved = new Set<number>();
-  private readonly gate = new LoginGate();
+  private readonly gate: LoginGate;
+  private readonly gateStore: DurableJsonStore<LoginGateFile>;
 
   constructor(private readonly o: {
     secret: Buffer; dataDir: string;
@@ -47,6 +59,9 @@ export class FriendsHost {
     gatewayHost?: string | null;
   }) {
     const root = join(o.dataDir, 'friends');
+    // failure counters survive a restart (atomic write; hashed names, no secrets); written off the event loop
+    this.gateStore = loginGateStore(join(root, 'login-limits.json'));
+    this.gate = new LoginGate(Date.now, this.gateStore);
     this.owner = new OwnerLogin(o.hostAuth ?? null, this.gate);
     this.friends = new Friends(new JsonStore<FriendsFile>(join(root, 'friends.json')), o.secret, {
       hostAddresses: o.hostAddresses, gate: this.gate, reserved: (login) => this.owner.isOwnerName(login),
@@ -84,7 +99,10 @@ export class FriendsHost {
     for (const f of this.friends.list()) if (!f.stopped) this.copies.start(this.spec(f));
   }
 
-  stop() { this.copies.stopAll(); this.server?.close(); }
+  stop() {
+    this.copies.stopAll(); this.server?.close();
+    try { this.gateStore.flush(); } catch { /* counters lost at worst; the app is shutting down */ }
+  }
 
   /** Hostnames tailscale serve may use, besides loopback. */
   publicHosts(): string[] {

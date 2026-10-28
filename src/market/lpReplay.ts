@@ -23,6 +23,7 @@
  * changed that setup's result by $15. So one replay is one path.
  */
 import { LP_MIN_SWAP_SHARE } from './lp';
+import { lpShouldMove, type LpMoveInput } from './lpMove';
 import { amountsForLiquidity, coinsOfRaw, liquidityForAmounts, marketPrice, rangeTicks, rawOfCoins, sqrtPriceAt, type PoolSides } from '../live/v3Liquidity';
 
 /** One minute of a V3 pool's trading. */
@@ -86,6 +87,14 @@ export interface ReplayOpts {
   gasMove: number;
   /** Largest price impact a swap may have (fraction) */
   maxImpact: number;
+  /** Buy-side and sell-side token tax (fraction). Omitted = 0, which leaves the swap cost unchanged. */
+  buyTax?: number;
+  sellTax?: number;
+  /** How long the price must stay outside before a move, and the minimum gap between moves. Omitted = 0 (the live rule). */
+  dwellMs?: number;
+  cooldownMs?: number;
+  /** Defaults to the live move rule. Tests and the harness inject a substitute. */
+  shouldMove?: (i: LpMoveInput) => { move: boolean; outSince: number | null };
 }
 
 export interface Coins { base: number; quote: number }
@@ -107,6 +116,13 @@ export interface ReplayResult {
   moveLoss: number;
   /** Earned after costs: fees − gas − swap costs − lost to moves, quote */
   net: number;
+  /** Part of swapCost that is token tax (0 when no tax was configured) */
+  taxCost: number;
+  /** Coins deposited at the open, and coins held at the end (position + idle + fees still owed) */
+  startCoins: Coins;
+  endCoins: Coins;
+  priceStart: number;
+  priceEnd: number;
 }
 /** One range as the replay API answers it: the replay, and a position opened now with the same money (its coins, and its share of the pool's active liquidity) */
 export type ReplayRow = ReplayResult & { coinsNow: Coins; poolShareNow: number };
@@ -152,12 +168,14 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
   const plan = (have: Coins, tl: number, tu: number, tick: number, liq: number) => {
     const p = price(tick), per = held(1e18, tl, tu, tick), value = val(have, p);
     const share = (per.base * p) / (per.base * p + per.quote), gap = share * value - have.base * p;
-    if (Math.abs(gap) <= value * LP_MIN_SWAP_SHARE) return { gap: 0, cost: 0, impact: 0, share, value };
+    const tax = gap > 0 ? (o.buyTax ?? 0) : (o.sellTax ?? 0);
+    if (Math.abs(gap) <= value * LP_MIN_SWAP_SHARE) return { gap: 0, cost: 0, impact: 0, share, value, taxCost: 0 };
     const imp = gap > 0 ? impact(gap, false, tick, liq) : impact(-gap / p, true, tick, liq);
-    return { gap, cost: Math.abs(gap) * (pool.swapFee + imp / 2), impact: imp, share, value };
+    const taxCost = Math.abs(gap) * tax;
+    return { gap, cost: Math.abs(gap) * (pool.swapFee + imp / 2) + taxCost, impact: imp, share, value, taxCost };
   };
 
-  let gas = 0, swapCost = 0, fees = 0, moves = 0, blocked = 0, inTime = 0, moveLoss = 0;
+  let gas = 0, swapCost = 0, taxCost = 0, fees = 0, moves = 0, blocked = 0, inTime = 0, moveLoss = 0;
   let pos = { tl: 0, tu: 0, L: 0 }, idle: Coins = { base: 0, quote: 0 }, owed: Coins = { base: 0, quote: 0 };
   const feeCoins: Coins = { base: 0, quote: 0 };
   /** The coins the open position went in with */
@@ -173,6 +191,7 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     const k = after / s.value;
     const coins = s.gap !== 0 ? { base: (s.share * after) / p, quote: (1 - s.share) * after } : { base: have.base * k, quote: have.quote * k };
     swapCost += s.cost;
+    taxCost += s.taxCost;
     gas += gasQuote;
     const r = rawOfCoins(coins, pool);
     const L = liquidityForAmounts(sqrtPriceAt(tick), sqrtPriceAt(tl), sqrtPriceAt(tu), r.a0, r.a1);
@@ -184,7 +203,11 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
 
   const first = rows[0];
   open({ base: 0, quote: o.capital }, first.c, first.liq, o.gasOpen);
+  const startCoins: Coins = { base: putIn.base + idle.base, quote: putIn.quote + idle.quote };
   let heldBack = false;
+  let outSince: number | null = null;
+  let lastMoveAt: number | null = null;
+  const decide = o.shouldMove ?? lpShouldMove;
 
   for (let i = 1; i < rows.length; i++) {
     const m = rows[i], p = price(m.c);
@@ -199,26 +222,41 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     fees += val(earned, p);
 
     const out = m.c < pos.tl || m.c >= pos.tu;
-    if (!out) heldBack = false;
+    if (!out) { heldBack = false; outSince = null; }
     if (!o.rerange || !out) continue;
     const c = held(pos.L, pos.tl, pos.tu, m.c);
     const have = { base: c.base + idle.base + owed.base, quote: c.quote + idle.quote + owed.quote };
     const next = rangeTicks(p * (1 - o.bandPct), p * (1 + o.bandPct), pool.spacing, pool);
     const s = plan(have, next.tickLower, next.tickUpper, m.c, m.liq);
-    // like the bot: a swap over the impact cap blocks the move
-    if (s.impact > o.maxImpact) { if (!heldBack) blocked++; heldBack = true; continue; }
+    // like the bot: a swap over the impact cap blocks the move. Dwell and cooldown come from the same rule the live bot calls.
+    const nowMs = m.t * 1000;
+    const blockedByImpact = s.impact > o.maxImpact;
+    const decision = decide({
+      rerange: true, outOfRange: true, blocked: blockedByImpact, now: nowMs, outSince, lastMoveAt,
+      dwellMs: o.dwellMs ?? 0, cooldownMs: o.cooldownMs ?? 0,
+    });
+    outSince = decision.outSince;
+    if (!decision.move) {
+      if (blockedByImpact) { if (!heldBack) blocked++; heldBack = true; }
+      continue;
+    }
     heldBack = false;
     moveLoss += val(putIn, p) - val(c, p);
     owed = { base: 0, quote: 0 };
     open(have, m.c, m.liq, o.gasMove);
     moves++;
+    lastMoveAt = nowMs;
+    outSince = null;
   }
 
   const lastRow = rows[rows.length - 1];
+  const endHeld = held(pos.L, pos.tl, pos.tu, lastRow.c);
   return {
     bandPct: o.bandPct, rerange: o.rerange, days: (lastRow.t - first.t) / DAY_S,
     feeCoins, fees, gas, swapCost, moves, blocked, inRange: inTime / (rows.length - 1), moveLoss,
-    net: fees - gas - swapCost - moveLoss,
+    net: fees - gas - swapCost - moveLoss, taxCost,
+    startCoins, endCoins: { base: endHeld.base + idle.base + owed.base, quote: endHeld.quote + idle.quote + owed.quote },
+    priceStart: price(first.c), priceEnd: price(lastRow.c),
   };
 }
 

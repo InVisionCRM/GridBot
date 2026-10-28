@@ -276,7 +276,7 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
             {x.note && <p className="muted small">{x.note}</p>}
             <table className="small"><thead><tr><th>DEX</th><th>Kind</th><th>Factory</th><th>Router</th><th>Quoter</th><th>Fee</th></tr></thead>
               <tbody>{x.dexes.map((d: AnyObj) => (
-                <tr key={d.id}><td>{d.name}{d.note ? <span className="muted"> · {d.note}</span> : null}</td><td>{d.kind}</td><td><Addr s={s} chainId={x.id} a={d.factory} /></td><td><Addr s={s} chainId={x.id} a={d.router} /></td><td><Addr s={s} chainId={x.id} a={d.quoter} /></td><td>{d.kind === 'v3' ? d.tiers.join(' / ') : `${d.feeBps / 100}%`}</td></tr>
+                <tr key={d.id}><td>{d.name}{d.note ? <span className="muted"> · {d.note}</span> : null}</td><td>{d.kind}</td><td><Addr s={s} chainId={x.id} a={d.factory} /></td><td><Addr s={s} chainId={x.id} a={d.router} /></td><td><Addr s={s} chainId={x.id} a={d.quoter} /></td><td>{d.kind === 'v3' ? d.tiers.join(' / ') : d.kind === 'v4' ? 'per pool' : `${d.feeBps / 100}%`}</td></tr>
               ))}{x.dexes.length === 0 && <tr><td colSpan={6} className="muted">none — {x.reason}</td></tr>}</tbody></table>
             <p className="small">Sources: {x.sources.map((src: AnyObj, i: number) => <span key={i}>{i ? ' · ' : ''}<a href={src.url} target="_blank" rel="noreferrer">{src.label}</a></span>)}</p>
           </div>

@@ -17,6 +17,7 @@ import { DailyScanner, localScan, scanDepsFromHub, type ScanFile } from './marke
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
+import { swapForHost } from './swap/wire';
 import { fetchJson } from './fetchJson';
 import { PoolSearch } from './market/poolSearch';
 import { TFS } from '../market/candles';
@@ -26,6 +27,9 @@ import { FriendsHost } from './friends/host';
 import { GeckoRelay, hostScan, relayFetch } from './friends/relay';
 import { Autopilot, type AutopilotState, type ScanView } from './bot/autopilot';
 import { createTokenTrader, tokenTraderStore } from './market/tokenFeed';
+import { tryStartPush } from './push/service';
+import { lpSnapsFromStatus } from './push/lpWatch';
+import { dailySummary } from './push/summary';
 
 loadEnv();
 const friendsSecret = takeFriendsSecret();
@@ -126,6 +130,14 @@ const tokenTrader = copy ? undefined : createTokenTrader({
 });
 // Stop all / STOP chain: the token trader and sniper make no new buys there; exits of positions it holds keep running.
 if (tokenTrader) bot.stopHooks.push((chainId, halt) => tokenTrader.stopEntries(chainId, halt));
+const push = tryStartPush({
+  dir: dataDir,
+  subject: cfg.vapidSubject,
+  log: (level, msg) => log[level](msg),
+  positions: () => { try { return lpSnapsFromStatus(bot.status()); } catch { return []; } },
+  summary: () => { try { return dailySummary(bot.status()); } catch { return { title: 'GridBot · daily summary', body: 'No generated profit to report.' }; } },
+});
+if (push) activity.on('activity', (ev) => { void push.onActivity(ev).catch(() => log.warn('push: event was not sent')); });
 // ROUTER HOOK: host only (a friend's copy has readCopy() set). Stop all calls router.halt.
 const router = new Router({
   store: new JsonStore<RouterFile>(path.join(dataDir, 'router.json')),
@@ -136,13 +148,28 @@ const router = new Router({
   log,
 });
 bot.routerHalt = (halt) => router.halt(halt);
+// Quotes and, in live mode, calldata only. A friend's copy does not construct this. Nothing here broadcasts.
+const swap = swapForHost(!!copy, {
+  hub,
+  allocations: () => bot.allocations().rows,
+  reservations: () => [
+    ...(tokenTrader?.reservations() ?? []),
+    ...convert.reservations(),
+    ...bot.routerReservations(),
+  ],
+});
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
-  lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
+  lpReplay: (q) => lpReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader, router, copy: !!copy,
+  friends, autopilot, tokenTrader, router, copy: !!copy, ...(push ? { push } : {}),
 });
 if (isProd) {
+  app.get('/sw.js', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('js');
+    res.sendFile(path.join(clientDir, 'sw.js'));
+  });
   app.use(express.static(clientDir));
   app.get('*', (_req, res) => res.sendFile(path.join(clientDir, 'index.html')));
 }
@@ -162,6 +189,10 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   void autopilot.tick();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
+  if (push) {
+    pushTimer = setInterval(() => { void push.tick().catch(() => log.warn('push: tick failed')); }, 15_000);
+    log.info('Web push ready');
+  }
   if (friends instanceof FriendsHost) {
     for (const rt of hub.runtimes()) if (rt.signer) hostAddresses.push(await rt.signer.getAddress());
     await friends.start().catch((e: Error) => { log.error(e.message); process.exit(1); });
@@ -177,9 +208,11 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 });
 let autopilotTimer: ReturnType<typeof setInterval> | null = null;
 let tokenTimer: ReturnType<typeof setInterval> | null = null;
+let pushTimer: ReturnType<typeof setInterval> | null = null;
 const shutdown = () => {
   if (autopilotTimer) clearInterval(autopilotTimer);
   if (tokenTimer) clearInterval(tokenTimer);
+  if (pushTimer) clearInterval(pushTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
   try { bot.flush(); } catch { /* logged by the store */ }
   if (friends instanceof FriendsHost) friends.stop();
