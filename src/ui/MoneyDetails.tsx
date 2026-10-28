@@ -8,16 +8,52 @@
  * comes out identical (a grid's price change is its open positions; with nothing generated yet, Total P&L is the price
  * change) are merged into one row with both names instead of printing the same number twice. A page can put its own
  * breakdown of Generated first (the LP's fees earned − costs = Generated).
+ *
+ * Per coin, first: what it made before costs − each cost charged in that coin = Generated (metrics.breakdownByCoin,
+ * token units; the rows add up to the headline exactly, the server checks the identity). Collapsed here only.
  */
 import type { ReactNode } from 'react';
 import { echoes, metricsOf, unitsText } from './deskStats';
 import { pct, qty } from './fmt';
+
+const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 import type { AnyObj } from './model';
+import type { BotMetrics } from '../metrics/botMetrics';
 
 /** A Details row: label, value, tooltip. */
 export type DetailRow = [string, ReactNode, string?];
 /** Rows a page can leave out because it already shows them: 'Total P&L', 'Value now' (keeps the deposit), or a label. */
 export type DetailHide = 'Made at event prices' | 'Total P&L' | 'Price change' | 'Open positions' | 'Value now';
+
+/**
+ * The per-coin lines of metrics.breakdownByCoin, in that coin's units: earned, then each non-zero cost with a minus,
+ * then "= Generated" (the headline above, not printed twice). A coin with no cost is one row saying so.
+ */
+export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'breakdownBasis'> | null | undefined, moves?: number | null): DetailRow[] {
+  const by = m?.breakdownByCoin, basis = m?.breakdownBasis;
+  if (!by || !basis) return [];
+  const earnedLabel = basis.earned === 'lpFees' ? 'Fees earned' : 'Trade profit before costs';
+  const earnedTip = basis.earned === 'lpFees'
+    ? 'Your share of the pool\'s trading fees in this coin: collected so far plus what\'s waiting in the position.'
+    : `Closed trades' profit before gas, pool fees and token taxes.${basis.itemized ? '' : ' Part of the costs is not split out here, so it stays inside this figure.'}`;
+  const rows: DetailRow[] = [];
+  for (const [sym, c] of Object.entries(by)) {
+    const costs: [string, number, string][] = ([
+      ['Gas + swap fees', c.gasSwap, `Gas for every transaction and the pool fees / swap cost, charged in ${sym}.`],
+      ['Range moves', c.rangeMoveLoss, `What the range moves locked in, in ${sym}${moves ? ` (${moves} range move${moves === 1 ? '' : 's'})` : ''}.`],
+      ['Token taxes', c.taxes, `Fee-on-transfer tax taken on the fills, in ${sym}.`],
+      ['Bridge', c.bridge, `Cross-chain move costs, in ${sym}.`],
+    ] as [string, number, string][]).filter(([, v]) => v !== 0);
+    if (!costs.length) {
+      rows.push([`${earnedLabel}, ${sym}`, c.earned === 0 ? <>none yet</> : <>all of it is Generated (no cost is charged in {sym})</>, `${earnedTip} Nothing is charged in ${sym}, so it is all Generated.`]);
+      continue;
+    }
+    rows.push([`${earnedLabel}, ${sym}`, <>{qty(c.earned, sym, 6)}</>, earnedTip]);
+    for (const [k, v, t] of costs) rows.push([`− ${k}, ${sym}`, <>{qty(-v, sym, 6)}</>, t]);
+    rows.push([`= Generated, ${sym}`, 'the headline above', `${earnedLabel} − ${costs.map(([k]) => k.toLowerCase()).join(' − ')}, in ${sym}.`]);
+  }
+  return rows;
+}
 
 export function MoneyDetails({ b, breakdown, hide = [], note }: { b: AnyObj; breakdown?: DetailRow[]; hide?: readonly DetailHide[]; note?: string }) {
   const m = metricsOf(b);
@@ -56,7 +92,7 @@ export function MoneyDetails({ b, breakdown, hide = [], note }: { b: AnyObj; bre
     <details className="more money-details" data-testid="money-details">
       <summary>Details <span className="muted small">{note ?? 'made at event prices, total P&L, price change'}</span></summary>
       <table className="stat-table"><tbody>
-        {(breakdown ?? []).map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
+        {[...coinBreakdownRows(m, num(b.reranges)), ...(breakdown ?? [])].map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
         {[...rows, value].map(([k, v, t]) => <tr key={k} title={t}><th>{k}</th><td className="mono">{v}</td></tr>)}
       </tbody></table>
     </details>

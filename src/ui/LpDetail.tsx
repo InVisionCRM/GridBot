@@ -17,7 +17,7 @@ import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
 import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
-import { metricsOf, unitsText } from './deskStats';
+import { EST_HINT, metricsOf, unitsText } from './deskStats';
 import { isShortRun } from './runRate';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -173,21 +173,22 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
 }
 
 /**
- * The bot's pace: Generated so far carried to a day, a week and a month (Generated ÷ age × the days, per coin, in
+ * The bot's pace: Generated so far carried to a day and a week (Generated ÷ age × the days, per coin, in
  * units), straight from the server's metrics (generatedRate). Same rule as every estimate: nothing until the bot is a day old, then
- * Generated ÷ age × the days; until then a dash and "needs 1 day". No client-side extrapolation.
+ * Generated ÷ age × the days; until then a dash and "shows after a day". No client-side extrapolation.
  */
 /**
  * Figures the LP page already shows elsewhere, left out of the chart's stat table so no number appears twice:
  * Generated (headline), its rates and Est. 24h/7d and the age (Pace), fees paid / earned (Details breakdown), the
  * range, its width and the range moves (the position card).
  */
-const LP_SHOWN_ELSEWHERE = ['Generated', 'Age', 'Est. 24h', 'Est. 7d', 'Est. 30d', 'Fees paid', 'Fees earned', 'Range', 'Spacing', 'Moves', 'Last move'] as const;
+const LP_SHOWN_ELSEWHERE = ['Generated', 'Age', 'Est. 24h', 'Est. 7d', 'Fees paid', 'Fees earned', 'Range', 'Spacing', 'Moves', 'Last move'] as const;
 
 /**
- * Details' breakdown of the headline: fees earned − costs = Generated. Every cost (gas, swaps, range moves) is paid in
- * the quote coin, so the arithmetic is shown in it; in the base coin nothing comes off, its fees ARE its Generated, and
- * the row says so instead of printing the headline's number a second time.
+ * Details' breakdown of the headline: per coin, fees earned − gas + swap fees − range moves = Generated, from the
+ * server's metrics.breakdownByCoin (MoneyDetails prints those lines first; costs in the coin they were charged in).
+ * A coin with no cost says its fees are all Generated instead of printing the headline's number a second time. These
+ * rows add both coins' fees at today's price and what's still waiting.
  */
 /** What's waiting of one coin's fees; "all the X" when none has been collected yet (the fees row already prints it). */
 function waiting(owed: number | null | undefined, earned: number, sym: string): string {
@@ -196,33 +197,23 @@ function waiting(owed: number | null | undefined, earned: number, sym: string): 
 }
 
 function lpBreakdown(b: AnyObj): DetailRow[] {
+  // the per-coin fees earned − costs = Generated lines come first, from metrics.breakdownByCoin (MoneyDetails)
   const pnl: AnyObj | null = b.pnl;
   if (!pnl?.feeCoins) return [];
   const base = b.base, q = b.quote;
-  const cost = pnl.gas + pnl.swapCost + pnl.moveLoss;
-  const genBase = metricsOf(b)?.generated?.[base];
-  const baseSame = genBase == null || Math.abs(genBase - pnl.feeCoins.base) <= 1e-9 * Math.max(1, Math.abs(genBase));
   return [
-    [`Fees earned, ${q}`, <>{qty(pnl.feeCoins.quote, q, 5)}</>,
-      `Your share of the pool's trading fees paid in ${q} (trades buying ${base}): collected so far plus what's waiting in the position.`],
-    [`Fees earned, ${base}`, baseSame ? <>all of it is Generated (nothing is paid in {base})</> : <>{qty(pnl.feeCoins.base, base, 5)}</>,
-      `Fees paid in ${base} (trades selling ${base}). No cost is taken in ${base}, so it all counts as Generated.`],
     ['Fees earned, all', <>{pnl.fees != null ? `≈ ${qty(pnl.fees, q, 5)} at today's price` : '—'}</>, `Both coins' fees together, in ${q} at today's price.`],
     ['of which waiting in the position', b.position ? <>shown in the position card</> : <>{waiting(b.owed?.base, pnl.feeCoins.base, base)} + {waiting(b.owed?.quote, pnl.feeCoins.quote, q)}</>, 'Earned but not collected yet; collected on the next range move, close or fee send.'],
-    [`− Costs, ${q}`, <>{qty(-cost, q, 4)}</>,
-      `Everything that came off the fees, in ${q}: gas for every open, range move, close and fee collect; what the swaps to the range's mix lost to the pool fee and price impact; and what each range move locked in (the shortfall against the coins put in, at the same price, when the position is taken out).`],
-    ['gas · swaps · range moves', <>{qty(pnl.gas, q, 3, false)} · {qty(pnl.swapCost, q, 3, false)} · {qty(pnl.moveLoss, q, 3, false)} ({b.reranges} range move{b.reranges === 1 ? '' : 's'})</>, 'The three costs, in the order above.'],
-    [`= Generated, ${q}`, 'the headline above', `Fees earned in ${q} − costs.`],
   ];
 }
 
 function GeneratedPace({ b }: { b: AnyObj }) {
   const m = metricsOf(b);
   if (!m || !m.generated) return null;
-  const all = [['A day', m.generatedRate.d1, m.generatedRate.needs.d1], ['A week', m.generatedRate.d7, m.generatedRate.needs.d7], ['A month', m.generatedRate.d30, m.generatedRate.needs.d30]] as const;
+  const all = [['A day', m.generatedRate.d1, m.generatedRate.needs.d1], ['A week', m.generatedRate.d7, m.generatedRate.needs.d7]] as const; // a day and a week; no month (Kyle: day, 7d and 365d only; d30 stays in the API)
   // under a day: no pace scaled up from a few hours (runRate.ts, #72)
   const short = isShortRun(m.ageSec != null ? m.ageSec * 1000 : null);
-  const rows = short ? all.map(([label]) => [label, null, 'shows after a day'] as const) : all;
+  const rows = short ? all.map(([label]) => [label, null, EST_HINT] as const) : all;
   return (
     <div className="card pace" data-testid="generated-pace">
       <div className="card-head">

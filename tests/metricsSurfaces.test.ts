@@ -51,11 +51,11 @@ describe('one headline per bot page', () => {
 
 describe('pace from BotMetrics, with the one-day rule', () => {
   const lp = (ageMs: number) => lpMetrics({ ...FX.lpLive, startedAt: FX.now - ageMs }, FX.now);
-  it('every window needs a day: dashes and "needs 1 day" at 14h, the scaled figures from a day on', () => {
+  it('every window needs a day: dashes and "shows after a day" at 14h, the scaled figures from a day on', () => {
     const young = lp(14 * H);
     expect([young.est.d1, young.est.d7, young.est.d30, young.est.d365]).toEqual([null, null, null, null]);
     expect(young.generatedRate.d30).toBeNull();
-    expect(young.est.needs).toEqual({ d1: 'needs 1 day', d7: 'needs 1 day', d30: 'needs 1 day', d365: 'needs 1 day' });
+    expect(young.est.needs).toEqual({ d1: 'shows after a day', d7: 'shows after a day', d30: 'shows after a day', d365: 'shows after a day' });
     const old = lp(26 * H);
     expect(old.est.needs.d30).toBeNull();
     expect(old.est.d30!).toBeCloseTo(old.generatedUsd! * (30 * DAY_MS) / (26 * H), 6);
@@ -64,7 +64,8 @@ describe('pace from BotMetrics, with the one-day rule', () => {
   it('the LP page has no client-side pace math left', () => {
     const s = src('LpDetail.tsx');
     expect(s).not.toMatch(/3_600_000|PositionPace|\['A month', 720\]/);
-    expect(s).toMatch(/m\.generatedRate\.d30, m\.generatedRate\.needs\.d30/);
+    expect(s).toMatch(/m\.generatedRate\.d7, m\.generatedRate\.needs\.d7/);
+    expect(s).not.toMatch(/generatedRate\.d30/); // no month row on screen (Kyle); d30 stays in the API
   });
 });
 

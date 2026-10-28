@@ -18,6 +18,7 @@
  * hash and never sends it again. Paper mode runs the same steps on a simulated position: fees come from the pool's
  * real fee counters for that liquidity, scaled by the share of the pool it would have been.
  */
+import { zeroedMoveLoss, type MoveLossInput } from '../../live/lpMoveLoss';
 import { MaxUint256 } from 'ethers';
 import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { LiveNetwork } from '../../live/networks';
@@ -303,13 +304,9 @@ export function upgradeLp(s: LpState): LpState {
  * Idempotent: once applied, totals.moveLoss is non-zero and moveLossBackfill is set.
  */
 export function backfillMoveLoss(s: LpState): LpState {
-  const t = s.totals, c = s.config, idle = s.idle, price = s.lastPrice;
-  if (t.moveLossBackfill || t.moveLoss !== 0 || t.swapCost !== 0 || !(s.reranges > 0)) return s;
-  if (s.status !== 'closed' || s.position || s.step || !c || !idle || !(price != null && price > 0)) return s;
-  if (t.sent > 0 || (s.aside && (s.aside.base > 0 || s.aside.quote > 0))) return s;
-  const principal = { base: idle.base - t.feeCoins.base, quote: idle.quote - t.feeCoins.quote };
-  const loss = ((c.baseAmount ?? 0) - principal.base) * price + (c.capital - principal.quote);
-  if (!Number.isFinite(loss) || loss <= 0) return s;
+  const t = s.totals, price = s.lastPrice;
+  const loss = zeroedMoveLoss(s as MoveLossInput, price); // the same math botMetrics applies to a payload that never had it
+  if (loss == null || price == null) return s;
   return {
     ...s,
     totals: {

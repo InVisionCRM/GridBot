@@ -56,7 +56,10 @@ describe('real snapshot: LP costs include range-move losses (#1)', () => {
   it('the LP page has one Costs tile that includes the moves, and no separate "Lost to range moves" tile', () => {
     const src = readFileSync(new URL('../src/ui/LpDetail.tsx', import.meta.url), 'utf8');
     expect(src).not.toContain('>Lost to range moves<');
-    expect(src).toMatch(/pnl\.gas \+ pnl\.swapCost \+ pnl\.moveLoss/);
+    // the costs, range moves included, are the per-coin lines of metrics.breakdownByCoin in Details (MoneyDetails)
+    expect(src).toMatch(/metrics\.breakdownByCoin/);
+    const md = readFileSync(new URL('../src/ui/MoneyDetails.tsx', import.meta.url), 'utf8');
+    expect(md).toMatch(/'Range moves', c\.rangeMoveLoss/);
   });
 });
 
@@ -65,7 +68,10 @@ describe('real snapshot: closed Robinhood ETH/USDG LP move loss is rebuilt at lo
   it('the saved state shows 12 moves and no loss (zeroed by the v5 upgrade)', () => {
     expect(saved.reranges).toBe(12);
     expect(saved.totals.moveLoss).toBe(0);
-    expect(lpClosedStatus(clone(saved)).metrics.generated.USDG).toBeCloseTo(89.51, 2); // what the app showed
+    // what the app showed (+89.51 = fees − gas, no move loss) …
+    expect(saved.totals.fees - saved.totals.gas).toBeCloseTo(89.51, 2);
+    // … and what botMetrics now gives for that payload even when no server rebuilt it (an older build): −16.31 (#43 regression guard)
+    expect(lpClosedStatus(clone(saved)).metrics.generated.USDG).toBeCloseTo(-16.31, 2);
   });
   it('load rebuilds ≈105.8 USDG lost to moves, so it generated ≈ −16.31 USDG (actual)', () => {
     const before = clone(saved);

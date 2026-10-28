@@ -154,10 +154,10 @@ describe('estimate hint for a dash', () => {
   it('every window needs one day of history, and says so', () => {
     for (const w of [DAY_MS, 7 * DAY_MS, 30 * DAY_MS, 365 * DAY_MS]) {
       expect(estNeedMs(w)).toBe(DAY_MS);
-      expect(estHint(0.48 * DAY_MS, w)).toBe('needs 1 day');
+      expect(estHint(0.48 * DAY_MS, w)).toBe('shows after a day');
       expect(estHint(DAY_MS, w)).toBeNull();
     }
-    expect(estHint(null, DAY_MS)).toBe('needs 1 day');
+    expect(estHint(null, DAY_MS)).toBe('shows after a day');
     expect(estHint(2 * DAY_MS, 365 * DAY_MS)).toBeNull();
   });
   it('puts the hint on the facts exactly where the estimate is a dash', () => {
@@ -176,7 +176,7 @@ describe('estimate hint for a dash', () => {
     // under a day: all dashes, each with the hint
     const young = botFacts({ ...lp, startedAt: now - 0.48 * DAY_MS }, now);
     expect([young.est.h24, young.est.d7, young.est.d365, young.aprPct]).toEqual([null, null, null, null]);
-    expect(young.estHint).toEqual({ h24: 'needs 1 day', d7: 'needs 1 day', d365: 'needs 1 day' });
+    expect(young.estHint).toEqual({ h24: 'shows after a day', d7: 'shows after a day', d365: 'shows after a day' });
   });
   it('writes units per token', () => {
     expect(unitsText({ ETH: 0.0062605, USDC: 41.455 })).toBe('+0.00626 ETH · +41.46 USDC');

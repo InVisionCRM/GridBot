@@ -15,21 +15,38 @@
  *
  * Quote-coin figures are converted once with usdPerQuote (grid capital is in the quote coin despite its legacy name
  * `totalCapitalQuote`). No rate → the dollar fields are null, never quote-as-dollars. Estimates (Kyle's rule): Generated
- * per token ÷ age in days × 1 / 7 / 30 / 365, all of them null with "needs 1 day" until the bot is a day old; no other
+ * per token ÷ age in days × 1 / 7 / 30 / 365, all of them null with "shows after a day" until the bot is a day old; no other
  * cap or minimum history. Age is historyEnd-aware (a stopped bot's age ends at its stop).
  */
 
-import { isCloseOut } from '../live/ledger';
+import { isCloseOut, roundTripCosts, type RoundTripCosts } from '../live/ledger';
 import { keySymbols, unitOf } from '../lib/marketKey';
+import { zeroedMoveLoss, type MoveLossInput } from '../live/lpMoveLoss';
 
 export const DAY_MS = 86_400_000;
 /** Kyle's rule: every estimate (day, 7d, 30d, 365d, APR) needs one day of history, and nothing else. */
 export const MIN_AGE_MS = DAY_MS;
+/** The one hint every screen shows for an estimate that isn't there yet (StatTable, LP pace, desk APR title). */
+export const EST_HINT = 'shows after a day';
 
 export type MetricsKind = 'grid' | 'trend' | 'lp' | 'token';
 export type Headline = 'generated';
 /** What the bot header leads with (confirmed by the lead): units generated, per token. */
 export const HEADLINE: Headline = 'generated';
+
+/**
+ * One coin's line of the breakdown, in that coin's units (never dollars): what the bot made before costs, the costs
+ * charged in that coin, and Generated. earned − gasSwap − rangeMoveLoss − taxes − bridge = generated, exactly.
+ */
+export interface CoinBreakdown { earned: number; gasSwap: number; rangeMoveLoss: number; taxes: number; bridge: number; generated: number }
+/**
+ * What `earned` is. lpFees: LP fees collected + still owed. tradeProfit: closed round trips' profit before gas, pool
+ * fees and token taxes (Generated + those costs). `itemized` false: a part of the costs is not known here (a token
+ * trader's log has no gas / fee split, or a round trip's buy is missing from the log), so it stays inside `earned`.
+ */
+export interface BreakdownBasis { earned: 'lpFees' | 'tradeProfit'; itemized: boolean; note: string }
+/** Where Invested (capitalIn, quote coin) comes from. legacy-config: a grid saved before the rename, config.totalCapitalUsd (quote-coin units). */
+export type CapitalSource = 'config' | 'legacy-config' | 'start-value' | 'trend-capital' | 'token-buys' | null;
 
 type Needs = { d1: string | null; d7: string | null; d30: string | null; d365: string | null };
 
@@ -86,6 +103,12 @@ export interface BotMetrics {
   bridgeCosts: { events: number; units: Record<string, number>; usdAtEvents: number } | null;
   /** Funds of this bot reserved for a cross-chain move that hasn't landed (one "In transit" holdings line). Null = none. */
   inTransitUsd: number | null;
+  /** Per coin, in token units: earned − gasSwap − rangeMoveLoss − taxes − bridge = generated (= `generated`). Null with no Generated. */
+  breakdownByCoin: Record<string, CoinBreakdown> | null;
+  breakdownBasis: BreakdownBasis | null;
+  /** Invested in the quote coin (= quote.capitalIn) and where it came from. */
+  capitalInQuote: number | null;
+  capitalInSource: CapitalSource;
   /** Extra: the same totals in the quote coin (the "show in quote coin" toggle and detail KPIs). */
   quote: {
     symbol: string | null; usdPerQuote: number | null; capitalIn: number | null; currentValue: number | null; totalPnl: number | null; realized: number | null; unrealized: number | null; feesEarned: number | null;
@@ -141,10 +164,10 @@ export function estNeedMs(windowMs: number): number {
   return MIN_AGE_MS;
 }
 
-/** "needs 1 day" while the bot is under a day old; null from then on (every window alike). */
+/** "shows after a day" (the wording every screen uses) while the bot is under a day old; null from then on (every window alike). */
 export function estHint(age: number | null, windowMs: number): string | null {
   if (age != null && age >= estNeedMs(windowMs)) return null;
-  return 'needs 1 day';
+  return EST_HINT;
 }
 
 /** Milliseconds since start. Null when the start time is missing or in the future. */
@@ -175,7 +198,7 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
   return now - startedAt;
 }
 
-const RATES = 'The day/7d/30d/365d estimates are Generated ÷ age in days × 1, 7, 30 or 365, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; all of them start once the bot is a day old.';
+const RATES = 'The day, 7d and 365d estimates are Generated ÷ age in days × 1, 7 or 365, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; all of them show after a day.';
 const GENERATED_CALC: Record<MetricsKind, string> = {
   lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin), swap fees (in the coin swapped in) and range-move losses (in the coin the move sold, locked in at each move).',
   grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown under Open positions. A close / stop cash-out sale is not a round trip; its result is in Price change.',
@@ -200,6 +223,9 @@ interface Core {
   generated: Record<string, number> | null; px: Record<string, number | null>;
   dollarsMade: number | null; rebalanceLoss: number | null; taxes: number | null;
   bridge?: BotMetrics['bridgeCosts']; inTransitUsd?: number | null;
+  /** Per-coin parts before bridge costs (finish adds bridge and checks nothing else is left over). */
+  parts?: Record<string, Omit<CoinBreakdown, 'bridge' | 'generated'>> | null; basis?: BreakdownBasis | null;
+  capitalSource?: CapitalSource;
   /** End of the bot's history for rates / estimates / APR (historyEnd); now when absent */
   end?: number;
 }
@@ -217,6 +243,21 @@ export function unitsUsd(gen: Record<string, number> | null, px: Record<string, 
   return sum;
 }
 
+/**
+ * The per-coin lines. `generated` is the headline (after bridge costs); each coin's earned comes from `parts`, and a coin
+ * with no part (or no parts at all) has earned = generated + its costs, so a line always adds up to its Generated.
+ */
+function breakdownOf(generated: Record<string, number> | null, parts: Core['parts'], bridge: BotMetrics['bridgeCosts']): Record<string, CoinBreakdown> | null {
+  if (!generated) return null;
+  const out: Record<string, CoinBreakdown> = {};
+  for (const sym of new Set([...Object.keys(generated), ...Object.keys(parts ?? {}), ...Object.keys(bridge?.units ?? {})])) {
+    const p = parts?.[sym], br = bridge?.units[sym] ?? 0;
+    const gasSwap = p?.gasSwap ?? 0, rangeMoveLoss = p?.rangeMoveLoss ?? 0, taxes = p?.taxes ?? 0;
+    out[sym] = { earned: p?.earned ?? (generated[sym] ?? 0) + gasSwap + rangeMoveLoss + taxes + br, gasSwap, rangeMoveLoss, taxes, bridge: br, generated: generated[sym] ?? 0 };
+  }
+  return out;
+}
+
 function finish(c: Core, now: number): BotMetrics {
   c = { ...c };
   const usd = (q: number | null) => (q == null || c.k == null ? null : q * c.k);
@@ -232,6 +273,8 @@ function finish(c: Core, now: number): BotMetrics {
     ? Object.fromEntries([...new Set([...Object.keys(c.generated), ...Object.keys(bridge.units)])].map((k) => [k, (c.generated![k] ?? 0) - (bridge.units[k] ?? 0)]))
     : c.generated;
   c = { ...c, generated };
+  // no basis (a token trader's old dollar-only log): no per-coin lines, never dollars as a coin
+  const breakdown = c.basis ? breakdownOf(c.generated, c.parts ?? null, bridge) : null;
   const genUsd = unitsUsd(c.generated, c.px);
   // Generated in the quote coin: its dollar value ÷ the quote coin's price; with no dollar price, only a bot whose
   // Generated is all in the quote coin has one (its units).
@@ -260,6 +303,9 @@ function finish(c: Core, now: number): BotMetrics {
     est: { d1: est(DAY_MS)?.amount ?? null, d7: est(7 * DAY_MS)?.amount ?? null, d30: est(30 * DAY_MS)?.amount ?? null, d365: y?.amount ?? null, needs },
     moveCount: c.moveCount, fillCount: c.fillCount, range: c.range, asOf: now,
     bridgeCosts: bridge, inTransitUsd: c.inTransitUsd ?? null,
+    breakdownByCoin: breakdown, breakdownBasis: breakdown ? c.basis ?? null : null,
+    // a multi-coin token trader keeps its money figures in dollars inside: no quote-coin Invested for it
+    capitalInQuote: c.symbol === 'USD' ? null : c.capitalIn, capitalInSource: c.capitalIn == null || c.symbol === 'USD' ? null : c.capitalSource ?? null,
     calc: `${GENERATED_CALC[c.kind]} ${RATES} ${TOTAL_CALC[c.kind]}`,
     quote: {
       symbol: c.symbol, usdPerQuote: c.k, capitalIn: c.capitalIn, currentValue: c.currentValue, totalPnl: total, realized: c.realized, unrealized: c.unrealized, feesEarned: c.feesEarned,
@@ -287,9 +333,38 @@ function tradeCosts(trades: unknown): { rebalanceLoss: number | null; taxes: num
   return { rebalanceLoss: loss, taxes: tax };
 }
 
+/** The log the status sends is its newest 100 trades (engine / trend status()); a full one may be cut. */
+const STATUS_TRADES = 100;
+
+/**
+ * Grid / trend: one line in the quote coin. earned = Generated + the round trips' gas (incl. gas lost on failed trades),
+ * pool fees and token taxes, which are inside the round-trip nets. From the server's full-log `rtCosts`, else the
+ * trades the status carries (itemized only when none of their buys is missing and the log isn't cut).
+ */
+function tradeParts(sym: string, gen: number | null, rt: RoundTripCosts | null, fromStatusLog: boolean, trades?: unknown): Pick<Core, 'parts' | 'basis'> {
+  if (gen == null) return { parts: null, basis: null };
+  const cut = fromStatusLog && Array.isArray(trades) && trades.length >= STATUS_TRADES;
+  if (!rt) return { parts: { [sym]: { earned: gen, gasSwap: 0, rangeMoveLoss: 0, taxes: 0 } }, basis: { earned: 'tradeProfit', itemized: false, note: 'No trade log here: the costs are inside the trade profit.' } };
+  const gasSwap = rt.gas + rt.poolFees;
+  return {
+    parts: { [sym]: { earned: gen + gasSwap + rt.taxes, gasSwap, rangeMoveLoss: 0, taxes: rt.taxes } },
+    basis: {
+      earned: 'tradeProfit', itemized: rt.unmatched === 0 && !cut,
+      note: `Closed round trips' profit before gas, pool fees and token taxes, in ${sym}; gas is charged in the chain's coin and booked in ${sym} at each fill's price, as the ledger deducts it.${rt.unmatched || cut ? ' Some buys are not in the log here, so part of their costs stays inside the profit.' : ''}`,
+    },
+  };
+}
+
+/** No fill yet (no trade logged, no move counted): it has generated 0, not "unknown". */
+const noFills = (b: Obj) => (!Array.isArray(b.trades) || b.trades.length === 0) && !((num(b.moveCount) ?? 0) > 0) && !((num(b.stats?.roundTrips) ?? 0) > 0);
+
 /** Grid status (engine.status() + usdPerQuote). All grid amounts are in the quote coin. */
 export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
-  const cap = num(b.config?.totalCapitalQuote);
+  // Invested: totalCapitalQuote; a grid saved before the *Usd→*Quote rename has only totalCapitalUsd, which always held
+  // quote-coin units (it was split per level and spent as the quote token: liveGrid buyAmountPerInterval → job.amount)
+  const capQ = num(b.config?.totalCapitalQuote), capLegacy = num(b.config?.totalCapitalUsd);
+  const cap = capQ ?? capLegacy;
+  const capitalSource: CapitalSource = capQ != null ? 'config' : capLegacy != null ? 'legacy-config' : null;
   const realized = num(b.pnl?.realized), unrealized = num(b.pnl?.unrealized);
   const sent = num(b.payout?.sent) ?? 0;
   const equity = cap == null ? null : cap + (realized ?? 0) + (unrealized ?? 0);
@@ -300,8 +375,11 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   const sym = String(unitOf(b.quoteSym) ?? unitOf(b.stable) ?? 'quote'); // never a market key as the unit
   // Generated = completed round trips (minus gas lost on failed / manual trades). A close / stop cash-out sale is a
   // liquidation at the day's price, so it is in Total P&L (price change) but not here. Older payloads: realized.
-  const gen = num(b.stats?.generated) ?? realized;
+  const gen = num(b.stats?.generated) ?? realized ?? (noFills(b) ? 0 : null);
+  const fromStats = num(b.stats?.generated) != null;
+  const rt = fromStats && b.stats?.rtCosts ? b.stats.rtCosts as RoundTripCosts : Array.isArray(b.trades) && fromStats ? roundTripCosts(b.trades, 'grid') : null;
   return finish({
+    ...tradeParts(sym, gen, rt, !b.stats?.rtCosts, b.trades), capitalSource,
     kind: 'grid', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'grid' }, now),
     capitalIn: cap, currentValue: equity == null ? null : equity - sent, paidOut: sent, extraCost: 0,
     realized, unrealized, feesEarned: null, feesCollected: null, feesUncollected: null,
@@ -316,11 +394,13 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
 
 export function trendMetrics(b: Obj, now = Date.now()): BotMetrics {
   const cap = num(b.capital);
-  const realized = num(b.pnl?.realized), unrealized = num(b.pnl?.unrealized);
+  const realized = num(b.pnl?.realized) ?? (noFills(b) ? 0 : null), unrealized = num(b.pnl?.unrealized);
   const equity = num(b.pnl?.equity) ?? (cap == null ? null : cap + (realized ?? 0) + (unrealized ?? 0));
   const n = num(b.moveCount);
   const sym = String(unitOf(b.quoteSym) ?? unitOf(b.quote) ?? 'quote'); // never a market key as the unit
+  const rt = b.rtCosts ? b.rtCosts as RoundTripCosts : Array.isArray(b.trades) ? roundTripCosts(b.trades, 'all') : null;
   return finish({
+    ...tradeParts(sym, realized, rt, !b.rtCosts, b.trades), capitalSource: 'trend-capital',
     kind: 'trend', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'trend' }, now),
     capitalIn: cap, currentValue: equity, paidOut: 0, extraCost: 0,
     realized, unrealized, feesEarned: null, feesCollected: null, feesUncollected: null,
@@ -342,7 +422,7 @@ const coinsOf = (c: unknown): Coins | null => {
  * each event's price). State saved before that bookkeeping existed has only the quote-valued total; that part is
  * charged to the quote coin.
  */
-export function lpGenerated(b: Obj): { generated: Record<string, number> | null; px: Record<string, number | null> } {
+export function lpGenerated(b: Obj): { generated: Record<string, number> | null; px: Record<string, number | null>; parts?: Core['parts']; basis?: BreakdownBasis } {
   const baseSym = String(unitOf(b.base) ?? keySymbols(b.market)?.base ?? 'base'), quoteSym = String(unitOf(b.quote) ?? keySymbols(b.market)?.quote ?? 'quote');
   const k = rate(b), price = num(b.price);
   const px: Record<string, number | null> = { [baseSym]: price != null && k != null ? price * k : null, [quoteSym]: k };
@@ -355,10 +435,28 @@ export function lpGenerated(b: Obj): { generated: Record<string, number> | null;
     return got ?? { base: 0, quote: num(total) ?? 0 };
   };
   const g = cost(t.gasCoins, t.gas), sw = cost(t.swapCoins, t.swapCost), mv = cost(t.moveCoins, t.moveLoss);
+  const side = (k: keyof Coins) => ({ earned: fees[k], gasSwap: g[k] + sw[k], rangeMoveLoss: mv[k], taxes: 0 });
+  const parts = { [baseSym]: side('base'), [quoteSym]: side('quote') };
   return {
-    generated: { [baseSym]: fees.base - g.base - sw.base - mv.base, [quoteSym]: fees.quote - g.quote - sw.quote - mv.quote },
-    px,
+    // the same arithmetic as each line of the breakdown: earned − (gas + swap fees) − range-move loss
+    generated: Object.fromEntries(Object.entries(parts).map(([s, p]) => [s, p.earned - p.gasSwap - p.rangeMoveLoss])),
+    px, parts,
+    basis: { earned: 'lpFees', itemized: true, note: 'Fees collected + still owed, per coin; costs in the coin they were paid in (an older state without per-coin costs: all in the quote coin).' },
   };
+}
+
+/**
+ * A closed LP from a server that never rebuilt its zeroed range-move loss (saved before the rebuild, or an older build):
+ * the same rebuild the engine runs at load (lpMoveLoss.ts), so its Generated is net of the moves either way (#43: the
+ * Robinhood ETH/USDG LP is −16.31 USDG, not +89.51).
+ */
+function withMoveLoss(b: Obj): Obj {
+  if (b?.status !== 'closed' || !b.totals) return b;
+  const price = num(b.price) ?? num(b.lastPrice);
+  const loss = zeroedMoveLoss(b as MoveLossInput, price);
+  if (loss == null) return b;
+  const t = b.totals, mc = coinsOf(t.moveCoins) ?? { base: 0, quote: 0 };
+  return { ...b, totals: { ...t, moveLoss: loss, moveCoins: { base: mc.base, quote: mc.quote + loss }, moveLossBackfill: { loss, price, at: num(b.lastPriceAt) ?? num(b.priceAt) ?? 0 } } };
 }
 
 /** Closed, nothing open: its figures come from the totals and the idle coins at the exit price. */
@@ -377,6 +475,7 @@ function closedLpPnl(b: Obj): Obj | null {
 
 /** LP status (lpEngine.status()). `pnl` is LpEngine.pnl(): equity = value + sent − gas. */
 export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
+  b = withMoveLoss(b);
   const start = num(b.startValue) ?? num(b.config?.capital);
   const closed = closedLpPnl(b);
   const p = b.pnl ?? closed;
@@ -389,6 +488,7 @@ export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
   const lo = num(b.position?.lower), hi = num(b.position?.upper);
   const n = num(b.reranges);
   return finish({
+    capitalSource: start == null ? null : 'start-value',
     kind: 'lp', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'lp' }, now),
     capitalIn: start, currentValue: p ? value : null, paidOut: sent, extraCost: gas ?? 0,
     realized: num(p?.net), unrealized: num(p?.price),
@@ -454,6 +554,14 @@ export function tokenSpendTotals(t: Obj): Record<string, SpendTotals> | null {
  * inside (symbol 'USD', never shown: the page lists them per coin from tokenSpendTotals). An old log that can't be put
  * in coins stays in dollars.
  */
+/** Token trader: the closed sells' result per spend coin; its log has no gas / fee split, so the costs stay inside. */
+function tokenParts(generated: Record<string, number>): Pick<Core, 'parts' | 'basis'> {
+  return {
+    parts: Object.fromEntries(Object.entries(generated).map(([s, u]) => [s, { earned: u, gasSwap: 0, rangeMoveLoss: 0, taxes: 0 }])),
+    basis: { earned: 'tradeProfit', itemized: false, note: 'Closed sells\' result per coin spent; the log has no gas / swap-fee split, so they stay inside it.' },
+  };
+}
+
 export function tokenMetrics(t: Obj, now = Date.now()): BotMetrics {
   const trades = (t.trades ?? []) as Obj[];
   const positions = (t.positions ?? []) as Obj[];
@@ -473,12 +581,12 @@ export function tokenMetrics(t: Obj, now = Date.now()): BotMetrics {
       const [s] = syms, c = coins[s];
       return finish({
         ...base, capitalIn: c.bought, currentValue: c.openCost + c.open, paidOut: c.sold,
-        realized: c.fromSells, unrealized: c.open, k: rates[s], symbol: s, generated, px, dollarsMade: c.fromSells,
+        realized: c.fromSells, unrealized: c.open, k: rates[s], symbol: s, generated, px, dollarsMade: c.fromSells, ...tokenParts(generated), capitalSource: 'token-buys',
         rebalanceLoss: trades.filter((x) => x.side === 'sell').reduce((a, x) => { const v = num(x.pnl) ?? (num(x.pnlUsd) ?? 0) / rates[s]; return v < 0 ? a - v : a; }, 0),
       }, now);
     }
     const dollars = tokenDollars(trades, positions);
-    return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated, px }, now);
+    return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated, px, ...tokenParts(generated) }, now);
   }
   // no coin amounts in the log (older format): dollars inside (the page shows them as ETH)
   const dollars = tokenDollars(trades, positions);

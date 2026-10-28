@@ -99,7 +99,8 @@ describe('MED 3: the LP page does not restate its headline under a day', () => {
     for (const [sym, u] of Object.entries(b.metrics.generated as Record<string, number>)) {
       expect(tile.split(` ${sym}`).length - 1, `${u} ${sym}`).toBe(1);
     }
-    expect(pace(html)).toMatch(/A day—shows after a dayA week—shows after a dayA month—shows after a day/);
+    expect(pace(html)).toMatch(/A day—shows after a dayA week—shows after a day/);
+    expect(pace(html)).not.toMatch(/A month/); // Kyle: day, 7d and 365d only on screen
   });
   it('from a day on, the pace rows are back', () => {
     const html = page(lp(2 * DAY_MS));
@@ -112,7 +113,8 @@ describe('kept from #72 through the merge: no Est. rows scaled up from under a d
   const table = (ageMs: number) => text(render(createElement(StatTable, { b: grid('t', ageMs), s: S })));
   it('under a day the Est. rows are dashes until a day', () => {
     const t = table(8.8 * H);
-    for (const k of ['Est. 24h', 'Est. 7d', 'Est. 30d', 'Est. 365d']) expect(t).toContain(`${k}— (shows after a day)`);
+    for (const k of ['Est. 24h', 'Est. 7d', 'Est. 365d', 'APR']) expect(t).toContain(`${k}— (shows after a day)`);
+    expect(t).not.toContain('Est. 30d');
   });
   it('from a day on the Est. 24h row has a figure', () => {
     expect(table(2 * DAY_MS)).not.toContain('Est. 24h— (shows after a day)');
