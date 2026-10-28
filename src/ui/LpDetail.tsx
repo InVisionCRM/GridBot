@@ -350,7 +350,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="split">
-        <ValueOverTime q={q} note="after gas, with fees sent out counted" data={b.equity ?? []} />
+        <ValueOverTime q={q} note="after gas, with fees sent out counted" data={b.equityHist ?? []} />
         <div className="card"><h3>Log</h3><BotLog events={events} botId={b.id} /></div>
       </div>
     </main>
