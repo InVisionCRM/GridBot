@@ -185,9 +185,10 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
 const LP_SHOWN_ELSEWHERE = ['Generated', 'Age', 'Est. 24h', 'Est. 7d', 'Fees paid', 'Fees earned', 'Range', 'Spacing', 'Moves', 'Last move'] as const;
 
 /**
- * Details' breakdown of the headline: fees earned − costs = Generated. Every cost (gas, swaps, range moves) is paid in
- * the quote coin, so the arithmetic is shown in it; in the base coin nothing comes off, its fees ARE its Generated, and
- * the row says so instead of printing the headline's number a second time.
+ * Details' breakdown of the headline: per coin, fees earned − gas + swap fees − range moves = Generated, from the
+ * server's metrics.breakdownByCoin (MoneyDetails prints those lines first; costs in the coin they were charged in).
+ * A coin with no cost says its fees are all Generated instead of printing the headline's number a second time. These
+ * rows add both coins' fees at today's price and what's still waiting.
  */
 /** What's waiting of one coin's fees; "all the X" when none has been collected yet (the fees row already prints it). */
 function waiting(owed: number | null | undefined, earned: number, sym: string): string {
@@ -196,23 +197,13 @@ function waiting(owed: number | null | undefined, earned: number, sym: string): 
 }
 
 function lpBreakdown(b: AnyObj): DetailRow[] {
+  // the per-coin fees earned − costs = Generated lines come first, from metrics.breakdownByCoin (MoneyDetails)
   const pnl: AnyObj | null = b.pnl;
   if (!pnl?.feeCoins) return [];
   const base = b.base, q = b.quote;
-  const cost = pnl.gas + pnl.swapCost + pnl.moveLoss;
-  const genBase = metricsOf(b)?.generated?.[base];
-  const baseSame = genBase == null || Math.abs(genBase - pnl.feeCoins.base) <= 1e-9 * Math.max(1, Math.abs(genBase));
   return [
-    [`Fees earned, ${q}`, <>{qty(pnl.feeCoins.quote, q, 5)}</>,
-      `Your share of the pool's trading fees paid in ${q} (trades buying ${base}): collected so far plus what's waiting in the position.`],
-    [`Fees earned, ${base}`, baseSame ? <>all of it is Generated (nothing is paid in {base})</> : <>{qty(pnl.feeCoins.base, base, 5)}</>,
-      `Fees paid in ${base} (trades selling ${base}). No cost is taken in ${base}, so it all counts as Generated.`],
     ['Fees earned, all', <>{pnl.fees != null ? `≈ ${qty(pnl.fees, q, 5)} at today's price` : '—'}</>, `Both coins' fees together, in ${q} at today's price.`],
     ['of which waiting in the position', b.position ? <>shown in the position card</> : <>{waiting(b.owed?.base, pnl.feeCoins.base, base)} + {waiting(b.owed?.quote, pnl.feeCoins.quote, q)}</>, 'Earned but not collected yet; collected on the next range move, close or fee send.'],
-    [`− Costs, ${q}`, <>{qty(-cost, q, 4)}</>,
-      `Everything that came off the fees, in ${q}: gas for every open, range move, close and fee collect; what the swaps to the range's mix lost to the pool fee and price impact; and what each range move locked in (the shortfall against the coins put in, at the same price, when the position is taken out).`],
-    ['gas · swaps · range moves', <>{qty(pnl.gas, q, 3, false)} · {qty(pnl.swapCost, q, 3, false)} · {qty(pnl.moveLoss, q, 3, false)} ({b.reranges} range move{b.reranges === 1 ? '' : 's'})</>, 'The three costs, in the order above.'],
-    [`= Generated, ${q}`, 'the headline above', `Fees earned in ${q} − costs.`],
   ];
 }
 

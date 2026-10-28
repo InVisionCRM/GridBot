@@ -125,6 +125,46 @@ export function totals(trades: LiveTrade[], price: number | null) {
   return { pos, realized, gasQuote, unrealized };
 }
 
+/**
+ * What the round trips in Generated paid, in the quote coin, so "trade profit before costs − costs = Generated" can be
+ * shown per coin (botMetrics breakdownByCoin). Display only; nothing here feeds a trade.
+ *  - gas: each counted sell's gas + its matched buy's gas (the share of that buy's lot it sold), + gas lost on failed /
+ *    manual trades (`lostGas`, already off Generated).
+ *  - poolFees: the same trades' pool fee (feeQuote; it is inside the amounts, so it is already off the round-trip net).
+ *  - taxes: token tax seen on those fills (stableAmount × taxPct), likewise already inside the amounts.
+ * A sell counts when it is a round trip: grid = not failed / manual / close-out; `all` (trend) = every filled sell.
+ * A sell's buy is the latest earlier filled buy on its interval (a start-up buy covers each level in `seed`); `unmatched`
+ * counts sells whose buy isn't in the list (an older or trimmed log): their buy-side costs are not in the figures.
+ */
+export interface RoundTripCosts { gas: number; poolFees: number; taxes: number; lostGas: number; roundTrips: number; unmatched: number }
+
+type CostTrade = Pick<LiveTrade, 'side' | 'intervalIndex' | 'timestamp' | 'stableAmount' | 'gasQuote'> & {
+  failed?: boolean; manual?: boolean; closeOut?: boolean; closeSale?: boolean; seed?: number[]; feeQuote?: number; taxPct?: number; lotCost?: number;
+};
+
+export function roundTripCosts(trades: readonly CostTrade[], which: 'grid' | 'all' = 'grid'): RoundTripCosts {
+  const fin = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const out: RoundTripCosts = { gas: 0, poolFees: 0, taxes: 0, lostGas: 0, roundTrips: 0, unmatched: 0 };
+  const lastBuy = new Map<string, CostTrade>();
+  const key = (i: unknown) => String(typeof i === 'number' ? i : 'x');
+  for (const t of [...trades].sort((a, b) => fin(a.timestamp) - fin(b.timestamp))) {
+    if (t.failed || t.manual) { out.lostGas += fin(t.gasQuote); continue; }
+    if (t.side === 'buy') {
+      for (const i of t.seed?.length ? t.seed : [t.intervalIndex]) lastBuy.set(key(i), t);
+      continue;
+    }
+    if (which === 'grid' && isCloseOut(t)) continue;
+    out.roundTrips++;
+    out.gas += fin(t.gasQuote); out.poolFees += fin(t.feeQuote); out.taxes += fin(t.stableAmount) * fin(t.taxPct);
+    const buy = lastBuy.get(key(t.intervalIndex));
+    const share = buy && fin(buy.lotCost) > 0 && fin(t.lotCost) > 0 ? Math.min(1, fin(t.lotCost) / fin(buy.lotCost)) : null;
+    if (!buy || share == null) { out.unmatched++; continue; }
+    out.gas += fin(buy.gasQuote) * share; out.poolFees += fin(buy.feeQuote) * share; out.taxes += fin(buy.stableAmount) * fin(buy.taxPct) * share;
+  }
+  out.gas += out.lostGas;
+  return out;
+}
+
 /** Per-grid round-trip stats (quote units). */
 export function roundTripStats(trades: LiveTrade[]) {
   const ok = trades.filter((t) => !t.failed && !t.manual);
@@ -147,6 +187,8 @@ export function roundTripStats(trades: LiveTrade[]) {
     totalFees: ok.reduce((s, t) => s + (t.feeQuote ?? 0), 0),
     totalGas: trades.reduce((s, t) => s + t.gasQuote, 0),
     avgSlippagePct: slips.length ? slips.reduce((a, b) => a + b, 0) / slips.length : 0,
+    /** Costs of the round trips in `generated` (display: botMetrics breakdownByCoin). */
+    rtCosts: roundTripCosts(trades, 'grid'),
   };
 }
 

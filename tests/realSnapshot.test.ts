@@ -56,7 +56,10 @@ describe('real snapshot: LP costs include range-move losses (#1)', () => {
   it('the LP page has one Costs tile that includes the moves, and no separate "Lost to range moves" tile', () => {
     const src = readFileSync(new URL('../src/ui/LpDetail.tsx', import.meta.url), 'utf8');
     expect(src).not.toContain('>Lost to range moves<');
-    expect(src).toMatch(/pnl\.gas \+ pnl\.swapCost \+ pnl\.moveLoss/);
+    // the costs, range moves included, are the per-coin lines of metrics.breakdownByCoin in Details (MoneyDetails)
+    expect(src).toMatch(/metrics\.breakdownByCoin/);
+    const md = readFileSync(new URL('../src/ui/MoneyDetails.tsx', import.meta.url), 'utf8');
+    expect(md).toMatch(/'Range moves', c\.rangeMoveLoss/);
   });
 });
 
