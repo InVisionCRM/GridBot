@@ -367,7 +367,8 @@ function classifyRelayCall(provider: string, req: BridgeQuoteRequest, router: st
     }
     if (sel === WETH_WITHDRAW.getFunction('withdraw')!.selector.toLowerCase()) {
       const wad = asBig(WETH_WITHDRAW.decodeFunctionData('withdraw', data)[0]);
-      if (wad !== req.amountIn) bad(provider, 'deposit amount does not match');
+      // The WETH sequence check is the one place withdraw, native value, and
+      // cleanup amount are compared with amountIn.
       return { kind: 'withdraw', amount: wad };
     }
     if (sel === ERC20_TRANSFER.getFunction('transfer')!.selector.toLowerCase()) bad(provider, 'deposit recipient does not match');
@@ -376,7 +377,6 @@ function classifyRelayCall(provider: string, req: BridgeQuoteRequest, router: st
   }
   if (sameAddress(target, router)) {
     if (emptyBytes(data) || data.length < 10) {
-      if (value !== req.amountIn) bad(provider, 'deposit amount does not match');
       return { kind: 'fund', value };
     }
     if (sel === ROUTER_CALLS.getFunction('cleanupNativeViaCall')!.selector.toLowerCase()) {
@@ -387,7 +387,6 @@ function classifyRelayCall(provider: string, req: BridgeQuoteRequest, router: st
       const native = RELAY_NATIVE.decodeFunctionData('depositNative', inner);
       assertDepositor(provider, getAddress(String(native.depositor)), req.sender, false);
       const amt = asBig(cleaned.amount);
-      if (amt !== 0n) bad(provider, 'deposit amount does not match');
       if (value !== 0n) bad(provider, 'deposit amount does not match');
       return { kind: 'cleanupNativeViaCall', amount: amt, to: getAddress(String(cleaned.to)), id: String(native.id).toLowerCase() };
     }

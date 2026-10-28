@@ -22,6 +22,8 @@
  * - cleanupErc20s of amountIn+1 fails if the overpayment check is removed.
  * - cleanupErc20s of amountIn-1 fails if the underpayment check is removed.
  * - outer amounts of amountIn-1, or a second token, fails if the outer tokens/amounts check is removed.
+ * - a WETH withdraw, native value, or cleanup amount of amountIn±1 fails if the
+ *   sequence's exact-amount check is removed. refundTo and nftRecipient are the sender.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -315,6 +317,27 @@ describe('Relay sequences and hostile approvals', () => {
       mc.refundTo = ATTACKER;
       mc.nftRecipient = ATTACKER;
     }))).rejects.toThrow(/refund recipient does not match/);
+  });
+
+  it.each([
+    ['withdraw', -1n],
+    ['withdraw', 1n],
+    ['native value', -1n],
+    ['native value', 1n],
+    ['cleanup', -1n],
+    ['cleanup', 1n],
+  ] as const)('rejects a WETH %s of amountIn + %s, which is the sequence amount check', async (part, delta) => {
+    const amount = ETH_IN + delta;
+    await expect(relayQuoteOf(weth((mc) => {
+      if (part === 'withdraw') {
+        mc.calls[1].callData = WETH.encodeFunctionData('withdraw', [amount]);
+      } else if (part === 'native value') {
+        mc.calls[2].value = amount;
+      } else {
+        const cleaned = ROUTER.decodeFunctionData('cleanupNativeViaCall', mc.calls[3].callData);
+        mc.calls[3].callData = ROUTER.encodeFunctionData('cleanupNativeViaCall', [amount, cleaned.to, cleaned.data]);
+      }
+    }))).rejects.toThrow(/deposit amount does not match/);
   });
 
   it('R7a rejects withdraw of amountIn minus one', async () => {
