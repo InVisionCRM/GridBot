@@ -36,9 +36,9 @@ function tokenKey(t: TokenQty): string {
   return normFigure(`${formatAmt(t.amount)} ${t.symbol}`);
 }
 
-/** Every generated coin stays on the card: a number, or `All paper BUN` when it is that coin's section total. */
+/** Every generated coin stays on the card: a number, or `All paper BUN` when it is that coin's section total. A real zero stays `0 PLS`. */
 export function generatedCardLine(bot: TokenQty[], section: TokenQty[], scope: 'live' | 'paper'): { text: string; parts: string[] } | null {
-  const shown = bot.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
+  const shown = bot.filter((t) => Number.isFinite(t.amount));
   if (!shown.length) return null;
   const sectionShown = section.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
   const line = formatTokenLine(shown);
@@ -51,7 +51,8 @@ export function generatedCardLine(bot: TokenQty[], section: TokenQty[], scope: '
   const replaced = shown.some((t) => totals.get(t.symbol) === normFigure(formatTokenLine([t])));
   if (!replaced) return { text: line, parts: tokenLineParts(shown) };
   const parts = shown.map((t, i) => {
-    if (totals.get(t.symbol) === normFigure(formatTokenLine([t]))) return `All ${word} ${t.symbol}`;
+    const zero = t.amount === 0 || formatAmt(t.amount) === '0';
+    if (!zero && totals.get(t.symbol) === normFigure(formatTokenLine([t]))) return `All ${word} ${t.symbol}`;
     return tokenLineParts(shown.slice(0, i + 1)).at(-1) ?? formatTokenLine([t]);
   });
   return { text: parts.join(' '), parts };
@@ -76,7 +77,7 @@ export function investedLine(bot: TokenQty[], total: TokenQty[], scope: 'live' |
 const DAY_SEC = 86_400;
 
 export function hasGenerated(m: { generated?: TokenQty[] | null }): boolean {
-  return (m.generated ?? []).some((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
+  return (m.generated ?? []).some((t) => Number.isFinite(t.amount));
 }
 
 /** Closed and stopped bots, and anything under a day or without Generated, do not show Est. rows. */
@@ -235,9 +236,76 @@ export function isLedgerLabel(label: string): boolean {
     || label === 'Generated';
 }
 
+function placesOf(amount: number): { unit: number; places: number } {
+  const anchor = amount !== 0 ? amount : 1;
+  const unit = standardUnit(amount !== 0 ? amount : anchor);
+  return { unit, places: unit >= 1 ? 0 : naturalPlaces(anchor) };
+}
+
+/** Itemized per-coin rows from botMetrics, rounded so each coin's parts equal its Generated. */
+function metricsBreakdown(m: BotMetrics, details: boolean): SheetRow[] {
+  const by = m.breakdownByCoin;
+  const basis = m.breakdownBasis;
+  if (!by || !basis) return [];
+  const generatedText = m.generated.length ? formatTokenLine(m.generated) : '';
+  if (!basis.itemized) {
+    const rows: SheetRow[] = [];
+    if (!details && generatedText) rows.push({ label: 'Generated', value: generatedText });
+    if (basis.note) rows.push({ label: 'Note', value: basis.note });
+    return rows;
+  }
+  const costEntries = Object.entries(by).filter(([, c]) => c.gasSwap !== 0 || c.rangeMoveLoss !== 0 || c.taxes !== 0 || c.bridge !== 0);
+  if (!costEntries.length) {
+    const rows: SheetRow[] = [];
+    if (!details && generatedText) rows.push({ label: 'Generated', value: generatedText });
+    return rows;
+  }
+  const rounded = new Map(costEntries.map(([symbol, coin]) => {
+    const { unit, places } = placesOf(coin.generated);
+    const specs: { key: 'earned' | 'gas' | 'move' | 'tax' | 'bridge'; raw: number }[] = [
+      { key: 'earned', raw: coin.earned },
+    ];
+    if (coin.gasSwap !== 0) specs.push({ key: 'gas', raw: -Math.abs(coin.gasSwap) });
+    if (coin.rangeMoveLoss !== 0) specs.push({ key: 'move', raw: -Math.abs(coin.rangeMoveLoss) });
+    if (coin.taxes !== 0) specs.push({ key: 'tax', raw: -Math.abs(coin.taxes) });
+    if (coin.bridge !== 0) specs.push({ key: 'bridge', raw: -Math.abs(coin.bridge) });
+    const values = apportion(specs.map((s) => s.raw), displayedValue(coin.generated), unit);
+    const parts = { earned: 0, gas: 0, move: 0, tax: 0, bridge: 0, places };
+    specs.forEach((s, i) => { parts[s.key] = values[i]; });
+    return [symbol, parts] as const;
+  }));
+  const line = (key: 'earned' | 'gas' | 'move' | 'tax' | 'bridge') => joinParts(
+    [...rounded.entries()].map(([symbol, parts]) => ({ symbol, amount: parts[key], places: parts.places })),
+  );
+  const symbols = [...rounded.keys()];
+  const feeLabel = basis.earned === 'tradeProfit'
+    ? 'Trade profit before gas'
+    : symbols.length === 1
+      ? `${symbols[0]} fees earned`
+      : `${coinList(symbols)} fees earned`;
+  const rows: SheetRow[] = [];
+  const earned = line('earned');
+  const gas = line('gas');
+  const move = line('move');
+  const tax = line('tax');
+  const bridge = line('bridge');
+  if (earned) rows.push({ label: feeLabel, value: earned });
+  if (gas) rows.push({ label: 'Gas + swap fees', value: gas });
+  if (move) rows.push({ label: 'Range-move loss', value: move });
+  if (tax) rows.push({ label: 'Taxes', value: tax });
+  if (bridge) rows.push({ label: 'Bridge', value: bridge });
+  if (!details && generatedText) rows.push({ label: 'Generated', value: generatedText });
+  if (details && rows.length) rows.push({ label: 'Adds', value: 'These add up to the Generated above.' });
+  if (!details && rows.length) rows.push({ label: 'Round', value: 'Rows are rounded to add up exactly.' });
+  const free = Object.keys(by).filter((symbol) => !symbols.includes(symbol) && (by[symbol].generated !== 0 || by[symbol].earned !== 0));
+  if (free.length === 1) rows.push({ label: 'Note', value: `${free[0]} has no costs taken out.` });
+  else if (free.length > 1) rows.push({ label: 'Note', value: `${coinList(free)} have no costs taken out.` });
+  return rows;
+}
+
 /**
  * Breakdown rows in token units. Dollar rows and price change are not rendered.
- * Est. 7d and Est. 365d are included; Est. 24h is the hero /day line, so it is not repeated here.
+ * Est. 7d and Est. 365d are included; Est. 24h is the hero line, so it is not repeated here.
  */
 export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, covered = '', details = false): SheetRow[] {
   const used = new Set<string>();
@@ -270,12 +338,11 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
   if (!details && rows.length > beforeParts && !(m.kind === 'grid' && m.fillCount === 0)) {
     rows.push({ label: 'Round', value: 'Rows are rounded to add up exactly.' });
   }
-  if (!ledger && (m.kind === 'lp' || m.kind === 'grid')) {
-    if (!details) {
-      const shown = m.generated.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
-      const text = shown.length ? formatTokenLine(shown) : (m.kind === 'grid' && m.fillCount === 0 ? '0' : '');
-      if (text) rows.push({ label: 'Generated', value: text });
-    }
+  const fromMetrics = metricsBreakdown(m, details);
+  if (fromMetrics.length) {
+    rows.push(...fromMetrics);
+  } else if (!ledger && (m.kind === 'lp' || m.kind === 'grid' || m.kind === 'trend')) {
+    if (!details && m.generated.length) rows.push({ label: 'Generated', value: formatTokenLine(m.generated) });
     rows.push({ label: 'Note', value: 'Breakdown coming soon' });
   }
   if (ledger?.untouched) add('Note', ledger.untouched);

@@ -202,7 +202,7 @@ describe('v2 copy stays in token units', () => {
       const rows = sheetRows(bot.metrics, { base: bot.base, quote: bot.quote });
       const generated = rows.find((r) => r.label === 'Generated');
       if (generated) {
-        expect(generated.value, bot.metrics.botId).toBe(formatTokenLine(bot.metrics.generated.filter((t) => t.amount !== 0 && t.amount !== undefined)));
+        expect(generated.value, bot.metrics.botId).toBe(formatTokenLine(bot.metrics.generated));
       }
       for (const label of ['Est. 7d', 'Est. 365d'] as const) {
         const got = rows.find((r) => r.label === label)?.value;
@@ -219,15 +219,10 @@ describe('v2 copy stays in token units', () => {
       if (rows.some((r) => (r.label === 'Trade profit before gas' || r.label.endsWith(' fees earned')) && /\d/.test(r.value))) {
         expect(rows.some((r) => r.value === 'Rows are rounded to add up exactly.'), bot.metrics.botId).toBe(true);
       }
-      if (!bot.metrics.grossFees.length && !bot.metrics.feesPaid.length && (bot.metrics.kind === 'lp' || bot.metrics.kind === 'grid')) {
-        expect(rows.find((r) => r.label === 'Gas + swap fees'), bot.metrics.botId).toBeUndefined();
-        expect(rows.find((r) => r.label === 'Trade profit before gas'), bot.metrics.botId).toBeUndefined();
-        expect(rows.find((r) => r.label.endsWith('fees earned')), bot.metrics.botId).toBeUndefined();
-        expect(rows.find((r) => r.label === 'Range-move loss'), bot.metrics.botId).toBeUndefined();
+      if (bot.metrics.breakdownBasis) {
+        expect(rows.some((r) => r.value === 'Breakdown coming soon'), bot.metrics.botId).toBe(false);
+      } else if (bot.metrics.kind === 'lp' || bot.metrics.kind === 'grid') {
         expect(rows.some((r) => r.value === 'Breakdown coming soon'), bot.metrics.botId).toBe(true);
-        if (bot.metrics.generated.some((t) => t.amount !== 0)) {
-          expect(rows.find((r) => r.label === 'Generated')?.value, bot.metrics.botId).toBe(formatTokenLine(bot.metrics.generated));
-        }
       }
     }
   });
@@ -328,7 +323,7 @@ describe('v2 copy stays in token units', () => {
     expect(rows.some((r) => r.value === 'Breakdown coming soon')).toBe(false);
   });
 
-  it('dashes grid invested when the payload only has totalCapitalUsd', () => {
+  it('shows legacy grid capital as quote-coin units, never USD', () => {
     const now = 1_700_000_000_000;
     const desk = adaptStatus({
       spotsAt: now,
@@ -340,14 +335,15 @@ describe('v2 copy stays in token units', () => {
         moveCount: 1,
       }],
     }, [], now);
-    expect(desk.bots[0].metrics.invested).toEqual([]);
+    expect(desk.bots[0].metrics.invested).toEqual([{ symbol: 'USDC', amount: 1000, usd: null }]);
     const text = textOf(renderToStaticMarkup(
       <BotView bot={desk.bots[0]} activity={[]} prices={[]} onBack={() => {}} onActivity={() => {}} showFeed={false} breakdown />,
     ));
     expect(text).not.toMatch(/\bUSD\b/);
-    expect(text).not.toContain('1,000');
-    expect(text).toMatch(/Invested\s+—/);
-    expect(text).toContain('Breakdown coming soon');
+    expect(text).not.toContain('legacy-config');
+    expect(text).toContain('1,000.00 USDC');
+    expect(text).toContain('No trade log here: the costs are inside the trade profit.');
+    expect(text).not.toContain('Breakdown coming soon');
     expect(text).toContain('Est. 24H');
     expect(text).not.toMatch(/\/day/);
   });

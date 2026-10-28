@@ -29,7 +29,7 @@ export const sanitizedStatus = {
       config: { capital: 1 },
       position: { lower: 0.0004, upper: 0.0006 },
       owed: { base: 10, quote: 0.002 },
-      totals: { fees: 0.01, gas: 0.001, feeCoins: { base: 4, quote: 0.001 }, swapCost: 0.002, moveLoss: 0.003 },
+      totals: { fees: 0.01, gas: 0.0011, feeCoins: { base: 4, quote: 0.001 }, swapCost: 0.002, moveLoss: 0.0029 },
       pnl: {
         net: 0.02, price: -0.004, fees: 0.026, gas: 0.0011, swapCost: 0.002, moveLoss: 0.0029, equity: 1.016,
         feeCoins: { base: 20, quote: 0.004 },

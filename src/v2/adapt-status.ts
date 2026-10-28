@@ -46,27 +46,27 @@ function screenCalc(calc: string): string {
     .join(' ');
 }
 
-/** Quote-coin capital only. A grid still named totalCapitalUsd has no quote.capitalIn, so this stays empty. USD is not a coin. */
+/** Quote-coin units from capitalInQuote. A USD book has none. The source tag is not shown. */
 function coinInvested(m: ServerMetrics): TokenQty[] {
   const symbol = m.quote.symbol;
-  const amount = m.quote.capitalIn;
+  const amount = m.capitalInQuote;
   if (amount == null || !symbol || symbol === 'USD') return [];
   return [{ symbol, amount, usd: null }];
 }
 
-function recordTokens(rows: Record<string, number> | null): TokenQty[] | null {
+/** `keepZero` retains an explicit 0, such as a grid with no fills (`{PLS: 0}`). */
+function recordTokens(rows: Record<string, number> | null, keepZero = false): TokenQty[] | null {
   if (rows == null) return null;
   return Object.entries(rows)
-    .filter(([, amount]) => amount !== 0 && Number.isFinite(amount))
+    .filter(([, amount]) => Number.isFinite(amount) && (keepZero || amount !== 0))
     .map(([symbol, amount]) => ({ symbol, amount, usd: null }));
 }
 
-/** The server's object when status already attached it; otherwise the same functions. */
+/**
+ * Always the botMetrics functions, never a metrics object already on the payload.
+ * An old snapshot's attached metrics still has the pre-rebuild Generated.
+ */
 function metricsOf(raw: Rec, kind: 'grid' | 'lp' | 'trend', asOf: number): ServerMetrics {
-  const attached = rec(raw.metrics);
-  if (attached && rec(attached.quote) && attached.generatedRate && typeof attached.generatedRate === 'object') {
-    return attached as unknown as ServerMetrics;
-  }
   if (kind === 'grid') return gridMetrics(raw, asOf);
   if (kind === 'lp') return lpMetrics(raw, asOf);
   return trendMetrics(raw, asOf);
@@ -77,7 +77,7 @@ function metricsOf(raw: Rec, kind: 'grid' | 'lp' | 'trend', asOf: number): Serve
  * object, so those arrays stay empty and the sheet shows the Generated total with a note.
  */
 function viewOf(m: ServerMetrics, asOf: number): BotMetrics {
-  const pace = (rows: Record<string, number> | null) => (rows == null ? null : recordTokens(rows) ?? []);
+  const pace = (rows: Record<string, number> | null) => (rows == null ? null : recordTokens(rows, true) ?? []);
   return {
     botId: m.botId,
     mode: m.mode === 'live' ? 'live' : 'paper',
@@ -98,7 +98,7 @@ function viewOf(m: ServerMetrics, asOf: number): BotMetrics {
     tokenTaxesUsd: m.tokenTaxesUsd,
     realizedRebalanceLossUsd: m.realizedRebalanceLossUsd,
     priceChangeUsd: m.priceChangeUsd,
-    generated: recordTokens(m.generated) ?? [],
+    generated: recordTokens(m.generated, true) ?? [],
     generatedUsd: m.generatedUsd,
     headline: 'generated',
     totalPnlUsd: m.totalPnlUsd,
@@ -117,6 +117,8 @@ function viewOf(m: ServerMetrics, asOf: number): BotMetrics {
     asOf,
     calc: screenCalc(m.calc),
     invested: coinInvested(m),
+    breakdownByCoin: m.breakdownByCoin,
+    breakdownBasis: m.breakdownBasis,
     grossFees: [],
     feesPaid: [],
     moveLoss: [],
@@ -390,9 +392,10 @@ function activityOf(events: ActivityEvent[], names: Map<string, { pair: string; 
 }
 
 export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = num(status.spotsAt) ?? Date.now(), source: DeskSnapshot['source'] = 'snapshot'): DeskSnapshot {
-  const grids = (Array.isArray(status.grids) ? status.grids : []).map(rec).filter((g): g is Rec => !!g);
-  const lps = (Array.isArray(status.lps) ? status.lps : []).map(rec).filter((g): g is Rec => !!g);
-  const trends = (Array.isArray(status.trends) ? status.trends : []).map(rec).filter((g): g is Rec => !!g);
+  const listed = (row: Rec) => !row.archivedAt;
+  const grids = (Array.isArray(status.grids) ? status.grids : []).map(rec).filter((g): g is Rec => !!g && listed(g));
+  const lps = (Array.isArray(status.lps) ? status.lps : []).map(rec).filter((g): g is Rec => !!g && listed(g));
+  const trends = (Array.isArray(status.trends) ? status.trends : []).map(rec).filter((g): g is Rec => !!g && listed(g));
   const bots = [
     ...grids.map((g) => gridBot(status, g, asOf)),
     ...lps.map((lp) => lpBot(status, lp, asOf)),

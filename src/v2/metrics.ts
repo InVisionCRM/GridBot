@@ -34,6 +34,21 @@ export interface RangeBlock {
   inRange: boolean;
 }
 
+export interface CoinBreakdown {
+  earned: number;
+  gasSwap: number;
+  rangeMoveLoss: number;
+  taxes: number;
+  bridge: number;
+  generated: number;
+}
+
+export interface BreakdownBasis {
+  earned: 'lpFees' | 'tradeProfit';
+  itemized: boolean;
+  note: string;
+}
+
 export interface BotMetrics {
   botId: string;
   mode: BotMode;
@@ -70,8 +85,11 @@ export interface BotMetrics {
   range: RangeBlock | null;
   asOf: number;
   calc: string;
-  /** Coins deposited, in the engine quote coin. Not dollars. */
+  /** Coins deposited, from botMetrics capitalInQuote. Not dollars. */
   invested: TokenQty[];
+  /** Per-coin parts from botMetrics. Null when that module has no breakdown. */
+  breakdownByCoin: Record<string, CoinBreakdown> | null;
+  breakdownBasis: BreakdownBasis | null;
   /** Fee coins before costs. LP only; empty when the bot has no split. */
   grossFees: TokenQty[];
   /** Gas plus swap cost, in the engine quote coin. */
