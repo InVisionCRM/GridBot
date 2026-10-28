@@ -6,16 +6,18 @@ import { Logger } from './bot/logger';
 import { JsonStore } from './bot/store';
 import { DurableJsonStore } from './bot/durableStore';
 import { ActivityBus } from './bot/activity';
-import { createSigners, loadEnv, readCopy, readSettings, takeFriendsSecret, takeHostAuth } from './env';
+import { createSigners, loadEnv, readCopy, readSettings, receiveFriendKey, shortQuoteKeyWarnings, takeBridgeKeys, takeFriendsSecret, takeHostAuth } from './env';
+import { Router, type RouterFile } from './router/router';
 import { createApp } from './app';
 import { CandleStore } from './market/candleStore';
 import { GeckoSource } from './market/gecko';
 import { CandleSync, geckoBackfill, onchainBackfill } from './market/backfill';
 import { VersionCheck } from './system/version';
-import { DailyScanner, scanDepsFromHub, type ScanFile } from './market/scanner';
+import { DailyScanner, localScan, scanDepsFromHub, type ScanFile } from './market/scanner';
 import { PoolHistories } from './lp/poolHistory';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
+import { swapForHost } from './swap/wire';
 import { fetchJson } from './fetchJson';
 import { PoolSearch } from './market/poolSearch';
 import { TFS } from '../market/candles';
@@ -32,17 +34,22 @@ import { dailySummary } from './push/summary';
 loadEnv();
 const friendsSecret = takeFriendsSecret();
 const hostAuth = takeHostAuth();
+// Before anything copies process.env (a friend's copy must not inherit quote keys).
+const bridgeKeyStatus = takeBridgeKeys();
 const cfg = readSettings();
 const isProd = process.env.NODE_ENV === 'production';
 const log = new Logger();
+for (const msg of shortQuoteKeyWarnings()) log.warn(msg);
 // A friend's copy (started by the host app, friends/copies.ts) shares the host's candles budget and daily scan.
 const copy = readCopy();
 
 // Every configured chain gets a fallback RPC reader; signers come from PRIVATE_KEY / PRIVATE_KEY_<SLUG> (env.ts only).
 const dataDir = path.dirname(cfg.stateFile);
 log.attach(path.join(dataDir, 'server.log'));
+// A friend's copy gets its key from the host over IPC (never through its environment).
+const friendKey = copy ? await receiveFriendKey() : undefined;
 const { hub, readers } = buildHub({
-  net: cfg.net, env: process.env, signerFactory: createSigners,
+  net: cfg.net, env: process.env, signerFactory: (chains) => (copy ? createSigners(chains, { friendKey }) : createSigners(chains)),
   custom: new JsonStore<CustomFile>(path.join(dataDir, 'custom.json')),
 });
 const legacyReader = readers.get(cfg.net.chainId)!;
@@ -93,7 +100,8 @@ const backfill = async (pair: string, source: 'gecko' | 'onchain', days: number)
 const dailyScan: DailyScanner | undefined = !copy && sync.enabled ? new DailyScanner(scanDepsFromHub(hub, candles, {
   gecko, store: new JsonStore<ScanFile>(path.join(dataDir, 'picks.json')), approval: cfg.approval, emit: activity.emitEvent,
 })) : undefined;
-const scanner = copy ? hostScan(copy.hostUrl, copy.host) : dailyScan;
+const scanSource = copy ? hostScan(copy.hostUrl, copy.host) : dailyScan;
+const scanner = scanSource ? localScan(hub, scanSource) : undefined;
 
 const version = copy ? null : await VersionCheck.start(process.cwd(), process.env.NODE_ENV !== 'production');
 const entry = fileURLToPath(import.meta.url);
@@ -130,11 +138,31 @@ const push = tryStartPush({
   summary: () => { try { return dailySummary(bot.status()); } catch { return { title: 'GridBot · daily summary', body: 'No generated profit to report.' }; } },
 });
 if (push) activity.on('activity', (ev) => { void push.onActivity(ev).catch(() => log.warn('push: event was not sent')); });
+// ROUTER HOOK: host only (a friend's copy has readCopy() set). Stop all calls router.halt.
+const router = new Router({
+  store: new JsonStore<RouterFile>(path.join(dataDir, 'router.json')),
+  host: copy == null,
+  configured: bridgeKeyStatus,
+  chainIds: hub.runtimes().map((r) => r.cfg.id),
+  emit: activity.emitEvent,
+  log,
+});
+bot.routerHalt = (halt) => router.halt(halt);
+// Quotes and, in live mode, calldata only. A friend's copy does not construct this. Nothing here broadcasts.
+const swap = swapForHost(!!copy, {
+  hub,
+  allocations: () => bot.allocations().rows,
+  reservations: () => [
+    ...(tokenTrader?.reservations() ?? []),
+    ...convert.reservations(),
+    ...bot.routerReservations(),
+  ],
+});
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
-  lpReplay: (q) => lpReplay.replay(q), convert, poolSearch: new PoolSearch(hub, fetchJson),
+  lpReplay: (q) => lpReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader, copy: !!copy, ...(push ? { push } : {}),
+  friends, autopilot, tokenTrader, router, copy: !!copy, ...(push ? { push } : {}),
 });
 if (isProd) {
   app.get('/sw.js', (_req, res) => {
@@ -157,6 +185,8 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   bot.startLoop(cfg.pollMs);
   sync.start();
   dailyScan?.start();
+  // A first check at once: its prices and unconfirmed swaps are read now, not a minute after a restart
+  void autopilot.tick();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
   if (push) {

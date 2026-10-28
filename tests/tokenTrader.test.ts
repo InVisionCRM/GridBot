@@ -68,6 +68,17 @@ describe('safety gate', () => {
     expect(gateToken(clean({ lpUnlocked: null, canPause: null })).ok).toBe(true);
   });
 
+  it('ignores a trade-size impact unless that check is on, then caps it and fails closed when the quote is missing', () => {
+    const base = gateToken(clean());
+    expect(gateToken(clean({ sizeImpact: 0.2, enforceSizeImpact: false }))).toEqual(base);
+    expect(gateToken(clean({ enforceSizeImpact: true, sizeImpact: 0.009 })).ok).toBe(true);
+    expect(gateToken(clean({ enforceSizeImpact: true, sizeImpact: 0.01 })).ok).toBe(true);
+    expect(gateToken(clean({ enforceSizeImpact: true, sizeImpact: 0.02 })).reason).toMatch(/2\.00% at this size is over the 1\.00%/);
+    expect(gateToken(clean({ enforceSizeImpact: true, sizeImpact: null })).reason).toMatch(/could not be verified/);
+    expect(gateToken(clean({ risk: 'any', enforceSizeImpact: true, sizeImpact: null })).ok).toBe(false);
+    expect(gateToken(clean({ enforceSizeImpact: true, sizeImpact: 0.02, sizeImpactCap: 0.03 })).ok).toBe(true);
+  });
+
   it('medium allows a proxy and a small tax under the cap, and still blocks a pause function and unlocked liquidity', () => {
     expect(gateToken(clean({ risk: 'medium', proxy: true, sellTax: 0.05 })).ok).toBe(true);
     expect(gateToken(clean({ risk: 'medium', canPause: true })).reason).toMatch(/pause/);

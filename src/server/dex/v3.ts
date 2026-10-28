@@ -11,6 +11,7 @@ import { NATIVE } from '../../live/swapMath';
 import { ADDRESS_THIS, encodeV3Path, midPrice, v3Impact, virtualReserves } from '../../live/v3Math';
 import type { ChainReader } from '../bot/chain';
 import { V3_FACTORY, V3_POOL, V3_QUOTER, V3_ROUTER } from './abis';
+import { feeTierToBps, readV3FeeBps } from './poolFee';
 import { isZero, readCall, sameAddr, type BuiltSwap, type DexAdapter, type PoolState, type QuoteOut, type SwapRequest } from './types';
 
 export class V3Adapter implements DexAdapter {
@@ -24,7 +25,14 @@ export class V3Adapter implements DexAdapter {
     const found = await Promise.all(this.cfg.feeTiers!.map(async (tier) => {
       try {
         const [p] = await readCall<[string]>(this.reader, this.cfg.factory, V3_FACTORY, 'getPool', [a, b, tier]);
-        return isZero(p) ? null : { dex: this.cfg.id, kind: 'v3' as const, address: p, feeBps: tier / 100, feeTier: tier };
+        if (isZero(p)) return null;
+        // feeTier is the factory key for getPool, QuoterV2 and the router. A static fee is that tier, so this
+        // makes no fee() call. A dynamic-fee DEX reads fee() once; a failed read keeps the tier and the pool.
+        let feeBps = feeTierToBps(tier);
+        if (this.cfg.dynamicFee) {
+          try { feeBps = await readV3FeeBps(this.reader, p); } catch { /* tier fallback, pool stays */ }
+        }
+        return { dex: this.cfg.id, kind: 'v3' as const, address: p, feeBps, feeTier: tier };
       } catch { return null; }
     }));
     return found.filter((x): x is NonNullable<typeof x> => !!x);
@@ -58,9 +66,15 @@ export class V3Adapter implements DexAdapter {
     let impact = 0;
     if (st?.sqrtPriceX96) {
       const inIs0 = sameAddr(st.token0, tokenIn);
-      impact = v3Impact(amountIn, amountOut, midPrice(st.sqrtPriceX96, inIs0, 0, 0), pool.feeBps);
+      impact = v3Impact(amountIn, amountOut, midPrice(st.sqrtPriceX96, inIs0, 0, 0), await this.feeBpsNow(pool, st.pool.address));
     }
     return { amountOut, impact, gasEstimate: q[3] };
+  }
+
+  /** The fee this quote paid: the pool's fee() read now on a dynamic-fee DEX (never cached), else the pool's fixed fee. */
+  async feeBpsNow(pool: PoolRef, address?: string): Promise<number> {
+    if (!this.cfg.dynamicFee) return pool.feeBps;
+    return readV3FeeBps(this.reader, address ?? pool.address!);
   }
 
   buildSwap(r: SwapRequest & { path?: { tokens: string[]; fees: number[] } }): BuiltSwap {
