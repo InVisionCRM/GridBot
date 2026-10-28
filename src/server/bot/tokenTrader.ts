@@ -47,6 +47,11 @@ export interface TraderOptions {
   maxImpact: number;
   maxPoolShare: number;
   /**
+   * Read Uniswap V3 position NFTs and attach the lock/burn report to the gate.
+   * Off unless set: the gate then behaves exactly as it does without the field.
+   */
+  v3LpLockCheck: boolean;
+  /**
    * Read holder concentration and let the gate use it. Default off: assess still passes unknown concentration,
    * and the gate output matches a build that does not know about this flag.
    */
@@ -144,6 +149,7 @@ const TRADE_MAX = 200;
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
+  v3LpLockCheck: false,
   enforceHolderCheck: false, maxHolderShare: DEFAULT_MAX_HOLDER_SHARE, maxTop10Share: DEFAULT_MAX_TOP10_SHARE,
   minHolderCoverage: DEFAULT_MIN_HOLDER_COVERAGE,
   enforceSizeImpact: false, sizeImpactCap: DEFAULT_SIZE_IMPACT_CAP,
@@ -265,6 +271,7 @@ export class TokenTrader {
 
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
     const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
+    if ('v3LpLockCheck' in o) n.v3LpLockCheck = o.v3LpLockCheck === true;
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
