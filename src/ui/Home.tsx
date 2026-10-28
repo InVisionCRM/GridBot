@@ -70,19 +70,21 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
   const book = useMemo(() => bots.reduce((a, b) => a + (bookUsd(b) ?? 0), 0), [bots]);
   const shownWorth = worth ?? (holdings?.hasSigner === false ? book : null);
   const ethUsd = useEthUsd();
-  const tokens = useMemo(() => (holdings?.hasSigner ? holdingsByToken(holdings, chain).slice(0, 6) : botsByToken(bots)), [holdings, chain, bots]);
-  // The Net worth card is the wallet, so its chart and chip follow live bots' equity only: a paper loss changes nothing
-  // the wallet holds. A desk without a signer has only paper bots, and its book value is what the card shows.
-  const seriesBots = useMemo(() => (holdings?.hasSigner === false ? bots : bots.filter((b) => b.mode === 'live')), [bots, holdings?.hasSigner]);
+  // A desk without a signer has only paper bots, and their book value is what the Net worth card shows. With a signer
+  // the card is the wallet: until the wallet is read there is nothing to show, and the chart and chip follow live bots'
+  // equity only, since a paper loss changes nothing the wallet holds.
+  const paperDesk = holdings?.hasSigner === false;
+  const tokens = useMemo(() => (holdings?.hasSigner ? holdingsByToken(holdings, chain).slice(0, 6) : paperDesk ? botsByToken(bots) : []), [holdings, chain, bots, paperDesk]);
+  const seriesBots = useMemo(() => (paperDesk ? bots : bots.filter((b) => b.mode === 'live')), [bots, paperDesk]);
   const series = useMemo(() => {
     const hist = portfolioSeries(seriesBots, range);
     if (hist.length > 2 && hist.some((p) => p !== hist[0])) return hist;
     if (range === '1H' || range === '1D') {
-      const day = todaySeries(seriesBots, holdings?.hasSigner === false);
+      const day = todaySeries(seriesBots, paperDesk);
       if (day.length > 1 && day.some((p) => p !== 0)) return day;
     }
     return hist;
-  }, [seriesBots, range, holdings?.hasSigner]);
+  }, [seriesBots, range, paperDesk]);
   const chg = seriesChange(series);
   const span = equitySpan(seriesBots);
   const month = useMemo(() => portfolioSeries(seriesBots, '1M'), [seriesBots]);
@@ -108,6 +110,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
         .filter((c) => (chain === 'all' || c.chainId === chain) && c.usd > 0)
         .map((c) => ({ key: String(c.chainId), label: c.short, usd: c.usd, color: c.color, units: holdingsByToken(holdings, c.chainId).map((t) => `${coinNum(t.amount)} ${t.sym}`).join(' + ') }));
     }
+    if (!paperDesk) return [];
     const map = new Map<number, number>();
     for (const b of bots) {
       const v = bookUsd(b);
@@ -119,7 +122,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
       const c = chainOf(s, id) ?? chains(s).find((x) => x.id === id);
       return { key: String(id), label: c?.short ?? String(id), usd: v, color: c?.color ?? '#F0B90B', units: botsByToken(bots.filter((b) => (b.chainId ?? s.legacyChainId) === id)).map((t) => `${coinNum(t.amount)} ${t.sym}`).join(' + ') };
     });
-  }, [holdings, chain, bots, s]);
+  }, [holdings, chain, bots, s, paperDesk]);
   const { p } = useOpportunities();
   const picks = ((p?.chains ?? []) as AnyObj[])
     .filter((c) => chain === 'all' || c.chainId === chain)
@@ -131,8 +134,6 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
   const auto = useJson('/api/autopilot');
   const trader = useJson('/api/token-trader');
   const top = picks[0]?.w.expected ?? 0;
-  const paper = holdings?.hasSigner === false;
-
   return (
     <main className="home">
       <div className="hero-grid">
@@ -143,7 +144,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
               <HeroWorth value={shownWorth} />
               <p className="home-sub">
                 {holdings == null && 'Reading…'}
-                {paper && 'Paper'}
+                {paperDesk && 'Paper'}
                 {shownWorth != null && (
                   <span className={`chip ${cls(chg.delta)}`}>{inEth(chg.delta, ethUsd, true, 3)} {chg.pct == null ? '' : pct(chg.pct, 2, true)}</span>
                 )}

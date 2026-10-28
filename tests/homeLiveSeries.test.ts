@@ -38,7 +38,9 @@ const noop = () => {};
 const render = (el: ReactElement) => renderToStaticMarkup(
   createElement(ShowUsdCtx.Provider, { value: { on: false, set: noop } }, createElement(EthUsdCtx.Provider, { value: ETH_USD }, el)),
 );
-const hero = (holdings: Obj) => /<section class="card hero-card"[\s\S]*?<\/section>/.exec(render(createElement(Home, { s: S, nav: noop, holdings: holdings as never, act: noop })))![0];
+const page = (holdings: Obj | null) => render(createElement(Home, { s: S, nav: noop, holdings: holdings as never, act: noop }));
+const hero = (holdings: Obj | null) => /<section class="card hero-card"[\s\S]*?<\/section>/.exec(page(holdings))![0];
+const alloc = (holdings: Obj | null) => /<section class="card alloc-card"[\s\S]*?<\/section>/.exec(page(holdings))![0];
 const text = (html: string) => html.replace(/<[^>]+>/g, '');
 
 describe('Home net worth chip is live only', () => {
@@ -52,5 +54,11 @@ describe('Home net worth chip is live only', () => {
     const h = hero(UNPRICED);
     expect(text(h)).toContain('Net worth—');
     expect(h).not.toMatch(/class="chip/);
+  });
+  it('while the wallet is still being read, paper bots do not stand in for it', () => {
+    const h = text(hero(null));
+    expect(h).toContain('Reading…');
+    expect(h).not.toMatch(/\d[\d,.]* (DAI|USDG|USDC|ETH)/);
+    expect(text(alloc(null))).toContain('No balances yet');
   });
 });
