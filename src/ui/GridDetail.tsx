@@ -195,7 +195,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const rs = rangeState(g);
   // Headline: Invested + Generated, net of costs, in tokens (generated.ts). No price-move figures (Kyle's rule).
   const gen = generatedOf({ ...g, kind: 'grid' }), inv = investedOf({ ...g, kind: 'grid' });
-  const earned: number | null = gen?.tokens[0]?.amount ?? null, held: number = g.pnl.plsHeld;
+  const earned: number | null = gen ? (gen.tokens[0]?.amount ?? 0) : null, held: number = g.pnl.plsHeld;
   const runMs = g.startedAt ? Date.now() - g.startedAt : null;
   const running = g.status === 'running';
   const closing = !!g.closing;

@@ -247,7 +247,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
         <div className="kpi">
           <span><L tip={`The fees earned in each coin, with the costs paid and what range moves lost taken out of the ${q} side. The coins' own price move isn't in it: that happens whether or not the bot runs. Details below shows each part.`}>Generated, net of costs</L></span>
-          <div className={`kpi-v coins2 ${cls(pnl?.net)}`}>{gen ? gen.tokens.map((t) => <b key={t.symbol} className={cls(t.amount)}>{formatTokens([t], true)}</b>) : '—'}</div>
+          <div className={`kpi-v coins2 ${cls(pnl?.net)}`}>{gen && !gen.tokens.length ? `0 ${q}` : gen ? gen.tokens.map((t) => <b key={t.symbol} className={cls(t.amount)}>{formatTokens([t], true)}</b>) : '—'}</div>
         </div>
         <div className="kpi">
           <span><L tip="The coins in the position right now (they change as the price moves inside the range), and its share of the liquidity trading at today's price, which is its share of every trade's fee. Out of range the share is 0.">Liquidity provided</L></span>

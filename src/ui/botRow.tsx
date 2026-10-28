@@ -6,7 +6,7 @@ import { chainOf, RefreshCtx } from './chains';
 import { botFacts } from './deskStats';
 import { estYearly, isShortRun } from './runRate';
 import { cls, dur, pct, px, qty } from './fmt';
-import { formatTokens, generatedOf, generatedPct, investedOf } from './generatedView';
+import { formatTokens, generatedOf, generatedPct, investedOf, quoteSymbolOf } from './generatedView';
 import { ChainMark, TokenMark } from './icons';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { botSpark } from './series';
@@ -258,7 +258,8 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   const genPct = generatedPct(b);
   const inv = investedOf(b);
   // one line per coin, each in its own colour, so "+0.02 SPY" and "−907.2 USDG" never wrap into each other
-  const money = gen ? gen.tokens.map((t) => <b key={t.symbol} className={cls(t.amount)}>{formatTokens([t], true, 4)}</b>) : <b>—</b>;
+  // nothing generated yet (the shared module leaves zero amounts out): 0 in the quote coin
+  const money = gen && !gen.tokens.length ? <b>0 {quoteSymbolOf(b)}</b> : gen ? gen.tokens.map((t) => <b key={t.symbol} className={cls(t.amount)}>{formatTokens([t], true, 4)}</b>) : <b>—</b>;
   const noGen = !gen && isTrader(b) ? 'No generated figure in tokens for token traders yet' : undefined;
   const pos = b.position;
   const facts = metrics ? botFacts(b) : null;

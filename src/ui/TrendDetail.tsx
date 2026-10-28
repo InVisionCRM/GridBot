@@ -44,7 +44,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const q = quoteSym(t), base = t.base ?? 'PLS';
   // Headline: Invested + Generated, net of costs, in tokens (generated.ts): closed trades only, no open trade's price move.
   const gen = generatedOf({ ...t, kind: 'trend' }), inv = investedOf({ ...t, kind: 'trend' });
-  const profit: number | null = gen?.tokens[0]?.amount ?? null;
+  const profit: number | null = gen ? (gen.tokens[0]?.amount ?? 0) : null;
   const runMs = t.startedAt ? Date.now() - t.startedAt : null;
   const running = t.status === 'running';
   const closing = !!t.closing;
