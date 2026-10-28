@@ -2,7 +2,8 @@
  * sendSafe: eth_call at pending, gas cap, explicit gasLimit, one send through the shared gate and nonce.
  * Fees, halt, replacement and broadcast errors are checked here. No second broadcast. No real RPC.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { Interface, keccak256, toQuantity } from 'ethers';
 import { describe, expect, it } from 'vitest';
 import { requestHalt } from '../src/server/bot/audit';
@@ -35,7 +36,7 @@ class Rpc implements SafeReader {
   reads = 0;
   broadcasts: string[] = [];
   broadcastError: unknown = null;
-  receipt: { status: number; transactionHash?: string } | null | 'throw' = { status: 1 };
+  receipt: { status: number; transactionHash?: string; blockNumber?: number } | null | 'throw' = { status: 1 };
   blockTxs: Record<string, unknown>[] = [];
   /** When set, full-block reads use this instead of blockTxs. The argument is the block number. */
   blockTxsAt: ((n: number) => Record<string, unknown>[]) | null = null;
@@ -81,11 +82,13 @@ class Rpc implements SafeReader {
       if (this.receipt === 'throw') throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
       if (!this.receipt) return null;
       const hash = String(params[0]);
-      return {
+      const body: Record<string, unknown> = {
         status: this.receipt.status === 1 ? '0x1' : '0x0',
         transactionHash: this.receipt.transactionHash ?? hash,
         gasUsed: '0x1',
       };
+      if (this.receipt.blockNumber != null) body.blockNumber = toQuantity(this.receipt.blockNumber);
+      return body;
     }
     throw new Error(method);
   }
@@ -384,7 +387,9 @@ describe('sendSafe', () => {
   it('Stop all while the send is queued behind a bot tx aborts before the nonce', async () => {
     const h = harness();
     const router = new Router({ store: new MemoryStore<RouterFile>(), host: true, chainIds: [1] });
+    router.update({ mode: 'live', maxPerMoveUsd: 10, maxPerDayUsd: 20, allowedChains: [1], allowedBridges: ['across'] });
     router.turnOn();
+    expect(routerSendHalted(router)()).toBe(false);
     let release!: () => void;
     const hold = new Promise<void>((r) => { release = r; });
     let mark!: () => void;
@@ -536,7 +541,8 @@ describe('sendSafe', () => {
     expect(cancelled.replacementHash).toBe(other);
 
     const foreign = harness();
-    foreign.rpc.receipt = { status: 1, transactionHash: other };
+    foreign.rpc.blockNumber = 16;
+    foreign.rpc.receipt = { status: 1, transactionHash: other, blockNumber: 10 };
     const mined = await foreign.go();
     expect(mined.status).toBe('replaced');
     expect(mined.hash).toBe(hashOf(foreign.signer));
@@ -577,21 +583,31 @@ describe('sendSafe', () => {
     expect(pending.status).not.toBe('confirmed');
   });
 
-  it('wires router.isHalted into the halted check', async () => {
+  it('wires router.isHalted into the halted check, and blocks off and paper', async () => {
     const router = new Router({ store: new MemoryStore<RouterFile>(), host: true, chainIds: [1] });
     const halted = routerSendHalted(router);
     const src = readFileSync(new URL('../src/server/router/sendSafe.ts', import.meta.url), 'utf8');
-    const body = src.slice(src.indexOf('function routerSendHalted'), src.indexOf('export async function sendSafe'));
-    expect(body).toMatch(/return \(\) => router\.isHalted\(\)/);
+    const body = src.slice(src.indexOf('function routerSendHalted'), src.indexOf('export type SendSafeStatus'));
+    expect(body).toMatch(/router\.isHalted\(\)/);
+    expect(body).toMatch(/mode !== 'live'/);
+    expect(body).toMatch(/s\.on !== true/);
     expect(halted.toString()).toMatch(/\.isHalted\s*\(/);
-    expect(router.status().on).toBe(false);
+    expect(router.status()).toMatchObject({ on: false, mode: 'paper' });
     expect(router.isHalted()).toBe(false);
+    expect(halted()).toBe(true);
+    router.turnOn();
+    expect(router.status().mode).toBe('paper');
+    expect(halted()).toBe(true);
+    router.update({ mode: 'live', maxPerMoveUsd: 10, maxPerDayUsd: 20, allowedChains: [1], allowedBridges: ['across'] });
+    router.turnOn();
+    expect(router.status()).toMatchObject({ on: true, mode: 'live' });
     expect(halted()).toBe(false);
     const h = harness();
     const ok = await h.go({ halted });
     expect(ok.status).toBe('confirmed');
     router.halt(requestHalt('stop-all', 'POST /api/bot/stop-all', 1));
     expect(router.status().on).toBe(false);
+    expect(router.isHalted()).toBe(true);
     expect(halted()).toBe(true);
     await expect(h.go({ halted })).rejects.toMatchObject({ code: 'halt' });
     expect(h.rpc.reads).toBe(1);
@@ -873,5 +889,246 @@ describe('sendSafe', () => {
     const retry = await sendSafe({ ...sendOpts, reader: missReader, signer: missSigner, gate: new TxGate(), nonce: missNonce });
     expect(retry.nonce).toBe(chainPending);
     expect(pendingReads).toBe(2);
+  });
+
+  it('keeps the runtime halt check at the door and immediately before the nonce', async () => {
+    const src = readFileSync(new URL('../src/server/router/sendSafe.ts', import.meta.url), 'utf8');
+    const assertBody = src.slice(src.indexOf('function assertNotHalted'), src.indexOf('type BroadcastKind'));
+    expect(assertBody).toContain("typeof o.halted !== 'function'");
+    expect(assertBody).toContain('o.halted()');
+    const sendAt = src.indexOf('export async function sendSafe');
+    const sendHead = src.slice(sendAt, src.indexOf('await assess(o)', sendAt));
+    expect(sendHead).toContain("typeof o.halted !== 'function'");
+    const gate = src.slice(src.indexOf('return o.gate.run'), src.indexOf('return broadcast'));
+    expect(gate).toMatch(/assertNotHalted\(o\);\s*const nonce = await o\.nonce\.next/);
+
+    const h = harness();
+    await expect(sendSafe({
+      tx: h.tx, kind: 'bridge', chainId: 1, reader: h.rpc, signer: h.signer, gate: h.gate, nonce: h.nonce,
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      halted: undefined as unknown as () => boolean,
+    })).rejects.toMatchObject({ code: 'halt', message: 'halt check is missing' });
+    expect(h.rpc.calls).toHaveLength(0);
+    expect(h.rpc.reads).toBe(0);
+  });
+
+  it('does not call a receipt replaced until that block has one confirmation', async () => {
+    const other = '0x' + 'cd'.repeat(32);
+    const tip = harness();
+    tip.rpc.receipt = { status: 1, transactionHash: other, blockNumber: 20 };
+    tip.rpc.blockNumber = 20;
+    tip.rpc.pending = 4;
+    tip.rpc.mined = 4;
+    const atTip = await tip.go();
+    expect(atTip.status).toBe('pending');
+    expect(atTip.state).toBe('source_sent');
+    expect(atTip.replacementHash).toBeUndefined();
+    expect(atTip.hash).not.toBe(other);
+
+    const missing = harness();
+    missing.rpc.receipt = { status: 1, transactionHash: other };
+    missing.rpc.blockNumber = 20;
+    missing.rpc.pending = 4;
+    missing.rpc.mined = 4;
+    const bare = await missing.go();
+    expect(bare.status).toBe('pending');
+    expect(bare.replacementHash).toBeUndefined();
+
+    const buried = harness();
+    buried.rpc.receipt = { status: 1, transactionHash: other, blockNumber: 19 };
+    buried.rpc.blockNumber = 20;
+    buried.rpc.pending = 4;
+    buried.rpc.mined = 4;
+    const rep = await buried.go();
+    expect(rep.status).toBe('replaced');
+    expect(rep.replacementHash).toBe(other);
+    expect(rep.hash).toBe(hashOf(buried.signer));
+    expect(rep.hash).not.toBe(other);
+    expect(rep.status).not.toBe('confirmed');
+  });
+
+  it('a stale nonce during rebroadcast is not success when the hash is unknown', async () => {
+    const tx: ExactTx = { from: FROM, to: TO, data: '0x1234', value: 0n };
+    const chainPending = 6;
+    let pendingReads = 0;
+    let nextSends = 0;
+    const reader: SafeReader = {
+      async send(method: string) {
+        if (method === 'eth_call') return '0x';
+        if (method === 'eth_estimateGas') return toQuantity(100_000n);
+        if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+        if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+        if (method === 'eth_getTransactionReceipt' || method === 'eth_getTransactionByHash') return null;
+        throw new Error(method);
+      },
+      async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
+      async getTransactionCount(_address: string, tag: 'pending' | 'latest') {
+        if (tag === 'pending') pendingReads++;
+        return chainPending;
+      },
+      async broadcastRaw() { throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); },
+      async broadcastNext() {
+        nextSends++;
+        throw Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' });
+      },
+      async hasTx() { return false; },
+    };
+    const nonce = new SharedNonce();
+    const opts = {
+      tx, kind: 'bridge' as const, chainId: 1, reader, signer: new Signer(), gate: new TxGate(), nonce,
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      receiptTimeoutMs: 30, halted: () => false,
+    };
+    await expect(sendSafe(opts)).rejects.toMatchObject({ code: 'stale_nonce', message: 'nonce already used; not resent' });
+    expect(nextSends).toBe(1);
+    const followed = await sendSafe({
+      ...opts,
+      reader: {
+        ...reader,
+        async broadcastRaw() { return '0x01'; },
+        async broadcastNext() { throw new Error('should not rebroadcast'); },
+      },
+      signer: new Signer(),
+    });
+    expect(followed.nonce).toBe(chainPending);
+    expect(pendingReads).toBe(2);
+  });
+
+  it('does not drop the nonce when a rebroadcast was accepted and the receipt is still missing', async () => {
+    const tx: ExactTx = { from: FROM, to: TO, data: '0x1234', value: 0n };
+    const chainPending = 6;
+    let pendingReads = 0;
+    const raws: string[] = [];
+    const reader: SafeReader = {
+      async send(method: string) {
+        if (method === 'eth_call') return '0x';
+        if (method === 'eth_estimateGas') return toQuantity(100_000n);
+        if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+        if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+        if (method === 'eth_getTransactionReceipt' || method === 'eth_getTransactionByHash') return null;
+        throw new Error(method);
+      },
+      async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
+      async getTransactionCount(_address: string, tag: 'pending' | 'latest') {
+        if (tag === 'pending') pendingReads++;
+        return chainPending;
+      },
+      async broadcastRaw(raw: string) {
+        raws.push(raw);
+        throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+      },
+      async broadcastNext(raw: string) {
+        raws.push(raw);
+        return '0x01';
+      },
+      async hasTx() { return false; },
+    };
+    const nonce = new SharedNonce();
+    const opts = {
+      tx, kind: 'bridge' as const, chainId: 1, reader, signer: new Signer(), gate: new TxGate(), nonce,
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      receiptTimeoutMs: 30, halted: () => false,
+    };
+    const lost = await sendSafe(opts);
+    expect(lost.status).toBe('pending');
+    expect(lost.nonce).toBe(chainPending);
+    expect(raws).toHaveLength(2);
+    expect(raws[1]).toBe(raws[0]);
+    const retry = await sendSafe({ ...opts, signer: new Signer() });
+    expect(retry.nonce).toBe(chainPending + 1);
+    expect(pendingReads).toBe(1);
+  });
+
+  it('stops rebroadcasting when every timeout is unknown', async () => {
+    let sends = 0;
+    const reader: SafeReader = {
+      async send(method: string) {
+        if (method === 'eth_call') return '0x';
+        if (method === 'eth_estimateGas') return toQuantity(100_000n);
+        if (method === 'eth_getBlockByNumber') return { number: '0x10', baseFeePerGas: toQuantity(40n) };
+        if (method === 'eth_maxPriorityFeePerGas') return toQuantity(20n);
+        if (method === 'eth_getTransactionReceipt' || method === 'eth_getTransactionByHash') return null;
+        throw new Error(method);
+      },
+      async getFeeData() { return { gasPrice: 100n, maxFeePerGas: 100n }; },
+      async getTransactionCount() { return 4; },
+      async broadcastRaw() { sends++; throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); },
+      async broadcastNext() { sends++; throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); },
+      async hasTx() { return false; },
+    };
+    const out = await sendSafe({
+      tx: { from: FROM, to: TO, data: '0x1234', value: 0n }, kind: 'bridge', chainId: 1, reader,
+      signer: new Signer(), gate: new TxGate(), nonce: new SharedNonce(),
+      gasCap: 300_000n, gasBudgetWei: 10n ** 18n, maxGasPriceWei: 10n ** 12n, maxPriorityFeeWei: 10n ** 12n,
+      receiptTimeoutMs: 20, halted: () => false,
+    });
+    expect(out.status).toBe('pending');
+    expect(sends).toBe(9);
+  });
+
+  it('broadcastNext does not follow the read cursor or resend a timed-out endpoint', async () => {
+    const timeout = () => Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+    const reader = (blockFails: number[]) => {
+      const hits = [0, 0, 0];
+      const providers = [0, 1, 2].map((i) => ({
+        async send(method: string) {
+          if (method === 'eth_sendRawTransaction') { hits[i]++; return '0x1'; }
+          if (method === 'eth_blockNumber') {
+            if (blockFails[i] > 0) { blockFails[i]--; throw timeout(); }
+            return '0x10';
+          }
+          throw new Error(method);
+        },
+      }));
+      const r = new FallbackReader(
+        ['https://rpc.example/a', 'https://rpc.example/b', 'https://rpc.example/c'], 1,
+        providers as unknown as ConstructorParameters<typeof FallbackReader>[2],
+      );
+      return { r, hits, blockFails };
+    };
+    const drain = async (r: FallbackReader) => {
+      for (;;) {
+        try { await r.broadcastNext('0xabc'); }
+        catch (e) {
+          expect((e as { code?: string }).code).toBe('NO_ENDPOINT');
+          return;
+        }
+      }
+    };
+
+    // A read leaves the cursor on C. The broadcast starts there. A later read walks the cursor
+    // back to A. The old bound then stops before A and B are tried.
+    const back = reader([1, 1, 0]);
+    await back.r.send('eth_blockNumber', []);
+    expect(back.r.currentUrl).toBe('https://rpc.example/c');
+    await back.r.broadcastRaw('0xabc');
+    back.blockFails[2] = 1;
+    await back.r.send('eth_blockNumber', []);
+    expect(back.r.currentUrl).toBe('https://rpc.example/a');
+    await drain(back.r);
+    expect(back.hits).toEqual([1, 1, 1]);
+
+    // The broadcast starts on A, which times out. A read moves the cursor to B. The old bound
+    // then wraps and sends A again.
+    const forward = reader([1, 0, 0]);
+    await forward.r.broadcastRaw('0xabc');
+    await forward.r.send('eth_blockNumber', []);
+    expect(forward.r.currentUrl).toBe('https://rpc.example/b');
+    await drain(forward.r);
+    expect(forward.hits).toEqual([1, 1, 1]);
+  });
+
+  it('no bot calls sendSafe or broadcastNext', () => {
+    const root = join(__dirname, '..', 'src');
+    const walk = (d: string): string[] => readdirSync(d).flatMap((f) => {
+      const p = join(d, f);
+      return statSync(p).isDirectory() ? walk(p) : p.endsWith('.ts') ? [p] : [];
+    });
+    for (const file of walk(root)) {
+      if (file.endsWith(`${join('router', 'sendSafe.ts')}`) || file.endsWith(`${join('chains', 'fallback.ts')}`)) continue;
+      const code = readFileSync(file, 'utf8');
+      expect(code, file).not.toMatch(/\bsendSafe\s*\(/);
+      expect(code, file).not.toMatch(/\.broadcastNext\s*\(/);
+    }
   });
 });

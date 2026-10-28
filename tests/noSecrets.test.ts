@@ -3,8 +3,9 @@ import { join, relative } from 'node:path';
 import { Wallet } from 'ethers';
 import { describe, expect, it } from 'vitest';
 import { GridEngine, type BotState } from '../src/server/bot/engine';
-import { Logger, redact } from '../src/server/bot/logger';
-import { takeBridgeKeys } from '../src/server/env';
+import { Logger, REDACT_FLOOR, redact, registerSecret } from '../src/server/bot/logger';
+import { bridgeConfigured, bridgeProviderConfig, bridgeQuoteRequest, shortQuoteKeyWarnings, takeBridgeKeys } from '../src/server/env';
+import { Router, type RouterFile } from '../src/server/router/router';
 import { MemoryStore } from '../src/server/bot/store';
 import { NET, MockChain } from './helpers/mockChain';
 
@@ -90,6 +91,7 @@ describe('private key handling', () => {
     const snap = index.indexOf('...process.env');
     expect(take).toBeGreaterThanOrEqual(0);
     expect(snap).toBeGreaterThan(take);
+    expect(index).toMatch(/for \(const msg of shortQuoteKeyWarnings\(\)\) log\.warn\(msg\)/);
   });
   it('a built client bundle does not contain quote key or private key names', () => {
     const dir = join(root, 'dist', 'client');
@@ -118,6 +120,101 @@ describe('private key handling', () => {
       log.error(`leak ${key}`);
       expect(log.entries[0].msg).toContain('[REDACTED]');
       expect(log.entries[0].msg).not.toContain(key);
+    } finally {
+      delete process.env.ACROSS_API_KEY;
+      delete process.env.RELAY_API_KEY;
+      delete process.env.LIFI_API_KEY;
+    }
+  });
+  it('does not redact a quote key shorter than the floor, and warns with the name only', () => {
+    const one = '§';
+    const five = 'qK7m2';
+    const six = 'qK7m2p';
+    expect(one).toHaveLength(1);
+    expect(five).toHaveLength(REDACT_FLOOR - 1);
+    expect(six).toHaveLength(REDACT_FLOOR);
+    delete process.env.ACROSS_API_KEY;
+    delete process.env.RELAY_API_KEY;
+    delete process.env.LIFI_API_KEY;
+    process.env.ACROSS_API_KEY = one;
+    process.env.RELAY_API_KEY = five;
+    process.env.LIFI_API_KEY = six;
+    try {
+      expect(takeBridgeKeys()).toEqual({ across: false, relay: false, lifi: true });
+      expect(bridgeConfigured()).toEqual({ across: false, relay: false, lifi: true });
+      expect(redact(`${one} ${five} ${six}`)).toBe(`${one} ${five} [REDACTED]`);
+      registerSecret(one, 1);
+      expect(redact(one)).toBe(one);
+      const warnings = shortQuoteKeyWarnings();
+      expect(warnings).toEqual(['ACROSS_API_KEY was refused', 'RELAY_API_KEY was refused']);
+      const text = warnings.join('\n');
+      expect(text).not.toMatch(/\d/);
+      expect(text).not.toContain(one);
+      expect(text).not.toContain(five);
+      expect(text).not.toContain(six);
+      const log = new Logger(true);
+      for (const msg of warnings) log.warn(msg);
+      const logged = log.entries.map((e) => e.msg).join('\n');
+      expect(logged).toContain('ACROSS_API_KEY');
+      expect(logged).not.toContain(one);
+      expect(logged).not.toContain(five);
+      expect(logged).not.toMatch(/\d/);
+    } finally {
+      delete process.env.ACROSS_API_KEY;
+      delete process.env.RELAY_API_KEY;
+      delete process.env.LIFI_API_KEY;
+    }
+  });
+  it('a refused short quote key is absent from provider config, status, and every request', async () => {
+    const one = '§';
+    const five = 'Zm4qL';
+    const six = 'pT8nQw';
+    delete process.env.ACROSS_API_KEY;
+    delete process.env.RELAY_API_KEY;
+    delete process.env.LIFI_API_KEY;
+    process.env.ACROSS_API_KEY = one;
+    process.env.RELAY_API_KEY = five;
+    process.env.LIFI_API_KEY = six;
+    try {
+      const configured = takeBridgeKeys();
+      expect(configured).toEqual({ across: false, relay: false, lifi: true });
+      expect(bridgeConfigured()).toEqual(configured);
+      expect(process.env.ACROSS_API_KEY).toBeUndefined();
+      expect(process.env.RELAY_API_KEY).toBeUndefined();
+      expect(bridgeProviderConfig()).toEqual({ across: null, relay: null, lifi: { apiKey: six } });
+      const router = new Router({ store: new MemoryStore<RouterFile>(), host: true, chainIds: [1], configured });
+      expect(router.status().configured).toEqual({ across: false, relay: false, lifi: true });
+      expect(router.status().on).toBe(false);
+      expect(JSON.stringify(router.status())).not.toContain(one);
+      expect(JSON.stringify(router.status())).not.toContain(five);
+
+      const warnings = shortQuoteKeyWarnings();
+      expect(warnings).toEqual(['ACROSS_API_KEY was refused', 'RELAY_API_KEY was refused']);
+      const log = new Logger(true);
+      for (const msg of warnings) log.warn(msg);
+      const logged = log.entries.map((e) => e.msg).join('\n');
+      expect(logged).toBe(warnings.join('\n'));
+      expect(logged).not.toContain(one);
+      expect(logged).not.toContain(five);
+      expect(logged).not.toContain(six);
+      expect(logged).not.toMatch(/\d/);
+
+      const sent: string[] = [];
+      for (const provider of ['across', 'relay', 'lifi'] as const) {
+        const req = bridgeQuoteRequest(provider, 'https://quotes.example/route', {
+          headers: { accept: 'application/json' },
+          body: '{"amount":"1"}',
+        });
+        if (provider !== 'lifi') expect(req.headers).not.toHaveProperty('Authorization');
+        const request = new Request(req.url, { method: 'POST', headers: req.headers, body: req.body });
+        const headerText = [...request.headers.entries()].map(([k, v]) => `${k}: ${v}`).join('\n');
+        sent.push(`${request.url}\n${headerText}\n${await request.text()}`);
+      }
+      const wire = sent.join('\n');
+      expect(wire).not.toContain(one);
+      expect(wire).not.toContain(five);
+      expect(sent[0]).not.toMatch(/authorization/i);
+      expect(sent[1]).not.toMatch(/authorization/i);
     } finally {
       delete process.env.ACROSS_API_KEY;
       delete process.env.RELAY_API_KEY;
