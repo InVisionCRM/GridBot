@@ -62,14 +62,30 @@ export function positionManagerFor(dexes: ChainConfig['dexes'], dexId: string): 
 }
 
 /** Run the check for one discovered pool. V2 / flag-off callers should not use this. Never throws. */
-export async function readV3LpLock(reader: V3LockReader, pool: FreshPool, dexes: ChainConfig['dexes'], o: { nowSec: number; blockTimeSec: number; logChunk: number }): Promise<V3LpReport> {
+export async function readV3LpLock(reader: V3LockReader, pool: FreshPool, dexes: ChainConfig['dexes'], o: {
+  nowSec: number; blockTimeSec: number; logChunk: number;
+  /** Off unless true. Does not change the check when false or omitted. */
+  cacheEnabled?: boolean;
+  cacheTtlMs?: number;
+  /** 0 or omitted: no cap. */
+  callBudget?: number;
+  blockNumber?: number;
+}): Promise<V3LpReport> {
   const npm = positionManagerFor(dexes, pool.dex);
   if (!npm) return unverifiedV3Lp(pool.pool, '', 'no position manager for this V3 pool');
   const blocksPerDay = Math.ceil(86_400 / Math.max(o.blockTimeSec, 0.2));
+  const bounds: { cacheEnabled?: boolean; cacheTtlMs?: number; callBudget?: number; blockNumber?: number } = {};
+  if (o.cacheEnabled === true) {
+    bounds.cacheEnabled = true;
+    if (o.cacheTtlMs != null) bounds.cacheTtlMs = o.cacheTtlMs;
+  }
+  if (o.callBudget != null && o.callBudget > 0) bounds.callBudget = o.callBudget;
+  if (o.blockNumber != null) bounds.blockNumber = o.blockNumber;
   try {
     return await inspectV3LpLock(v3LockRpc(reader), {
       chainId: pool.chainId, pool: pool.pool, positionManager: npm, nowSec: o.nowSec,
       chunkBlocks: Math.max(250, o.logChunk), maxBlockSpan: blocksPerDay * 3,
+      ...bounds,
     });
   } catch (e) {
     return unverifiedV3Lp(pool.pool, npm, `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 180)}`);
