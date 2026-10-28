@@ -7,7 +7,10 @@ import { JsonRpcProvider } from 'ethers';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
-import { ROUTER } from '../dex/abis';
+import { ERC20, ROUTER } from '../dex/abis';
+import { readCall } from '../dex/types';
+import { fetchJson } from '../fetchJson';
+import { holderApiBase, readHolderConcentration, type HolderChain } from './holderRead';
 import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
 import type { DexConfig } from '../../live/chains';
 import type { SafetyLimits } from '../../live/limits';
@@ -89,11 +92,45 @@ export function createTokenTrader(o: {
   approval: 'exact' | 'max'; receiptTimeoutMs: number;
 }): TokenTrader {
   const sniper = new PoolSniper({ chains: sniperChains(o.hub), source: logSource(o.hub) });
-  const trader = new TokenTrader({
+  const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk),
+    // Called only when the holder check is on. Flag off never reaches this, so a scan makes no explorer calls.
+    holders: (pool) => {
+      const rt = o.hub.rt(pool.chainId);
+      const cfg = rt.cfg;
+      const reader = rt.reader as typeof rt.reader & {
+        getBlockNumber?: () => Promise<number>; getLogs?: HolderChain['getLogs'];
+        getCode?: (a: string) => Promise<string>; send?: (method: string, params: unknown[]) => Promise<unknown>;
+      };
+      const chain: HolderChain | undefined = reader.getBlockNumber && reader.getLogs ? {
+        getBlockNumber: () => reader.getBlockNumber!(),
+        getLogs: (f) => reader.getLogs!(f),
+        call: (tx) => reader.call(tx),
+        getCode: async (address, blockTag) => {
+          if (reader.send) {
+            const tag = blockTag === 'latest' ? 'latest' : `0x${blockTag.toString(16)}`;
+            return String(await reader.send('eth_getCode', [address, tag]));
+          }
+          return reader.getCode ? reader.getCode(address) : '0x';
+        },
+      } : undefined;
+      return readHolderConcentration({
+        chainId: pool.chainId, chainName: cfg.name, token: pool.token, exclude: [pool.pool],
+        api: holderApiBase(cfg),
+        spends: [cfg.wrappedNative.address, ...cfg.stables.map((s) => s.address)],
+        dexes: cfg.dexes, geckoSlug: cfg.geckoSlug,
+      }, {
+        fetchJson, chain,
+        minCoverage: trader.status().options.minHolderCoverage,
+        totalSupply: async (chainId, token) => {
+          const [supply] = await readCall<[bigint]>(o.hub.rt(chainId).reader, token, ERC20, 'totalSupply');
+          return supply;
+        },
+      });
+    },
     // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
     quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
     resolve: (hit) => resolveHit(o.hub, hit),
@@ -225,6 +262,8 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
     buyTax: s?.buyTaxPct ?? null, sellTax: s?.sellTaxPct ?? null,
     liquidityUsd: pool.liquidityUsd, minLiquidityUsd: pool.source === 'snipe' ? 0 : 0,
     canMint, canPause: s?.paused != null ? true : null, canBlacklist: s?.blacklist != null ? true : null,
+    // Unknown until the trader's holder check is on. That check fills this in; leaving it null here keeps the gate
+    // identical when the check is off, and keeps this function from calling an explorer on every assess.
     proxy: s?.proxy != null ? true : null, lpUnlocked: null, holderConcentration: null, recentLiqPull: false,
     liveAllowed: s?.liveAllowed ?? false,
   };
