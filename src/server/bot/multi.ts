@@ -1301,10 +1301,9 @@ export class MultiBot {
       if (p.length && this.now() - p[p.length - 1][0] < 60_000) continue;
       const rows = this.botRows(mode);
       if (!rows.length) continue;
-      const open = rows.filter((r) => r.status !== 'closed'); // what the bots hold now; a closed bot gave its coins back
-      const eq = open.reduce((a, r) => a + (r.usdPerQuote ? r.equity * r.usdPerQuote : 0), 0);
+      const eq = rows.reduce((a, r) => a + (r.usdPerQuote ? r.equity * r.usdPerQuote : 0), 0);
       const re = rows.reduce((a, r) => a + (r.usdPerQuote ? r.realized * r.usdPerQuote : 0), 0);
-      const cap = open.reduce((a, r) => a + (r.usdPerQuote ? r.capital * r.usdPerQuote : 0), 0);
+      const cap = rows.reduce((a, r) => a + (r.usdPerQuote ? r.capital * r.usdPerQuote : 0), 0);
       pushCapped(p, [this.now(), usdFmt(eq), usdFmt(re), usdFmt(cap)], 4000);
       changed = true;
     }
@@ -1319,22 +1318,26 @@ export class MultiBot {
     const periods = { today: day.getTime(), d7: now - 7 * 86_400_000, all: 0 };
     const usd = (r: (typeof rows)[number], v: number) => (r.usdPerQuote ? v * r.usdPerQuote : 0);
     const realizedSince = (from: number) => rows.reduce((a, r) => a + usd(r, r.trades.filter((t) => t.timestamp >= from).reduce((s, t) => s + t.realizedPnlQuote, 0)), 0);
-    // A closed bot gave its coins back: its history (trades, fees, gas) stays in the all-time sums and the table, but
-    // what the bots hold now and what is allocated to them count open bots only.
+    // A closed bot gave its coins back: its history (trades, fees, gas) and its final P&L stay in the all-time sums,
+    // the period changes and the table, but what the bots hold now and what is allocated to them count open bots only.
     const open = rows.filter((r) => r.status !== 'closed');
     // Only snapshots that carry the allocated capital can be compared: PnL = equity − capital, so starting,
-    // adding or removing a bot is not counted as a gain or loss.
+    // adding or removing a bot is not counted as a gain or loss. A closed bot's equity − capital is its final P&L,
+    // so closing one does not move the period changes either.
     const ph = this.multi.portfolio[mode];
-    const eqNow = open.reduce((a, r) => a + usd(r, r.equity), 0);
-    const capNow = open.reduce((a, r) => a + usd(r, r.capital), 0);
+    const eqNow = rows.reduce((a, r) => a + usd(r, r.equity), 0);
+    const capNow = rows.reduce((a, r) => a + usd(r, r.capital), 0);
     const pnlNow = eqNow - capNow;
     const pnlAt = (from: number) => {
       const p = ph.find((x) => x[0] >= from);
       return p ? { v: p[1] - p[3], partial: p[0] - from > 3_600_000 } : null;
     };
+    // All-time is since the bots started: every bot's equity − capital, with no snapshot to compare against (the first
+    // snapshot can be far younger than the bots, e.g. after a state migration, and would hide what came before it).
     const per = Object.fromEntries(Object.entries(periods).map(([k, from]) => {
+      if (from === 0) return [k, { realized: realizedSince(0), equityChange: pnlNow, partial: false }];
       const e = pnlAt(from);
-      return [k, { realized: realizedSince(from), equityChange: e ? pnlNow - e.v : null, partial: from > 0 ? e?.partial ?? false : false }];
+      return [k, { realized: realizedSince(from), equityChange: e ? pnlNow - e.v : null, partial: e?.partial ?? false }];
     }));
     // Portfolio curve at today's capital: capNow + PnL(t) (flows removed), so drawdown reflects trading only.
     const curve = ph.map(([t, v, , c]) => [t, capNow + (v - c)] as [number, number]);
