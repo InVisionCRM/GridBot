@@ -64,6 +64,8 @@ export interface TrendInFlight {
   deadline: number;
   approvalTxHash?: string;
   swapTxHash?: string;
+  /** Base units per native coin when the swap was sent (gas on a receipt reconciled after a restart). Absent on old records. */
+  basePerNative?: number;
 }
 
 export interface TrendTrade extends LiveTrade {
@@ -599,7 +601,7 @@ export class TrendEngine {
       }
       if (q.priceImpact > s.limits.maxPriceImpact) return this.skip(job, `price impact ${(q.priceImpact * 100).toFixed(2)}% > cap ${(s.limits.maxPriceImpact * 100).toFixed(2)}%`);
       if (!q.balanceOk) return this.skip(job, `insufficient balance (${q.balanceNote})`);
-      s.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline) };
+      s.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative };
       this.save();
       try {
         const f = await this.executor.execute(q, {
@@ -690,12 +692,13 @@ export class TrendEngine {
     const job = f.job;
     const drop = () => { this.state.inFlight = null; this.state.queue = this.state.queue.filter((q) => q.id !== job.id); };
     if (!f.swapTxHash) { drop(); this.skip(job, 'interrupted before swap was sent'); this.save(); return; }
-    const r = await this.executor.recover(f.swapTxHash, f.tokenOut, f.decimalsOut);
+    const r = await this.executor.recover(f.swapTxHash, f.tokenOut, f.decimalsOut, f.basePerNative);
     if (r == null) {
       if (this.now() / 1000 > f.deadline + 300) { drop(); this.skip(job, `swap ${f.swapTxHash} never mined before its deadline`); this.save(); }
       return;
     }
     drop();
+    if (r.gasUnknown) this.log('warn', `swap ${f.swapTxHash}: gas ${r.gasNative.toPrecision(4)} native not booked — the base/native rate was not saved with the swap and could not be read after the restart`);
     if (r.ok && r.amountOutHuman > 0) {
       this.recordFill(job, { txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman, amountOutHuman: r.amountOutHuman, gasPls: r.gasPls, fromReceipt: true }, f.price);
     } else {

@@ -38,6 +38,9 @@ export interface Payout { at: number; amount: number; to: string; txHash: string
 /** After a failed transfer, wait this long before trying again. */
 export const PAYOUT_RETRY_MS = 10 * 60_000;
 
+/** A reconciled swap whose gas couldn't be converted to base units (no saved rate, none readable): booked as 0. */
+export const GAS_UNKNOWN_NOTE = 'gas unknown: the base/native rate was not saved with the swap and could not be read after the restart';
+
 export interface InFlight {
   job: QueuedTrade;
   tokenOut: string;
@@ -48,6 +51,8 @@ export interface InFlight {
   deadline: number;
   approvalTxHash?: string;
   swapTxHash?: string;
+  /** Base units per native coin when the swap was sent (gas on a receipt reconciled after a restart). Absent on old records. */
+  basePerNative?: number;
 }
 
 export interface BotState {
@@ -757,13 +762,14 @@ export class GridEngine {
     this.ev('skipped', `Grid ${this.label}: skipped ${job.side} @ ${job.levelPrice.toPrecision(5)} — ${why}`, { level: 'warn' });
   }
 
-  private recordFailure(job: QueuedTrade, gasPls: number, price: number, hash: string | undefined, note: string) {
-    if (!(gasPls > 0)) return;
+  private recordFailure(job: QueuedTrade, gasPls: number, price: number, hash: string | undefined, note: string, gasUnknown = false) {
+    if (!(gasPls > 0) && !gasUnknown) return;
     const gasUsd = gasPls * price;
     this.state.trades.push({
       id: hash ?? `fail-${this.now()}`, network: this.netKey, side: job.side, intervalIndex: job.intervalIndex,
       stable: this.state.stable, plsAmount: 0, stableAmount: 0, price: 0, gasPls, gasUsd, txHash: hash ?? '',
       timestamp: this.now(), realizedPnlUsd: -gasUsd, failed: true, paper: this.state.mode === 'paper', note,
+      ...(gasUnknown ? { gasUnknown: true } : {}),
     });
   }
 
@@ -774,6 +780,7 @@ export class GridEngine {
   private recordFill(job: QueuedTrade, f: {
     plsAmount: number; stableAmount: number; gasPls: number; txHash: string; approvalTxHash?: string;
     quotedPrice: number; fromReceipt: boolean; taxPct?: number; outSource?: Fill['outSource']; expectedOut?: number;
+    gasUnknown?: boolean;
   }) {
     const { plsAmount, stableAmount, gasPls } = f;
     const fee = (this.def?.pool.feeBps ?? FEE_BPS) / 10_000;
@@ -806,6 +813,7 @@ export class GridEngine {
       triggerPrice: job.triggerPrice, levelPrice: job.levelPrice, ...(cash ? { closeSale: true } : {}), quotedPrice: f.quotedPrice, execPrice, slippagePct,
       fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.seed ? { seed: job.seed } : {}),
       ...(f.taxPct ? { taxPct: f.taxPct } : {}), ...(f.outSource ? { outSource: f.outSource } : {}), ...(f.expectedOut != null ? { expectedOut: f.expectedOut } : {}),
+      ...(f.gasUnknown ? { gasUnknown: true, note: GAS_UNKNOWN_NOTE } : {}),
       ...(this.def ? { dex: this.def.pool.dex, feeBps: this.def.pool.feeBps, ...(this.def.pool.feeTier != null ? { feeTier: this.def.pool.feeTier } : {}) } : {}),
     });
     // A completed sell's profit: added to that level's next buy (reinvest), or set aside to send (send mode).
@@ -871,7 +879,7 @@ export class GridEngine {
         }
       }
 
-      this.state.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline) };
+      this.state.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative };
       this.save();
       try {
         const f = await this.executor.execute(q, {
@@ -942,7 +950,7 @@ export class GridEngine {
       this.save();
       return;
     }
-    const r = await this.executor.recover(f.swapTxHash, f.tokenOut, f.decimalsOut);
+    const r = await this.executor.recover(f.swapTxHash, f.tokenOut, f.decimalsOut, f.basePerNative);
     if (r == null) {
       if (this.now() / 1000 > f.deadline + 300) {
         this.state.inFlight = null;
@@ -954,13 +962,17 @@ export class GridEngine {
     }
     this.state.inFlight = null;
     this.state.queue = this.state.queue.filter((q) => q.id !== job.id);
+    if (r.gasUnknown) this.tag('warn', `swap ${f.swapTxHash}: gas ${r.gasNative.toPrecision(4)} ${this.chainCfg?.nativeSymbol ?? 'native'} not booked — ${GAS_UNKNOWN_NOTE}`);
     if (r.ok && r.amountOutHuman > 0) {
-      this.recordFill(job, this.fillArgs(job, {
-        txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman,
-        amountOutHuman: r.amountOutHuman, gasPls: r.gasPls, fromReceipt: true,
-      }, f.price));
+      this.recordFill(job, {
+        ...this.fillArgs(job, {
+          txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman,
+          amountOutHuman: r.amountOutHuman, gasPls: r.gasPls, fromReceipt: true,
+        }, f.price),
+        gasUnknown: r.gasUnknown,
+      });
     } else {
-      this.recordFailure(job, r.gasPls, f.price, f.swapTxHash, 'swap reverted (reconciled)');
+      this.recordFailure(job, r.gasPls, f.price, f.swapTxHash, r.gasUnknown ? `swap reverted (reconciled); ${GAS_UNKNOWN_NOTE}` : 'swap reverted (reconciled)', !!r.gasUnknown);
       this.skip(job, 'swap reverted');
       if (this.state.closing && job.id.startsWith(CLOSE_JOB)) this.closeFailed('swap reverted');
     }

@@ -44,6 +44,8 @@ export interface LiveTrade {
   /** Expected post-tax output from the quote (to compare with the actual amount received) */
   expectedOut?: number;
   note?: string;
+  /** Gas could not be converted to base units when this swap was reconciled: gasPls/gasUsd are 0, not the real cost */
+  gasUnknown?: boolean;
   // ── Per-fill diagnostics (all prices quote per PLS, amounts in quote units) ──
   /** getPrice() when the level was crossed */
   triggerPrice?: number;
