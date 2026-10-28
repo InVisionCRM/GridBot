@@ -208,6 +208,11 @@ export class MultiBot {
    * and the token trader stop opening anything new. The one stop hook system (it replaced onStop).
    */
   readonly stopHooks: ((chainId: number | null, halt: Halt) => void)[] = [];
+  /**
+   * ROUTER HOOK. index.ts sets this to `(halt) => router.halt(halt)`.
+   * Stop all turns the capital router off. STOP chain does not call it.
+   */
+  routerHalt: ((halt: Halt) => void) | null = null;
   /** Stop all / STOP chain presses, numbered: a start that was under way when one landed is refused (stopWins) */
   private stopSeq = 0;
   private stopLog: { seq: number; chainId: number | null; halt: Halt }[] = [];
@@ -732,6 +737,13 @@ export class MultiBot {
     this.d.log.warn(`KILL ALL — ${n} bot(s) stopped (grids, trend and liquidity bots).`);
     this.activity.emitEvent({ type: 'stopped', kind: 'system', level: 'error', notify: true, msg: `KILL ALL — ${n} bot(s) stopped`, data: { halt } });
     this.noteStop(null, halt);
+    // ROUTER HOOK: Stop all turns the capital router off. STOP chain does not.
+    // A save error inside the router must not fail the stop; the bots are already stopped.
+    try { this.routerHalt?.(halt); }
+    catch (e) {
+      const msg = String((e as Error)?.message ?? e).replace(/https?:\/\/\S+/gi, '[rpc]').slice(0, 180);
+      this.d.log.error(`router halt failed: ${msg}`);
+    }
   }
 
   /** Stop one bot by id, whatever its kind (POST /api/bot/stop { id }). */
