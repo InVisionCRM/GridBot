@@ -151,6 +151,20 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     }
   }
 
+  it('re-ranges on the first out-of-range reading, with the clock held still, and again with no cooldown', async () => {
+    const { lp, m, pool } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: true });
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 0, inRange: true });
+    // The clock is not advanced. A dwell or a cooldown would leave the range where it is.
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 1, inRange: true });
+    m.movePrice(pool, 0.7);
+    await lp.tick();
+    expect(lp.status()).toMatchObject({ reranges: 2, inRange: true });
+  });
+
   it('out of range with Auto-move on it moves to the price at once, both ways, whatever moving costs; with it off it waits', async () => {
     const { lp, m, pool } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });

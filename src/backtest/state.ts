@@ -23,7 +23,7 @@ import {
 } from '../live/markets';
 import { NETWORKS } from '../live/networks';
 import { GAS_UNITS, impliedLpGasPrice, type BacktestChain } from './gasModel';
-import { fmt, signed } from './report';
+import { fmt, recordedSource, signed, sourceLabel } from './report';
 import type { BotSummary } from './report';
 import { runBot, type BotConfig, type HarnessData, type TokenRef } from './run';
 
@@ -92,8 +92,16 @@ export interface LpActual {
   moveLoss: number;
 }
 
+export type BotMode = 'paper' | 'live';
+
+/** Saved rows are paper unless the app marked them live. */
+export function botMode(v: unknown): BotMode {
+  return v === 'live' ? 'live' : 'paper';
+}
+
 export interface SavedBot {
   id: string;
+  mode: BotMode;
   config: BotConfig;
   fills: RecordedFill[];
   /** Seconds, the bot's own run, when the state recorded a start and a last price. */
@@ -160,6 +168,8 @@ export interface Calibration {
   movesError: number | null;
   /** True when net-units error was measured and is at most {@link NET_ERROR_LIMIT}. */
   calibrated: boolean;
+  /** Paper or live, copied from the saved bot. Paper rows stay out of what-if output. */
+  mode: BotMode;
   note: string;
 }
 
@@ -528,6 +538,7 @@ function gridBot(row: Record<string, unknown>, i: number): SavedBot | null {
   const gasPriceNative = recordedGasPrice(row.trades, side.chain);
   return {
     id: str(row.id) || `grid-${i + 1}`,
+    mode: botMode(row.mode),
     fills,
     window,
     depth: depthOf(row),
@@ -558,6 +569,7 @@ function trendBot(row: Record<string, unknown>, i: number): SavedBot | null {
   const gasPriceNative = recordedGasPrice(row.trades, side.chain);
   return {
     id: str(row.id) || `trend-${i + 1}`,
+    mode: botMode(row.mode),
     fills,
     window,
     depth: depthOf(row),
@@ -615,6 +627,7 @@ function lpBot(row: Record<string, unknown>, i: number): SavedBot | null {
   const feeBps = num(row.feeBps) ?? num(cfg.feeBps) ?? side.feeBps;
   return {
     id: str(row.id) || `lp-${i + 1}`,
+    mode: botMode(row.mode),
     fills,
     window: windowOf(row, fills),
     depth: depthOf(row),
@@ -669,8 +682,8 @@ export function defaultBots(): SavedBot[] {
     baseIs0: true, spacing: 50, gasToken: 'quote',
   };
   return [
-    { id: 'default-eth-usdc', config: eth, fills: [] },
-    { id: 'default-hex-wpls', config: hex, fills: [] },
+    { id: 'default-eth-usdc', mode: 'paper', config: eth, fills: [] },
+    { id: 'default-hex-wpls', mode: 'paper', config: hex, fills: [] },
   ];
 }
 
@@ -826,7 +839,7 @@ function unfinished(bot: SavedBot, cfg: BotConfig, feeK: number, slippageBps: nu
   return {
     botId: bot.id, fitted: false, feeK, slippageBps, config: cfg, error: null,
     recordedPerDay: recordedPerDay(bot), replayedPerDay: null, netError: null, movesError: null,
-    calibrated: false, note,
+    calibrated: false, mode: bot.mode, note,
   };
 }
 
@@ -878,6 +891,7 @@ export function calibrateBot(bot: SavedBot, data: HarnessData): Calibration {
     botId: bot.id, fitted: true, feeK: best.feeK, slippageBps: best.slippageBps,
     config: withFit(cfg, best.feeK, best.slippageBps, lp ? best.dwellMs : undefined),
     error, recordedPerDay: target, replayedPerDay: best.perDay, netError, movesError: error.movesError, calibrated,
+    mode: bot.mode,
     note: lp
       ? 'The fee model was fitted to recorded net units per day. The move count is reported separately.'
       : 'The fee and fill model was fitted to the recorded fills. Net units per day are reported separately.',
@@ -888,43 +902,44 @@ const pct = (n: number) => `${n < 0 ? '-' : '+'}${fmt(Math.abs(n) * 100)}%`;
 
 function netLines(c: Calibration): string[] {
   const unit = c.config.quote.symbol;
+  const recordedLabel = sourceLabel(recordedSource(c.mode));
   const recorded = c.recordedPerDay == null
-    ? 'Recorded net was not measured (on-chain actual).'
-    : `Recorded net ${signed(c.recordedPerDay)} ${unit}/day (on-chain actual).`;
+    ? `Recorded net was not measured (${recordedLabel}).`
+    : `Recorded net ${signed(c.recordedPerDay)} ${unit}/day (${recordedLabel}).`;
   const replayed = c.replayedPerDay == null
-    ? 'Replayed net was not measured (modeled).'
-    : `Replayed net ${signed(c.replayedPerDay)} ${unit}/day (modeled).`;
+    ? 'Replayed net was not measured (fitted model).'
+    : `Replayed net ${signed(c.replayedPerDay)} ${unit}/day (fitted model).`;
   const net = c.netError == null
-    ? 'Net-units error was not measured (modeled).'
-    : `Net-units error ${pct(c.netError)} (modeled).`;
-  return [recorded, replayed, net, `Calibrated ${c.calibrated ? 'yes' : 'no'} (modeled).`];
+    ? 'Net-units error was not measured (fitted model).'
+    : `Net-units error ${pct(c.netError)} (fitted model).`;
+  return [recorded, replayed, net, `Calibrated ${c.calibrated ? 'yes' : 'no'} (fitted model).`];
 }
 
 /** Lines for the summary. Every line that contains a digit is marked modeled or on-chain actual. */
 export function calibrationMarkdown(c: Calibration): string {
   const who = `${pairLabel(c.config)} ${c.botId}`;
-  if (!c.fitted || !c.error) return [`${who}: ${c.note} (modeled)`, ...netLines(c)].join('\n');
+  if (!c.fitted || !c.error) return [`${who}: ${c.note} (fitted model)`, ...netLines(c)].join('\n');
   const countWord = c.config.kind === 'lp' ? 'moves' : 'fills';
-  const countErr = ` ${countWord[0].toUpperCase()}${countWord.slice(1)} error ${pct(c.error.movesError)} (modeled).`;
+  const countErr = ` ${countWord[0].toUpperCase()}${countWord.slice(1)} error ${pct(c.error.movesError)} (fitted model).`;
   if (c.config.kind === 'lp') {
-    const fee = c.error.priceMape == null ? 'Fee error was not measured (modeled).' : `Fees collected error ${pct(c.error.priceMape)} (modeled).`;
-    const gas = c.error.feeMape == null ? 'Gas error was not measured (modeled).' : `Gas error ${pct(c.error.feeMape)} (modeled).`;
-    const swap = c.error.swapRel == null ? '' : ` Swap cost error ${pct(c.error.swapRel)} (modeled).`;
-    const loss = c.error.lossRel == null ? '' : ` Move loss error ${pct(c.error.lossRel)} (modeled).`;
+    const fee = c.error.priceMape == null ? 'Fee error was not measured (fitted model).' : `Fees collected error ${pct(c.error.priceMape)} (fitted model).`;
+    const gas = c.error.feeMape == null ? 'Gas error was not measured (fitted model).' : `Gas error ${pct(c.error.feeMape)} (fitted model).`;
+    const swap = c.error.swapRel == null ? '' : ` Swap cost error ${pct(c.error.swapRel)} (fitted model).`;
+    const loss = c.error.lossRel == null ? '' : ` Move loss error ${pct(c.error.lossRel)} (fitted model).`;
     const dwellMin = (c.config.dwellMs ?? 0) / 60_000;
-    const dwell = `Outside-range dwell ${fmt(dwellMin)} minutes (modeled).`;
+    const dwell = `Outside-range dwell ${fmt(dwellMin)} minutes (fitted model).`;
     return [
-      `${who}: fee k ${fmt(c.feeK)} (modeled). ${dwell}`,
+      `${who}: fee k ${fmt(c.feeK)} (fitted model). ${dwell}`,
       `${fee} ${gas}${swap}${loss}`,
-      `Recorded moves ${fmt(c.error.recorded)} and replayed moves ${fmt(c.error.replayed)} (modeled).${countErr}`,
+      `Recorded moves ${fmt(c.error.recorded)} and replayed moves ${fmt(c.error.replayed)} (fitted model).${countErr}`,
       ...netLines(c),
     ].join('\n');
   }
-  const fee = c.error.feeMape == null ? 'Fee error was not measured (modeled).' : `Fee error ${pct(c.error.feeMape)} (modeled).`;
-  const price = c.error.priceMape == null ? 'Price error was not measured (modeled).' : `Price error ${pct(c.error.priceMape)} (modeled).`;
+  const fee = c.error.feeMape == null ? 'Fee error was not measured (fitted model).' : `Fee error ${pct(c.error.feeMape)} (fitted model).`;
+  const price = c.error.priceMape == null ? 'Price error was not measured (fitted model).' : `Price error ${pct(c.error.priceMape)} (fitted model).`;
   return [
-    `${who}: fee k ${fmt(c.feeK)} (modeled). Fill slippage ${fmt(c.slippageBps)} bps (modeled).`,
-    `Recorded fills ${fmt(c.error.recorded)} and replayed fills ${fmt(c.error.replayed)} (modeled).${countErr}`,
+    `${who}: fee k ${fmt(c.feeK)} (fitted model). Fill slippage ${fmt(c.slippageBps)} bps (fitted model).`,
+    `Recorded fills ${fmt(c.error.recorded)} and replayed fills ${fmt(c.error.replayed)} (fitted model).${countErr}`,
     `${price} ${fee}`,
     ...netLines(c),
   ].join('\n');
@@ -934,21 +949,30 @@ export interface WhatIfRow {
   id: string;
   pair: string;
   unit: string;
+  mode: BotMode;
   replayedPerDay: number | null;
   calibrated: boolean;
 }
 
-/** What-if copy. Bots over the net-units limit are named as left out and are not given a rate. */
+/** Live bots first, then paper, keeping the order inside each group. */
+export function splitByMode<T extends { mode: BotMode }>(rows: T[]): { live: T[]; paper: T[] } {
+  return { live: rows.filter((r) => r.mode === 'live'), paper: rows.filter((r) => r.mode === 'paper') };
+}
+
+/** What-if copy. Paper bots are a separate section and are not given a rate here. */
 export function whatIfMarkdown(rows: WhatIfRow[]): string {
+  const { live, paper } = splitByMode(rows);
+  const ok = live.filter((r) => r.calibrated);
   const lines = [
     '# What-if',
     '',
-    `A what-if uses only a bot whose net-units error is at most ${fmt(NET_ERROR_LIMIT)} (modeled).`,
+    `A what-if uses a live bot whose net-units error is at most ${fmt(NET_ERROR_LIMIT)} (fitted model).`,
+    'Paper bots stay in their own section and are left out of what-if output (fitted model).',
   ];
-  const ok = rows.filter((r) => r.calibrated);
-  if (!ok.length) lines.push('No bot cleared that bar, so this run has no what-if (modeled).');
-  for (const r of ok) lines.push(`${r.pair} ${r.id}: ${signed(r.replayedPerDay ?? 0)} ${r.unit}/day (modeled).`);
-  const left = rows.filter((r) => !r.calibrated).length;
-  if (left) lines.push(`Uncalibrated bots left out: ${fmt(left)} (modeled).`);
+  if (!ok.length) lines.push('No live bot cleared that bar, so this run has no what-if (fitted model).');
+  for (const r of ok) lines.push(`${r.pair} ${r.id}: ${signed(r.replayedPerDay ?? 0)} ${r.unit}/day (fitted model).`);
+  const left = live.filter((r) => !r.calibrated).length;
+  if (left) lines.push(`Uncalibrated live bots left out: ${fmt(left)} (fitted model).`);
+  if (paper.length) lines.push(`Paper bots left out: ${fmt(paper.length)} (fitted model).`);
   return lines.join('\n');
 }

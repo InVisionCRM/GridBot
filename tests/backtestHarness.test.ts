@@ -6,10 +6,10 @@ import { describe, expect, it } from 'vitest';
 import { diskCache, decodeV3Snapshot, geckoOhlcvUrl, invertCandles, parseDexscreenerOhlcv, parseGeckoOhlcv } from '../src/backtest/adapters';
 import { candleLpFees, lpShareForFeeTier } from '../src/backtest/feeModel';
 import { GAS_UNITS, gasQuote } from '../src/backtest/gasModel';
-import { renderMarkdown, unlabeledNumberLines, type BotSummary } from '../src/backtest/report';
+import { renderMarkdown, summaryJson, unlabeledNumberLines, type BotSummary } from '../src/backtest/report';
 import { liveEngines, minutesFromCandles, runBot, type BotConfig, type HarnessData } from '../src/backtest/run';
 import { maxCapitalWhereMarginalHolds, scoreOpportunity } from '../src/backtest/score';
-import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, NET_ERROR_LIMIT, NO_STATE_NOTE, pairLabel, recordedPerDay, recordedQuoteNet, replayExit, stripCredentials, whatIfMarkdown, ZERO_REPLAY_WARNING } from '../src/backtest/state';
+import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, NET_ERROR_LIMIT, NO_STATE_NOTE, pairLabel, recordedPerDay, recordedQuoteNet, replayExit, splitByMode, stripCredentials, whatIfMarkdown, ZERO_REPLAY_WARNING } from '../src/backtest/state';
 import { lpShouldMove } from '../src/market/lpMove';
 import { DEFAULT_TREND } from '../src/market/strategy';
 import type { Candle } from '../src/market/candles';
@@ -140,8 +140,14 @@ describe('markdown', () => {
     const md = renderMarkdown([s], { from: T0, to: T0 + 7 * 86_400 });
     const lines = md.split('\n').filter((l) => l.startsWith('**'));
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/USDG\/day \(modeled\)/);
+    expect(lines[0]).toMatch(/USDG\/day \(fitted model\)/);
     expect(md).not.toMatch(/WETH\/day/);
+    expect(md).not.toMatch(/[Nn]et vs hold/);
+    const js = summaryJson([s], { from: T0, to: T0 + 7 * 86_400 });
+    expect(JSON.stringify(js)).not.toMatch(/netVsHold/);
+    expect(js.model.label).toBe('fitted model');
+    expect(js.model.source).toBe('modeled');
+    expect(js.bots[0].generationPerDay.USDG).toMatchObject({ source: 'modeled', label: 'fitted model' });
     expect(md).not.toMatch(/per month|\/month/);
     expect(md).toMatch(/not the default last 30 days/);
     expect(unlabeledNumberLines(md)).toEqual([]);
@@ -152,7 +158,7 @@ describe('markdown', () => {
     const from = T0;
     const md = renderMarkdown([s], { from, to: from + 30 * 86_400 });
     expect(md).not.toMatch(/not the default/);
-    expect(md).toMatch(/Last 30 days \(modeled\)/);
+    expect(md).toMatch(/Last 30 days \(fitted model\)/);
     expect(unlabeledNumberLines(md)).toEqual([]);
   });
 });
@@ -227,6 +233,7 @@ describe('scoreOpportunity', () => {
     expect(s.botType).toBe('lp');
     expect(s.horizonDays).toBe(7);
     expect(s.source).toBe('modeled');
+    expect(s).not.toHaveProperty('netVsHold');
     expect(s.asOf).toBe(new Date((T0 + 168 * 3600) * 1000).toISOString());
     expect(s.capitalUsd).toBe(1000);
     expect(Object.keys(s.ratePerDay)).toEqual(['USDG']);
@@ -299,6 +306,14 @@ describe('app state', () => {
     expect(pairLabel(hex.config)).toBe('pulsechain:HEX/PLS');
     expect(pairLabel(dai.config)).toBe('pulsechain:PLS/DAI');
     const live = state.bots[3];
+    expect(hex.mode).toBe('live');
+    expect(usdc.mode).toBe('paper');
+    expect(dai.mode).toBe('paper');
+    expect(live.mode).toBe('live');
+    expect(state.bots.find((b) => b.id === 'lp-mvkbewe0-ldou')!.mode).toBe('paper');
+    expect(state.bots.find((b) => b.id === 'lp-mvfv3g7g-to6l')!.mode).toBe('live');
+    expect(splitByMode(state.bots).live.map((b) => b.id)).toEqual(['g-mvowdsys-i5iq', 'lp-mvnm73sx-hghe', 'lp-mvfv3g7g-to6l']);
+    expect(splitByMode(state.bots).paper.map((b) => b.id)).toEqual(['g-mvnlyq6p-76zc', 'g-mvpdla8b-fmkg', 'lp-mvkbewe0-ldou']);
     expect(live.config.base.symbol).toBe('USDC');
     expect(live.config.base.decimals).toBe(6);
     expect(live.config.quote.symbol).toBe('ETH');
@@ -332,6 +347,9 @@ describe('app state', () => {
       expect(cal.fitted).toBe(true);
       const md = calibrationMarkdown(cal);
       expect(md).toMatch(/Net-units error/);
+      expect(md).toMatch(/fitted model/);
+      expect(md).toMatch(bot.mode === 'live' ? /on-chain actual/ : /paper \(simulated fills\)/);
+      if (bot.mode === 'paper') expect(md).not.toMatch(/on-chain actual/);
       expect(md).toMatch(new RegExp(pairLabel(bot.config).replace('/', '\\/')));
       expect(unlabeledNumberLines(md)).toEqual([]);
     }
@@ -410,12 +428,12 @@ describe('app state', () => {
     expect(md).toMatch(/Moves error/);
     expect(unlabeledNumberLines(md)).toEqual([]);
     const whatIf = whatIfMarkdown([
-      { id: live.id, pair: pairLabel(live.config), unit: 'ETH', replayedPerDay: cal.replayedPerDay, calibrated: true },
-      { id: 'lp-other', pair: 'pulsechain:HEX/WPLS', unit: 'WPLS', replayedPerDay: 1, calibrated: false },
+      { id: live.id, pair: pairLabel(live.config), unit: 'ETH', mode: 'live', replayedPerDay: cal.replayedPerDay, calibrated: true },
+      { id: 'g-paper', pair: 'ethereum:ETH/USDC', unit: 'USDC', mode: 'paper', replayedPerDay: 1, calibrated: true },
     ]);
     expect(whatIf).toMatch(/ethereum:USDC\/ETH/);
-    expect(whatIf).not.toMatch(/HEX\/WPLS:|pulsechain:HEX\/WPLS lp-other: \+/);
-    expect(whatIf).toMatch(/Uncalibrated bots left out: 1/);
+    expect(whatIf).not.toMatch(/ethereum:ETH\/USDC g-paper/);
+    expect(whatIf).toMatch(/Paper bots left out: 1/);
     expect(unlabeledNumberLines(whatIf)).toEqual([]);
   });
 
@@ -432,6 +450,7 @@ describe('app state', () => {
     const made = runBot({ ...gridCfg, slippageBps: 10 }, data);
     const cal = calibrateBot({
       id: 'g-paper',
+      mode: 'paper',
       config: gridCfg,
       fills: made.simFills.map((f) => ({ ...f, levelPrice: null })),
     }, data);

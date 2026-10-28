@@ -166,7 +166,7 @@ function finish(cfg: BotConfig, g: {
   timeInRange: number; timeWord: BotSummary['timeWord'];
   /** Fees valued in the quote coin, before converting to USD. */
   feeQuote: number;
-  priceStart: number; priceEnd: number; netVsHold: number;
+  priceStart: number; priceEnd: number;
 }, extra?: { onChain?: NamedNumber[]; modelNotes?: NamedNumber[]; simFills?: SimFill[] }): BotSummary {
   if (!(g.days > 0)) throw new Error('the window is empty');
   // One unit: every fee coin is already in the quote coin at the price when it was earned. `g.quote` is the net of that.
@@ -190,7 +190,6 @@ function finish(cfg: BotConfig, g: {
     timeInRange: g.timeInRange, timeWord: g.timeWord,
     feeApr: cfg.capital > 0 ? (g.feeQuote / cfg.capital) * (365 / g.days) : 0,
     priceChange: priceChanges(cfg, g.priceStart, g.priceEnd),
-    netVsHold: { amount: g.netVsHold, symbol: cfg.quote.symbol },
     modelNotes, onChain: extra?.onChain ?? [], simFills: extra?.simFills ?? [],
   };
 }
@@ -256,8 +255,6 @@ function runLp(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     shouldMove: e.lpShouldMove,
   });
   const price = r.priceEnd > 0 ? r.priceEnd : priceGuess;
-  const endValue = r.endCoins.base * price + r.endCoins.quote - r.gas;
-  const holdValue = r.startCoins.base * price + r.startCoins.quote;
   // r.fees values each coin at the price of the minute it was earned. r.net subtracts gas, the open/move swap, and move loss.
   return finish(cfg, {
     base: 0,
@@ -266,7 +263,6 @@ function runLp(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     timeInRange: r.inRange, timeWord: 'Time in range',
     feeQuote: r.feeCoins.quote + (price > 0 ? r.feeCoins.base * price : 0),
     priceStart: r.priceStart, priceEnd: price,
-    netVsHold: endValue - holdValue,
   }, {
     onChain: data.onChain,
     // Quote-valued totals, so an LP with no fill list can be checked against the app's recorded totals.
@@ -364,7 +360,6 @@ function runGrid(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     }
   }
   const priceEnd = series[series.length - 1].c;
-  const endValue = base * priceEnd + quote;
   return finish(cfg, {
     base: 0, quote: realized,
     days: (series[series.length - 1].t - series[0].t) / day,
@@ -372,7 +367,6 @@ function runGrid(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     timeInRange: inBars / series.length, timeWord: 'Time in range',
     feeQuote,
     priceStart: seedMid, priceEnd,
-    netVsHold: endValue - cfg.capital,
   }, { onChain: data.onChain, simFills });
 }
 
@@ -388,9 +382,6 @@ function runTrend(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary 
   const realized = r.trades.reduce((a, t) => a + t.pnl, 0);
   const feeQuote = r.trades.reduce((a, t) => a + t.fees, 0);
   const priceEnd = candles[candles.length - 1].c;
-  const openBase = r.open?.pls ?? 0;
-  const openValue = openBase * sellOf(priceEnd, cfg.feeBps);
-  const endQuote = cfg.capital + realized;
   const simFills: SimFill[] = r.trades.flatMap((t) => [
     { t: t.entryT, side: 'buy' as const, price: t.entryPrice, baseAmount: t.pls, quoteAmount: t.cost, feeQuote: t.fees / 2 },
     { t: t.exitT, side: 'sell' as const, price: t.exitPrice, baseAmount: t.pls, quoteAmount: t.proceeds, feeQuote: t.fees / 2 },
@@ -402,7 +393,6 @@ function runTrend(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary 
     timeInRange: r.metrics.exposure, timeWord: 'Time in a position',
     feeQuote,
     priceStart: candles[0].o, priceEnd,
-    netVsHold: endQuote + openValue - cfg.capital,
   }, { onChain: data.onChain, simFills });
 }
 
@@ -461,7 +451,6 @@ function runToken(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary 
   const spent = (size.spend + buy.gasQuote) * soldFrac;
   const realized = proceeds - spent;
   const priceEnd = candles[candles.length - 1].c;
-  const endValue = (cfg.capital - size.spend - buy.gasQuote) + proceeds + tokens * sellOf(priceEnd, cfg.feeBps);
   return finish(cfg, {
     base: 0, quote: realized,
     days: (candles[candles.length - 1].t - candles[0].t) / day,
@@ -469,7 +458,6 @@ function runToken(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary 
     timeInRange: tokens > entry * 1e-6 ? 1 : sells / candles.length, timeWord: 'Time in a position',
     feeQuote,
     priceStart: c0.c, priceEnd,
-    netVsHold: endValue - cfg.capital,
   }, { onChain: data.onChain, simFills });
 }
 

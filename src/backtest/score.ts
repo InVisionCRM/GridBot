@@ -24,8 +24,8 @@ export interface ScoreRange {
   poolDepth?: { quoteReserve: number; baseReserve: number };
   /** ISO time the score is as of. Default: the window end. */
   asOf?: string;
-  /** Default modeled. onchain only when the caller measured the rate on-chain. */
-  source?: 'modeled' | 'onchain';
+  /** modeled for a replay, onchain for a live measurement, paper-fills for a paper bot's simulated fills. */
+  source?: 'modeled' | 'onchain' | 'paper-fills';
 }
 
 export interface CapitalPoint { capitalUsd: number; usdPerDay: number }
@@ -41,7 +41,7 @@ export interface OpportunityScore {
   horizonDays: number;
   windowDays: number;
   confidence: { p10UsdPerDay: number; p50UsdPerDay: number; p90UsdPerDay: number; oosStable: boolean };
-  source: 'modeled' | 'onchain';
+  source: 'modeled' | 'onchain' | 'paper-fills';
   asOf: string;
   /** Configured capital, in USD. */
   capitalUsd: number;

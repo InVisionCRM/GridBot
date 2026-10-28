@@ -10,9 +10,9 @@ import { dirname, resolve } from 'node:path';
 import { CHAINS } from '../src/live/chains';
 import { invertCandles, loadCandles, readGasPrice, readV3Pool, type FetchLike } from '../src/backtest/adapters';
 import { discoverPool } from '../src/backtest/pools';
-import { renderMarkdown, summaryJson, type RunWindow } from '../src/backtest/report';
+import { aggregateModel, fittedModel, recordedSource, renderMarkdown, sourceLabel, summaryJson, type RunWindow } from '../src/backtest/report';
 import { runBot, type BotConfig, type HarnessData } from '../src/backtest/run';
-import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, pairLabel, recordedPerDay, replayExit, whatIfMarkdown, ZERO_REPLAY_WARNING } from '../src/backtest/state';
+import { blockReason, calibrateBot, calibrationMarkdown, loadAppState, pairLabel, recordedPerDay, replayExit, splitByMode, whatIfMarkdown, type BotMode, ZERO_REPLAY_WARNING } from '../src/backtest/state';
 
 const DAY = 86_400;
 
@@ -70,11 +70,11 @@ async function loadMarket(cfg: BotConfig, from: number, to: number, cacheDir: st
   const onChain: HarnessData['onChain'] = [];
   if (pool) {
     onChain.push(
-      { label: 'Pool fee tier', value: pool.fee, source: 'on-chain actual' },
-      { label: 'Active liquidity', value: liq, source: 'on-chain actual' },
+      { label: 'Pool fee tier', value: pool.fee, source: 'onchain' },
+      { label: 'Active liquidity', value: liq, source: 'onchain' },
     );
   }
-  if (gas > 0) onChain.push({ label: 'Current gas price', value: gas, unit: 'native per gas', source: 'on-chain actual' });
+  if (gas > 0) onChain.push({ label: 'Current gas price', value: gas, unit: 'native per gas', source: 'onchain' });
   const data: HarnessData = { candles, poolLiquidity: liq > 0 ? liq : undefined, onChain };
   const next: BotConfig = {
     ...cfg,
@@ -88,6 +88,27 @@ async function loadMarket(cfg: BotConfig, from: number, to: number, cacheDir: st
   return { data, cfg: next };
 }
 
+interface OutRow {
+  id: string;
+  mode: BotMode;
+  pair: string;
+  unit: string;
+  recordedSource: ReturnType<typeof recordedSource>;
+  recordedLabel: string;
+  replaySource: 'modeled';
+  replayLabel: 'fitted model';
+  recordedPerDay: number | null;
+  replayedPerDay: number | null;
+  netError: number | null;
+  movesError: number | null;
+  calibrated: boolean;
+  model: ReturnType<typeof fittedModel>;
+  skip?: string;
+  summary?: unknown;
+  calibration?: unknown;
+  lines: string[];
+}
+
 async function main() {
   const statePath = resolve(arg('--state') ?? 'data/state.json');
   const cacheDir = resolve(arg('--cache') ?? 'data/backtest-cache');
@@ -95,26 +116,27 @@ async function main() {
   const now = Math.floor(Date.now() / 1000);
   const fromArg = arg('--from');
   const toArg = arg('--to');
-  const blocks: string[] = [loaded.note, ''];
-  const jsonBots: Record<string, unknown>[] = [];
+  const rows: OutRow[] = [];
   let replayed = 0;
 
-  const skippedRow = (bot: (typeof loaded.bots)[number], reason: string) => {
-    const row = {
-      id: bot.id,
-      pair: pairLabel(bot.config),
-      unit: bot.config.quote.symbol,
-      recordedPerDay: recordedPerDay(bot),
-      replayedPerDay: null as number | null,
-      netError: null as number | null,
-      movesError: null as number | null,
-      calibrated: false,
-      skip: reason,
-    };
-    jsonBots.push(row);
-    blocks.push(`${row.pair} ${bot.id}: not replayed (${reason}) (modeled).`);
-    blocks.push('');
-  };
+  const shell = (bot: (typeof loaded.bots)[number], model: ReturnType<typeof fittedModel>, lines: string[], extra?: Partial<OutRow>): OutRow => ({
+    id: bot.id,
+    mode: bot.mode,
+    pair: pairLabel(bot.config),
+    unit: bot.config.quote.symbol,
+    recordedSource: recordedSource(bot.mode),
+    recordedLabel: sourceLabel(recordedSource(bot.mode)),
+    replaySource: 'modeled',
+    replayLabel: 'fitted model',
+    recordedPerDay: recordedPerDay(bot),
+    replayedPerDay: null,
+    netError: null,
+    movesError: null,
+    calibrated: false,
+    model,
+    lines,
+    ...extra,
+  });
 
   for (const bot of loaded.bots) {
     const span = bot.window
@@ -129,7 +151,7 @@ async function main() {
       cfg = await resolvePool(cfg, cacheDir);
       const why = blockReason(cfg);
       if (why) {
-        skippedRow(bot, why);
+        rows.push(shell(bot, fittedModel(false, null, false), [`${pairLabel(bot.config)} ${bot.id} (${bot.mode}): not replayed (${why}) (fitted model).`], { skip: why }));
         continue;
       }
       const market = await loadMarket(cfg, from, to, cacheDir);
@@ -137,26 +159,22 @@ async function main() {
       cfg = market.cfg;
       if (bot.depth) data.poolDepth = bot.depth;
     } catch (e) {
-      skippedRow(bot, `replay did not run (${(e as Error).message})`);
+      const reason = `replay did not run (${(e as Error).message})`;
+      rows.push(shell(bot, fittedModel(false, null, false), [`${pairLabel(bot.config)} ${bot.id} (${bot.mode}): not replayed (${reason}) (fitted model).`], { skip: reason }));
       continue;
     }
     replayed++;
     const cal = calibrateBot({ ...bot, config: cfg }, data);
     const summary = runBot(cal.config, data);
+    const model = fittedModel(cal.fitted, cal.netError, cal.calibrated);
     const w: RunWindow = { from, to, inSample: cal.fitted };
-    blocks.push(renderMarkdown([summary], w).trimEnd());
-    blocks.push(calibrationMarkdown(cal));
-    blocks.push('');
-    jsonBots.push({
-      id: bot.id,
-      pair: pairLabel(cal.config),
-      unit: cal.config.quote.symbol,
+    rows.push(shell(bot, model, [renderMarkdown([summary], w).trimEnd(), calibrationMarkdown(cal)], {
       recordedPerDay: cal.recordedPerDay,
       replayedPerDay: cal.replayedPerDay,
       netError: cal.netError,
       movesError: cal.movesError,
       calibrated: cal.calibrated,
-      summary: summaryJson([summary], w).bots[0],
+      summary: summaryJson([summary], w, model).bots[0],
       calibration: {
         botId: cal.botId, fitted: cal.fitted, feeK: cal.feeK, slippageBps: cal.slippageBps,
         dwellMs: cal.config.dwellMs ?? 0,
@@ -164,15 +182,24 @@ async function main() {
         netError: cal.netError, movesError: cal.movesError, calibrated: cal.calibrated,
         error: cal.error, note: cal.note,
       },
-    });
+    }));
   }
 
-  blocks.push(whatIfMarkdown(jsonBots.map((b) => ({
-    id: String(b.id),
-    pair: String(b.pair),
-    unit: String(b.unit),
-    replayedPerDay: b.replayedPerDay as number | null,
-    calibrated: b.calibrated === true,
+  const { live, paper } = splitByMode(rows);
+  const ordered = [...live, ...paper];
+  const blocks: string[] = [loaded.note, ''];
+  const writeSection = (title: string, list: OutRow[]) => {
+    blocks.push(`# ${title}`, '');
+    if (!list.length) {
+      blocks.push('None in this file (fitted model).', '');
+      return;
+    }
+    for (const row of list) blocks.push(...row.lines, '');
+  };
+  writeSection('Live bots', live);
+  writeSection('Paper bots', paper);
+  blocks.push(whatIfMarkdown(ordered.map((b) => ({
+    id: b.id, pair: b.pair, unit: b.unit, mode: b.mode, replayedPerDay: b.replayedPerDay, calibrated: b.mode === 'live' && b.calibrated,
   }))));
   blocks.push('');
 
@@ -188,10 +215,22 @@ async function main() {
   if (md) { mkdirSync(dirname(resolve(md)), { recursive: true }); writeFileSync(md, text); }
   if (js) {
     mkdirSync(dirname(resolve(js)), { recursive: true });
-    const whatIf = jsonBots.filter((b) => b.calibrated === true).map((b) => ({
-      id: b.id, pair: b.pair, unit: b.unit, recordedPerDay: b.recordedPerDay, replayedPerDay: b.replayedPerDay, netError: b.netError,
+    const publish = (row: OutRow) => {
+      const { lines: _lines, ...rest } = row;
+      return rest;
+    };
+    const liveOut = live.map(publish);
+    const paperOut = paper.map(publish);
+    const bots = [...liveOut, ...paperOut];
+    const model = aggregateModel(bots.map((b) => ({ mode: b.mode, model: b.model })));
+    const whatIf = liveOut.filter((b) => b.calibrated).map((b) => ({
+      id: b.id, mode: b.mode, pair: b.pair, unit: b.unit,
+      recordedPerDay: b.recordedPerDay, replayedPerDay: b.replayedPerDay, netError: b.netError,
+      model: b.model,
     }));
-    writeFileSync(js, JSON.stringify({ source: loaded.source, note: loaded.note, replayed, whatIf, bots: jsonBots }, null, 2));
+    writeFileSync(js, JSON.stringify({
+      source: loaded.source, note: loaded.note, replayed, inSample: model.fitted, model, whatIf, live: liveOut, paper: paperOut, bots,
+    }, null, 2));
   }
   if (failed) process.exit(failed);
 }
