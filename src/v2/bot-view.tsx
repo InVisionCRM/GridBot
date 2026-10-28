@@ -17,7 +17,7 @@ import { TokenHeadline, TokenLine } from './tokens';
 
 function openClassic(view: View) {
   try { localStorage.setItem('view', JSON.stringify(view)); } catch { /* storage unavailable */ }
-  location.href = '/?classic=1';
+  location.href = '/';
 }
 
 function classicView(m: BotMetrics): View {

@@ -1,6 +1,6 @@
 /**
- * A screen shows each money or token figure once.
- * Cards that would restate the hero or the section total say so in words.
+ * A screen shows each money or token figure once per place: a card never repeats itself, and the hero never repeats
+ * itself. A card's figure may equal its section total; both are labelled, so that is one fact in two places, not two facts.
  */
 import type { BotMetrics, TapePrice, TokenQty } from './metrics';
 import { apportion, displayedValue, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, standardUnit, tokenLineParts } from './format';
@@ -36,43 +36,17 @@ function tokenKey(t: TokenQty): string {
   return normFigure(`${formatAmt(t.amount)} ${t.symbol}`);
 }
 
-/** Every generated coin stays on the card: a number, or `All paper BUN` when it is that coin's section total. A real zero stays `0 PLS`. */
-export function generatedCardLine(bot: TokenQty[], section: TokenQty[], scope: 'live' | 'paper'): { text: string; parts: string[] } | null {
+/** Every generated coin stays on the card as a number. A real zero stays `0 PLS`. The section header carries the total. */
+export function generatedCardLine(bot: TokenQty[]): { text: string; parts: string[] } | null {
   const shown = bot.filter((t) => Number.isFinite(t.amount));
   if (!shown.length) return null;
-  const sectionShown = section.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
-  const line = formatTokenLine(shown);
-  const word = scope === 'live' ? 'live' : 'paper';
-  const priced = shown.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
-  const totals = new Map(sectionShown.map((t) => [t.symbol, normFigure(formatTokenLine([t]))]));
-  const matched = priced.filter((t) => totals.get(t.symbol) === normFigure(formatTokenLine([t])));
-  if (priced.length && matched.length === priced.length && priced.length === sectionShown.length) {
-    const text = priced.length === 1 ? `All ${word} ${priced[0].symbol}` : `All ${word} ${priced.map((t) => t.symbol).join(' + ')}`;
-    return { text, parts: [text] };
-  }
-  if (!matched.length) return { text: line, parts: tokenLineParts(shown) };
-  const parts = shown.map((t, i) => {
-    const zero = t.amount === 0 || formatAmt(t.amount) === '0';
-    if (!zero && totals.get(t.symbol) === normFigure(formatTokenLine([t]))) return `All ${word} ${t.symbol}`;
-    return tokenLineParts(shown.slice(0, i + 1)).at(-1) ?? formatTokenLine([t]);
-  });
-  return { text: parts.join(' '), parts };
+  return { text: formatTokenLine(shown), parts: tokenLineParts(shown) };
 }
 
-/**
- * Invested line for one card. The same amount on another bot is still shown.
- * A coin that equals that coin in this section's hero reads `All live PLS`.
- * The whole hero line, and only that, reads `All of the live total`.
- */
-export function investedLine(bot: TokenQty[], total: TokenQty[], scope: 'live' | 'paper'): string | null {
+/** Invested line for one card: the bot's own bag, coin by coin. */
+export function investedLine(bot: TokenQty[]): string {
   if (!bot.length) return '—';
-  const word = scope === 'live' ? 'live' : 'paper';
-  const whole = normFigure(formatBag(bot)) === normFigure(formatBag(total));
-  if (whole) return bot.length === 1 ? `All ${word} ${bot[0].symbol}` : `All ${word} ${bot.map((t) => t.symbol).join(' + ')}`;
-  const all = new Map(total.map((t) => [t.symbol, normFigure(formatBag([t]))]));
-  return bot.map((t) => (
-    all.get(t.symbol) === normFigure(formatBag([t])) ? `All ${word} ${t.symbol}` : formatBag([t])
-  )).join(' + ');
+  return bot.map((t) => formatBag([t])).join(' + ');
 }
 
 const DAY_SEC = 86_400;
@@ -100,8 +74,8 @@ export type CardReadout =
   | { kind: 'line'; text: string; parts: string[] };
 
 /** Generated text for a card. A missing figure is a dash, never a status word. */
-export function cardReadout(metrics: BotMetrics, sectionTokens: TokenQty[], scope: 'live' | 'paper'): CardReadout {
-  const line = generatedCardLine(metrics.generated, sectionTokens, scope);
+export function cardReadout(metrics: BotMetrics): CardReadout {
+  const line = generatedCardLine(metrics.generated);
   if (!line) return { kind: 'note', text: 'Not calculated yet' };
   return { kind: 'line', text: line.text, parts: line.parts };
 }

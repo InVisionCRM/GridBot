@@ -190,10 +190,6 @@
 }
 .v2 .token-headline.is-open,
 .v2 .token-headline.is-fold { white-space: normal; }
-.v2 .hero-curve { display: flex; align-items: center; flex-wrap: nowrap; gap: 8px 12px; min-height: 0; }
-.v2 .hero-curve .curve-empty { margin: 0; min-height: 0; font-family: var(--font); font-size: 13px; white-space: nowrap; }
-.v2 .hero-curve .seg { flex: none; }
-.v2 .hero-curve .seg button { padding: 2px 7px; font-size: 11px; min-height: 0; }
 .v2 .eyebrow { margin: 0; color: var(--label); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
 .v2 .hero-num, .v2 .hero-gen {
   font-family: var(--mono);
@@ -544,11 +540,8 @@
   .v2 .hero.glass { padding: 18px 14px 16px; gap: 12px; }
   .v2 .hero-units { font-size: 28px; line-height: 1.15; white-space: normal; }
   .v2 .hero-rate { font-size: 15px; margin: 0; white-space: normal; }
-  .v2 .hero-curve { flex-wrap: wrap; }
-  .v2 .hero-curve .seg button,
   .v2 .chart-frame .seg button,
   .v2 .slot .seg button { min-height: 44px; min-width: 44px; padding: 0 8px; font-size: 12px; }
-  .v2 .hero-curve .curve-empty { font-size: 12px; }
   .v2 .hero-gen { font-size: 20px; }
   .v2 .ests { grid-template-columns: 1fr; }
   .v2 .tape-who { flex-direction: column; align-items: flex-start; gap: 2px; }

@@ -3,10 +3,9 @@ import { ActivityTape } from '../src/v2/activity-tape';
 import { BotView } from '../src/v2/bot-view';
 import { adaptStatus } from '../src/v2/adapt-status';
 import { figureAtoms, generatedCardLine, ledgerLines, normFigure, sheetRows } from '../src/v2/figures';
-import { formatRangePx, formatTokenLine } from '../src/v2/format';
+import { formatRangePx, formatTokenLine, tokenLineParts } from '../src/v2/format';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
 import type { BotMetrics } from '../src/v2/metrics';
-import { HoldingsView } from '../src/v2/holdings-view';
 import { HomeView, Ticker } from '../src/v2/home-view';
 import { TokenHeadline } from '../src/v2/tokens';
 import { loadDesk } from '../src/v2/load-owner';
@@ -23,9 +22,8 @@ describe('v2 copy stays in token units', () => {
 
   it('does not render dollars, APR, or the old P&L labels', () => {
     const chunks = [
-      renderToStaticMarkup(<><Ticker prices={desk.prices} /><HomeView portfolio={desk.portfolio} bots={desk.bots} prices={desk.prices} onOpen={() => {}} /></>),
+      renderToStaticMarkup(<><Ticker prices={desk.prices} /><HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} /></>),
       renderToStaticMarkup(<><Ticker prices={desk.prices} /><ActivityTape items={desk.activity} full /></>),
-      renderToStaticMarkup(<HoldingsView rows={desk.holdings} />),
     ];
     for (const row of desk.bots) {
       chunks.push(renderToStaticMarkup(
@@ -87,7 +85,7 @@ describe('v2 copy stays in token units', () => {
 
   it('renders the same generated figure on Home and the bot page', () => {
     const homeHtml = renderToStaticMarkup(
-      <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={desk.prices} onOpen={() => {}} />,
+      <HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} />,
     ).replace(/<details class="card-details"[\s\S]*?<\/details>/g, ' ');
     const homeText = textOf(homeHtml);
     const homeAtoms = new Set(figureAtoms(homeText).map(normFigure));
@@ -225,7 +223,7 @@ describe('v2 copy stays in token units', () => {
     }
   });
 
-  it('shows every generated coin on the card as a number or All text', () => {
+  it('shows every generated coin on the card as a number', () => {
     const now = 1_700_000_000_000;
     const desk = adaptStatus({
       spotsAt: now,
@@ -254,17 +252,15 @@ describe('v2 copy stays in token units', () => {
       ],
     }, [], now);
     const html = renderToStaticMarkup(
-      <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />,
+      <HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} />,
     );
     const card = html.split('data-bot="bun"')[1]?.split('card-details')[0] ?? '';
     const text = card.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    expect(text).toContain('All paper BUN');
+    const gen = desk.bots.find((b) => b.metrics.botId === 'bun')!.metrics.generated;
+    expect(text).not.toContain('All paper');
+    for (const part of tokenLineParts(gen)) expect(text).toContain(part);
     expect(text).toContain('−0.01051 ETH');
-    expect(generatedCardLine(
-      desk.bots.find((b) => b.metrics.botId === 'bun')!.metrics.generated,
-      desk.portfolio.paperTokens,
-      'paper',
-    )?.text).toBe('All paper BUN −0.01051 ETH');
+    expect(generatedCardLine(gen)?.text).toBe(formatTokenLine(gen));
   });
 
   it('uses the same multi-coin generated string on the card and the hero', () => {
@@ -284,7 +280,7 @@ describe('v2 copy stays in token units', () => {
     const line = formatTokenLine(bot?.metrics.generated ?? []);
     expect(line).toBe('+65.04 USDG + 0.01531 ETH');
     const home = textOf(renderToStaticMarkup(
-      <HomeView portfolio={desk.portfolio} bots={desk.bots} prices={[]} onOpen={() => {}} />,
+      <HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} />,
     ));
     const hero = textOf(renderToStaticMarkup(
       <BotView bot={bot!} activity={[]} prices={[]} onBack={() => {}} onActivity={() => {}} showFeed={false} breakdown />,

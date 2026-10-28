@@ -85,7 +85,6 @@ describe('adaptStatus', () => {
     expect(desk.portfolio.paperGeneratedUsd).toBeCloseTo(15.5);
     expect(desk.portfolio.tokens.map((t) => t.symbol).sort()).toEqual(['ETH', 'USDC']);
     expect(desk.portfolio.feesTodayLiveUsd).toBeNull();
-    expect(desk.portfolio.madeSeries).toEqual([]);
   });
 
   it('drops activity that is not a fill, fee, or range move, and strips hex', () => {
@@ -392,5 +391,16 @@ describe('format', () => {
     expect(headlinePx(16, (px) => px * 15, 226)).toBe(15);
     expect(headlinePx(16, widthAt, 180)).toBe(null);
     expect(headlinePx(34, widthAt, 0)).toBe(34);
+  });
+  it('counts the live bots the hero sums, not paper ones', () => {
+    const now = 1_700_000_000_000;
+    const grid = (id: string, mode: 'live' | 'paper', status: string) => ({
+      id, mode, status, chainId: 1, label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC', usdPerQuote: 1, price: 2,
+      startedAt: now - 86_400_000, config: { totalCapitalQuote: 100, lowerPrice: 1, upperPrice: 3 },
+      pnl: { realized: 0, unrealized: 0, gasUsd: 0 }, stats: { roundTrips: 0, totalFees: 0 },
+    });
+    const desk = adaptStatus({ spotsAt: now, grids: [grid('a', 'live', 'running'), grid('b', 'live', 'paused'), grid('c', 'paper', 'running'), grid('d', 'paper', 'running')] }, [], now);
+    expect(desk.portfolio.botsRunning).toBe(1);
+    expect(desk.portfolio.botsTotal).toBe(2);
   });
 });

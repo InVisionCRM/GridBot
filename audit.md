@@ -1,6 +1,6 @@
 # GridBot metric audit and v2 de-dup spec
 
-Presentation only. Nothing in the classic desk is deleted. v2 (`src/v2`, default route) shows one home per metric. Classic stays at `/?classic=1`. Every money figure on a v2 screen is a field from the server payload. Views do not add, subtract, or extrapolate.
+Presentation only. The classic app (`src/ui`) is the default route and has every control. The desk (`src/v2`, at `/?desk=1`) is a read-only view that shows one home per metric; it has no Holdings tab (holdings are a classic screen) and no hero chart (the stream carries no history). Every money figure on a v2 screen is a field from the server payload. Views do not add, subtract, or extrapolate.
 
 Numbers in the prototype are **demo data**.
 

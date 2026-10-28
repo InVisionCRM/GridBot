@@ -310,9 +310,8 @@ function portfolio(bots: BotDesk[], asOf: number): PortfolioSnapshot {
     capitalInUsd: sumField(live.filter((b) => b.metrics.status === 'running'), (b) => b.metrics.capitalInUsd),
     feesTodayLiveUsd: null,
     feesTodayPaperUsd: null,
-    botsRunning: bots.filter((b) => b.metrics.status === 'running').length,
-    botsTotal: bots.length,
-    madeSeries: [],
+    botsRunning: live.filter((b) => b.metrics.status === 'running').length,
+    botsTotal: live.length,
   };
 }
 
@@ -413,6 +412,5 @@ export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = nu
     bots,
     prices: deskPrices(bots),
     activity: activityOf(events, new Map(bots.map((b) => [b.metrics.botId, { pair: b.pair, chain: b.chain }]))),
-    holdings: [],
   };
 }
