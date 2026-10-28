@@ -111,6 +111,12 @@ describe('grid / trend: trade profit before costs', () => {
     expect(kept.generated!.USDC).toBe(10);
     expect(kept.quote.totalPnl).toBeCloseTo(10, 12);
   });
+  it('what was put in, per coin: a liquidity bot funded with both coins lists both', () => {
+    const lp = { id: 'l2', kind: 'lp', status: 'running', base: 'ETH', quote: 'USDG', quoteSym: 'USDG', usdPerQuote: 1, startValue: 1468.5, startPrice: 2342.5, startedAt: 1, config: { capital: 1000, baseAmount: 0.2, bandPct: 0.1 }, pnl: { net: 0, price: 0, fees: 0, gas: 0, swapCost: 0, moveLoss: 0, equity: 1468.5, feeCoins: { base: 0, quote: 0 } }, totals: { gas: 0, swapCost: 0, moveLoss: 0 }, value: 1468.5 };
+    expect(lpMetrics(lp, AS_OF).capitalCoins).toEqual({ USDG: 1000, ETH: 0.2 });
+    expect(lpMetrics({ ...lp, config: { ...lp.config, baseAmount: 0 } }, AS_OF).capitalCoins).toEqual({ USDG: 1000 });
+    expect(gridMetrics({ id: 'g3', kind: 'grid', status: 'running', quoteSym: 'DAI', config: { totalCapitalQuote: 200 }, pnl: { realized: 0 }, stats: {}, trades: [] }, AS_OF).capitalCoins).toEqual({ DAI: 200 });
+  });
   it('a sell whose buy is not in the log: not itemized, still adds up', () => {
     const m = gridMetrics({ id: 'g2', kind: 'grid', status: 'running', quoteSym: 'DAI', config: { totalCapitalQuote: 200 }, pnl: { realized: 8 }, stats: { generated: 8 }, trades: [sell] }, AS_OF);
     expect(m.breakdownBasis!.itemized).toBe(false);

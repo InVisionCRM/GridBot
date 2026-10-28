@@ -6,7 +6,7 @@ import { Chart } from './Chart';
 import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { MoneyDetails, type DetailRow } from './MoneyDetails';
-import { ago, cls, dur, num, pct, px, qty, qtyFixed, sameShown } from './fmt';
+import { ago, bagFixed, cls, dur, num, pct, px, qty, sameShown } from './fmt';
 import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -312,8 +312,8 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="kpi-row detail-stats" data-testid="top-strip">
         {/* Kyle: the headline is Invested + Generated, in the bot's own coins (the server's capital in) */}
         <div className="kpi" data-testid="invested">
-          <span><L tip={`What was put into this bot at the start, in ${m?.quote.symbol ?? 'the quote coin'}.`}>Invested</L></span>
-          <div className="kpi-v coins2"><b>{m?.quote.capitalIn != null && m.quote.symbol ? qtyFixed(m.quote.capitalIn, m.quote.symbol, 5) : '—'}</b></div>
+          <span><L tip="What was put into this bot at the start, coin by coin.">Invested</L></span>
+          <div className="kpi-v coins2"><b>{bagFixed(m?.capitalCoins)}</b></div>
           <span className="sub">put in at the start</span>
         </div>
         <div className="kpi">
@@ -346,6 +346,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
               <p className="muted small">{openedText(b, pos)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>
             </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
             {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
+            {(b.aside?.base > 0 || b.aside?.quote > 0) && <p className="muted small">Set aside: {num(b.aside.base, 6)} {base} + {num(b.aside.quote, 6)} {q} (kept out so the position stays under 10% of the pool's active liquidity; it is counted in Value and goes back to your wallet when the bot closes)</p>}
           </div>
           <LpSettings key={`${b.profits?.mode}-${b.profits?.to ?? ''}`} b={b} act={act} busy={busy} />
         </div>

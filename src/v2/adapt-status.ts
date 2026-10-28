@@ -46,12 +46,9 @@ function screenCalc(calc: string): string {
     .join(' ');
 }
 
-/** Quote-coin units from capitalInQuote. A USD book has none. The source tag is not shown. */
+/** The coins put in, from capitalCoins (a liquidity bot funded with both coins lists both). A USD book has none. */
 function coinInvested(m: ServerMetrics): TokenQty[] {
-  const symbol = m.quote.symbol;
-  const amount = m.capitalInQuote;
-  if (amount == null || !symbol || symbol === 'USD') return [];
-  return [{ symbol, amount, usd: null }];
+  return Object.entries(m.capitalCoins ?? {}).map(([symbol, amount]) => ({ symbol, amount, usd: null }));
 }
 
 /** `keepZero` retains an explicit 0, such as a grid with no fills (`{PLS: 0}`). */

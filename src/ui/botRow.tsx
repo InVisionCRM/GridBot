@@ -6,7 +6,7 @@ import { chainOf, RefreshCtx } from './chains';
 import { botFacts, EST_HINT, metricsOf, unitsText } from './deskStats';
 import { isShortRun } from './runRate';
 import type { FeesToday } from '../metrics/feesToday';
-import { cls, dur, pctShown, px, qty, qtyFixed } from './fmt';
+import { bagFixed, cls, dur, pctShown, px, qty } from './fmt';
 import { ChainMark, TokenMark } from './icons';
 import { botView, gridName, lpName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { botSpark } from './series';
@@ -328,7 +328,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   const m = metricsOf(b);
   // Crypto units only: the value and fees in the bot's quote coin
   const value = m?.quote.currentValue ?? null;
-  const invested = m?.quote.capitalIn ?? null; // Kyle: each row shows Invested and Generated
+  const invested = m?.capitalCoins ?? null; // Kyle: each row shows Invested and Generated; a liquidity bot funded with both coins lists both
   const feesEarned = m?.quote.feesEarned ?? null;
   const facts = metrics ? botFacts(b) : null;
   const gen = generatedParts(b);
@@ -353,7 +353,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           </button>
           <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
           <span className="desk-range"><BotRange b={b} fills={fills} /></span>
-          {metrics && <span className="desk-inv" title="Invested: what was put into this bot at the start, in its quote coin">{invested == null ? '—' : qtyFixed(invested, pair.quote, 5)}<small className="inv-label"> invested</small></span>}
+          {metrics && <span className="desk-inv" title="Invested: what was put into this bot at the start, in its quote coin">{bagFixed(invested)}<small className="inv-label"> invested</small></span>}
           <span className="desk-val">{value == null ? '—' : qty(value, pair.quote, 5, false)}</span>
           {metrics && facts ? <>
             <span className="desk-gen" title={m?.calc ?? undefined}>

@@ -42,6 +42,9 @@ export const qty = (x: number | null | undefined, sym: string, sig = 5, sign = t
  * An amount with its trailing zeros kept to the same significant digits as `qty` ("3.5000 ETH", not "3.5 ETH"): an exact
  * amount such as what was put in reads as exact, not as a rounded figure that could be the value beside it.
  */
+/** Coins put in, each as an exact amount: "1,000.0 USDG + 0.20000 ETH". */
+export const bagFixed = (coins: Record<string, number> | null | undefined, sig = 5): string =>
+  (coins == null || !Object.keys(coins).length ? '—' : Object.entries(coins).map(([sym, v]) => qtyFixed(v, sym, sig)).join(' + '));
 export const qtyFixed = (x: number | null | undefined, sym: string, sig = 5, sign = false): string => {
   if (x == null || !Number.isFinite(x)) return '—';
   const p = Math.abs(x).toPrecision(sig);

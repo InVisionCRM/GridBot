@@ -109,6 +109,8 @@ export interface BotMetrics {
   /** Invested in the quote coin (= quote.capitalIn) and where it came from. */
   capitalInQuote: number | null;
   capitalInSource: CapitalSource;
+  /** What was put in, per coin (units). A liquidity bot funded with both coins lists both; capitalIn values them in the quote coin. */
+  capitalCoins: Record<string, number> | null;
   /** Extra: the same totals in the quote coin (the "show in quote coin" toggle and detail KPIs). */
   quote: {
     symbol: string | null; usdPerQuote: number | null; capitalIn: number | null; currentValue: number | null; totalPnl: number | null; realized: number | null; unrealized: number | null; feesEarned: number | null;
@@ -226,6 +228,8 @@ interface Core {
   /** Per-coin parts before bridge costs (finish adds bridge and checks nothing else is left over). */
   parts?: Record<string, Omit<CoinBreakdown, 'bridge' | 'generated'>> | null; basis?: BreakdownBasis | null;
   capitalSource?: CapitalSource;
+  /** What was put in, per coin (units): a liquidity bot funded with both coins lists both. Null when unknown. */
+  capitalCoins?: Record<string, number> | null;
   /** End of the bot's history for rates / estimates / APR (historyEnd); now when absent */
   end?: number;
 }
@@ -306,6 +310,7 @@ function finish(c: Core, now: number): BotMetrics {
     breakdownByCoin: breakdown, breakdownBasis: breakdown ? c.basis ?? null : null,
     // a multi-coin token trader keeps its money figures in dollars inside: no quote-coin Invested for it
     capitalInQuote: c.symbol === 'USD' ? null : c.capitalIn, capitalInSource: c.capitalIn == null || c.symbol === 'USD' ? null : c.capitalSource ?? null,
+    capitalCoins: c.capitalCoins ?? (c.capitalIn == null || c.symbol == null || c.symbol === 'USD' ? null : { [c.symbol]: c.capitalIn }),
     calc: `${GENERATED_CALC[c.kind]} ${RATES} ${TOTAL_CALC[c.kind]}`,
     quote: {
       symbol: c.symbol, usdPerQuote: c.k, capitalIn: c.capitalIn, currentValue: c.currentValue, totalPnl: total, realized: c.realized, unrealized: c.unrealized, feesEarned: c.feesEarned,
@@ -478,6 +483,14 @@ function closedLpPnl(b: Obj): Obj | null {
   return { equity, value, fees, gas, swapCost, moveLoss, net, price: equity - start - net, feeCoins: t.feeCoins };
 }
 
+/** What a liquidity bot was given, per coin: config.capital in the quote coin and config.baseAmount in the base coin. */
+function lpCapitalCoins(b: Obj): Record<string, number> | null {
+  const quote = unitOf(b.quoteSym) ?? unitOf(b.quote), base = unitOf(b.base);
+  const capital = num(b.config?.capital), baseAmount = num(b.config?.baseAmount) ?? 0;
+  if (capital == null || !quote) return null;
+  return baseAmount > 0 && base ? { [quote]: capital, [base]: baseAmount } : { [quote]: capital };
+}
+
 /** LP status (lpEngine.status()). `pnl` is LpEngine.pnl(): equity = value + sent − gas. */
 export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
   b = withMoveLoss(b);
@@ -494,6 +507,7 @@ export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
   const n = num(b.reranges);
   return finish({
     capitalSource: start == null ? null : 'start-value',
+    capitalCoins: lpCapitalCoins(b),
     kind: 'lp', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'lp' }, now),
     capitalIn: start, currentValue: p ? value : null, paidOut: sent, extraCost: gas ?? 0,
     realized: num(p?.net), unrealized: num(p?.price),
