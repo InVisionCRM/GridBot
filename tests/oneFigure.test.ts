@@ -37,7 +37,7 @@ import { gridMetrics, lpMetrics, trendMetrics } from '../src/metrics/botMetrics'
 import { BotRow } from '../src/ui/botRow';
 import { DeskTable } from '../src/ui/DeskTable';
 import { deskItems, sortItems } from '../src/ui/deskTableModel';
-import { pctShown, qtyFixed } from '../src/ui/fmt';
+import { pctShown, qty, qtyFixed } from '../src/ui/fmt';
 import { readFileSync } from 'node:fs';
 import { Bots } from '../src/ui/Bots';
 import { GridDetail } from '../src/ui/GridDetail';
@@ -287,6 +287,11 @@ describe('a percent that rounds to 0.0% reads "—" (display only; sort and APR 
     expect(pctShown(0.0005, 2, true)).toBe('+0.05%');
     expect(pctShown(-0.00004)).toBe('—');
     expect(pctShown(0.1234, undefined, true)).toBe('+12.34%');
+    // a zero amount carries no sign: "0 DAI", never "+0 DAI"
+    expect(qty(0, 'DAI')).toBe('0 DAI');
+    expect(qty(1.5, 'DAI')).toBe('+1.5 DAI');
+    expect(qty(-1.5, 'DAI')).toBe('−1.5 DAI');
+    expect(qtyFixed(0, 'DAI', 5, true)).toBe('0.0000 DAI');
     expect(pctShown(null)).toBe('—');
   });
   it('the Bots row and the Details: "—" for a tiny % (desktop and phone), and the sort still orders by the exact value', () => {

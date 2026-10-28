@@ -115,7 +115,7 @@ export function ModeAnalytics({ s, mode, seed }: { s: AnyObj; mode: 'live' | 'pa
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF((x) => ({ ...x, [k]: e.target.value }));
   const P = ({ k }: { k: 'today' | 'd7' | 'all' }) => {
     const p = per?.[k];
-    if (!p) return <>—</>;
+    if (!p || !bots.length) return <>—</>;
     const v = p.equityChange ?? p.realized;
     return <><AnimatedNumber value={v} format={(x) => inEth(x, ethUsd, true)} className={cls(v)} /><small className="muted"> from trades {inEth(p.realized, ethUsd, true)}{p.partial ? ' · partial' : ''}</small></>;
   };

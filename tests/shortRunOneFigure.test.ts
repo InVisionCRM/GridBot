@@ -48,7 +48,7 @@ describe('MED 1: the Bots row APR cell does not repeat the % column', () => {
   it('a run under a day shows a dash only in the APR cell, with the % in its own column', () => {
     const html = row(grid('short', 8.8 * H));
     const pctCell = text(cell(html, 'desk-pct'));
-    expect(pctCell).toMatch(/\d\.\d%/);
+    expect(pctCell).toMatch(/\d\.\d\d%/); // two decimals (Kyle)
     expect(text(cell(html, 'desk-apr'))).toBe('—');
   });
   it('a stale yearly figure on a run under a day still is not shown', () => {

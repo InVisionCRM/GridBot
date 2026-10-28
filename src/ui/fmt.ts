@@ -37,7 +37,7 @@ export const usd = (x: number | null | undefined, sign = false) => {
   return `${x < 0 ? '−' : sign && x > 0 ? '+' : ''}$${s}`;
 };
 export const qty = (x: number | null | undefined, sym: string, sig = 5, sign = true) =>
-  x == null || !Number.isFinite(x) ? '—' : `${sign ? (x >= 0 ? '+' : '−') : x < 0 ? '−' : ''}${Number(Math.abs(x).toPrecision(sig)).toLocaleString(undefined, { maximumFractionDigits: 10 })} ${sym}`;
+  x == null || !Number.isFinite(x) ? '—' : `${x > 0 ? (sign ? '+' : '') : x < 0 ? '−' : ''}${Number(Math.abs(x).toPrecision(sig)).toLocaleString(undefined, { maximumFractionDigits: 10 })} ${sym}`;
 /**
  * An amount with its trailing zeros kept to the same significant digits as `qty` ("3.5000 ETH", not "3.5 ETH"): an exact
  * amount such as what was put in reads as exact, not as a rounded figure that could be the value beside it.
@@ -47,7 +47,7 @@ export const qtyFixed = (x: number | null | undefined, sym: string, sig = 5, sig
   const p = Math.abs(x).toPrecision(sig);
   if (/e/i.test(p)) return qty(x, sym, sig, sign);
   const d = p.includes('.') ? p.split('.')[1].length : 0;
-  return `${sign ? (x >= 0 ? '+' : '−') : x < 0 ? '−' : ''}${Number(p).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })} ${sym}`;
+  return `${x > 0 ? (sign ? '+' : '') : x < 0 ? '−' : ''}${Number(p).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })} ${sym}`;
 };
 export const cls = (x: number | null | undefined) => (x == null ? '' : x > 0 ? 'pos' : x < 0 ? 'neg' : '');
 export const ago = (ms: number | null | undefined, now = Date.now()) => {

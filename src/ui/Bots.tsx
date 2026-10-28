@@ -69,7 +69,8 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
     <main className="home">
       <div className="page-head">
         <h1>Bots</h1>
-        <span className="head-links">
+        <span className="head-links" aria-label="New bot">
+          <small className="muted">New</small>
           <button type="button" onClick={() => nav({ v: 'new', kind: 'grid' })}>Grid</button>
           <button type="button" onClick={() => nav({ v: 'new', kind: 'trend' })}>Trend</button>
           <button type="button" onClick={() => nav({ v: 'new', kind: 'lp' })}>Liquidity</button>
