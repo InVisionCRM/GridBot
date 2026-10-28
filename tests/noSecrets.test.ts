@@ -75,6 +75,16 @@ describe('private key handling', () => {
     expect(() => createSigner({} as never)).toThrow(/^PRIVATE_KEY in \.env is not/);
     try { process.env.PRIVATE_KEY = 'not-a-key-SECRETVALUE'; createSigner({} as never); } catch (e) { expect((e as Error).message).not.toContain('SECRETVALUE'); }
   });
+  it('bridge quote keys are registered so redact masks them', async () => {
+    const { createBridgeProviders } = await import('../src/server/bridge');
+    const key = 'BridgeQuoteKey0123456789abcdEF';
+    createBridgeProviders({
+      keys: { across: key, relay: key, lifi: key },
+      http: async () => ({ status: 200, body: {}, retryAfterMs: null }),
+    });
+    expect(redact(`leak ${key}`)).toBe('leak [REDACTED]');
+    expect(redact(`header ${key}`)).not.toContain(key);
+  });
   it('.env is gitignored and .env.example holds only a placeholder', () => {
     expect(readFileSync(join(root, '.gitignore'), 'utf8')).toMatch(/^\.env$/m);
     expect(readFileSync(join(root, '.env.example'), 'utf8')).not.toMatch(/0x[0-9a-fA-F]{64}/);

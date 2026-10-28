@@ -1,5 +1,6 @@
 /** Notification JSON the service worker shows. No secrets, no endpoints. */
 import type { PushType } from '../../live/pushRules';
+import { redact } from '../bot/logger';
 
 export interface PushPayload {
   title: string;
@@ -32,9 +33,10 @@ export function pushTopic(tag: string): string | undefined {
 
 export function buildPayload(type: PushType, body: string, o: { tag?: string; title?: string; url?: string; ts?: number; botId?: string; mode?: 'paper' | 'live' } = {}): PushPayload {
   // Keep line breaks (the daily summary puts paper on its own line). Collapse the other whitespace.
-  const text = body.replace(/[^\S\n]+/g, ' ').replace(/ *\n */g, '\n').trim().slice(0, 280);
+  // Redacted before it is cut: an error in an Activity message can embed a keyed RPC URL.
+  const text = redact(body).replace(/[^\S\n]+/g, ' ').replace(/ *\n */g, '\n').trim().slice(0, 280);
   const url = o.url && o.url.startsWith('/') && !o.url.startsWith('//') ? o.url : '/';
-  let title = o.title ?? `GridBot · ${TITLES[type]}`;
+  let title = redact(o.title ?? `GridBot · ${TITLES[type]}`);
   if (o.mode === 'paper' && !title.startsWith('(paper)')) title = `(paper) ${title}`;
   return {
     title: title.slice(0, 120),

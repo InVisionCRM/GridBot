@@ -19,7 +19,8 @@ import { humanAmount } from '../live/amount';
 import { recenterAt } from '../live/recenter';
 import { LiveLevels, livePrice } from './live';
 import { L, Tip } from './Tip';
-import { showHalt } from './haltText';
+import { overrideText, showHalt } from './haltText';
+import { SafetyChecking, heldForSafety, useLiveStart, useSafetyChecking } from './SafetyChecking';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -55,10 +56,11 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
   const running = g.status === 'running';
   const funds = spendFunds(s, g.stable, +amount || 0, reserveCfg(g.limits));
   const problem = fundsProblem(funds, +amount || 0, g.mode);
-  const restart = () => act(async () => {
+  const live = useLiveStart(act, busy);
+  const restart = () => {
     if (g.mode === 'live' && !confirm(`Restart this LIVE grid with the new range? It signs real swaps.`)) return;
-    await botApi(`grids/${g.id}/start`, 'POST', { mode: g.mode, stable: g.stable, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalQuote: +amount });
-  });
+    live.run(g.mode === 'live', (extra, from) => botApi(`grids/${g.id}/start`, 'POST', { mode: g.mode, stable: g.stable, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalQuote: +amount, ...extra }, from));
+  };
   const coin = (x: number, sign = false) => `${sign && x > 0 ? '+' : ''}${humanAmount(x)} ${q}`;
   return (
     <div className="stack" style={{ gap: 10 }}>
@@ -76,6 +78,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
       {econ && <div className={`verdict ${econ.ok ? 'ok' : 'bad'}`}>{econ.ok
         ? <span>Each completed buy-then-sell nets about <b>{coin(econ.netPerRoundTrip, true)}</b> ({pct(econ.netPct, 2)}). Levels are {pct(econ.spacingPct, 2)} apart.</span>
         : <span><b className="neg">Each completed buy-then-sell {econ.netPerRoundTrip < 0 ? `loses about ${coin(-econ.netPerRoundTrip)}` : `nets only ${coin(econ.netPerRoundTrip)}`} at this size.</b> You can still restart it. {econ.reasons.join(' ')}</span>}</div>}
+      {live.banner}
       <div className="actions">
         <button type="button" className={`btn ${g.mode === 'live' ? 'live' : 'primary'}`} disabled={busy || running || !(+amount > 0) || !(+upper > +lower) || !!problem} onClick={restart}>Restart with this range</button>
         <span className={`small ${problem ? 'neg' : 'muted'}`}>{running ? 'Stop the grid first.' : problem ?? `Restarts as ${g.mode} on ${gridName(g)}. ${g.base} the old levels still hold stays in this grid's totals.`}</span>
@@ -191,6 +194,7 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
 }
 
 export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
+  const chk = useSafetyChecking();
   const g: AnyObj | undefined = s.grids.find((x: AnyObj) => x.id === id);
   if (!g) return null;
 
@@ -223,12 +227,14 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="detail-actions">
           {running
             ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
-            : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => botApi(`grids/${g.id}/resume`, 'POST'))}>Resume</button>}
+            : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => chk.run(g.mode === 'live', () => botApi(`grids/${g.id}/resume`, 'POST')))}>Resume</button>}
           <button type="button" className="btn danger" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
           <button type="button" className="btn danger" disabled={busy || running || !!g.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
         </div>
       </div>
       {showHalt(g, closing) && <p className="bot-why">{showHalt(g, closing)}</p>}
+      {overrideText(g) && <p className="bot-why">{overrideText(g)}</p>}
+      {(chk.on || heldForSafety(s, g.id)) && <SafetyChecking what={chk.on ? 'Checking safety before resuming…' : 'Checking safety after the restart… exits (stop-loss, take-profit, sells) still run; no new buys until it passes.'} />}
 
       <div className="notices">
         {g.available === false && <div className="banner error"><span className="grow">This market isn't available on the running server (its chain may be turned off {s.copy ? `by ${s.copy.host}` : 'in .env'}).</span></div>}

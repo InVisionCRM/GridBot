@@ -21,7 +21,7 @@ import {
 import { tradeStats, pushCapped, drawdown } from '../../market/stats';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type ChainReader, type Executor, type Fill, type MarketSnapshot, type Quote, type TxSender } from './chain';
 import type { Emit } from './activity';
-import { requestHalt, resolveHalt, StartStopped, systemHalt, type Halt } from './audit';
+import { isHalt, requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
 import type { Logger } from './logger';
 import type { Store } from './store';
 import type { SharedNonce, TxGate } from './txGate';
@@ -64,6 +64,8 @@ export interface TrendInFlight {
   deadline: number;
   approvalTxHash?: string;
   swapTxHash?: string;
+  /** Base units per native coin when the swap was sent (gas on a receipt reconciled after a restart). Absent on old records. */
+  basePerNative?: number;
 }
 
 export interface TrendTrade extends LiveTrade {
@@ -114,6 +116,8 @@ export interface TrendState {
   archivedAt?: number | null;
   /** Why this bot last stopped or closed. Absent on state saved before this field existed. */
   halt?: Halt | null;
+  /** This run was started LIVE with Start anyway (no completed safety check): who pressed it and why. Null otherwise. */
+  startOverride?: StartOverride | null;
 }
 
 export interface TrendDeps {
@@ -150,6 +154,8 @@ export interface TrendStartParams {
   limits?: Partial<SafetyLimits>;
   /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
   guard?: () => Halt | null;
+  /** LIVE only: go ahead when the safety check couldn't complete (never when it completed and failed). Audited. */
+  startAnyway?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -247,11 +253,15 @@ export class TrendEngine {
     const def = this.hub.def(p.quote);
     if (p.mode === 'live' && !this.hub.rt(def.chainId).signer) errs.push(noKey());
     if (errs.length) throw new Error(errs.join('; '));
+    // LIVE needs a fresh, completed safety check (Hub.liveCheck, 3 tries); Start anyway only when it couldn't complete.
+    let override: StartOverride | null = null;
     if (p.mode === 'live' && def.safety) {
-      let sf = def.safety ?? null;
-      try { sf = await this.hub.recheck(p.quote); } catch (e) { sf = this.hub.def(p.quote).safety ?? sf; this.log('warn', `safety re-check failed: ${(e as Error).message}`); }
-      if (sf?.stale && sf.liveAllowed) this.log('warn', `starting on the last known safety report from ${new Date(sf.at).toISOString()} (stale: ${sf.stale.why})`);
-      if (!sf?.liveAllowed) throw new Error(`LIVE blocked — ${this.hub.label(p.quote)} safety ${sf?.risk ?? 'unknown'}: ${(sf?.reasons ?? ['no safety check']).join(' ')}`);
+      const info = (await this.hub.liveCheck(p.quote, { startAnyway: !!p.startAnyway })).override;
+      if (info) {
+        override = startOverride(info, this.now());
+        this.log('warn', `Start anyway: starting LIVE without a completed safety check (${info.blockedBy}), on the report from ${new Date(info.lastKnownAt).toISOString()}`);
+        this.emit('info', `${p.name || this.hub.label(p.quote)}: Start anyway — LIVE without a completed safety check (${info.blockedBy})`, { level: 'warn', notify: true, data: { startOverride: override } });
+      }
     }
     const executor = this.makeExecutor(p.mode, p.quote);
     if (p.mode === 'live' && def.quote.native) {
@@ -275,7 +285,7 @@ export class TrendEngine {
       status: 'running', cfg, limits, capital: p.capital, cash: p.capital, position: null, queue: [], inFlight: null,
       trades: p.mode === 'paper' ? [] : keepTrades, signals: [], lastBarT: null, cooldownUntil: 0, lastPrice: price, lastPriceAt: this.now(),
       lastNote: 'waiting for the next closed candle', blocked: 0, startedAt: this.now(), startPrice: price, equity: [[this.now(), p.capital]],
-      closing: false, archivedAt: null, halt: null,
+      closing: false, archivedAt: null, halt: null, startOverride: override,
     };
     // Don't act on the candle that closed before start: wait for the next close.
     const k = closedOnly(this.d.candles(p.quote, p.tf), p.tf, Math.floor(this.now() / 1000));
@@ -286,7 +296,18 @@ export class TrendEngine {
     this.emit('started', `Trend bot started — ${this.state.name} (${p.mode})`, { level: 'success' });
   }
 
-  resume() {
+  /** Record that this live run goes on without a completed safety check (MultiBot's boot check). Saved. */
+  setStartOverride(o: StartOverride) {
+    this.state.startOverride = o;
+    this.save();
+  }
+
+  /**
+   * `override`: MultiBot ran the fresh safety check (Hub.liveCheck) for a LIVE resume. A Halt-like record when it
+   * couldn't complete and the bot resumes on the last passing report (audited); null when it passed; undefined when
+   * called directly (no check: tests, paper).
+   */
+  resume(override?: StartOverride | null) {
     if (this.state.status === 'running') return;
     if (!this.state.capital) throw new Error('Nothing to resume.');
     if (this.executor instanceof UnavailableExecutor) throw new Error(this.lastError ?? 'market unavailable');
@@ -296,6 +317,7 @@ export class TrendEngine {
     this.state.closing = false;
     this.state.archivedAt = null;
     this.state.halt = null;
+    if (override !== undefined) this.state.startOverride = override;
     this.closeNote = null;
     this.save();
     this.log('info', 'Resumed.');
@@ -303,6 +325,7 @@ export class TrendEngine {
   }
 
   stop(why?: string | Halt) {
+    this.safetyHold = null;
     const halt = resolveHalt(why, this.now());
     const word = typeof why === 'string' ? why : halt.detail || 'STOPPED';
     const dropped = this.state.queue.length;
@@ -440,6 +463,37 @@ export class TrendEngine {
     return this.state.cash + (this.state.position ? this.state.position.pls * price : 0);
   }
 
+  /**
+   * MultiBot's boot safety hold (a restart, until the market's fresh check answers):
+   * - 'exits': exits only. Stops, take-profits and sells of what is held still fire and execute; no new entry or buy.
+   * - a Halt: the check failed. The exits already queued or in flight settle, nothing new is triggered, then the bot
+   *   stops with this Halt.
+   * Not persisted: a restart holds again.
+   */
+  safetyHold: null | 'exits' | Halt = null;
+
+  /** Boot hold (exits only): a queued entry (buy) is dropped; a queued exit stays. */
+  holdForSafety() {
+    this.safetyHold = 'exits';
+    if (!this.state.queue.some((q) => q.side === 'buy')) return;
+    this.state.queue = this.state.queue.filter((q) => q.side !== 'buy');
+    this.save();
+  }
+  releaseSafetyHold() { this.safetyHold = null; }
+  /** Boot check failed: stop now, or once the exit already queued / in flight has settled. */
+  settleThenStop(halt: Halt) {
+    if (this.state.status !== 'running') { this.safetyHold = null; return; } // stopped meanwhile (by hand): leave it
+    if (!this.state.inFlight && !this.state.queue.some((q) => q.side === 'sell')) { this.safetyHold = null; this.stop(halt); return; }
+    this.safetyHold = halt;
+    this.log('warn', `safety check failed: settling the exit already triggered, then stopping (${halt.detail})`);
+  }
+  private finishSettle() {
+    const h = this.safetyHold;
+    if (!isHalt(h) || this.state.inFlight || this.state.queue.some((q) => q.side === 'sell')) return;
+    this.safetyHold = null;
+    this.stop(h);
+  }
+
   /** One poll. `price` = sell-side spot (quote/PLS) from the shared price batch. */
   async tick(price?: number): Promise<void> {
     if (this.ticking) return;
@@ -454,7 +508,9 @@ export class TrendEngine {
       if (s.closing && s.position && !s.inFlight && !s.queue.some((q) => q.side === 'sell')) {
         this.enqueue({ side: 'sell', reason: 'manual', amount: s.position.pls, triggerPrice: p, manual: true });
       }
-      if (s.status === 'running' && !s.inFlight && !s.queue.length && !s.closing) {
+      // Boot hold 'exits': stops / take-profit / exit signals still fire; entries don't (evaluateCandles). Failed check
+      // (a Halt): nothing new fires, the exit already triggered settles (drain), then it stops (finishSettle).
+      if (s.status === 'running' && !s.inFlight && !s.queue.length && !s.closing && !isHalt(this.safetyHold)) {
         if (s.position) {
           const why = priceExit(s.position.risk, p);
           if (why) {
@@ -467,6 +523,7 @@ export class TrendEngine {
       if (s.startedAt && (!s.equity.length || this.now() - s.equity[s.equity.length - 1][0] >= 60_000)) pushCapped(s.equity, [this.now(), this.equityNow(p)], 3000);
       this.save();
       await this.drain();
+      this.finishSettle();
       if (this.state.closing && !this.state.inFlight && !this.state.queue.length && !this.state.position) this.finishClose();
       // A tick that got through means the last error (often one RPC timeout) is over; the Activity log keeps it.
       // A close that could not sell keeps that reason on the row.
@@ -520,6 +577,11 @@ export class TrendEngine {
       return;
     }
     if (!sig.enter) return;
+    if (this.safetyHold) {
+      this.signal('filtered', last.t, `${sig.note} — entry held until the safety check after the restart passes`);
+      this.emit('blocked', `${s.name}: entry not taken — held until the safety check after the restart passes`, { level: 'warn' });
+      return;
+    }
     if (last.t < s.cooldownUntil) { this.signal('cooldown', last.t, `entry signal ignored: cooldown until ${new Date(s.cooldownUntil * 1000).toISOString()}`); return; }
     const atrV = ind.atr[i];
     if (atrV == null || !(atrV > 0)) return;
@@ -558,7 +620,9 @@ export class TrendEngine {
     this.draining = true;
     try {
       while (this.state.status === 'running' && !this.state.inFlight && this.state.queue.length) {
-        const job = this.state.queue[0];
+        // Boot hold: only exits (sells) run; an entry isn't sent until the check passes.
+        const job = this.safetyHold ? this.state.queue.find((q) => q.side === 'sell') : this.state.queue[0];
+        if (!job) break;
         const run = () => this.runJob(job);
         const gate = this.gate;
         if (gate) await gate.run(run); else await run();
@@ -599,7 +663,7 @@ export class TrendEngine {
       }
       if (q.priceImpact > s.limits.maxPriceImpact) return this.skip(job, `price impact ${(q.priceImpact * 100).toFixed(2)}% > cap ${(s.limits.maxPriceImpact * 100).toFixed(2)}%`);
       if (!q.balanceOk) return this.skip(job, `insufficient balance (${q.balanceNote})`);
-      s.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline) };
+      s.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative };
       this.save();
       try {
         const f = await this.executor.execute(q, {
@@ -690,12 +754,13 @@ export class TrendEngine {
     const job = f.job;
     const drop = () => { this.state.inFlight = null; this.state.queue = this.state.queue.filter((q) => q.id !== job.id); };
     if (!f.swapTxHash) { drop(); this.skip(job, 'interrupted before swap was sent'); this.save(); return; }
-    const r = await this.executor.recover(f.swapTxHash, f.tokenOut, f.decimalsOut);
+    const r = await this.executor.recover(f.swapTxHash, f.tokenOut, f.decimalsOut, f.basePerNative);
     if (r == null) {
       if (this.now() / 1000 > f.deadline + 300) { drop(); this.skip(job, `swap ${f.swapTxHash} never mined before its deadline`); this.save(); }
       return;
     }
     drop();
+    if (r.gasUnknown) this.log('warn', `swap ${f.swapTxHash}: gas ${r.gasNative.toPrecision(4)} native not booked — the base/native rate was not saved with the swap and could not be read after the restart`);
     if (r.ok && r.amountOutHuman > 0) {
       this.recordFill(job, { txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman, amountOutHuman: r.amountOutHuman, gasPls: r.gasPls, fromReceipt: true }, f.price);
     } else {
@@ -734,7 +799,7 @@ export class TrendEngine {
       moveCount: trades.filter((t) => !t.failed).length,
       lastMoveAt: trades.reduce((m, t) => (!t.failed ? Math.max(m, t.timestamp || 0) : m), 0) || null,
       equityHist: s.equity.slice(-600),
-      blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, lastError: this.lastError,
+      blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, lastError: this.lastError,
     };
   }
 }
