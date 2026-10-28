@@ -48,6 +48,8 @@ export interface LoginGateFile {
   recent: number[];
   /** sha256 of Tailscale-User-Login values that logged in as the owner (plus HOST_TAILNET_LOGINS) */
   ownerIds: string[];
+  /** The owner session number (HOST_SESSION) ownerIds were learned under; a different one clears them */
+  ownerIdsSession?: number;
 }
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -67,7 +69,9 @@ export class LoginGate {
   constructor(private readonly now: () => number = Date.now, private readonly store?: Store<LoginGateFile>) {
     let loaded: LoginGateFile | null = null;
     try { loaded = store?.load() ?? null; } catch { loaded = null; }
-    this.f = loaded?.v === 1 ? { v: 1, names: loaded.names ?? {}, recent: loaded.recent ?? [], ownerIds: loaded.ownerIds ?? [] } : { v: 1, names: {}, recent: [], ownerIds: [] };
+    this.f = loaded?.v === 1
+      ? { v: 1, names: loaded.names ?? {}, recent: loaded.recent ?? [], ownerIds: loaded.ownerIds ?? [], ...(loaded.ownerIdsSession != null ? { ownerIdsSession: loaded.ownerIdsSession } : {}) }
+      : { v: 1, names: {}, recent: [], ownerIds: [] };
   }
 
   private save() {
@@ -121,6 +125,18 @@ export class LoginGate {
     const k = sha(login);
     if (!(k in this.f.names)) return;
     delete this.f.names[k];
+    this.save();
+  }
+
+  /**
+   * The owner's current session number (HOST_SESSION; `npm run host:password` bumps it). Learned tailnet logins from
+   * another (or an unknown) session number are forgotten: a password change revokes them, like the owner's device and
+   * session cookies. HOST_TAILNET_LOGINS in .env is not affected. The failure counters are kept.
+   */
+  ownerCredential(session: number) {
+    if (this.f.ownerIdsSession === session) return;
+    this.f.ownerIds = [];
+    this.f.ownerIdsSession = session;
     this.save();
   }
 

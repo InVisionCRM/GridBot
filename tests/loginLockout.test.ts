@@ -6,7 +6,8 @@
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -18,6 +19,7 @@ import {
 import { DEVICE_COOKIE, hashPassword, HOST_ID, signDevice, signSession } from '../src/server/friends/auth';
 import { createGateway } from '../src/server/friends/gateway';
 import { OwnerLogin } from '../src/server/friends/owner';
+import { loginGateStore } from '../src/server/friends/host';
 import { subKey } from '../src/server/friends/vault';
 
 const secret = randomBytes(32);
@@ -104,9 +106,9 @@ describe('gateway: an attacker cannot lock the owner out', () => {
   const servers: http.Server[] = [];
   afterEach(() => { for (const s of servers.splice(0)) { s.closeAllConnections?.(); s.close(); } });
 
-  async function setup(o: { tailnetLogins?: string[]; file?: string } = {}) {
+  async function setup(o: { tailnetLogins?: string[]; file?: string; session?: number; pass?: typeof ownerHash } = {}) {
     const gate = new LoginGate(Date.now, o.file ? new JsonStore<LoginGateFile>(o.file) : new MemoryStore<LoginGateFile>());
-    const owner = new OwnerLogin({ login: 'owner', pass: ownerHash, session: 2, tailnetLogins: o.tailnetLogins }, gate);
+    const owner = new OwnerLogin({ login: 'owner', pass: o.pass ?? ownerHash, session: o.session ?? 2, tailnetLogins: o.tailnetLogins }, gate);
     const friends = new Friends(new MemoryStore<FriendsFile>(), secret, { gate, reserved: (n) => owner.isOwnerName(n) });
     friends.setHost({ name: 'Kyle', address: `https://${PUBLIC}` });
     const app = createGateway({
@@ -169,9 +171,13 @@ describe('gateway: an attacker cannot lock the owner out', () => {
     await lockFromShared(port);
     const cookie = dev.split(';')[0];
     expect((await post(port, { ...kyleTaggedNoLogin, cookie }, PASS)).status).toBe(303);
-    // an owner session cookie from before (expired, older password) also marks a known device
-    const oldSession = `gb_session=${signSession(sessionKey, { f: HOST_ID, s: 1, e: Date.now() - 1000, role: 'host' })}`;
-    expect((await post(port, { ...kyleTaggedNoLogin, cookie: oldSession }, PASS)).status).toBe(303);
+    // an expired owner session cookie for the current password (session 2) also marks a known device
+    const expired = `gb_session=${signSession(sessionKey, { f: HOST_ID, s: 2, e: Date.now() - 1000, role: 'host' })}`;
+    expect((await post(port, { ...kyleTaggedNoLogin, cookie: expired }, PASS)).status).toBe(303);
+    // one from an older password (session 1) does not (#62 review: a password change revokes it)
+    const oldSession = `gb_session=${signSession(sessionKey, { f: HOST_ID, s: 1, e: Date.now() + 1e6, role: 'host' })}`;
+    await lockFromShared(port); // the logins above cleared the lock
+    expect(locked(await post(port, { ...kyleTaggedNoLogin, cookie: oldSession }, PASS))).toBe(true);
   });
 
   it('this computer (loopback, no forwarding) logs in while locked', async () => {
@@ -197,6 +203,47 @@ describe('gateway: an attacker cannot lock the owner out', () => {
     for (let i = 0; i < GLOBAL_FAILS_PER_MIN; i++) gate.fail(`spray-${i}`);
     expect((await post(port, shared, PASS)).text).toMatch(/Wait a minute/);
     expect((await post(port, kyleTailnet, PASS)).status).toBe(303);
+  });
+
+  it('#62 review: a password change (new HOST_SESSION) revokes known devices, old owner cookies and learned tailnet logins; the owner still logs in', async () => {
+    const file = tmpFile();
+    const NEW = 'a brand new owner passphrase';
+    const newHash = await hashPassword(NEW);
+    // Before: the owner logs in from a tailnet device (tailnet login learned) and gets a device cookie + session.
+    const a = await setup({ file, session: 2 });
+    const first = await post(a.port, kyleTailnet, PASS);
+    expect(first.status).toBe(303);
+    const dev = first.cookies.find((c) => c.startsWith(`${DEVICE_COOKIE}=`))!.split(';')[0];
+    const sess = first.cookies.find((c) => c.startsWith('gb_session='))!.split(';')[0];
+    await lockFromShared(a.port);
+    expect((await post(a.port, { ...kyleTaggedNoLogin, cookie: dev }, PASS)).status).toBe(303); // trusted before
+    // npm run host:password: new hash, HOST_SESSION 2 → 3, restart (same counters file).
+    const b = await setup({ file, session: 3, pass: newHash });
+    await lockFromShared(b.port);
+    for (const [what, h] of [
+      ['old device cookie', { ...kyleTaggedNoLogin, cookie: dev }],
+      ['old owner session cookie', { ...kyleTaggedNoLogin, cookie: sess }],
+      ['tailnet login learned under the old password', kyleTailnet],
+    ] as const) expect(locked(await post(b.port, h, NEW)), what).toBe(true);
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ ownerIds: [], ownerIdsSession: 3 });
+    // The owner still gets in: from this computer while locked, then that browser is a known device again.
+    expect((await post(b.port, local, PASS)).status).toBe(400); // the old password is dead
+    const fresh = await post(b.port, local, NEW);
+    expect(fresh.status).toBe(303);
+    const dev2 = fresh.cookies.find((c) => c.startsWith(`${DEVICE_COOKIE}=`))!.split(';')[0];
+    await lockFromShared(b.port);
+    expect((await post(b.port, { ...kyleTaggedNoLogin, cookie: dev2 }, NEW)).status).toBe(303);
+    // and with no lock in place the new password works from any device
+    const c = await setup({ session: 3, pass: newHash });
+    expect((await post(c.port, kyleTaggedNoLogin, NEW)).status).toBe(303);
+   }, 30_000); // ~25 scrypt checks: slow on a loaded CI runner
+
+  it('HOST_TAILNET_LOGINS (set by hand in .env) still counts after a password change', async () => {
+    const file = tmpFile();
+    await setup({ file, session: 2, tailnetLogins: [KYLE] });
+    const b = await setup({ file, session: 3, tailnetLogins: [KYLE] });
+    await lockFromShared(b.port);
+    expect((await post(b.port, kyleTailnet, PASS)).status).toBe(303);
   });
 
   it('a lock set before a restart still holds after it, and the bypass still works', async () => {
@@ -265,17 +312,87 @@ describe('gateway: forwarded headers cannot fake a trusted source', () => {
 
   it('forged or foreign cookies are not a known device', async () => {
     const { port } = await lockedGateway();
-    const genuine = signDevice(sessionKey, Date.now());
-    const otherKey = signDevice(subKey(randomBytes(32), 'session'), Date.now());
+    const genuine = signDevice(sessionKey, Date.now(), 1);
+    const otherKey = signDevice(subKey(randomBytes(32), 'session'), Date.now(), 1);
     const friendSession = signSession(sessionKey, { f: 'some-friend-id', s: 1, e: Date.now() + 1e6 });
     for (const cookie of [
       `${DEVICE_COOKIE}=${genuine.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'))}`, // tampered signature
       `${DEVICE_COOKIE}=${otherKey}`,                                             // another server's key
-      `${DEVICE_COOKIE}=d1.${Date.now()}.`,                                       // no signature
+      `${DEVICE_COOKIE}=d2.1.${Date.now()}.`,                                     // no signature
+      `${DEVICE_COOKIE}=${signDevice(sessionKey, Date.now(), 0)}`,                // genuine, but for another password
       `gb_session=${friendSession}`,                                              // a friend's session
     ]) {
       const r = await post(port, { host: PUBLIC, 'x-forwarded-for': '100.70.1.2', 'tailscale-user-login': 'friend@example.com', cookie });
       expect(r.text).toMatch(/Too many wrong passwords/);
     }
+  });
+});
+
+describe('#62 review: failed logins never write to disk on the event loop', () => {
+  it('a burst of wrong passwords makes no synchronous write; one coalesced write lands later, atomically', async () => {
+    const file = tmpFile();
+    const store = loginGateStore(file);
+    const g = new LoginGate(Date.now, store);
+    for (let i = 0; i < 40; i++) g.fail(i % 2 ? 'owner' : `spray-${i}`);
+    expect(store.writes).toBe(0); // nothing written inside fail()
+    expect(existsSync(file)).toBe(false);
+    await store.idle();
+    expect(store.writes).toBe(1); // 40 failures, one write
+    expect(readdirSync(dirname(file)).filter((f) => f.includes('.tmp'))).toEqual([]); // temp file renamed into place
+    const again = new LoginGate(Date.now, loginGateStore(file)); // restart
+    expect(again.lockedFor('owner')).toBeGreaterThan(0);
+    expect(() => again.begin('anyone')).toThrow(/Wait a minute/);
+  });
+
+  it('a later burst keeps the previous good file as .bak; flush() (shutdown) writes what is pending', async () => {
+    const file = tmpFile();
+    const store = loginGateStore(file);
+    const g = new LoginGate(Date.now, store);
+    lockOut(g, 'alex');
+    await store.idle();
+    lockOut(g, 'sam');
+    expect(existsSync(`${file}.bak`)).toBe(false);
+    store.flush();
+    expect(existsSync(`${file}.bak`)).toBe(true);
+    const again = new LoginGate(Date.now, loginGateStore(file));
+    expect(again.lockedFor('alex')).toBeGreaterThan(0);
+    expect(again.lockedFor('sam')).toBeGreaterThan(0);
+  });
+
+  it('an old login-limits.json (no ownerIdsSession) still loads its locks', async () => {
+    const file = tmpFile();
+    const old = new LoginGate(Date.now, new JsonStore<LoginGateFile>(file));
+    lockOut(old, 'owner');
+    old.trustOwnerId(KYLE);
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    delete raw.ownerIdsSession;
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(file, JSON.stringify(raw));
+    const g = new LoginGate(Date.now, loginGateStore(file));
+    expect(g.lockedFor('owner')).toBeGreaterThan(0);
+    // unknown credential version: learned tailnet logins are dropped once (relearned at the next owner log-in)
+    new OwnerLogin({ login: 'owner', pass: ownerHash, session: 1 }, g);
+    expect(g.isOwnerId(KYLE)).toBe(false);
+    expect(g.lockedFor('owner')).toBeGreaterThan(0);
+  });
+});
+
+describe('#62 review: FriendsHost wiring', () => {
+  it('the host keeps login-limits.json in the async store, and stop() writes what is pending', async () => {
+    const { FriendsHost } = await import('../src/server/friends/host');
+    const dataDir = mkdtempSync(join(tmpdir(), 'gate-host-'));
+    const host = new FriendsHost({
+      secret, dataDir, entry: 'unused.js', hostEnv: {}, hostPort: 1, port: 0, publicDir: null,
+      hostAddresses: () => [], say: () => undefined, hostAuth: { login: 'owner', pass: ownerHash, session: 1 },
+    });
+    const gate = (host as unknown as { gate: LoginGate }).gate;
+    const file = join(dataDir, 'friends', 'login-limits.json');
+    await new Promise((r) => setTimeout(r, 300)); // the owner-credential save at start lands
+    const before = existsSync(file) ? readFileSync(file, 'utf8') : '';
+    lockOut(gate, 'owner');
+    expect(existsSync(file) ? readFileSync(file, 'utf8') : '').toBe(before); // not written inside fail()
+    host.stop();
+    const again = new LoginGate(Date.now, loginGateStore(file));
+    expect(again.lockedFor('owner')).toBeGreaterThan(0);
   });
 });

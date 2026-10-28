@@ -80,7 +80,8 @@ export function createGateway(d: GatewayDeps) {
   const LOCAL_NAME = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
   /**
    * Whether an owner log-in may skip the lockout (never the password). Called only when the request is not Funnel.
-   *  - known device: a genuine owner-device cookie, or a genuine owner session cookie (any age or session number);
+   *  - known device: a genuine owner-device cookie, or a genuine owner session cookie (any age), either one signed for
+   *    the current owner session number: changing the password (npm run host:password bumps HOST_SESSION) revokes them;
    *  - this computer: a loopback socket and loopback Host with no forwarding or Tailscale header at all (tailscale serve
    *    always sets X-Forwarded-For and the public Host, so nothing it forwards qualifies);
    *  - the owner's own tailnet login: Tailscale-User-Login on a forwarded tailnet request (serve deletes client-sent
@@ -94,8 +95,9 @@ export function createGateway(d: GatewayDeps) {
     const rawId = hd['tailscale-user-login'];
     const tailnetId = forwarded && typeof rawId === 'string' && rawId.trim() ? rawId.trim() : null;
     const t = now();
-    const knownDevice = readDevice(d.sessionKey, cookieValue(hd.cookie, DEVICE_COOKIE), t) != null
-      || (() => { const s = readSession(d.sessionKey, cookieValue(hd.cookie, COOKIE), 0); return s?.role === 'host'; })();
+    const session = d.owner?.session ?? null;
+    const knownDevice = session != null && (readDevice(d.sessionKey, cookieValue(hd.cookie, DEVICE_COOKIE), t, session) != null
+      || (() => { const s = readSession(d.sessionKey, cookieValue(hd.cookie, COOKIE), 0); return !!s && s.role === 'host' && !!d.owner?.current(s); })());
     const local = !forwarded && !tsHeaders && isLoopbackIp(req.socket.remoteAddress) && LOCAL_NAME.test(String(hd.host ?? ''));
     return { trusted: knownDevice || local || !!d.owner?.isOwnerTailnet(tailnetId), tailnetId };
   };
@@ -142,7 +144,7 @@ export function createGateway(d: GatewayDeps) {
         if (res.locals.funnel) throw new Error(FUNNEL_OWNER_REFUSED);
         const o = await d.owner.login(name, password, ownerTrust(req));
         stamp(res, ownerSession(o.session));
-        res.append('Set-Cookie', deviceCookie(signDevice(d.sessionKey, now())));
+        res.append('Set-Cookie', deviceCookie(signDevice(d.sessionKey, now(), o.session)));
       } else stamp(res, friendSession(await d.friends.login(name, password)));
       res.redirect(303, '/');
     } catch (e) { html(res, 400, loginPage(host(), { error: (e as Error).message, name })); }

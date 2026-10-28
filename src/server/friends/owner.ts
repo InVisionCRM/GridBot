@@ -37,7 +37,13 @@ export function ownerLoginFrom(raw: string | undefined): string {
 }
 
 export class OwnerLogin {
-  constructor(private readonly cfg: OwnerConfig | null, private readonly gate: LoginGate) {}
+  constructor(private readonly cfg: OwnerConfig | null, private readonly gate: LoginGate) {
+    // A password change (new HOST_SESSION) forgets the tailnet logins learned under the old password (#62 review).
+    if (cfg) gate.ownerCredential(cfg.session);
+  }
+
+  /** The owner's current session number (HOST_SESSION), or null when no owner password is set. */
+  get session(): number | null { return this.cfg?.session ?? null; }
 
   get enabled(): boolean { return this.cfg != null; }
   /** Normalized login, or null when no owner password is set. */
