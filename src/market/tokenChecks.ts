@@ -13,6 +13,8 @@ export function mintInBytecode(code: string | null | undefined): boolean | null 
 /**
  * V2 LP token: burned (or dead) share vs the owner's share.
  * false = at least 90% burned (treated as locked). true = the owner still holds more than half. null = not clear.
+ * V3 liquidity is a position NFT, not this token — see v3LpLock.ts.
+ * The live assess path calls this only when `lpUnlockCheck` is on.
  */
 export function lpRemovable(total: bigint, burned: bigint, ownerBalance: bigint): boolean | null {
   if (total <= 0n) return null;

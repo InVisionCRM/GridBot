@@ -13,7 +13,7 @@ export interface GridPrefill { pair: string; bandPct: number; gridCount: number;
 /** A liquidity range from Opportunities opened in New bot. */
 export interface LpPrefill { pair: string; bandPct: number; nonce: number }
 
-export const TOOL_TABS = [['chart', 'Charts'], ['backtest', 'Backtest'], ['analytics', 'Analytics'], ['markets', 'Markets'], ['convert', 'Convert'], ['alerts', 'Alerts'], ['system', 'System'], ['friends', 'Friends']] as const;
+export const TOOL_TABS = [['chart', 'Charts'], ['backtest', 'Backtest'], ['analytics', 'Analytics'], ['markets', 'Markets'], ['convert', 'Convert'], ['system', 'System'], ['friends', 'Friends']] as const;
 export type ToolTab = (typeof TOOL_TABS)[number][0];
 
 export type HoldingsFocus = 'wallet' | 'lp' | 'fees' | 'bots' | 'chains' | 'how';
@@ -28,7 +28,19 @@ export type View =
   | { v: 'grid'; id: string }
   | { v: 'trend'; id: string }
   | { v: 'lp'; id: string }
-  | { v: 'tools'; tab: ToolTab; btPrefill?: BtPrefill; analytics?: 'live' | 'paper' };
+  | { v: 'tools'; tab: ToolTab; btPrefill?: BtPrefill; analytics?: 'live' | 'paper' }
+  | { v: 'alerts' };
+const STORED_VIEWS = ['home', 'bots', 'more', 'opps', 'auto', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools', 'alerts'] as const;
+
+/** A saved tools/alerts tab is the Alerts screen now. Unknown shapes are dropped. */
+export function normalizeView(raw: unknown): View | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const v = raw as { v?: string; tab?: string };
+  if (v.v === 'tools' && v.tab === 'alerts') return { v: 'alerts' };
+  if (typeof v.v === 'string' && (STORED_VIEWS as readonly string[]).includes(v.v)) return raw as View;
+  return null;
+}
+
 export type Nav = (v: View) => void;
 export type BotKind = 'grid' | 'trend' | 'lp';
 /** Detail view of a bot */

@@ -63,7 +63,9 @@ describe('token trader: off wins over a tick already in flight', () => {
     s.t.turnOn();
     await s.t.tick();
     expect(s.t.status().positions).toHaveLength(0);
-    expect(k).toBe(1);
+    expect(s.t.status().trades).toHaveLength(0);
+    // Main overlaps the safety reads (read-only), so all three started before the off landed; none of them buys.
+    expect(k).toBe(3);
   });
 
   it('a snipe hit that arrives after off is not assessed or bought', async () => {
