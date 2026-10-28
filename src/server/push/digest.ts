@@ -1,9 +1,9 @@
 /** Group a burst of grid fills into one lock-screen alert. */
 import { FILL_DIGEST_LIMIT, FILL_DIGEST_QUIET_MS, FILL_DIGEST_WINDOW_MS } from '../../live/pushRules';
 
-export interface DigestItem { title: string; body: string; tag: string }
-export interface DigestSend { kind: 'send'; title: string; body: string; tag: string }
-export interface DigestBatch { title: string; body: string; tag: string; count: number }
+export interface DigestItem { title: string; body: string; tag: string; mode?: 'paper' | 'live' }
+export interface DigestSend { kind: 'send'; title: string; body: string; tag: string; mode?: 'paper' | 'live' }
+export interface DigestBatch { title: string; body: string; tag: string; count: number; mode?: 'paper' | 'live' }
 
 /** Held lines kept for one digest. Past this, only the count grows. */
 export const DIGEST_HOLD_CAP = 200;
@@ -38,7 +38,7 @@ export class FillDigester {
       this.lastHeldAt = t;
       return { kind: 'hold' };
     }
-    return { kind: 'send', title: item.title, body: item.body, tag: item.tag };
+    return { kind: 'send', title: item.title, body: item.body, tag: item.tag, mode: item.mode };
   }
 
   /**
@@ -54,11 +54,13 @@ export class FillDigester {
     const n = this.held.length + this.overflow;
     const lines = this.held.slice(0, 3).map((h) => h.body);
     const more = n > lines.length ? ` (+${n - lines.length} more)` : '';
+    const paper = this.held.every((h) => h.mode === 'paper');
     return {
       title: `GridBot · ${n} more grid fill${n === 1 ? '' : 's'}`,
       body: `${lines.join(' · ')}${more}`,
       tag: 'grid-fill-digest',
       count: n,
+      ...(paper ? { mode: 'paper' as const } : {}),
     };
   }
 

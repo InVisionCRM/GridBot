@@ -134,19 +134,19 @@ export class PushService {
     // The auto-move text is the alert. Don't also send "out for 10 min" for this same stay outside.
     if (type === 'lp_range' && e.botId) this.lp.suppressOut(e.botId);
     if (type === 'grid_fill') {
-      const item = { title: 'GridBot · Grid fill', body: e.msg, tag: `fill-${e.botId ?? 'g'}-${this.now().toString(36)}` };
+      const item = { title: 'GridBot · Grid fill', body: e.msg, tag: `fill-${e.botId ?? 'g'}-${this.now().toString(36)}`, mode: e.mode };
       const r = this.digest.offer(item);
       if (r.kind === 'hold') return;
-      await this.deliver(buildPayload('grid_fill', r.body, { title: r.title, tag: r.tag, ts: this.now(), botId: e.botId }));
+      await this.deliver(buildPayload('grid_fill', r.body, { title: r.title, tag: r.tag, ts: this.now(), botId: e.botId, mode: r.mode }));
       return;
     }
-    await this.deliver(buildPayload(type, e.msg, { ts: this.now(), botId: e.botId }));
+    await this.deliver(buildPayload(type, e.msg, { ts: this.now(), botId: e.botId, mode: e.mode }));
   }
 
   private async tickBody() {
     const batch = this.digest.flush();
     if (batch && this.allowed('grid_fill')) {
-      const sent = await this.deliver(buildPayload('grid_fill', batch.body, { title: batch.title, tag: batch.tag, ts: this.now() }));
+      const sent = await this.deliver(buildPayload('grid_fill', batch.body, { title: batch.title, tag: batch.tag, ts: this.now(), mode: batch.mode }));
       if (sent > 0) this.digest.commit();
     }
     let snaps: LpSnap[] = [];
@@ -154,7 +154,7 @@ export class PushService {
     const notes = this.lp.update(snaps);
     if (this.allowed('lp_range')) {
       for (const n of notes) {
-        const sent = await this.deliver(buildPayload('lp_range', n.body, { title: n.title, tag: n.tag, ts: this.now(), botId: n.id }));
+        const sent = await this.deliver(buildPayload('lp_range', n.body, { title: n.title, tag: n.tag, ts: this.now(), botId: n.id, mode: n.mode }));
         if (sent > 0 && n.kind === 'out') this.lp.suppressOut(n.id);
         if (sent > 0 && n.kind === 'near') this.lp.suppressNear(n.id);
       }

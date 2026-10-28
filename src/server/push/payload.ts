@@ -30,11 +30,14 @@ export function pushTopic(tag: string): string | undefined {
   return t.length ? t : undefined;
 }
 
-export function buildPayload(type: PushType, body: string, o: { tag?: string; title?: string; url?: string; ts?: number; botId?: string } = {}): PushPayload {
-  const text = body.replace(/\s+/g, ' ').trim().slice(0, 280);
+export function buildPayload(type: PushType, body: string, o: { tag?: string; title?: string; url?: string; ts?: number; botId?: string; mode?: 'paper' | 'live' } = {}): PushPayload {
+  // Keep line breaks (the daily summary puts paper on its own line). Collapse the other whitespace.
+  const text = body.replace(/[^\S\n]+/g, ' ').replace(/ *\n */g, '\n').trim().slice(0, 280);
   const url = o.url && o.url.startsWith('/') && !o.url.startsWith('//') ? o.url : '/';
+  let title = o.title ?? `GridBot · ${TITLES[type]}`;
+  if (o.mode === 'paper' && !title.startsWith('(paper)')) title = `(paper) ${title}`;
   return {
-    title: (o.title ?? `GridBot · ${TITLES[type]}`).slice(0, 120),
+    title: title.slice(0, 120),
     body: text || 'GridBot',
     tag: (o.tag ?? `${type}:${o.botId ?? 'app'}`).slice(0, 64),
     type,

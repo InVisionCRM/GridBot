@@ -86,6 +86,6 @@ export function dailySummary(status: unknown): { title: string; body: string } {
   const lines = [section('Generated', live, liveTrips), section('Paper', paper, paperTrips)].filter((x): x is string => !!x);
   return {
     title: 'GridBot · daily summary',
-    body: lines.length ? lines.join(' ') : 'No generated profit to report.',
+    body: lines.length ? lines.join('\n') : 'No generated profit to report.',
   };
 }

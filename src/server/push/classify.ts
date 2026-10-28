@@ -7,6 +7,8 @@ export interface PushEvent {
   msg: string;
   kind?: string;
   botId?: string;
+  /** Stamped by the bot when it emits the event. */
+  mode?: 'paper' | 'live';
   data?: Record<string, unknown>;
 }
 

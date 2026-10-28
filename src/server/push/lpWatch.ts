@@ -11,6 +11,7 @@ export interface LpSnap {
   upper: number;
   inRange: boolean | null;
   outSince: number | null;
+  mode?: 'paper' | 'live';
 }
 
 export interface LpNote {
@@ -19,6 +20,7 @@ export interface LpNote {
   title: string;
   body: string;
   tag: string;
+  mode?: 'paper' | 'live';
 }
 
 function sig(n: number): string {
@@ -47,6 +49,7 @@ export function lpSnapsFromStatus(status: unknown): LpSnap[] {
       price, lower, upper,
       inRange: typeof lp.inRange === 'boolean' ? lp.inRange : null,
       outSince: typeof lp.outSince === 'number' ? lp.outSince : null,
+      ...(lp.mode === 'paper' || lp.mode === 'live' ? { mode: lp.mode } : {}),
     });
   }
   return out;
@@ -114,6 +117,7 @@ export class LpWatch {
       id: s.id, kind: 'near', tag: `lp-near-${s.id}`.slice(0, 64),
       title: 'GridBot · LP near edge',
       body: `${s.label}: price ${sig(s.price)} is ${pct ?? '—'}% to the edge (${sig(s.lower)}–${sig(s.upper)}).`,
+      ...(s.mode ? { mode: s.mode } : {}),
     };
   }
 
@@ -123,6 +127,7 @@ export class LpWatch {
       id: s.id, kind: 'out', tag: `lp-out-${s.id}`.slice(0, 64),
       title: 'GridBot · LP out of range',
       body: `${s.label}: out of range for ${min} min. Price ${sig(s.price)} vs ${sig(s.lower)}–${sig(s.upper)}.`,
+      ...(s.mode ? { mode: s.mode } : {}),
     };
   }
 }

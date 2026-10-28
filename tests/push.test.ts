@@ -11,8 +11,20 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_PUSH_PREFS, dailyDue, pushAllowed, type PushPrefs } from '../src/live/pushRules';
 import { pctToEdge, rangeZone } from '../src/live/rangeBand';
 import { redact, Logger } from '../src/server/bot/logger';
+import type { ActivityInput } from '../src/server/bot/activity';
+import { GridEngine, type BotState } from '../src/server/bot/engine';
+import { LpEngine, type LpState } from '../src/server/bot/lpEngine';
 import { MultiBot, type MultiState } from '../src/server/bot/multi';
 import { MemoryStore } from '../src/server/bot/store';
+import { TokenTrader, type TraderState } from '../src/server/bot/tokenTrader';
+import { ChainRuntime } from '../src/server/chains/runtime';
+import { Hub } from '../src/server/chains/hub';
+import { chainFromNetwork } from '../src/live/chains';
+import { legacyMarkets, type MarketDef } from '../src/live/markets';
+import { NETWORKS } from '../src/live/networks';
+import type { GateInput, FreshPool } from '../src/market/tokenTrader';
+import type { PoolSniper, SnipeHit } from '../src/server/market/sniper';
+import { MultiDexMock, type Tok } from './helpers/multiDex';
 import { createApp } from '../src/server/app';
 import { MockChain, NET } from './helpers/mockChain';
 import { classifyPush } from '../src/server/push/classify';
@@ -163,8 +175,9 @@ describe('vapid key file', () => {
 
 describe('payload', () => {
   it('collapses whitespace, caps the body, and refuses an off-site url', () => {
-    const p = buildPayload('grid_fill', `  a \n b  ${'x'.repeat(400)}`, { url: 'https://evil.example/phish', tag: 'a:b' });
+    const p = buildPayload('grid_fill', `  a  b  ${'x'.repeat(400)}`, { url: 'https://evil.example/phish', tag: 'a:b' });
     expect(p.body.startsWith('a b ')).toBe(true);
+    expect(buildPayload('daily_summary', 'Generated — PulseChain +1 DAI.\nPaper — PulseChain +2 DAI.').body).toBe('Generated — PulseChain +1 DAI.\nPaper — PulseChain +2 DAI.');
     expect(p.body.length).toBeLessThanOrEqual(280);
     expect(p.url).toBe('/');
     expect(p.title.length).toBeLessThanOrEqual(120);
@@ -605,8 +618,11 @@ describe('daily summary text', () => {
         { mode: 'paper', chainId: 369, quote: 'DAI', pnl: { net: 0.5, price: 100 } },
       ],
     });
-    expect(both.body.startsWith('Generated')).toBe(true);
-    expect(both.body.indexOf('Generated')).toBeLessThan(both.body.indexOf('Paper'));
+    const [liveLine, paperLine, extra] = both.body.split('\n');
+    expect(extra).toBeUndefined();
+    expect(liveLine.startsWith('Generated')).toBe(true);
+    expect(paperLine.startsWith('Paper')).toBe(true);
+    expect(buildPayload('daily_summary', both.body).body.split('\n')[1]).toBe(paperLine);
     expect(both.body).toContain('PulseChain +1.5 DAI');
     expect(both.body).toContain('PulseChain −0.25 HEX');
     expect(both.body).toContain('PulseChain +9.5 DAI');
@@ -619,6 +635,7 @@ describe('daily summary text', () => {
     });
     expect(liveOnly.body).toContain('Generated');
     expect(liveOnly.body).not.toContain('Paper');
+    expect(liveOnly.body).not.toContain('\n');
     expect(liveOnly.body).not.toMatch(/\$|Realized|Unrealized/);
   });
 });
@@ -658,6 +675,110 @@ describe('push init', () => {
       bot.stopLoop();
       server.close();
     }
+  });
+});
+
+describe('paper and live pushes', () => {
+  const P0 = 0.00001;
+  const grid = { lowerPrice: P0 * 0.8, upperPrice: P0, gridCount: 10, totalCapitalUsd: 50 };
+
+  async function gridFill(mode: 'paper' | 'live'): Promise<ActivityInput> {
+    const chain = new MockChain(P0);
+    const events: ActivityInput[] = [];
+    const engine = new GridEngine({
+      net: NET, reader: chain, signer: mode === 'live' ? chain : null, store: new MemoryStore<BotState>(),
+      log: new Logger(true), maxRetries: 1, retryDelayMs: 0, emit: (e) => events.push(e),
+    });
+    await engine.start({ mode, ...grid });
+    chain.setPrice(P0 * 0.975);
+    await engine.tick();
+    const fill = events.find((e) => e.type === 'filled');
+    if (!fill) throw new Error(`no ${mode} grid fill`);
+    return fill;
+  }
+
+  async function paperLpRange(): Promise<ActivityInput> {
+    const NETW = NETWORKS.mainnet;
+    const CH = chainFromNetwork(NETW);
+    const dex = CH.dexes.find((d) => d.id === '9mm-v3')!;
+    const m = new MultiDexMock();
+    const WPLS: Tok = { address: NETW.pulsex.wpls, symbol: 'WPLS', decimals: 18 };
+    const DAI: Tok = { address: NETW.quotes.find((q) => q.symbol === 'DAI')!.address, symbol: 'DAI', decimals: 18 };
+    [WPLS, DAI].forEach((t) => m.addToken(t));
+    m.addV3('9mm-v3', { factory: dex.factory, quoter: dex.quoter! });
+    const pool = m.v3Pool('9mm-v3', WPLS, 1e10, DAI, 3e5, 2500);
+    const def: MarketDef = {
+      key: 'pulsechain:PLS/DAI#9mm', chainId: 369, custom: true,
+      base: { address: WPLS.address, symbol: 'PLS', decimals: 18, native: true }, quote: { address: DAI.address, symbol: 'DAI', decimals: 18 },
+      pool: { dex: '9mm-v3', kind: 'v3', address: pool, feeBps: 25, feeTier: 2500 }, probe: 1, quoteKind: 'stable',
+    };
+    const hub = new Hub({ runtimes: [new ChainRuntime(CH, m, null)], markets: [...legacyMarkets(NETW), def], legacyNet: NETW });
+    const events: ActivityInput[] = [];
+    const lp = new LpEngine({ net: NETW, store: new MemoryStore<LpState>(), log: new Logger(true), hub, now: () => 1_800_000_000_000, emit: (e) => events.push(e) });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.tick();
+    await lp.move();
+    const range = events.find((e) => e.type === 'range');
+    if (!range) throw new Error('no paper LP range alert');
+    return range;
+  }
+
+  async function paperSniperBuy(): Promise<ActivityInput> {
+    const events: ActivityInput[] = [];
+    const now = 1_700_000_000_000;
+    const fresh: FreshPool = {
+      chainId: 1, pool: '0x' + 'ab'.repeat(20), dex: 'uni-v3', kind: 'v3',
+      token: '0x' + '11'.repeat(20), spend: '0x' + '22'.repeat(20),
+      tokenSymbol: 'SNIPE', spendSymbol: 'WETH', liquidityUsd: 20_000, volumeUsd: 10_000,
+      createdAt: now - 1000, source: 'snipe', quoteReserve: 40, tokenReserve: 1_000_000, feeBps: 30, price: 0.00004, usdPerSpend: 2_000,
+    };
+    const hit: SnipeHit = { chainId: 1, dex: 'uni-v3', kind: 'v3', pool: fresh.pool, token0: fresh.token, token1: fresh.spend, fee: 3000, blockNumber: 10, at: now, skip: null };
+    const gate: GateInput = {
+      mode: 'paper', risk: 'safe', honeypot: false, sellSimOk: true, paused: false, decimals: 18,
+      buyTax: 0, sellTax: 0, liquidityUsd: 20_000, minLiquidityUsd: 0,
+      canMint: false, canPause: false, canBlacklist: false, proxy: false, lpUnlocked: null,
+      holderConcentration: null, recentLiqPull: false, liveAllowed: true,
+    };
+    const sniper = { tick: async (cursors: Record<string, number>) => ({ cursors, hits: [hit], notes: [] }) } as unknown as PoolSniper;
+    const t = new TokenTrader({
+      store: new MemoryStore<TraderState>(), now: () => now, sniper, emit: (e) => events.push(e),
+      assess: async () => gate, resolve: async () => fresh,
+    });
+    t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null } });
+    t.turnOn();
+    await t.tick();
+    const buy = events.find((e) => e.data?.push === 'sniper');
+    if (!buy) throw new Error('no paper sniper buy');
+    return buy;
+  }
+
+  it('prefixes a paper grid fill, a paper LP range alert and a paper sniper buy, and leaves a live fill alone', async () => {
+    const paperFill = await gridFill('paper');
+    const liveFill = await gridFill('live');
+    const range = await paperLpRange();
+    const sniper = await paperSniperBuy();
+    expect(paperFill.mode).toBe('paper');
+    expect(liveFill.mode).toBe('live');
+    expect(range.mode).toBe('paper');
+    expect(sniper.mode).toBe('paper');
+
+    const sent: { body: string }[] = [];
+    const svc = new PushService({
+      dir: dir(), now: () => Date.parse('2026-06-01T16:00:00Z'),
+      transport: { async send(_sub, body) { sent.push({ body }); } },
+    });
+    svc.subscribe({ endpoint: ENDPOINT, keys: KEYS }, 'test');
+    await svc.onActivity(paperFill);
+    await svc.onActivity(range);
+    await svc.onActivity(sniper);
+    await svc.onActivity(liveFill);
+    const titles = sent.map((s) => JSON.parse(s.body).title as string);
+    expect(titles).toHaveLength(4);
+    expect(titles[0]).toBe('(paper) GridBot · Grid fill');
+    expect(titles[1]).toBe('(paper) GridBot · LP range');
+    expect(titles[2]).toBe('(paper) GridBot · Sniper');
+    expect(titles[3]).toBe('GridBot · Grid fill');
+    expect(sent).toHaveLength(4);
   });
 });
 
