@@ -3,6 +3,7 @@ import { FetchRequest, JsonRpcProvider, Wallet } from 'ethers';
 import { getNetwork, type NetworkKey } from '../live/networks';
 import { REDACT_FLOOR, registerSecret } from './bot/logger';
 import { ownerLoginFrom, parsePassHash, type OwnerConfig } from './friends/owner';
+import { vapidSubjectFrom } from './push/send';
 
 /** Load .env from the working directory (Node ≥ 20.12). Missing file is fine. */
 export function loadEnv(file = '.env') {
@@ -25,6 +26,7 @@ export function readSettings() {
     approval: (process.env.APPROVAL_MODE === 'max' ? 'max' : 'exact') as 'exact' | 'max',
     maxRetries: Math.max(0, Number(process.env.MAX_RETRIES ?? 1)),
     retryDelayMs: Math.max(0, Number(process.env.RETRY_DELAY_MS ?? 5000)),
+    vapidSubject: vapidSubjectFrom(process.env.VAPID_SUBJECT),
   };
 }
 
@@ -50,6 +52,9 @@ export function takeHostAuth(): OwnerConfig | null {
   const hash = process.env.HOST_PASSWORD_HASH;
   const loginRaw = process.env.HOST_LOGIN;
   const sessionRaw = process.env.HOST_SESSION;
+  // HOST_TAILNET_LOGINS: the owner's Tailscale login(s), comma-separated; their tailnet devices skip a lockout
+  const tailnetRaw = process.env.HOST_TAILNET_LOGINS;
+  delete process.env.HOST_TAILNET_LOGINS;
   delete process.env.HOST_PASSWORD_HASH;
   delete process.env.HOST_LOGIN;
   delete process.env.HOST_SESSION;
@@ -57,7 +62,8 @@ export function takeHostAuth(): OwnerConfig | null {
   registerSecret(hash.trim());
   const pass = parsePassHash(hash);
   const n = Number(sessionRaw);
-  return { login: ownerLoginFrom(loginRaw), pass, session: Number.isInteger(n) && n > 0 ? n : 1 };
+  const tailnetLogins = (tailnetRaw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  return { login: ownerLoginFrom(loginRaw), pass, session: Number.isInteger(n) && n > 0 ? n : 1, ...(tailnetLogins.length ? { tailnetLogins } : {}) };
 }
 
 export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boolean }

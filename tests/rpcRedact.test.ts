@@ -25,6 +25,7 @@ import { hashPassword, HOST_ID, signSession } from '../src/server/friends/auth';
 import { createGateway } from '../src/server/friends/gateway';
 import { OwnerLogin } from '../src/server/friends/owner';
 import { subKey } from '../src/server/friends/vault';
+import { buildPayload } from '../src/server/push/payload';
 import { NET } from './helpers/mockChain';
 
 // Fake keys only. Each is long enough that any 8-character piece of it is distinctive.
@@ -167,6 +168,12 @@ describe('logs', () => {
     expect(text.length).toBeLessThanOrEqual(160);
     expect(text).toContain(origin);
     expect(leaks(text)).toEqual([]);
+  });
+
+  it('an iPhone push built from an Activity message carries no key', () => {
+    const p = buildPayload('tx_failed', `Grid DAI: couldn't send (server response 500 requestUrl=${pathUrl} via ${userUrl})`, { title: `GridBot · ${pathUrl}` });
+    expect(leaks(JSON.stringify(p))).toEqual([]);
+    expect(p.body).toContain(origin);
   });
 
   it('index.ts registers RPC URLs right after loadEnv and logs chains through chainBootLine', () => {
