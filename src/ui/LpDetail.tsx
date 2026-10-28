@@ -125,8 +125,8 @@ function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boo
       <div className="lp-health-stats">
         <div>
           <span className="k">Fees waiting</span>
-          <b className="pos">{waitingText(b.owed?.base, base, gen, b.pnl?.feeCoins?.base)}</b>
-          <span className="muted small">{waitingText(b.owed?.quote, q, gen, b.pnl?.feeCoins?.quote)}</span>
+          <b className="pos">{waitingText(b.owed?.base, base, gen)}</b>
+          <span className="muted small">{waitingText(b.owed?.quote, q, gen)}</span>
         </div>
         <div>
           <span className="k"><L tip="With compounding on, fees are collected and added back into this range once they are worth the multiple × the estimated gas. Off, they roll in on the next range move or when the bot closes.">Compound at</L></span>
@@ -182,16 +182,15 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
  * the page shows once already (Pace, or the stat table under a day): then it says so instead of a second age.
  */
 /**
- * A coin's waiting fees, in significant digits so a small fee never prints as "0". When they print the same as that
- * coin's Generated (no cost taken in that coin) or its Fees earned (nothing collected yet), the page says so: the
+ * A coin's waiting fees to 4 decimals; a fee too small for that prints in significant digits, never as "0". When they
+ * print the same as that coin's Generated in the headline (no cost taken in that coin yet), the page says so: the
  * figure is on the screen once already (Kyle).
  */
-function waitingText(owed: number | null | undefined, sym: string, gen: Record<string, number> | null | undefined, earned: number | null | undefined): string {
-  const txt = qty(owed, sym, 4, false);
-  if (owed == null) return txt;
+function waitingText(owed: number | null | undefined, sym: string, gen: Record<string, number> | null | undefined): string {
+  const small = owed != null && owed !== 0 && num(owed, 4) === '0';
+  const txt = `${small ? Number(owed.toPrecision(3)) : num(owed, 4)} ${sym}`;
   const g = gen?.[sym];
-  if (g != null && sameShown(qty(g, sym, 5), txt)) return `${sym}: all of Generated`;
-  return earned != null && sameShown(qty(earned, sym, 5), txt) ? `${sym}: all of Fees earned` : txt;
+  return g != null && owed != null && sameShown(qty(g, sym, 5), txt) ? `${sym}: all of Generated` : txt;
 }
 
 function openedText(b: AnyObj, pos: AnyObj): string {
