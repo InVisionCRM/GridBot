@@ -10,6 +10,7 @@ import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
 import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
+import { draftFrom, LpPolicyFields, payloadFrom, type PolicyDraft } from './LpPolicyFields';
 import { T } from './theme';
 import { L } from './Tip';
 import { type AnyObj, type Nav } from './model';
@@ -20,13 +21,21 @@ import { historyEnd } from './deskStats';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
-const ACTION: Record<string, string> = { open: 'Opening', rerange: 'Moving the range', close: 'Closing', send: 'Sending fees' };
-const STAGE: Record<string, string> = { exit: 'taking the position out', swap: "swapping to the range's mix", approve: 'approving the position manager', mint: 'opening the position', collect: 'collecting the fees' };
+const ACTION: Record<string, string> = { open: 'Opening', rerange: 'Moving the range', close: 'Closing', send: 'Sending fees', compound: 'Compounding fees' };
+const STAGE: Record<string, string> = { exit: 'taking the position out', swap: "swapping to the range's mix", approve: 'approving the position manager', mint: 'opening the position', collect: 'collecting the fees', increase: 'adding the fees to the position' };
 
 /** Out of range: when the range moves, or why it doesn't. */
 function moveNote(b: AnyObj): string {
   if (!b.config?.rerange) return 'Auto-move is off: it waits for the price to come back, or move it yourself below.';
-  if (b.move.block) return `It can't move the range now: ${b.move.block}.`;
+  if (b.move?.block) return `It can't move the range now: ${b.move.block}.`;
+  const wait = b.hold?.wait as string | undefined;
+  const dwell = b.config?.range?.dwellMin ?? 0;
+  const cool = b.config?.range?.cooldownMin ?? 0;
+  if (wait === 'dwell') return `Auto-move is on: it waits ${dwell} minute${dwell === 1 ? '' : 's'} outside before moving.`;
+  if (wait === 'cooldown') return `Auto-move is on: it waits ${cool} minute${cool === 1 ? '' : 's'} after a move before it can move again.`;
+  if (wait === 'buffer') return 'The price is outside the range but still inside the buffer, so the range stays.';
+  if (wait === 'cost') return 'Moving would cost more in gas and the swap than the fees it should earn, so it waits.';
+  if (dwell > 0 || cool > 0) return `Auto-move is on: it moves after ${dwell > 0 ? `${dwell} minutes outside` : 'the price leaves'}${cool > 0 ? `, and not again for ${cool} minutes` : ''}${b.config?.range?.bufferPct ? `, once the price is ${(b.config.range.bufferPct * 100).toFixed(2)}% past the edge` : ''}.`;
   return 'Auto-move is on: it moves the range to the price on its next check.';
 }
 
@@ -63,20 +72,71 @@ function RangeControls({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: b
       <button type="button" className="btn primary" disabled={busy || !!why} title={why} onClick={move}>
         {same ? 'Move to the price now' : ok ? `Change to ±${+(band * 100).toFixed(2)}%` : 'Change range'}
       </button>
-      <p className="muted small">Moved {b.reranges} time{b.reranges === 1 ? '' : 's'}{b.lastRerangeAt ? `, last ${ago(b.lastRerangeAt)}` : ''}.</p>
     </div>
   );
 }
 
-/** Range on a line: the band is the position, the marker is the price (the line reaches 25% of the width past each end). */
-function RangeGauge({ lower, upper, price }: { lower: number; upper: number; price: number | null }) {
-  const pad = (upper - lower) * 0.25, lo = lower - pad, hi = upper + pad;
+/** Range health: where the price sits in the band, fees waiting, and what a compound or a move would do. */
+function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boolean }) {
+  const pos = b.position as { lower: number; upper: number };
+  const price = b.price as number | null;
+  const lower = pos.lower, upper = pos.upper, span = upper - lower;
+  const toEdge = price != null && span > 0 ? 1 - Math.abs(price - (lower + upper) / 2) / (span / 2) : null;
+  const out = b.inRange === false;
+  const pad = span * 0.25, lo = lower - pad, hi = upper + pad;
   const at = (v: number) => `${Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100))}%`;
+  const q = b.quote as string, base = b.base as string;
+  const need = b.hold?.compoundNeed as number | null | undefined;
+  const compoundOn = !!b.config?.compound?.enabled;
+  const dwell = b.config?.range?.dwellMin ?? 0;
+  const cool = b.config?.range?.cooldownMin ?? 0;
+  const hrs = (m: number) => (m % 60 === 0 ? `${m / 60}h` : `${m}m`);
+  const rule = !b.config?.rerange ? 'Move rule: off'
+    : dwell > 0 && cool > 0 ? `Move rule: ${hrs(dwell)} outside, ${hrs(cool)} cooldown`
+    : dwell > 0 ? `Move rule: wait ${hrs(dwell)}`
+    : cool > 0 ? `Move rule: ${hrs(cool)} cooldown`
+    : b.config?.range?.costCheck ? 'Move rule: fees must cover the cost'
+    : 'Move rule: on the next check';
+  const outFor = b.outSince ? Math.max(0, Math.round((Date.now() - b.outSince) / 60_000)) : 0;
+  const widen = b.hold?.suggestedBand as number | undefined;
+  const compound = () => act(async () => {
+    if (b.mode === 'live' && !confirm(`Add the waiting fees back into the ${b.label} position? It collects them and increases this range. Gas applies.`)) return;
+    await botApi(`lps/${b.id}/compound`, 'POST');
+  });
+  const doWiden = () => act(async () => {
+    if (widen == null) return;
+    if (b.mode === 'live' && !confirm(`Widen the range to ±${(widen * 100).toFixed(1)}% around ${px(price)}? The position is taken out and opened again.`)) return;
+    await botApi(`lps/${b.id}/move`, 'POST', { bandPct: widen });
+  });
   return (
-    <div className="gauge" title={`range ${px(lower)} – ${px(upper)}${price != null ? ` · price ${px(price)}` : ''}`}>
-      <div className="gauge-track" />
-      <span className="gauge-band" style={{ left: at(lower), width: `calc(${at(upper)} - ${at(lower)})` }} />
-      {price != null && <span className="gauge-price" style={{ left: at(price) }} />}
+    <div className="lp-health">
+      <div className="lp-health-top">
+        <span className="small">{px(lower)} – {px(upper)} {q}/{base}</span>
+        <span className={`lp-edge ${out ? 'out' : ''}`}>{out ? `out of range${outFor ? ` ${outFor}m` : ''}` : toEdge != null ? `${Math.max(0, Math.round(toEdge * 100))}% to edge` : ''}</span>
+      </div>
+      <div className="lp-health-bar" title={`range ${px(lower)} – ${px(upper)}${price != null ? ` · price ${px(price)}` : ''}`}>
+        <div className="lp-health-track" />
+        <div className={`lp-health-fill ${out ? 'out' : ''}`} style={{ left: at(lower), width: `calc(${at(upper)} - ${at(lower)})` }} />
+        {price != null && <span className="lp-health-mark" style={{ left: at(price) }}><i>{px(price)}</i></span>}
+      </div>
+      <div className="lp-health-scale"><span>{px(lower)}</span><span>{px(upper)}</span></div>
+      <div className="lp-health-stats">
+        <div>
+          <span className="k">Fees waiting</span>
+          <b className="pos">{num(b.owed?.base, 4)} {base}</b>
+          <span className="muted small">{num(b.owed?.quote, 4)} {q}</span>
+        </div>
+        <div>
+          <span className="k"><L tip="With compounding on, fees are collected and added back into this range once they are worth the multiple × the estimated gas. Off, they roll in on the next range move or when the bot closes.">Compound at</L></span>
+          <b>{compoundOn ? (need != null && Number.isFinite(need) ? qty(need, q, 4, false) : '…') : 'off'}</b>
+          <span className="muted small">{compoundOn ? `${b.config.compound.gasMultiple ?? 10}× gas` : 'rolls in on a move'}</span>
+        </div>
+      </div>
+      <div className="lp-actions">
+        <button type="button" className="btn primary" disabled={busy || b.status !== 'running' || !!b.step || b.profits?.mode === 'send'} title={b.profits?.mode === 'send' ? 'Fees are set to be sent out' : 'Collect waiting fees and add them to this range'} onClick={compound}>Compound now</button>
+        {widen != null && widen > b.config.bandPct + 1e-9 && <button type="button" className="btn" disabled={busy || b.status !== 'running' || !!b.step} onClick={doWiden}>Widen to ±{(widen * 100).toFixed(1)}%</button>}
+        <span className="tag">{rule}</span>
+      </div>
     </div>
   );
 }
@@ -84,8 +144,13 @@ function RangeGauge({ lower, upper, price }: { lower: number; upper: number; pri
 function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boolean }) {
   const cur: { mode: 'reinvest' | 'send'; to?: string } = b.profits ?? { mode: 'reinvest' };
   const [p, setP] = useState<ProfitsChoice>({ mode: cur.mode, to: cur.to ?? '' });
+  const [pol, setPol] = useState<PolicyDraft>(() => draftFrom(b.config?.range, b.config?.compound));
+  const [presetBand, setPresetBand] = useState<number | null>(null);
   const changed = p.mode !== cur.mode || (p.mode === 'send' && p.to !== (cur.to ?? ''));
   const q = b.quote;
+  const saved = draftFrom(b.config?.range, b.config?.compound);
+  const bandDirty = presetBand != null && Math.abs(presetBand - b.config.bandPct) > 1e-9;
+  const policyDirty = JSON.stringify(payloadFrom(pol)) !== JSON.stringify(payloadFrom(saved)) || bandDirty;
   return (
     <div className="card">
       <h3>Settings</h3>
@@ -95,6 +160,12 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
           onClick={() => act(() => botApi(`lps/${b.id}/profits`, 'PUT', profitsBody(p)))}>Save</button>}
         {b.totals.sent > 0 && <span className="small">Sent so far: {qty(b.totals.sent, q, 5, false)}{cur.mode === 'send' ? ` to ${cur.to}` : ''}.</span>}
       </div>
+      <details className="more">
+        <summary>Advanced</summary>
+        <LpPolicyFields d={pol} set={setPol} onPreset={(bandPct) => setPresetBand(bandPct)} />
+        {policyDirty && <button type="button" className="btn small-btn primary" disabled={busy}
+          onClick={() => act(() => botApi(`lps/${b.id}/policy`, 'PUT', { ...payloadFrom(pol), ...(bandDirty ? { bandPct: presetBand } : {}) }))}>Save range settings</button>}
+      </details>
     </div>
   );
 }
@@ -197,7 +268,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={`Your share of the pool's trading fees, in the coins they were paid in: collected so far plus what's waiting in the position. A trade selling ${base} pays its fee in ${base}; one buying it pays in ${q}. The coins' price doesn't change these amounts.`}>Fees earned</L></span>
           <div className="kpi-v coins2">{pnl ? <><b className={cls(pnl.feeCoins.base)}>{qty(pnl.feeCoins.base, base, 5)}</b><b className={cls(pnl.feeCoins.quote)}>{qty(pnl.feeCoins.quote, q, 5)}</b></> : '—'}</div>
-          <span className="sub">{pnl ? <>waiting in the position: {num(b.owed?.base, 6)} {base} + {num(b.owed?.quote, 6)} {q}<Usd v={pnl.fees} k={k} /></> : 'measuring…'}</span>
+          {!pnl && <span className="sub">measuring…</span>}
         </div>
         <div className="kpi">
           <span><L tip={`Gas for every open, range move, close and fee collect, plus what the swaps to the range's mix lost to the pool fee and price impact. Counted in ${q}.`}>Costs</L></span>
@@ -207,7 +278,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={`While the price is inside the range, the position sells ${base} as it rises and buys it as it falls, so it ends up with more of whichever coin fell. Taking it out (to move the range, or to close) makes that final. This is how much less those coins were worth than the ones put in, at the same price.`}>Lost to range moves</L></span>
           <div className={`kpi-v ${pnl?.moveLoss ? 'neg' : ''}`}>{pnl ? qty(-pnl.moveLoss, q, 4) : '—'}</div>
-          <span className="sub">{b.reranges} range move{b.reranges === 1 ? '' : 's'}<Usd v={pnl ? -pnl.moveLoss : null} k={k} /></span>
+          <span className="sub">{b.reranges} range move{b.reranges === 1 ? '' : 's'}</span>
         </div>
         <div className="kpi">
           <span><L tip={`Fees earned minus costs and what range moves lost, in ${q}. The coins' own price move isn't in it: that happens whether or not the bot runs.`}>Earned after costs</L></span>
@@ -233,11 +304,9 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <div className="card">
             <h3>{pos ? (b.inRange ? 'In range, earning' : 'Out of range') : closed ? 'Closed' : 'No position open'}</h3>
             {pos ? <>
-              <p className="small">{px(pos.lower)} – {px(pos.upper)} {q}/{base} · price {px(b.price)}</p>
-              <RangeGauge lower={pos.lower} upper={pos.upper} price={b.price} />
+              <RangeHealth b={b} act={act} busy={busy} />
               {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
               <p className="small">In the position: <b>{num(b.coins?.base, 6)} {base}</b> + <b>{num(b.coins?.quote, 6)} {q}</b></p>
-              <p className="small">Fees waiting: {num(b.owed?.base, 8)} {base} + {num(b.owed?.quote, 8)} {q}</p>
               <p className="muted small">Opened {ago(pos.openedAt)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{pct(b.config?.bandPct, 0)} wide</p>
             </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
             {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
