@@ -196,7 +196,9 @@ describe('no money or token figure is repeated on a screen', () => {
     expect(repeatedFigures(text), text).toEqual([]);
     expect(text.match(/1\.00 ETH/g)).toHaveLength(1);
     expect(text).toContain('All live ETH');
-    expect(text).toContain('All of the live total');
+    expect(text).toContain('+20.00 USDC');
+    expect(text.match(/\+20\.00 USDC/g)).toHaveLength(1);
+    expect(text).not.toContain('+2 more');
   });
 
   it('keeps the same invested amount on different bots and names a coin that is the whole section', () => {

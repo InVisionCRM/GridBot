@@ -8,10 +8,11 @@ import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture'
 import type { BotMetrics } from '../src/v2/metrics';
 import { HoldingsView } from '../src/v2/holdings-view';
 import { HomeView, Ticker } from '../src/v2/home-view';
+import { TokenHeadline } from '../src/v2/tokens';
 import { loadDesk } from '../src/v2/load-owner';
 import type { TokenQty } from '../src/v2/metrics';
 
-const BANNED = /\$|\bAPR\b|\bAPY\b|Unrealized|Realized|Value change|≈/;
+const BANNED = /\$|\bAPR\b|\bAPY\b|Unrealized|Realized|Value change|≈|Total P&L|start value|capital in|Price change|impermanent loss/i;
 
 function textOf(html: string): string {
   return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
@@ -309,9 +310,9 @@ describe('v2 copy stays in token units', () => {
       moveLoss: [],
       generated: [],
     } as BotMetrics);
-    expect(lines?.gross).toBe('0');
+    expect(lines?.gross).toBe('0 PLS');
     expect(lines?.paid).toBe('−20.3k PLS');
-    expect(lines?.generated).toBe('0');
+    expect(lines?.generated).toBe('0 PLS');
     expect(lines?.gross).not.toContain('20.3k');
     const rows = sheetRows({
       kind: 'grid',
@@ -321,8 +322,8 @@ describe('v2 copy stays in token units', () => {
       moveLoss: [],
       generated: [],
     } as BotMetrics, { base: 'HEX', quote: 'PLS' });
-    expect(rows.find((r) => r.label === 'Trade profit before gas')?.value).toBe('0');
-    expect(rows.find((r) => r.label === 'Generated')?.value).toBe('0');
+    expect(rows.find((r) => r.label === 'Trade profit before gas')?.value).toBe('0 PLS');
+    expect(rows.find((r) => r.label === 'Generated')?.value).toBe('0 PLS');
     expect(rows.map((r) => r.value).join(' ')).not.toContain('+20.3k');
     expect(rows.some((r) => r.value === 'Breakdown coming soon')).toBe(false);
   });
@@ -347,6 +348,21 @@ describe('v2 copy stays in token units', () => {
     expect(text).not.toContain('1,000');
     expect(text).toMatch(/Invested\s+—/);
     expect(text).toContain('Breakdown coming soon');
+    expect(text).toContain('Est. 24H');
+    expect(text).not.toMatch(/\/day/);
+  });
+
+  it('shows every hero coin instead of a more pill', () => {
+    const html = renderToStaticMarkup(
+      <TokenHeadline tokens={[
+        { symbol: 'USDG', amount: 89.51, usd: null },
+        { symbol: 'USDC', amount: 63.24, usd: null },
+        { symbol: 'ETH', amount: 0.001731, usd: null },
+      ]} />,
+    );
+    const text = textOf(html);
+    expect(text).toContain('+89.51 USDG + 63.24 USDC + 0.001731 ETH');
+    expect(text).not.toContain('more');
   });
 });
 

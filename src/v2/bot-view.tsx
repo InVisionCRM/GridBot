@@ -4,8 +4,8 @@ import { CoinMark } from './coin-mark';
 import type { View } from '../ui/model';
 import { ActivityTape } from './activity-tape';
 import { CandlePane } from './candle-pane';
-import { ledgerLines, sheetRows } from './figures';
-import { formatBag, formatQuotePx, formatStamp, shortenFigures, showsNoFills } from './format';
+import { estimatesVisible, hasGenerated, ledgerLines, sheetRows } from './figures';
+import { formatBag, formatQuotePx, formatStamp, shortenFigures } from './format';
 import { LpRangeSlot } from './lp-range-slot';
 import type { ActivityItem, BotDesk, BotMetrics, TapePrice } from './metrics';
 import { PairTitle } from './pair-label';
@@ -55,6 +55,7 @@ export function BotView({
   const beside = `${activity.map((a) => shortenFigures(a.text).replace(/\$/g, '')).join('\n')} ${prices.map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' ')}`;
   const rows = shot ? sheetRows(shot, { base: shownBase || bot.base, quote: shownQuote || bot.quote }, beside) : [];
   const day = m.est.d1;
+  const showEst = estimatesVisible(m);
   return (
     <div className="bot-page" data-bot={m.botId}>
       <button type="button" className="text-btn" onClick={() => { press(); onBack(); }}>Home</button>
@@ -69,13 +70,20 @@ export function BotView({
       <section className="stat-strip glass" aria-label="Generated">
         <p className="eyebrow">Invested</p>
         <p className="hero-rate">{formatBag(m.invested)}</p>
-        {showsNoFills(m) ? <div className="hero-gen">No fills yet</div> : (
+        <p className="eyebrow">Generated</p>
+        {hasGenerated(m) ? (
+          <div className="hero-gen">{ledgerLines(m)?.generated ?? <TokenHeadline tokens={m.generated} />}</div>
+        ) : (
           <>
-            <p className="eyebrow">Generated</p>
-            <div className="hero-gen">{ledgerLines(m)?.generated ?? <TokenHeadline tokens={m.generated} />}</div>
+            <div className="hero-gen">—</div>
+            <p className="muted small">Not calculated yet</p>
+          </>
+        )}
+        {showEst && (
+          <>
             <p className="hero-rate" data-est="">
-              {day == null ? '—' : day.length ? <TokenLine tokens={day} /> : '0'}
-              <span>/day</span>
+              {day?.length ? <TokenLine tokens={day} /> : '—'}
+              <span>Est. 24H</span>
             </p>
             <p className="muted small">Estimate, not a forecast.</p>
           </>
@@ -119,8 +127,7 @@ export function BotView({
             <ul className="break">
               {rows.map((row) => <Row key={row.label} label={row.label} value={row.value} />)}
             </ul>
-            <p className="muted small">Estimate, not a forecast.</p>
-            <p className="muted small" title={shot.calc}>{shot.calc}</p>
+            {showEst && <p className="muted small">Estimate, not a forecast.</p>}
             {shot.kind === 'lp' && <LpRangeSlot pair={bot.pair} />}
             <button type="button" className="text-btn" onClick={() => openClassic(classicView(shot))}>Open the classic page</button>
           </motion.aside>

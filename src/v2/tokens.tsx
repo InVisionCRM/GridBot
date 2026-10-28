@@ -1,6 +1,5 @@
-import { useLayoutEffect, useRef, useState } from 'react';
 import type { TokenQty } from './metrics';
-import { formatTokenLine } from './format';
+import { formatTokenLine, tokenLineParts } from './format';
 
 /** Smallest headline size before a line becomes a "+N more" pill. */
 export const HEADLINE_FLOOR_PX = 22;
@@ -27,69 +26,23 @@ export function headlinePx(
 }
 
 export function TokenLine({ tokens, usd = null, className = '' }: { tokens: TokenQty[] | null; usd?: number | null; className?: string }) {
-  if (tokens == null) return <span className={className}>—</span>;
-  if (!tokens.length) return <span className={className}>{usd === 0 ? '0' : '—'}</span>;
+  if (tokens == null || !tokens.length) return <span className={className}>—</span>;
+  void usd;
   return <span className={className}>{formatTokenLine(tokens)}</span>;
 }
 
-function mainToken(tokens: TokenQty[]): TokenQty {
-  return [...tokens].sort((a, b) => Math.abs(b.usd ?? 0) - Math.abs(a.usd ?? 0) || Math.abs(b.amount) - Math.abs(a.amount))[0];
-}
-
-function measureLine(sample: HTMLElement, text: string, px: number): number {
-  const cs = getComputedStyle(sample);
-  const probe = document.createElement('span');
-  probe.textContent = text;
-  probe.style.cssText = `position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;font:${cs.font};letter-spacing:${cs.letterSpacing};font-size:${px}px;`;
-  document.body.appendChild(probe);
-  const width = probe.getBoundingClientRect().width;
-  probe.remove();
-  return width;
-}
-
-/** Full token line on one row. Shrink once, then a small pill, only when the measured line does not fit. */
+/** Every coin, wrapping between coins. A headline never hides the rest behind “+N more”. */
 export function TokenHeadline({ tokens, usd = null }: { tokens: TokenQty[] | null; usd?: number | null }) {
-  const host = useRef<HTMLSpanElement>(null);
-  const [px, setPx] = useState<number | 'fold' | null>(null);
-  const [open, setOpen] = useState(false);
-  const text = tokens?.length ? formatTokenLine(tokens) : '';
-  useLayoutEffect(() => {
-    const el = host.current;
-    if (!el) return;
-    const read = () => {
-      if (open || !tokens || tokens.length < 2) {
-        setPx((cur) => (cur == null ? cur : null));
-        return;
-      }
-      const sample = el.parentElement ?? el;
-      const naturalPx = parseFloat(getComputedStyle(sample).fontSize) || HEADLINE_FLOOR_PX;
-      const fitted = headlinePx(naturalPx, (size) => measureLine(sample, text, size), el.clientWidth);
-      const next: number | 'fold' = fitted == null ? 'fold' : fitted;
-      setPx((cur) => (cur === next ? cur : next));
-    };
-    read();
-    const ro = new ResizeObserver(read);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [open, text, tokens]);
   if (!tokens?.length) return <TokenLine tokens={tokens} usd={usd} />;
-  const folded = px === 'fold' && !open && tokens.length >= 2;
+  const parts = tokenLineParts(tokens);
   return (
-    <span
-      ref={host}
-      className={`token-headline${open ? ' is-open' : ''}${folded ? ' is-fold' : ''}`}
-      style={typeof px === 'number' && !open ? { fontSize: px } : undefined}
-    >
-      {folded ? (
-        <span className="token-fold">
-          <TokenLine tokens={[mainToken(tokens)]} />
-          <button type="button" className="chip more" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen(true); }}>
-            +{tokens.length - 1} more
-          </button>
+    <span className="token-headline is-open bag-line">
+      {parts.map((part, i) => (
+        <span key={`${part}-${i}`} className="bag-part">
+          {i > 0 && ' '}
+          <span className="bag-coin">{part}</span>
         </span>
-      ) : (
-        <TokenLine tokens={tokens} usd={usd} />
-      )}
+      ))}
     </span>
   );
 }

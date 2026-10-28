@@ -186,7 +186,7 @@
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  white-space: nowrap;
+  white-space: normal;
 }
 .v2 .token-headline.is-open,
 .v2 .token-headline.is-fold { white-space: normal; }
@@ -210,7 +210,7 @@
 .v2 .hero-rate { margin: 2px 0 0; font-family: var(--mono); font-size: 16px; color: var(--secondary); }
 .v2 .bag-line { white-space: normal; }
 .v2 .bag-coin { white-space: nowrap; font-size: inherit; font-family: inherit; color: inherit; }
-.v2 .hero-rate > span:not(.bag-part) { margin-left: 4px; color: var(--label); font-family: var(--font); font-size: 13px; }
+.v2 .hero-rate > span:not(.bag-part):not(.bag-line) { margin-left: 4px; color: var(--label); font-family: var(--font); font-size: 13px; }
 .v2 .hero-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 2px; }
 .v2 .hero-stat { margin: 0; font-size: 13px; color: var(--label); }
 .v2 .hero-stat b { font-family: var(--mono); color: var(--text); font-weight: 500; margin-left: 6px; }

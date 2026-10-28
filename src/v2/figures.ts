@@ -2,8 +2,8 @@
  * A screen shows each money or token figure once.
  * Cards that would restate the hero or the section total say so in words.
  */
-import type { BotMetrics, RangeBlock, TapePrice, TokenQty } from './metrics';
-import { apportion, displayedValue, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, showsNoFills, standardUnit, tokenLineParts } from './format';
+import type { BotMetrics, TapePrice, TokenQty } from './metrics';
+import { apportion, displayedValue, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, standardUnit, tokenLineParts } from './format';
 
 const SUBSCRIPT_PRICE = /\$0\.0[₀₁₂₃₄₅₆₇₈₉]+\d+/g;
 const FIGURE = /[+−-]?\s*\$\d[\d,]*(?:\.\d+)?|[+−-]?\s*\d[\d,]*(?:\.\d+)?[kMB]\s+[A-Z][A-Z0-9]*|[+−-]\s*\d[\d,]*(?:\.\d+)?\s+[A-Z][A-Z0-9]*|[+−-]?\d+(?:\.\d+)?%/g;
@@ -73,9 +73,18 @@ export function investedLine(bot: TokenQty[], total: TokenQty[], scope: 'live' |
   )).join(' + ');
 }
 
-export function rangeWords(range: RangeBlock | null): string {
-  if (!range) return 'No range';
-  return range.inRange ? 'In range' : 'Out of range';
+const DAY_SEC = 86_400;
+
+export function hasGenerated(m: { generated?: TokenQty[] | null }): boolean {
+  return (m.generated ?? []).some((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
+}
+
+/** Closed and stopped bots, and anything under a day or without Generated, do not show Est. rows. */
+export function estimatesVisible(m: BotMetrics): boolean {
+  if (m.status === 'closed' || m.status === 'stopped') return false;
+  if (!hasGenerated(m)) return false;
+  if (m.ageSec == null || m.ageSec < DAY_SEC) return false;
+  return true;
 }
 
 export type CardReadout =
@@ -83,11 +92,10 @@ export type CardReadout =
   | { kind: 'note'; text: string }
   | { kind: 'line'; text: string; parts: string[] };
 
-/** Generated text for a card. Coins that match the section hero are named, not dropped. */
+/** Generated text for a card. A missing figure is a dash, never a status word. */
 export function cardReadout(metrics: BotMetrics, sectionTokens: TokenQty[], scope: 'live' | 'paper'): CardReadout {
-  if (showsNoFills(metrics)) return { kind: 'empty' };
   const line = generatedCardLine(metrics.generated, sectionTokens, scope);
-  if (!line) return { kind: 'note', text: rangeWords(metrics.range) };
+  if (!line) return { kind: 'note', text: 'Not calculated yet' };
   if (line.text === `All of the ${scope} total`) return { kind: 'note', text: line.text };
   return { kind: 'line', text: line.text, parts: line.parts };
 }
@@ -105,10 +113,9 @@ export function uniqueTape(prices: TapePrice[]): TapePrice[] {
 }
 
 export function heroFigureText(m: BotMetrics): string {
-  if (showsNoFills(m)) return '';
-  const day = m.est?.d1;
+  const day = estimatesVisible(m) ? m.est?.d1 : null;
   return [
-    ledgerLines(m)?.generated || formatTokenLine(m.generated),
+    ledgerLines(m)?.generated || (hasGenerated(m) ? formatTokenLine(m.generated) : ''),
     formatBagSafe(m.invested),
     day?.length ? formatTokenLine(day) : '',
   ].join(' ');
@@ -205,8 +212,9 @@ export function ledgerLines(m: BotMetrics): LedgerLines | null {
       .map((symbol) => ({ symbol, amount: -Math.abs(amountOf(m.feesPaid, symbol)), usd: null }))
       .filter((t) => t.amount !== 0))
     : row((coin) => coin.paid);
+  const zeroLine = costSymbols.length === 1 ? `0 ${costSymbols[0]}` : '—';
   return {
-    gross: noFills ? '0' : grid ? row((coin) => coin.profit) : row((coin) => coin.gross),
+    gross: noFills ? zeroLine : grid ? row((coin) => coin.profit) : row((coin) => coin.gross),
     feeLabel: grid
       ? 'Trade profit before gas'
       : costSymbols.length === 1
@@ -214,7 +222,7 @@ export function ledgerLines(m: BotMetrics): LedgerLines | null {
         : costSymbols.length ? `${coinList(costSymbols)} fees earned` : '',
     paid: gasLine,
     move: noFills ? '' : row((coin) => coin.move),
-    generated: noFills && !generated.length ? '0' : formatTokenLine(generated),
+    generated: noFills && !generated.length ? zeroLine : formatTokenLine(generated),
     untouched: noFills ? '' : untouched,
   };
 }
@@ -271,9 +279,11 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
     rows.push({ label: 'Note', value: 'Breakdown coming soon' });
   }
   if (ledger?.untouched) add('Note', ledger.untouched);
-  const pace = (tokens: TokenQty[] | null | undefined) => (tokens == null ? '—' : tokens.length ? formatTokenLine(tokens) : '0');
-  rows.push({ label: 'Est. 7d', value: pace(m.est?.d7) });
-  rows.push({ label: 'Est. 365d', value: pace(m.est?.d365) });
+  if (estimatesVisible(m)) {
+    const pace = (tokens: TokenQty[] | null | undefined) => (tokens == null || !tokens.length ? '—' : formatTokenLine(tokens));
+    rows.push({ label: 'Est. 7d', value: pace(m.est?.d7) });
+    rows.push({ label: 'Est. 365d', value: pace(m.est?.d365) });
+  }
   add('Age', formatAge(m.ageSec));
   add('Moves', m.moveCount == null ? '—' : String(m.moveCount));
   add('Fills', m.fillCount == null ? '—' : String(m.fillCount));
