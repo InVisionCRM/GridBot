@@ -7,6 +7,8 @@ import { JsonRpcProvider } from 'ethers';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
 import { mintInBytecode } from '../../market/tokenChecks';
+import { unverifiedV3Lp } from '../../market/v3LpLock';
+import { readV3LpLock, type V3LockReader } from './v3LpLockRead';
 import { ERC20, ROUTER } from '../dex/abis';
 import { readCall } from '../dex/types';
 import { fetchJson } from '../fetchJson';
@@ -92,11 +94,12 @@ export function createTokenTrader(o: {
   approval: 'exact' | 'max'; receiptTimeoutMs: number;
 }): TokenTrader {
   const sniper = new PoolSniper({ chains: sniperChains(o.hub), source: logSource(o.hub) });
+  const flag = { on: () => false };
   const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
-    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk),
+    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flag.on()),
     // Called only when the holder check is on. Flag off never reaches this, so a scan makes no explorer calls.
     holders: (pool) => {
       const rt = o.hub.rt(pool.chainId);
@@ -153,6 +156,7 @@ export function createTokenTrader(o: {
       },
     },
   });
+  flag.on = () => trader.status().options.v3LpLockCheck === true;
   return trader;
 }
 
@@ -255,12 +259,12 @@ export async function withPoolFees(
   return read.filter((p): p is NonNullable<typeof p> => !!p);
 }
 
-async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any'): Promise<GateInput> {
+async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', v3LpLockCheck = false): Promise<GateInput> {
   const r = await hub.inspect({ chainId: pool.chainId, address: pool.token, quote: pool.spend, pool: pool.pool });
   const s = r.safety;
   let canMint: boolean | null = null;
   try { canMint = mintInBytecode(await (hub.rt(pool.chainId).reader as Reader).getCode(pool.token)); } catch { canMint = null; }
-  return {
+  const gate: GateInput = {
     mode, risk: _risk, honeypot: s?.honeypot ?? null, sellSimOk: s ? s.simulated && s.honeypot !== true : false,
     paused: s?.paused ?? null, decimals: s?.decimals ?? r.token?.decimals ?? null,
     buyTax: s?.buyTaxPct ?? null, sellTax: s?.sellTaxPct ?? null,
@@ -271,6 +275,17 @@ async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 
     proxy: s?.proxy != null ? true : null, lpUnlocked: null, holderConcentration: null, recentLiqPull: false,
     liveAllowed: s?.liveAllowed ?? false,
   };
+  // Flag off: do not attach v3Lp, so gateToken sees the same input it always has.
+  if (!v3LpLockCheck || pool.kind !== 'v3') return gate;
+  try {
+    const rt = hub.rt(pool.chainId);
+    gate.v3Lp = await readV3LpLock(rt.reader as V3LockReader, pool, rt.cfg.dexes, {
+      nowSec: Math.floor(Date.now() / 1000), blockTimeSec: rt.cfg.blockTimeSec, logChunk: rt.cfg.logChunk,
+    });
+  } catch (e) {
+    gate.v3Lp = unverifiedV3Lp(pool.pool, '', `rpc failed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
+  }
+  return gate;
 }
 
 async function resolveHit(hub: Hub, hit: import('./sniper').SnipeHit): Promise<FreshPool | null> {

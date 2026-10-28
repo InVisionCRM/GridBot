@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Guide } from './Guide';
 import { useStream, type ActivityEvent } from './ui/useStream';
 import { Activity } from './ui/Activity';
-import { loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs } from './ui/Alerts';
+import { Alerts, loadPrefs, notify, notifyCategory, savePrefs, type NotifyPrefs } from './ui/Alerts';
+import { preparePushWorker } from './ui/pushClient';
 import { botApi, http } from './ui/api';
 import { EthUsdCtx, ethUsdOf, inEth } from './ui/units';
 import { ChainFilterCtx, chainOf, RefreshCtx, rpcAlerts, type ChainFilter } from './ui/chains';
@@ -19,15 +20,15 @@ import { Tools } from './ui/Tools';
 import { Opportunities } from './ui/Opportunities';
 import { SmartTrader } from './ui/SmartTrader';
 import { useVersion } from './ui/System';
-import { type View } from './ui/model';
+import { normalizeView, type View } from './ui/model';
 import { Header } from './ui/Header';
 import { Holdings, useHoldings } from './ui/Holdings';
 import { ShowUsdCtx } from './ui/money';
 
 function loadView(): View {
   try {
-    const v = JSON.parse(localStorage.getItem('view') ?? 'null') as View | null;
-    if (v && ['home', 'bots', 'more', 'opps', 'auto', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools'].includes(v.v)) return v;
+    const stored = normalizeView(JSON.parse(localStorage.getItem('view') ?? 'null'));
+    if (stored) return stored;
   } catch { /* storage unavailable */ }
   return { v: 'home' };
 }
@@ -63,12 +64,14 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const ver = useVersion();
   const holdings = useHoldings();
+  // ETH price for dollar totals shown in ETH (net worth): see src/ui/units.tsx
   const ethUsd = useMemo(() => ethUsdOf(s, holdings.data), [s, holdings.data]);
   const [guide, setGuide] = useState(false);
   const closeGuide = useCallback(() => setGuide(false), []);
   const [drawer, setDrawer] = useState(false);
   const scrolling = useRef(false);
   const scrollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => { void preparePushWorker(); }, []);
   useEffect(() => {
     const move = () => { scrolling.current = true; };
     const end = () => {
@@ -162,7 +165,8 @@ export default function App() {
           {view.v === 'grid' && <GridDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'trend' && <TrendDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
           {view.v === 'lp' && <LpDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}
-          {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} prefs={prefs} setPrefs={setPrefs} ver={ver} />}
+          {view.v === 'tools' && <Tools s={s} view={view} ticks={ticks} nav={nav} act={act} busy={busy} ver={ver} />}
+          {view.v === 'alerts' && <Alerts status={s} prefs={prefs} setPrefs={setPrefs} />}
         </ViewError>
 
         {drawer && <>

@@ -25,6 +25,7 @@ import { TokenTraderPanel } from '../src/ui/TokenTrader';
 import { LpDetail } from '../src/ui/LpDetail';
 import { GridDetail } from '../src/ui/GridDetail';
 import { TrendDetail } from '../src/ui/TrendDetail';
+import { Alerts, DEFAULT_PREFS } from '../src/ui/Alerts';
 import { HOLDINGS, JOURNAL, overview, PANELS, S, TRADER, TREND_ID } from './helpers/unitsScreens';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -60,6 +61,7 @@ const screens: [string, () => string][] = [
   ['Analytics market conditions', () => render(createElement(MarketsTab, { seed: PANELS }))],
   ['Token trader', () => render(createElement(TokenTraderPanel, { s: S, seed: TRADER }))],
   ['Token trader (old dollar-only log)', () => render(createElement(TokenTraderPanel, { s: S, seed: { ...TRADER, metrics: { ...TRADER.metrics, generated: { USD: 10.23 }, quote: { ...TRADER.metrics.quote, symbol: 'USD' } }, spendTotals: null } }))],
+  ['Alerts (notification settings)', () => render(createElement(Alerts, { status: S, prefs: { ...DEFAULT_PREFS, enabled: true }, setPrefs: noop }))],
   ['Trend', () => render(createElement(TrendDetail, { s: S, id: TREND_ID, events: [], ticks: null, nav: noop, act, busy: false }))],
   ...S.lps.map((l: Obj) => [`LP ${l.id}`, () => render(createElement(LpDetail, { s: S, id: l.id, events: [], ticks: null, nav: noop, act, busy: false }))] as [string, () => string]),
   ...S.grids.map((g: Obj) => [`Grid ${g.id}`, () => render(createElement(GridDetail, { s: S, id: g.id, events: [], ticks: null, nav: noop, act, busy: false }))] as [string, () => string]),

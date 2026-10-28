@@ -3,7 +3,7 @@ import { analyzeSpacing } from '../live/spacing';
 import type { AnyObj } from './model';
 
 // Estimate rules live with the server's metrics (one definition); re-exported for callers and tests.
-export { ageMs, DAY_MS, estHint, estNeedMs, extrapolate, MAX_SCALE, MIN_AGE_MS } from '../metrics/botMetrics';
+export { ageMs, DAY_MS, estHint, estNeedMs, extrapolate, historyEnd, MAX_SCALE, MIN_AGE_MS } from '../metrics/botMetrics';
 import type { BotMetrics } from '../metrics/botMetrics';
 
 export interface Extrapolation { amount: number; pct: number | null }
