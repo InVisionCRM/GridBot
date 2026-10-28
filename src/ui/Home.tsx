@@ -95,7 +95,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
     if (holdings?.hasSigner) {
       return holdings.chains
         .filter((c) => (chain === 'all' || c.chainId === chain) && c.usd > 0)
-        .map((c) => ({ key: String(c.chainId), label: c.short, usd: c.usd, color: c.color }));
+        .map((c) => ({ key: String(c.chainId), label: c.short, usd: c.usd, color: c.color, units: holdingsByToken(holdings, c.chainId).map((t) => `${coinNum(t.amount)} ${t.sym}`).join(' + ') }));
     }
     const map = new Map<number, number>();
     for (const b of bots) {
@@ -106,7 +106,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
     }
     return [...map.entries()].filter(([, v]) => v > 0).map(([id, v]) => {
       const c = chainOf(s, id) ?? chains(s).find((x) => x.id === id);
-      return { key: String(id), label: c?.short ?? String(id), usd: v, color: c?.color ?? '#F0B90B' };
+      return { key: String(id), label: c?.short ?? String(id), usd: v, color: c?.color ?? '#F0B90B', units: botsByToken(bots.filter((b) => (b.chainId ?? s.legacyChainId) === id)).map((t) => `${coinNum(t.amount)} ${t.sym}`).join(' + ') };
     });
   }, [holdings, chain, bots, s]);
   const { p } = useOpportunities();

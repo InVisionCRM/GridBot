@@ -1,4 +1,5 @@
 /** Chain + market helpers for the UI: badges, grouped market pickers, explorer links, the global chain filter. */
+import { Eth } from './units';
 import { createContext, useContext, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { flipKey, isFlipKey, orientedKey, unflipKey } from '../live/markets';
 import { http } from './api';
@@ -177,7 +178,6 @@ interface FoundPool {
   base: FoundCoin; quote: FoundCoin;
   feeTier: number | null; feeBps: number | null; liquidityUsd: number | null; volume24hUsd: number | null; market: string | null; lpOk: boolean;
 }
-const usdShort = (x: number | null) => (x == null ? '—' : x >= 1e6 ? `$${(x / 1e6).toFixed(1)}M` : x >= 1e3 ? `$${Math.round(x / 1e3)}k` : `$${Math.round(x)}`);
 
 /**
  * Pair picker with search and the ⇄ orientation toggle. `value` is the market key in its orientation ('HEX' = PLS/HEX,
@@ -280,7 +280,7 @@ export function PairPicker({ s, value, onChange, label = 'Pair', disabled = fals
                 <button type="button" role="option" key={`${p.chainId}:${p.pool}`} aria-selected={false} className={`pair-row ${active === i ? 'active' : ''}`} disabled={!!adding && !busy} onMouseEnter={() => setActive(i)} onClick={() => { if (!adding) void pick(p); }}>
                   <span className="pair-main"><ChainBadge c={chainOf(s, p.chainId)} testnet={false} /><b>{p.base.symbol}/{p.quote.symbol}</b><DexTag name={p.dexName} feeBps={p.feeBps} feeTier={p.feeTier} /></span>
                   <span className="pair-meta">
-                    {p.base.address.slice(0, 6)}…{p.base.address.slice(-4)} · {usdShort(p.liquidityUsd)} in the pool · {usdShort(p.volume24hUsd)} traded today
+                    {p.base.address.slice(0, 6)}…{p.base.address.slice(-4)} · <Eth usd={p.liquidityUsd} /> in the pool · <Eth usd={p.volume24hUsd} /> traded today
                     {p.base.lookalike && <span className="pair-warn"> · same name as {p.base.lookalike}, a different coin</span>}
                   </span>
                   <span className={`pair-act ${busy && !adding?.error ? 'busy' : ''}`}>{p.market ? 'added' : busy && !adding?.error ? 'checking safety…' : 'add'}</span>

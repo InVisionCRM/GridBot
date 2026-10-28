@@ -187,7 +187,7 @@ const GENERATED_CALC: Record<MetricsKind, string> = {
   lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin), swap fees (in the coin swapped in) and range-move losses (in the coin the move sold, locked in at each move).',
   grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown under Open positions. A close / stop cash-out sale is not a round trip; its result is in Price change.',
   trend: 'Generated = profit from closed trades after pool fees and gas, in the quote coin. An open trade is under Open positions.',
-  token: 'Generated = profit from closed sells, in dollars (positions spend different coins). Open positions are not in it.',
+  token: 'Generated = profit from closed sells, per coin the trades spend (WETH, PLS, …). Open positions are not in it.',
 };
 const TOTAL_CALC: Record<MetricsKind, string> = {
   grid: 'Total P&L = coins held at today\'s price + profits paid out − capital in. Price change = Total P&L − Generated.',
@@ -409,26 +409,100 @@ export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
   }, now);
 }
 
-/** Token trader (TokenTrader state): dollars throughout. Buys are capital in, sells are paid out. */
+/** The coin a token-trader trade or position spends: `spendSym` (new logs), else the label's quote side ('PEPE/WETH'). */
+const spendSym = (x: Obj): string | null => (typeof x.spendSym === 'string' && x.spendSym ? x.spendSym
+  : typeof x.label === 'string' && x.label.includes('/') ? x.label.split('/').pop()! : null);
+
+/** Dollars per spend coin, newest first: open positions' `usdPerSpend`, then trades logged with a coin amount. */
+function spendRates(trades: Obj[], positions: Obj[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const p of positions) { const s = spendSym(p), k = num(p.usdPerSpend); if (s && k != null && k > 0 && out[s] == null) out[s] = k; }
+  for (const x of trades) { const s = spendSym(x), a = num(x.amount), u = num(x.usd); if (s && a != null && a > 0 && u != null && u > 0 && out[s] == null) out[s] = u / a; }
+  return out;
+}
+
+export interface SpendTotals { bought: number; sold: number; fromSells: number; open: number; openCost: number }
+
+/**
+ * The token trader per coin it spends (crypto units): bought, sold, the result of closed sells and of open positions.
+ * Null when a trade can't be put in a coin (an old log line with no label and no rate), so nothing is mixed.
+ */
+export function tokenSpendTotals(t: Obj): Record<string, SpendTotals> | null {
+  const trades = (t.trades ?? []) as Obj[];
+  const positions = (t.positions ?? []) as Obj[];
+  const k = spendRates(trades, positions);
+  const out: Record<string, SpendTotals> = {};
+  const row = (s: string) => (out[s] ??= { bought: 0, sold: 0, fromSells: 0, open: 0, openCost: 0 });
+  for (const x of trades) {
+    const s = spendSym(x), r = s ? k[s] : undefined;
+    const amt = num(x.amount) ?? (r && num(x.usd) != null ? x.usd / r : null);
+    if (!s || amt == null) return null;
+    if (x.side === 'buy') row(s).bought += amt;
+    else if (x.side === 'sell') {
+      const pnl = num(x.pnl) ?? (r && num(x.pnlUsd) != null ? x.pnlUsd / r : null);
+      if (pnl == null) return null;
+      row(s).sold += amt; row(s).fromSells += pnl;
+    }
+  }
+  for (const p of positions) {
+    const s = spendSym(p), r = s ? (num(p.usdPerSpend) ?? k[s]) : undefined;
+    const pnl = num(p.pnl) ?? (r && num(p.pnlUsd) != null ? p.pnlUsd / r : null);
+    const left = (num(p.entryTokens) ?? 0) > 0 ? (num(p.tokens) ?? 0) / p.entryTokens : 0;
+    const cost = num(p.spent) != null ? p.spent * left : r && num(p.spentUsd) != null ? (p.spentUsd * left) / r : null;
+    if (!s || pnl == null || cost == null) return null;
+    row(s).open += pnl; row(s).openCost += cost;
+  }
+  return out;
+}
+
+/**
+ * Token trader (TokenTrader state). Generated is per coin it spends (closed sells' result in that coin). With one
+ * spend coin the money figures are in it too; positions spending several coins keep the money figures in dollars
+ * inside (symbol 'USD', never shown: the page lists them per coin from tokenSpendTotals). An old log that can't be put
+ * in coins stays in dollars.
+ */
 export function tokenMetrics(t: Obj, now = Date.now()): BotMetrics {
   const trades = (t.trades ?? []) as Obj[];
   const positions = (t.positions ?? []) as Obj[];
+  const firstT = trades.reduce((m, x) => (num(x.t) != null && (m == null || x.t < m) ? x.t : m), null as number | null);
+  const base = {
+    kind: 'token' as const, id: String(t.id ?? 'token-trader'), mode: t.options?.mode === 'live' ? 'live' as const : 'paper' as const, status: t.on ? 'running' : 'stopped', startedAt: firstT,
+    extraCost: 0, feesEarned: null, feesCollected: null, feesUncollected: null, gas: null, swapCost: null,
+    moveCount: trades.length, fillCount: trades.length, range: null, taxes: null,
+  };
+  const coins = trades.length ? tokenSpendTotals(t) : null;
+  const rates = spendRates(trades, positions);
+  const syms = coins ? Object.keys(coins) : [];
+  if (coins && syms.length && syms.every((s) => rates[s] != null)) {
+    const generated = Object.fromEntries(syms.map((s) => [s, coins[s].fromSells]));
+    const px = Object.fromEntries(syms.map((s) => [s, rates[s]]));
+    if (syms.length === 1) {
+      const [s] = syms, c = coins[s];
+      return finish({
+        ...base, capitalIn: c.bought, currentValue: c.openCost + c.open, paidOut: c.sold,
+        realized: c.fromSells, unrealized: c.open, k: rates[s], symbol: s, generated, px, dollarsMade: c.fromSells,
+        rebalanceLoss: trades.filter((x) => x.side === 'sell').reduce((a, x) => { const v = num(x.pnl) ?? (num(x.pnlUsd) ?? 0) / rates[s]; return v < 0 ? a - v : a; }, 0),
+      }, now);
+    }
+    const dollars = tokenDollars(trades, positions);
+    return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated, px }, now);
+  }
+  // no coin amounts in the log (older format): dollars inside (the page shows them as ETH)
+  const dollars = tokenDollars(trades, positions);
+  return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated: trades.length ? { USD: dollars.realized } : null, px: { USD: 1 } }, now);
+}
+
+function tokenDollars(trades: Obj[], positions: Obj[]) {
   const bought = trades.filter((x) => x.side === 'buy').reduce((s, x) => s + (num(x.usd) ?? 0), 0);
   const sold = trades.filter((x) => x.side === 'sell').reduce((s, x) => s + (num(x.usd) ?? 0), 0);
   const realized = trades.filter((x) => x.side === 'sell').reduce((s, x) => s + (num(x.pnlUsd) ?? 0), 0);
   const unrealized = positions.reduce((s, x) => s + (num(x.pnlUsd) ?? 0), 0);
   const openCost = positions.reduce((s, x) => s + (num(x.spentUsd) ?? 0) * ((num(x.entryTokens) ?? 0) > 0 ? (num(x.tokens) ?? 0) / x.entryTokens : 0), 0);
-  const firstT = trades.reduce((m, x) => (num(x.t) != null && (m == null || x.t < m) ? x.t : m), null as number | null);
-  return finish({
-    kind: 'token', id: String(t.id ?? 'token-trader'), mode: t.options?.mode === 'live' ? 'live' : 'paper', status: t.on ? 'running' : 'stopped', startedAt: firstT,
-    capitalIn: trades.length ? bought : null, currentValue: trades.length ? openCost + unrealized : null, paidOut: sold, extraCost: 0,
-    realized, unrealized, feesEarned: null, feesCollected: null, feesUncollected: null, gas: null, swapCost: null,
-    moveCount: trades.length, fillCount: trades.length, range: null, k: 1, symbol: 'USD',
-    // positions spend different coins and the log is in dollars, so the units are dollars
-    generated: trades.length ? { USD: realized } : null, px: { USD: 1 },
-    dollarsMade: trades.length ? realized : null,
-    rebalanceLoss: trades.filter((x) => x.side === 'sell' && (num(x.pnlUsd) ?? 0) < 0).reduce((a, x) => a - x.pnlUsd, 0), taxes: null,
-  }, now);
+  return {
+    capitalIn: trades.length ? bought : null, currentValue: trades.length ? openCost + unrealized : null, paidOut: sold,
+    realized, unrealized, dollarsMade: trades.length ? realized : null,
+    rebalanceLoss: trades.filter((x) => x.side === 'sell' && (num(x.pnlUsd) ?? 0) < 0).reduce((a, x) => a - x.pnlUsd, 0),
+  };
 }
 
 export function botMetrics(b: Obj, now = Date.now()): BotMetrics | null {

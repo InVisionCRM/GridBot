@@ -6,7 +6,8 @@
  * (impact, fee, tax). Live is opt-in: it needs a signing key and the existing safety classifier, and sends
  * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
  */
-import { tokenMetrics } from '../../metrics/botMetrics';
+import { usdAsEth } from '../../lib/ethUnits';
+import { tokenMetrics, tokenSpendTotals } from '../../metrics/botMetrics';
 import { chainById } from '../../live/chains';
 import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, DEFAULT_MIN_HOLDER_COVERAGE, clampHolderCoverage, clampHolderShare } from '../../market/holders';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
@@ -203,7 +204,11 @@ export interface GenLedger {
 export type TradeMode = 'paper' | 'live';
 const genKey = (mode: TradeMode, chainId: number, coin: string) => `${mode}:${chainId}:${coin.toLowerCase()}`;
 
-export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null }
+/**
+ * One fill. `usd`/`pnlUsd` are dollars (kept for the API); `spendSym`, `amount` (spend coin bought with / received) and
+ * `pnl` (spend coin) are the same fill in the coin it spends, for the crypto-units screens. Older lines have only dollars.
+ */
+export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null; spendSym?: string; amount?: number; pnl?: number | null }
 export interface FeedItem { t: number; chainId: number; pool: string; label: string; verdict: 'bought' | 'skipped'; why: string }
 
 export interface TraderState {
@@ -531,7 +536,9 @@ export class TokenTrader {
     const positions = rest.positions.map((p) => {
       const pnlUsd = this.pnl(p);
       const cost = p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0);
-      return { ...p, pnlUsd, pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p) };
+      // the same open result in the spend coin (display only)
+      const pnl = p.usdPerSpend > 0 ? pnlUsd / p.usdPerSpend : null;
+      return { ...p, pnlUsd, pnl, spendSym: p.label.split('/').pop(), pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p) };
     });
     const out = {
       ...rest, id: 'token-trader', kind: 'token' as const,
@@ -553,7 +560,7 @@ export class TokenTrader {
       /** Generated per mode and spend coin (closed sells, less buy fees and gas paid); see types/generated.ts */
       generated: this.generated(),
     };
-    return { ...out, metrics: tokenMetrics(out, Date.now()) };
+    return { ...out, metrics: tokenMetrics(out, Date.now()), spendTotals: tokenSpendTotals(out) };
   }
 
   /** Passed plays. Not trimmed, and not part of `status()`. */
@@ -645,7 +652,7 @@ export class TokenTrader {
     if (!(n.perTradeUsd > 0) || !(n.totalUsd > 0)) throw new Error('Per-trade and total limits must be above 0.');
     if (n.perTradeUsd > n.totalUsd) throw new Error('Per-trade limit is above the total limit.');
     if (!(n.minPoolAgeSec >= 0)) throw new Error('Minimum pool age must be 0 or more seconds.');
-    if (!(n.minLiquidityUsd >= 0)) throw new Error('Minimum liquidity must be 0 or more USD.');
+    if (!(n.minLiquidityUsd >= 0)) throw new Error('Minimum liquidity must be 0 or more.');
     if (typeof n.enforceLiquidityFloor !== 'boolean') throw new Error('Liquidity floor flag must be on or off.');
     if (!(n.maxImpact > 0) || n.maxImpact > HARD_CAPS.maxPriceImpact) throw new Error('Price-impact cap must be between 0% and 5%.');
     if (!(n.sizeImpactCap > 0) || n.sizeImpactCap > HARD_CAPS.maxPriceImpact) throw new Error('Trade-size impact cap must be between 0% and 5%.');
@@ -667,7 +674,7 @@ export class TokenTrader {
     this.state.on = true;
     this.state.pendingChoice = null;
     this.logMode('on', requestHalt('token-trader-on', 'POST /api/token-trader/on', this.now()));
-    this.say(`token trader on (${o.mode}): up to ${o.perTradeUsd} USD a trade, ${o.totalUsd} USD open, pools at least ${Math.round(o.minPoolAgeSec / 3600)}h old unless the sniper is on`);
+    this.say(`token trader on (${o.mode}): up to ${usdAsEth(o.perTradeUsd)} a trade, ${usdAsEth(o.totalUsd)} open, pools at least ${Math.round(o.minPoolAgeSec / 3600)}h old unless the sniper is on`);
     this.save();
   }
 
@@ -1031,7 +1038,7 @@ export class TokenTrader {
     this.state.positions.push(pos);
     this.bookBuy(pos, gasNative ?? 0);
     const why = warn ? `buy ${sized.why}; ${warn}` : `buy ${sized.why}`;
-    this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null });
+    this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode: o.mode } : { mode: o.mode });
     this.rememberEntry(pos, pool, recordedImpact, txEntry, gasUsed, gasPrice, gasNative);
@@ -1116,7 +1123,9 @@ export class TokenTrader {
       const pool = await this.d.resolve?.(hit) ?? null;
       if (!pool) { rejectHit('could not price the new pool', hit.pool.slice(0, 8)); continue; }
       const minLiq = Math.max(sn.minLiquidityUsd, this.floorUsd());
-      if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `liquidity under $${minLiq.toLocaleString('en-US')}` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `liquidity under $${minLiq.toLocaleString('en-US')}`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
+      // the gate compares dollars (unchanged); the reason a screen shows is in ETH (src/lib/ethUnits.ts)
+      const thinWhy = `liquidity under ${usdAsEth(minLiq)}`;
+      if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: thinWhy }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: thinWhy, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `${sn.maxPerHour} snipes an hour already`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       const before = this.state.positions.length;
       await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');
@@ -1261,8 +1270,9 @@ export class TokenTrader {
       if (sold > 0) {
         const usd = quote * p.usdPerSpend;
         const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
+        const costCoin = p.spent * (p.entryTokens > 0 ? sold / p.entryTokens : 0); // the same cost in the spend coin (log only)
         const why = stopped ? `${d.why} (partial: ${num(sold)} of ${num(qty)})` : d.why;
-        this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost });
+        this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost, spendSym: p.label.split('/').pop(), amount: quote, pnl: quote - costCoin });
         this.say(`sold ${p.label}: ${why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
       }
       if (tp && (sold > 0 || pend || stopped)) {

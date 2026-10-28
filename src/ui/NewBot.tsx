@@ -64,7 +64,7 @@ function LimitsFields({ l, set, quoteNative, quote }: { l: Limits; set: (l: Limi
 /** "Amount (PLS)" input with the wallet balance and a Max button. */
 export function AmountField({ label, value, onChange, f }: { label: string; value: string; onChange: (v: string) => void; f: Funds }) {
   return (
-    <label><L tip={`How much ${f.symbol} the bot gets, in ${f.symbol} (not dollars). Max = everything you can use after the gas set-aside and what your other live bots use.`}>{label}</L>
+    <label><L tip={`How much ${f.symbol} the bot gets, in ${f.symbol}. Max = everything you can use after the gas set-aside and what your other live bots use.`}>{label}</L>
       <span className="pair-pick">
         <input value={value} inputMode="decimal" placeholder="0" onChange={(e) => onChange(e.target.value.replace(/,/g, ''))} />
         <button type="button" className="btn small-btn" disabled={f.max == null || f.max <= 0} title="Everything you can use after the gas set-aside and your other live bots"

@@ -5,6 +5,10 @@ import {
   DEFAULT_PLAYS, DEFAULT_PLAYS_CONTROL, LIVE_LIMITS_PROPOSAL, applyStopAll, canExitPlay, canOpenPlay,
   detroitDay, freshPlaysControl, freshPlaysOptions, resumeEntries, sameDetroitDay, sizeRoom, validatePlaysOptions,
 } from '../src/plays/options';
+import { setEthUsdSource } from '../src/lib/ethUnits';
+
+// screen text shows dollar-only figures in ETH; pin the price so the wording is fixed (gates stay in USD)
+setEthUsdSource(() => 2500);
 
 describe('plays defaults', () => {
   it('ships off, in paper, on Robinhood Chain, with the stated limits', () => {
@@ -64,7 +68,8 @@ describe('plays defaults', () => {
     const text = validatePlaysOptions(loose).join(' ');
     expect(text).toMatch(/1 to 3/);
     expect(text).toMatch(/1%/);
-    expect(text).toMatch(/\$50,000/);
+    expect(text).toMatch(/≈ 20 ETH/);
+    expect(text).not.toMatch(/\$/);
     expect(text).toMatch(/0\.25 ETH/);
     expect(text).toMatch(/PumpPill and Arrow only/);
   });

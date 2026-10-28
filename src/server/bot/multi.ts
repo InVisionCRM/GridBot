@@ -1344,7 +1344,7 @@ export class MultiBot {
         id: r.id, kind: r.kind, name: r.name, pair: r.pair, chainId: r.chainId, mode: r.mode, status: r.status, usdPerQuote: r.usdPerQuote,
         capital: r.capital, equity: r.equity, equityUsd: usd(r, r.equity), capitalUsd: usd(r, r.capital),
         realized: r.realized, unrealized: r.unrealized, realizedUsd: usd(r, r.realized), unrealizedUsd: usd(r, r.unrealized),
-        feesUsd: usd(r, r.fees), gasUsd: usd(r, r.gas),
+        feesUsd: usd(r, r.fees), gasUsd: usd(r, r.gas), fees: r.fees, gas: r.gas,
         returnPct: m?.totalPnlPct ?? (r.capital ? r.equity / r.capital - 1 : 0),
         metrics: m,
         plsHeld: r.plsHeld, quoteFree: r.quoteFree, startedAt: r.startedAt,
@@ -1364,7 +1364,7 @@ export class MultiBot {
       const d = this.hub.has(r.pair) ? this.hub.def(r.pair) : null;
       if (!d) continue;
       if (r.plsHeld > 0) addA(this.tokLabel(d.chainId, d.base.symbol), d.chainId, r.plsHeld * (this.hub.baseUsd(r.pair) ?? 0), r.plsHeld);
-      addA(this.tokLabel(d.chainId, d.quote.symbol), d.chainId, usd(r, r.quoteFree), null);
+      addA(this.tokLabel(d.chainId, d.quote.symbol), d.chainId, usd(r, r.quoteFree), r.quoteFree);
     }
     // Per-chain breakdown (aggregated ≈USD); live also shows each chain's gas wallet (paper spends no real gas).
     const chains = this.hub.runtimes().map((rt) => {
@@ -1391,7 +1391,7 @@ export class MultiBot {
       bots,
       portfolio: curve,
       portfolioDrawdown: drawdown(curve).max,
-      notes: ['≈USD: each bot\'s quote token is converted at today\'s rate — stables = $1, other tokens through the chain\'s native/stable market (PulseChain: PLS/DAI); historical equity points use today\'s rate. Bots whose quote has no USD route are excluded.', 'Period change = change in PnL (equity − allocated capital) from portfolio snapshots taken every minute while the server runs, so starting or removing a bot is not counted. "partial" = history starts after the period start.', 'The portfolio curve is drawn at today\'s allocated capital (capital + PnL at each time).'],
+      notes: ['Cross-coin totals ≈ETH: each bot\'s quote coin is converted at today\'s rate through the chain\'s native/stable market (PulseChain: PLS/DAI), then to ETH at Ethereum\'s; historical equity points use today\'s rate. Bots whose quote coin has no price route are left out.', 'Period change = change in PnL (equity − allocated capital) from portfolio snapshots taken every minute while the server runs, so starting or removing a bot is not counted. "partial" = history starts after the period start.', 'The portfolio curve is drawn at today\'s allocated capital (capital + PnL at each time).'],
     };
   }
 

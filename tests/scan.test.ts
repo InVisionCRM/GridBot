@@ -11,6 +11,10 @@ import { MemoryStore } from '../src/server/bot/store';
 import { RateLimited } from '../src/server/market/gecko';
 import type { MarketDef } from '../src/live/markets';
 import { NET, MockChain } from './helpers/mockChain';
+import { setEthUsdSource } from '../src/lib/ethUnits';
+
+// screen text shows dollar-only figures in ETH; pin the price so the wording is fixed (gates stay in USD)
+setEthUsdSource(() => 2500);
 
 const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
 const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
@@ -76,7 +80,7 @@ describe('pickTokens: real activity, something the bot can spend', () => {
     expect(r.picked.map((p) => [p.pool.name, p.token, p.spend])).toEqual([['WBTC / USDT', WBTC, USDT], ['USDC / PEPE', '0xf1', USDC], ['WASH / USDC', '0xe1', USDC]]);
     expect(r.picked.find((p) => p.pool.name === 'WASH / USDC')!.pool.wash).toBe(true);
     const why = Object.fromEntries(r.skipped.map((s) => [s.name, s.why]));
-    expect(why['BIS / WETH']).toMatch(/liquidity \$45 is below \$10,000/);
+    expect(why['BIS / WETH']).toMatch(/liquidity ≈ 0\.018 ETH is below ≈ 4 ETH/);
     expect(why['USDC / USDT']).toBe('both sides are the native coin or stablecoins');
     expect(why['ETH / USDT (V4 native)']).toBe('both sides are the native coin or stablecoins');
     expect(why['USDC / ETH (0xEeee)']).toBe('both sides are the native coin or stablecoins');
@@ -346,8 +350,8 @@ describe('DailyScanner: opportunities', () => {
     expect(f.chains[0].items.find((x) => x.label === 'ETH/USDC')).toMatchObject({ usd: 25_000, capital: 25_000 });
     expect((await sc.run()).testUsd).toBe(25_000);
     expect(new DailyScanner(deps).status().testUsd).toBe(25_000); // saved
-    await expect(sc.run(5)).rejects.toThrow(/from \$10 to \$10,000,000/);
-    await expect(sc.run(Number.NaN)).rejects.toThrow(/dollar amount/);
+    await expect(sc.run(5)).rejects.toThrow(/a number from ≈ 0\.004 ETH to ≈ 4,000 ETH/);
+    await expect(sc.run(Number.NaN)).rejects.toThrow(/must be a number/);
   });
 
   it('a saved scan from before (3 picks a chain, ranked with the price move) is dropped; its test size is kept', () => {
