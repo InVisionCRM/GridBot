@@ -46,7 +46,11 @@ export interface TraderOptions {
   mode: 'paper' | 'live';
   perTradeUsd: number;
   totalUsd: number;
-  /** Scan discovery only. Snipes ignore it. */
+  /**
+   * Scan discovery skips a pool younger than this when its age is known. Snipes do not use it there.
+   * When enforceWashAndAge is on, the gate uses the same number for scan pools, and an unknown age skips safe and medium.
+   * Snipes are exempt from the age leg (they only get the wash-volume leg).
+   */
   minPoolAgeSec: number;
   /**
    * Minimum pool liquidity (USD) for a scan buy and the safety gate. 0 matches the old hardcoded floor,
@@ -60,6 +64,11 @@ export interface TraderOptions {
   risk: 'safe' | 'medium' | 'any';
   maxImpact: number;
   maxPoolShare: number;
+  /**
+   * When on, safe and medium apply minPoolAgeSec in the gate, treat an unknown pool age as a skip,
+   * and skip wash volume (24h volume over 20× liquidity). Off: the gate ignores this and discovery is unchanged.
+   */
+  enforceWashAndAge: boolean;
   /**
    * When on, safe and medium skip a non-renounced owner who can mint, blacklist, pause, or set tax or limits,
    * and a proxy a live admin can upgrade. Off: the gate ignores this and the trader makes no extra reads.
@@ -280,7 +289,7 @@ const TRADE_MAX = 200;
 export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   minLiquidityUsd: DEFAULT_MIN_LIQUIDITY_USD, enforceLiquidityFloor: false,
-  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE, enforceOwnerPowers: false,
+  chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE, enforceWashAndAge: false, enforceOwnerPowers: false,
   v3LpLockCheck: false,
   v3LpLockCacheEnabled: false,
   v3LpLockCacheTtlMs: 10 * 60_000,
@@ -377,6 +386,11 @@ export class TokenTrader {
      * Missing = not native (gas is reported apart, never price-converted).
      */
     coinInfo?: (chainId: number, spend: string) => { native: boolean; nativeSymbol: string } | null;
+    /**
+     * Optional volume and age read. Called only when enforceWashAndAge is on.
+     * Production does not set this: the gate uses the pool row it already has. A throw is unverified.
+     */
+    poolFacts?: (pool: FreshPool) => Promise<{ createdAt: number | null; volumeUsd: number; liquidityUsd: number }>;
     /** Rejected candidates. Omitted in tests that only need the in-memory window. */
     rejects?: RejectSink;
   }) {
@@ -685,7 +699,11 @@ export class TokenTrader {
     this.state.on = true;
     this.state.pendingChoice = null;
     this.logMode('on', requestHalt('token-trader-on', 'POST /api/token-trader/on', this.now()));
-    this.say(`token trader on (${o.mode}): up to ${usdAsEth(o.perTradeUsd)} a trade, ${usdAsEth(o.totalUsd)} open, pools at least ${Math.round(o.minPoolAgeSec / 3600)}h old unless the sniper is on`);
+    const ageH = Math.round(o.minPoolAgeSec / 3600);
+    const ageNote = o.enforceWashAndAge
+      ? `pools at least ${ageH}h old, safe/medium skip an unknown age or wash volume; snipes skip only wash volume`
+      : `pools at least ${ageH}h old unless the sniper is on`;
+    this.say(`token trader on (${o.mode}): up to ${usdAsEth(o.perTradeUsd)} a trade, ${usdAsEth(o.totalUsd)} open, ${ageNote}`);
     this.save();
   }
 
@@ -884,6 +902,30 @@ export class TokenTrader {
         maxHolderShare: this.state.options.maxHolderShare,
         maxTop10Share: this.state.options.maxTop10Share,
       };
+    }
+    if (this.state.options.enforceWashAndAge) {
+      let volumeUsd = pool.volumeUsd;
+      let liquidityUsd = pool.liquidityUsd;
+      let createdAt = pool.createdAt;
+      let freshnessUnverified = false;
+      if (this.d.poolFacts) {
+        try {
+          const f = await this.d.poolFacts(pool);
+          volumeUsd = f.volumeUsd;
+          liquidityUsd = f.liquidityUsd;
+          createdAt = f.createdAt;
+        } catch {
+          freshnessUnverified = true;
+        }
+      }
+      gate.enforceWashAndAge = true;
+      gate.freshnessUnverified = freshnessUnverified;
+      gate.volumeUsd = volumeUsd;
+      gate.liquidityUsd = liquidityUsd;
+      gate.poolAgeSec = createdAt == null ? null : Math.max(0, (this.now() - createdAt) / 1000);
+      // A snipe is a just-created pool with no age by design ("a snipe ignores the age"): the age leg would block
+      // every snipe at safe/medium, so snipes get only the wash-volume leg.
+      gate.gateMinPoolAgeSec = pool.source === 'snipe' ? 0 : this.state.options.minPoolAgeSec;
     }
     let note: string | null = null;
     if (this.state.options.enforceOwnerPowers) {

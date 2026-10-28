@@ -2,6 +2,7 @@
  * Token trader on the Smart trader page: limits, sniper, open positions, the decision log, and the new-pool feed.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { SCAN_RULES } from '../market/scan';
 import { http } from './api';
 import { ago, num, pct, qty } from './fmt';
 import { ChainBadge, chainOf } from './chains';
@@ -124,6 +125,7 @@ export function TokenTraderPanel({ s, seed }: { s: AnyObj; seed?: AnyObj }) {
         <EthLimit label="Per trade" usd={o.perTradeUsd} ethUsd={ethUsd} onSave={(v) => void save({ perTradeUsd: v })} />
         <EthLimit label="Total open" usd={o.totalUsd} ethUsd={ethUsd} onSave={(v) => void save({ totalUsd: v })} />
         <label className="smart-field"><span className="k">Min pool age (hours)</span><input value={Math.round(o.minPoolAgeSec / 3600)} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, minPoolAgeSec: numIn(e.target.value) * 3600 } })} onBlur={() => void save({ minPoolAgeSec: o.minPoolAgeSec })} /></label>
+        <label className="check" style={{ alignSelf: 'end' }}><input type="checkbox" checked={!!o.enforceWashAndAge} onChange={(e) => void save({ enforceWashAndAge: e.target.checked })} /><span>Wash and pool age</span></label>
         <label className="smart-field"><span className="k">Max pool share %</span><input value={Math.round(o.maxPoolShare * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxPoolShare: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxPoolShare: o.maxPoolShare })} /></label>
         <label className="smart-field"><span className="k">Impact cap %</span><input value={Math.round(o.maxImpact * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxImpact: numIn(e.target.value) / 100 } })} onBlur={() => void save({ maxImpact: o.maxImpact })} /></label>
         <label className="smart-field"><span className="k">Trade-size cap %</span><input value={Math.round((o.sizeImpactCap ?? 0.01) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sizeImpactCap: numIn(e.target.value) / 100 } })} onBlur={() => void save({ sizeImpactCap: o.sizeImpactCap })} /></label>
@@ -142,6 +144,7 @@ export function TokenTraderPanel({ s, seed }: { s: AnyObj; seed?: AnyObj }) {
           </select>
         </label>
       </div>
+      <p className="muted small">Wash and pool age off leaves the gate as it is. On, safe and medium enforce the minimum age above, skip a pool whose age is unknown, and skip volume over {SCAN_RULES.maxVolumeToLiquidity}× liquidity. A failed read skips those modes too. Snipes are brand-new pools, so they get only the volume check, never the age check.</p>
 
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.enforceOwnerPowers} onChange={(e) => void save({ enforceOwnerPowers: e.target.checked })} /><span>Owner powers</span></label>

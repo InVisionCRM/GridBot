@@ -15,6 +15,7 @@ import { MAX_TAX, TAX_TOLERANCE } from '../live/tax';
 import { simBuy, simSell, type CostModel } from './costs';
 import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, clampHolderShare, holderBound, thinCoverageReason } from './holders';
 import { capSwap, TOKEN_MAX_POOL_SHARE } from './poolSize';
+import { isWashVolume } from './scan';
 import type { LpUnlockEvidence } from './lpUnlock';
 import { v3LockSatisfies, type V3LpReport } from './v3LpLock';
 
@@ -180,6 +181,19 @@ export interface GateInput {
   /** The existing safety classifier. Live still requires this. */
   liveAllowed: boolean;
   /**
+   * Wash volume and minimum pool age. Ignored unless this is true, so a gate call that leaves it off
+   * matches the gate from before this check existed.
+   */
+  enforceWashAndAge?: boolean;
+  /** A volume or age read failed. Safe and medium skip when the flag is on. */
+  freshnessUnverified?: boolean;
+  /** Used only for the wash check, and only when the flag is on. */
+  volumeUsd?: number;
+  /** Seconds since the pool was created. null = unknown. Ignored unless the flag is on. */
+  poolAgeSec?: number | null;
+  /** Same setting as scan discovery (`minPoolAgeSec`). 0 means no age requirement. */
+  gateMinPoolAgeSec?: number;
+  /**
    * Owner, EIP-1967 admin, and setter scan. Ignored unless this is true, so a gate call that
    * leaves it off matches the gate from before this check existed.
    */
@@ -272,6 +286,17 @@ export function gateToken(g: GateInput): GateResult {
     if (g.canBlacklist === true) return hard('owner can blacklist');
     if (tax > TAX_TOLERANCE) return hard(`tax ${(tax * 100).toFixed(2)}% (safe allows none)`);
     if (g.holderConcentration != null && g.holderConcentration > 0.5) return hard(`one holder has ${(g.holderConcentration * 100).toFixed(0)}%`);
+  }
+  if ((g.risk === 'safe' || g.risk === 'medium') && g.enforceWashAndAge) {
+    if (g.freshnessUnverified) return hard('pool age or volume could not be verified');
+    const volume = g.volumeUsd ?? 0;
+    if (isWashVolume(volume, g.liquidityUsd)) return hard(`volume is ${Math.round(volume / g.liquidityUsd)}× liquidity`);
+    const min = g.gateMinPoolAgeSec ?? 0;
+    if (min > 0 && g.poolAgeSec == null) return hard('pool age could not be verified');
+    if (min > 0 && g.poolAgeSec != null && g.poolAgeSec < min) {
+      const h = Math.max(0, Math.round(g.poolAgeSec / 3600));
+      return hard(`pool is ${h}h old (minimum ${Math.round(min / 3600)}h)`);
+    }
   }
   if ((g.risk === 'safe' || g.risk === 'medium') && g.enforceOwnerPowers) {
     if (g.ownerPowersUnverified) return hard(g.ownerPowersWhy || 'owner powers could not be verified');
