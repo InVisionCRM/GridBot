@@ -17,11 +17,14 @@ import { fmtFeeTier } from '../live/chains';
 import type { VersionCheck } from './system/version';
 import { runChecks } from './system/checks';
 import type { Converter } from './convert/converter';
+import type { SwapService } from './swap/service';
+import { viaFunnel } from './friends/publicHost';
 import type { PoolSearch } from './market/poolSearch';
 import type { FriendsHost } from './friends/host';
 import type { GeckoRelay } from './friends/relay';
 import type { Autopilot, AutoOptions, Budget } from './bot/autopilot';
 import type { TokenTrader, TraderOptions } from './bot/tokenTrader';
+import type { Router } from './router/router';
 import { noKey } from './words';
 import { fetchJson } from './fetchJson';
 import { StatusFeed } from './statusFeed';
@@ -43,12 +46,16 @@ export interface AppOpts {
   autopilot?: Autopilot;
   /** New-token trader and sniper (server only) */
   tokenTrader?: TokenTrader;
+  /** Capital router settings (host only). Absent in tests that don't construct one. */
+  router?: Router;
   /** A chart was opened: the candle sync keeps every timeframe of that market for a while (server only) */
   viewCandles?: (pair: string) => void;
   /** Liquidity replay over a pool's real trades (server only: reads the chain) */
   lpReplay?: (q: { market: string; capital?: number; maxImpact?: number }) => Promise<unknown>;
   /** Tools → Convert: a chain's holdings into one coin (server only: reads the explorer, signs swaps) */
   convert?: Converter;
+  /** Same-chain swap quotes. Builds calldata in live mode and never broadcasts it. */
+  swap?: SwapService;
   /** Pair search in the pair pickers (server only: asks DexScreener) */
   poolSearch?: PoolSearch;
   heartbeatMs?: number;
@@ -327,6 +334,21 @@ export function createApp(o: AppOpts) {
   app.get('/api/convert/job', wrap(() => ({ job: cv().job() })));
   app.post('/api/convert/stop', wrap(() => { cv().stop(); return { ok: true }; }));
 
+  // Host only. A friend's copy and a request that arrived through Tailscale Funnel never quote.
+  // Live mode returns calldata; this route never broadcasts it.
+  app.post('/api/swap/quote', wrap(async (req) => {
+    if (o.copy || !o.swap || viaFunnel(req.headers, req.socket.remoteAddress)) throw new Error('swap quoting is host-only');
+    const b = req.body ?? {};
+    if (typeof b.amountIn !== 'string' || !/^\d+$/.test(b.amountIn)) throw new Error('amountIn must be a decimal string of raw units');
+    return plain(await o.swap.quote({
+      chainId: Number(b.chainId), tokenIn: String(b.tokenIn ?? ''), tokenOut: String(b.tokenOut ?? ''),
+      amountIn: BigInt(b.amountIn), owner: String(b.owner ?? ''),
+      recipient: typeof b.recipient === 'string' ? b.recipient : undefined,
+      mode: b.mode === 'live' ? 'live' : 'paper',
+      slippageBps: num(b.slippageBps), deadlineMinutes: num(b.deadlineMinutes), maxPriceImpact: num(b.maxPriceImpact),
+    }));
+  }));
+
   // ── Smart trader ────────────────────────────────────────────────────
   const ap = () => { if (!o.autopilot) throw new Error('The smart trader is not available.'); return o.autopilot; };
   app.get('/api/autopilot', wrap(() => plain(ap().status())));
@@ -334,15 +356,16 @@ export function createApp(o: AppOpts) {
   app.put('/api/autopilot', wrap((req) => {
     const b = req.body ?? {};
     if (!Array.isArray(b.budgets)) throw new Error('budgets required');
-    ap().configure({ mode: b.mode, options: b.options as AutoOptions, budgets: b.budgets as Budget[] });
+    ap().configure({ mode: b.mode, options: (b.options ?? {}) as Partial<AutoOptions>, budgets: b.budgets as Budget[] });
     return plain(ap().status());
   }));
   app.put('/api/autopilot/options', wrap((req) => { ap().setOptions(req.body ?? {}); return plain(ap().status()); }));
   app.post('/api/autopilot/on', wrap(async () => { await ap().turnOn(); void bot.tickAll(); return plain(ap().status()); }));
+  // { chainId }: that budget sends again after KILL ALL / STOP chain
+  app.post('/api/autopilot/carry-on', wrap((req) => { ap().carryOn(Number(req.body?.chainId)); void ap().tick(); return plain(ap().status()); }));
   // { sell: true } closes every bot it runs to cash; false leaves them running unmanaged
   app.post('/api/autopilot/off', wrap((req) => { ap().turnOff(req.body?.sell === true); void ap().tick(); return plain(ap().status()); }));
   // { chainId }: that budget opens and swaps again after Stop all / STOP chain
-  app.post('/api/autopilot/carry-on', wrap((req) => { ap().carryOn(Number(req.body?.chainId)); void ap().tick(); return plain(ap().status()); }));
   app.post('/api/autopilot/review', wrap(async () => { await ap().review(true); void bot.tickAll(); return plain(ap().status()); }));
 
   const tt = () => { if (!o.tokenTrader) throw new Error('The token trader is not available.'); return o.tokenTrader; };
@@ -351,7 +374,8 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const patch: Partial<TraderOptions> = {};
     if (b.mode === 'paper' || b.mode === 'live') patch.mode = b.mode;
-    for (const k of ['perTradeUsd', 'totalUsd', 'minPoolAgeSec', 'maxImpact', 'maxPoolShare'] as const) if (b[k] != null) patch[k] = Number(b[k]);
+    for (const k of ['perTradeUsd', 'totalUsd', 'minPoolAgeSec', 'maxImpact', 'maxPoolShare', 'sizeImpactCap'] as const) if (b[k] != null) patch[k] = Number(b[k]);
+    if (typeof b.enforceSizeImpact === 'boolean') patch.enforceSizeImpact = b.enforceSizeImpact;
     if (b.risk === 'safe' || b.risk === 'medium' || b.risk === 'any') patch.risk = b.risk;
     if (Array.isArray(b.chains)) patch.chains = b.chains.map(Number);
     if (b.sniper && typeof b.sniper === 'object') patch.sniper = b.sniper;
@@ -360,6 +384,13 @@ export function createApp(o: AppOpts) {
   }));
   app.post('/api/token-trader/on', wrap(() => { tt().turnOn(); void tt().tick(); return plain(tt().status()); }));
   app.post('/api/token-trader/off', wrap(() => { tt().turnOff(); return plain(tt().status()); }));
+
+  // ── Capital router (settings only; this does not move funds) ──
+  const router = () => { if (!o.router) throw new Error('The capital router is not available.'); return o.router; };
+  app.get('/api/router', wrap(() => router().status()));
+  app.put('/api/router', wrap((req) => router().update(req.body ?? {})));
+  app.post('/api/router/on', wrap(() => router().turnOn()));
+  app.post('/api/router/off', wrap(() => router().turnOff()));
   // After Stop all / STOP chain: new buys and snipes may happen again
   app.post('/api/token-trader/resume-entries', wrap(() => { tt().resumeEntries(); return plain(tt().status()); }));
 

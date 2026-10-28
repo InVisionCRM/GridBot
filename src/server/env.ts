@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { FetchRequest, JsonRpcProvider, Wallet } from 'ethers';
 import { getNetwork, type NetworkKey } from '../live/networks';
-import { registerSecret } from './bot/logger';
+import { REDACT_FLOOR, registerSecret } from './bot/logger';
 import { ownerLoginFrom, parsePassHash, type OwnerConfig } from './friends/owner';
 
 /** Load .env from the working directory (Node ≥ 20.12). Missing file is fine. */
@@ -64,6 +64,66 @@ export function takeHostAuth(): OwnerConfig | null {
   return { login: ownerLoginFrom(loginRaw), pass, session: Number.isInteger(n) && n > 0 ? n : 1, ...(tailnetLogins.length ? { tailnetLogins } : {}) };
 }
 
+export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boolean }
+
+/**
+ * Quote keys for the capital router. Like PRIVATE_KEY they are removed from process.env at once.
+ * A key shorter than REDACT_FLOOR is refused: it is not stored, not configured, and not given to a provider.
+ * shortQuoteKeyWarnings() names the variable only, never the value and never its length.
+ * A longer key is registered for redaction. The strings stay in this module except on a quote request
+ * for a provider that was actually configured. A friend's copy never sees them.
+ */
+type BridgeName = 'across' | 'relay' | 'lifi';
+let bridgeKeys: Record<BridgeName, string | null> = { across: null, relay: null, lifi: null };
+/** Names only. A refused key is not stored here, and the value is never in this list. */
+let shortQuoteWarnings: string[] = [];
+
+/** Warnings from the last takeBridgeKeys(). Each line names the variable, never the value or its length. */
+export function shortQuoteKeyWarnings(): readonly string[] {
+  return shortQuoteWarnings;
+}
+
+function takeOne(name: 'ACROSS_API_KEY' | 'RELAY_API_KEY' | 'LIFI_API_KEY'): string | null {
+  const raw = process.env[name];
+  delete process.env[name];
+  if (!raw || !raw.trim()) return null;
+  const v = raw.trim();
+  if (v.length < REDACT_FLOOR) {
+    shortQuoteWarnings.push(`${name} was refused`);
+    return null;
+  }
+  registerSecret(v, REDACT_FLOOR);
+  return v;
+}
+
+/** What a quote provider may be constructed with. Null means keyless: nothing to put on a request. */
+export function bridgeProviderConfig(): Record<BridgeName, { apiKey: string } | null> {
+  const slot = (k: string | null) => (k == null ? null : { apiKey: k });
+  return { across: slot(bridgeKeys.across), relay: slot(bridgeKeys.relay), lifi: slot(bridgeKeys.lifi) };
+}
+
+/**
+ * A quote request for one provider. A keyless provider gets no Authorization header, and the key is
+ * never written into the url or the body.
+ */
+export function bridgeQuoteRequest(provider: BridgeName, url: string, init: { headers?: Record<string, string>; body?: string } = {}): { url: string; headers: Record<string, string>; body?: string } {
+  const headers = { ...(init.headers ?? {}) };
+  const key = bridgeKeys[provider];
+  if (key) headers.Authorization = `Bearer ${key}`;
+  return { url, headers, body: init.body };
+}
+
+export function takeBridgeKeys(): BridgeConfigured {
+  shortQuoteWarnings = [];
+  bridgeKeys = { across: takeOne('ACROSS_API_KEY'), relay: takeOne('RELAY_API_KEY'), lifi: takeOne('LIFI_API_KEY') };
+  return bridgeConfigured();
+}
+
+/** Whether a quote key was accepted. A refused key is false. The value is not in this object. */
+export function bridgeConfigured(): BridgeConfigured {
+  return { across: bridgeKeys.across != null, relay: bridgeKeys.relay != null, lifi: bridgeKeys.lifi != null };
+}
+
 /** What a friend's copy knows about itself: set by the host app that starts it (friends/copies.ts). */
 export interface CopyInfo { friend: string; host: string; hostUrl: string }
 
@@ -73,6 +133,28 @@ export function readCopy(): CopyInfo | null {
   if (friend == null && host == null && hostUrl == null) return null;
   if (!friend || !host || !hostUrl) throw new Error('A friend\'s copy needs FRIEND_NAME, HOST_NAME and HOST_URL; it is started by the host app.');
   return { friend, host, hostUrl };
+}
+
+/**
+ * A friend's copy: ask the host for the friend's key over the IPC channel (friends/copies.ts answers once). null = the
+ * friend gave no key (paper only). The key is registered for log redaction and never put in process.env.
+ */
+export function receiveFriendKey(timeoutMs = 15_000): Promise<string | null> {
+  const send = process.send?.bind(process);
+  if (!send) return Promise.reject(new Error('A friend\'s copy is started by the host app.'));
+  return new Promise((resolve, reject) => {
+    const done = (f: () => void) => { clearTimeout(timer); process.off('message', on); f(); };
+    const on = (m: unknown) => {
+      const msg = m as { type?: unknown; key?: unknown } | null;
+      if (msg?.type !== 'friend-key') return;
+      const key = typeof msg.key === 'string' && msg.key ? msg.key : null;
+      if (key) registerSecret(key.trim().startsWith('0x') ? key.trim() : `0x${key.trim()}`);
+      done(() => resolve(key));
+    };
+    const timer = setTimeout(() => done(() => reject(new Error("The host app didn't hand over the friend's key."))), timeoutMs);
+    process.on('message', on);
+    send({ type: 'friend-key?' });
+  });
 }
 
 /** JSON-RPC provider with a 30 s request timeout (ethers' default is 5 min, which can stall a poll or backfill). */
@@ -111,7 +193,7 @@ function parseKey(raw: string | undefined, name: string): string | null {
  * PRIVATE_KEY_<envSlug> (e.g. PRIVATE_KEY_ETHEREUM). Every PRIVATE_KEY* variable is removed from process.env
  * immediately and registered for log redaction; keys never leave this module except inside Wallet objects.
  */
-export function createSigners(chains: { id: number; envSlug: string; provider: JsonRpcProvider }[]): Map<number, Wallet> {
+export function createSigners(chains: { id: number; envSlug: string; provider: JsonRpcProvider }[], o: { friendKey?: string | null } = {}): Map<number, Wallet> {
   const shared = process.env.PRIVATE_KEY;
   delete process.env.PRIVATE_KEY;
   const per = new Map<string, string | undefined>();
@@ -120,7 +202,9 @@ export function createSigners(chains: { id: number; envSlug: string; provider: J
     per.set(name.slice('PRIVATE_KEY_'.length), process.env[name]);
     delete process.env[name];
   }
-  const sharedKey = parseKey(shared, 'PRIVATE_KEY');
+  // A friend's copy: only the key the host handed over (receiveFriendKey), on every chain; nothing from its environment.
+  if ('friendKey' in o) per.clear();
+  const sharedKey = 'friendKey' in o ? parseKey(o.friendKey ?? undefined, "The friend's key") : parseKey(shared, 'PRIVATE_KEY');
   const out = new Map<number, Wallet>();
   for (const c of chains) {
     const k = parseKey(per.get(c.envSlug), `PRIVATE_KEY_${c.envSlug}`) ?? sharedKey;
