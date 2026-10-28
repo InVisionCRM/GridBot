@@ -355,7 +355,7 @@ export function createApp(o: AppOpts) {
     const b = req.body ?? {};
     const patch: Partial<TraderOptions> = {};
     if (b.mode === 'paper' || b.mode === 'live') patch.mode = b.mode;
-    for (const k of ['perTradeUsd', 'totalUsd', 'minPoolAgeSec', 'maxImpact', 'maxPoolShare', 'maxHolderShare', 'maxTop10Share', 'sizeImpactCap'] as const) if (b[k] != null) patch[k] = Number(b[k]);
+    for (const k of ['perTradeUsd', 'totalUsd', 'minPoolAgeSec', 'maxImpact', 'maxPoolShare', 'maxHolderShare', 'maxTop10Share', 'minHolderCoverage', 'sizeImpactCap'] as const) if (b[k] != null) patch[k] = Number(b[k]);
     if (typeof b.enforceSizeImpact === 'boolean') patch.enforceSizeImpact = b.enforceSizeImpact;
     if (b.risk === 'safe' || b.risk === 'medium' || b.risk === 'any') patch.risk = b.risk;
     if (typeof b.enforceHolderCheck === 'boolean') patch.enforceHolderCheck = b.enforceHolderCheck;

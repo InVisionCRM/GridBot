@@ -92,7 +92,7 @@ export function createTokenTrader(o: {
   approval: 'exact' | 'max'; receiptTimeoutMs: number;
 }): TokenTrader {
   const sniper = new PoolSniper({ chains: sniperChains(o.hub), source: logSource(o.hub) });
-  const trader = new TokenTrader({
+  const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
     signerReady: (id) => !!o.hub.rt(id).signer,
     discover: () => discover(o.hub, o.gecko),
@@ -101,11 +101,21 @@ export function createTokenTrader(o: {
     holders: (pool) => {
       const rt = o.hub.rt(pool.chainId);
       const cfg = rt.cfg;
-      const reader = rt.reader as typeof rt.reader & { getBlockNumber?: () => Promise<number>; getLogs?: HolderChain['getLogs'] };
+      const reader = rt.reader as typeof rt.reader & {
+        getBlockNumber?: () => Promise<number>; getLogs?: HolderChain['getLogs'];
+        getCode?: (a: string) => Promise<string>; send?: (method: string, params: unknown[]) => Promise<unknown>;
+      };
       const chain: HolderChain | undefined = reader.getBlockNumber && reader.getLogs ? {
         getBlockNumber: () => reader.getBlockNumber!(),
         getLogs: (f) => reader.getLogs!(f),
         call: (tx) => reader.call(tx),
+        getCode: async (address, blockTag) => {
+          if (reader.send) {
+            const tag = blockTag === 'latest' ? 'latest' : `0x${blockTag.toString(16)}`;
+            return String(await reader.send('eth_getCode', [address, tag]));
+          }
+          return reader.getCode ? reader.getCode(address) : '0x';
+        },
       } : undefined;
       return readHolderConcentration({
         chainId: pool.chainId, chainName: cfg.name, token: pool.token, exclude: [pool.pool],
@@ -114,6 +124,7 @@ export function createTokenTrader(o: {
         dexes: cfg.dexes, geckoSlug: cfg.geckoSlug,
       }, {
         fetchJson, chain,
+        minCoverage: trader.status().options.minHolderCoverage,
         totalSupply: async (chainId, token) => {
           const [supply] = await readCall<[bigint]>(o.hub.rt(chainId).reader, token, ERC20, 'totalSupply');
           return supply;

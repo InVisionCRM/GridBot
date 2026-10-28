@@ -11,7 +11,7 @@
 import { getAddress, id } from 'ethers';
 import type { ChainConfig } from '../../live/chains';
 import { V4_POOL_MANAGER } from '../../market/poolEvents';
-import { HOLDER_PAGE_CAP, geckoTop10Share, holderShares, includedHolders, isExcludedHolder, protocolExclusions, type HolderMath, type HolderRow } from '../../market/holders';
+import { DEFAULT_MIN_HOLDER_COVERAGE, HOLDER_PAGE_CAP, explainedBalance, geckoTop10Share, holderCoverage, holderShares, includedHolders, isExcludedHolder, protocolExclusions, type HolderMath, type HolderRow } from '../../market/holders';
 import { ERC20, FACTORY, V3_FACTORY } from '../dex/abis';
 import { isZero, readCall } from '../dex/types';
 import type { FetchJson } from '../fetchJson';
@@ -39,6 +39,7 @@ export interface HolderQuery {
 export interface HolderLog {
   topics: readonly string[];
   data?: string;
+  blockNumber?: number;
 }
 
 /** The chain RPC, used when the explorer list is missing or refused. */
@@ -46,6 +47,8 @@ export interface HolderChain {
   getBlockNumber(): Promise<number>;
   getLogs(f: { address: string; topics: string[]; fromBlock: number; toBlock: number }): Promise<readonly HolderLog[]>;
   call(tx: { to: string; data: string }): Promise<string>;
+  /** Bytecode at a block. Used to binary-search the creation block. Missing history returns the same code for every block. */
+  getCode?(address: string, blockTag: number | 'latest'): Promise<string>;
 }
 
 export interface HolderReadOpts {
@@ -61,6 +64,8 @@ export interface HolderReadOpts {
   logSpan?: number;
   /** How many spans to walk back from the head. The window stays bounded. */
   logChunks?: number;
+  /** Explained balances ÷ totalSupply. Default 0.90. */
+  minCoverage?: number;
 }
 
 interface HolderPage {
@@ -151,7 +156,79 @@ function topicAddr(topic: string | undefined): string | null {
 }
 
 function unverified(kind: 'no-source' | 'read-failed', chainName: string): HolderMath {
-  return { unverified: true, largest: null, top10: null, included: 0, unavailable: kind, chainName };
+  return { unverified: true, largest: null, top10: null, included: 0, unavailable: kind, chainName, coverage: null };
+}
+
+const CODE_STEPS = 16;
+const MINT_STEPS = 6;
+const ZERO_TOPIC = `0x${'0'.repeat(64)}`;
+
+function emptyCode(code: string | null | undefined): boolean {
+  return !code || code === '0x' || code === '0x0';
+}
+
+/** Binary search eth_getCode inside the history the node still has, then the first mint from 0x0. */
+async function findCreationBlock(chain: HolderChain, token: string, head: number, chainId: number, gap: number, now: () => number): Promise<number | null> {
+  if (chain.getCode) {
+    const codeAt = (block: number) => paced(chainId, gap, now, () => chain.getCode!(token, block));
+    try {
+      const latest = await codeAt(head);
+      if (!emptyCode(latest)) {
+        let knownCode = head;
+        let knownEmpty: number | null = null;
+        let step = 1_000;
+        for (let i = 0; i < CODE_STEPS && knownEmpty == null; i++) {
+          const block = Math.max(0, knownCode - step);
+          let code: string;
+          try { code = await codeAt(block); } catch { break; }
+          if (emptyCode(code)) knownEmpty = block;
+          else if (block === 0) return 0;
+          else { knownCode = block; step = Math.min(step * 4, head); }
+        }
+        if (knownEmpty != null) {
+          let lo = knownEmpty;
+          let hi = knownCode;
+          for (let i = 0; i < CODE_STEPS && lo + 1 < hi; i++) {
+            const mid = Math.floor((lo + hi) / 2);
+            const code = await codeAt(mid);
+            if (emptyCode(code)) lo = mid;
+            else hi = mid;
+          }
+          return hi;
+        }
+      }
+    } catch { /* fall through to the mint log */ }
+  }
+  let lo = 0;
+  let hi = head;
+  let found: number | null = null;
+  for (let i = 0; i < MINT_STEPS && lo <= hi; i++) {
+    const mid = Math.floor((lo + hi) / 2);
+    let logs: readonly HolderLog[] = [];
+    try {
+      logs = await paced(chainId, gap, now, () => chain.getLogs({ address: token, topics: [TRANSFER, ZERO_TOPIC], fromBlock: lo, toBlock: mid }));
+    } catch { return found; }
+    const blocks = logs.map((l) => l.blockNumber).filter((n): n is number => n != null);
+    if (!blocks.length) { lo = mid + 1; continue; }
+    const earliest = Math.min(...blocks);
+    found = found == null ? earliest : Math.min(found, earliest);
+    if (earliest <= lo) return found;
+    hi = earliest - 1;
+  }
+  return found;
+}
+
+function attachCoverage(base: HolderMath, rows: readonly HolderRow[], supply: bigint, scan: { scannedLogs: boolean; windowFrom: number | null; creationBlock: number | null }, min: number): HolderMath {
+  const judged = holderCoverage({
+    totalSupply: supply, explained: explainedBalance(rows), min,
+    scannedLogs: scan.scannedLogs, windowFrom: scan.windowFrom, creationBlock: scan.creationBlock,
+  });
+  const placed = { coverage: judged.coverage, windowFrom: scan.windowFrom, creationBlock: scan.creationBlock };
+  if (base.unverified || !judged.thin) return { ...base, ...placed, thin: false };
+  return {
+    ...base, ...placed, thin: true, holders: 'unknown, coverage thin',
+    unverified: false, largest: null, top10: null, unavailable: undefined,
+  };
 }
 
 async function excludeAll(q: HolderQuery, opts: HolderReadOpts, gap: number, now: () => number): Promise<string[]> {
@@ -221,8 +298,7 @@ async function readExplorer(q: HolderQuery, opts: HolderReadOpts, exclude: reado
   }
   if (supply == null || !(supply > 0n)) return unverified('read-failed', chainName);
   const math = holderShares({ totalSupply: supply, holders: rows, exclude, moreHolders: more });
-  if (math.unverified) return { ...math, unavailable: 'read-failed', chainName };
-  return { ...math, chainName, unseen: 0, top10Exact: true };
+  return attachCoverage({ ...math, chainName, unseen: 0, top10Exact: true }, rows, supply, { scannedLogs: false, windowFrom: null, creationBlock: null }, opts.minCoverage ?? DEFAULT_MIN_HOLDER_COVERAGE);
 }
 
 async function geckoTop10(q: HolderQuery, opts: HolderReadOpts, gap: number, now: () => number): Promise<number | null> {
@@ -259,10 +335,12 @@ async function readLogs(q: HolderQuery, opts: HolderReadOpts, exclude: readonly 
     weight.set(addr, (weight.get(addr) ?? 0n) + (amount > 0n ? amount : 1n));
   };
   let cursor = head;
+  let windowFrom: number | null = null;
   for (let i = 0; i < chunks && cursor > 0; i++) {
     const from = Math.max(0, cursor - span);
     try {
       const logs = await paced(q.chainId, gap, now, () => chain.getLogs({ address: q.token, topics: [TRANSFER], fromBlock: from, toBlock: cursor }));
+      windowFrom = windowFrom == null ? from : Math.min(windowFrom, from);
       for (const l of logs) {
         const amount = l.data && l.data !== '0x' ? BigInt(l.data) : 1n;
         bump(topicAddr(l.topics[1]), amount);
@@ -287,7 +365,6 @@ async function readLogs(q: HolderQuery, opts: HolderReadOpts, exclude: readonly 
     } catch { /* this balance is missing; the unseen share covers it */ }
   }
   const math = holderShares({ totalSupply: supply, holders: rows, exclude, moreHolders: false });
-  if (math.unverified || math.largest == null || math.top10 == null) return null;
   let excludedBal = 0n;
   let seen = 0n;
   for (const r of rows) {
@@ -297,10 +374,10 @@ async function readLogs(q: HolderQuery, opts: HolderReadOpts, exclude: readonly 
   const circulating = supply - excludedBal;
   const unseen = circulating > seen ? Number((circulating - seen) * 1_000_000n / circulating) / 1_000_000 : 0;
   const gecko = await geckoTop10(q, opts, gap, now);
-  return {
-    unverified: false, largest: math.largest, top10: gecko ?? math.top10, included: math.included,
-    chainName, unseen, top10Exact: gecko != null,
-  };
+  const creationBlock = await findCreationBlock(chain, q.token, head, q.chainId, gap, now);
+  return attachCoverage({
+    ...math, chainName, unseen, top10: gecko ?? math.top10, top10Exact: gecko != null,
+  }, rows, supply, { scannedLogs: true, windowFrom, creationBlock }, opts.minCoverage ?? DEFAULT_MIN_HOLDER_COVERAGE);
 }
 
 /**

@@ -7,7 +7,7 @@
  * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
  */
 import { chainById } from '../../live/chains';
-import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, clampHolderShare } from '../../market/holders';
+import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, DEFAULT_MIN_HOLDER_COVERAGE, clampHolderCoverage, clampHolderShare } from '../../market/holders';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
 import {
@@ -53,6 +53,8 @@ export interface TraderOptions {
   maxHolderShare: number;
   /** Top 10 holders, as a share of circulating supply. Used only when `enforceHolderCheck` is on. Default 40%. */
   maxTop10Share: number;
+  /** Explained balances must cover at least this fraction of totalSupply. Default 90%. Used only when the check is on. */
+  minHolderCoverage: number;
   /**
    * After sizing, quote that exact size and skip the buy when the impact is over `sizeImpactCap`.
    * Default off: nothing is quoted for this check, and the 3% sizing cap is the one that applies.
@@ -141,6 +143,7 @@ export const DEFAULT_TRADER: TraderOptions = {
   mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: DEFAULT_MIN_POOL_AGE_SEC,
   chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: TOKEN_MAX_POOL_SHARE,
   enforceHolderCheck: false, maxHolderShare: DEFAULT_MAX_HOLDER_SHARE, maxTop10Share: DEFAULT_MAX_TOP10_SHARE,
+  minHolderCoverage: DEFAULT_MIN_HOLDER_COVERAGE,
   enforceSizeImpact: false, sizeImpactCap: DEFAULT_SIZE_IMPACT_CAP,
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
@@ -168,6 +171,8 @@ export class TokenTrader {
       largest: number | null; top10: number | null; unverified: boolean;
       unavailable?: 'no-source' | 'read-failed'; chainName?: string;
       unseen?: number | null; top10Exact?: boolean;
+      coverage?: number | null; thin?: boolean; holders?: string;
+      windowFrom?: number | null; creationBlock?: number | null;
     }>;
     /**
      * Impact of spending `spend` (human units of the pool's spend token) on this pool.
@@ -247,6 +252,7 @@ export class TokenTrader {
     if (!(n.maxPoolShare > 0) || n.maxPoolShare > 0.5) throw new Error('Max pool share must be between 0% and 50%.');
     n.maxHolderShare = clampHolderShare(n.maxHolderShare, DEFAULT_MAX_HOLDER_SHARE);
     n.maxTop10Share = clampHolderShare(n.maxTop10Share, DEFAULT_MAX_TOP10_SHARE);
+    n.minHolderCoverage = clampHolderCoverage(n.minHolderCoverage);
     if (n.sniper.mevRpc && !/^https:\/\//.test(n.sniper.mevRpc)) throw new Error('MEV URL must be an https RPC.');
     this.state.options = n;
     this.save();
@@ -362,38 +368,43 @@ export class TokenTrader {
     if (this.state.feed.length > FEED_MAX) this.state.feed.length = FEED_MAX;
   }
 
-  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null }> {
-    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null };
+  private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null }> {
+    if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null, warn: null };
     const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
     let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: g.minLiquidityUsd ?? (pool.source === 'snipe' ? this.state.options.sniper.minLiquidityUsd : 0) };
     if (this.state.options.enforceHolderCheck) {
       const chainName = chainById(pool.chainId)?.name ?? `chain ${pool.chainId}`;
-      let h: { largest: number | null; top10: number | null; unverified: boolean; unavailable?: 'no-source' | 'read-failed'; chainName?: string; unseen?: number | null; top10Exact?: boolean } = {
-        largest: null, top10: null, unverified: true, unavailable: 'read-failed', chainName,
+      let h: { largest: number | null; top10: number | null; unverified: boolean; unavailable?: 'no-source' | 'read-failed'; chainName?: string; unseen?: number | null; top10Exact?: boolean; coverage?: number | null; thin?: boolean; windowFrom?: number | null; creationBlock?: number | null } = {
+        largest: null, top10: null, unverified: true, unavailable: 'read-failed', chainName, coverage: null,
       };
       if (this.d.holders) {
         try { h = await this.d.holders(pool); } catch { /* the read failed; the reason names the chain */ }
       }
-      const unverified = h.unverified || h.largest == null || h.top10 == null;
+      const thin = h.thin === true;
+      const unverified = !thin && (h.unverified || h.largest == null || h.top10 == null);
       gate = {
         ...gate,
         enforceHolderCheck: true,
         holdersUnverified: unverified,
         holderUnavailable: unverified ? (h.unavailable ?? 'read-failed') : undefined,
         holderChain: h.chainName?.trim() || chainName,
-        holderConcentration: unverified ? null : h.largest,
-        top10Concentration: unverified ? null : h.top10,
-        holderUnseen: unverified ? null : h.unseen ?? 0,
-        top10Exact: unverified ? false : h.top10Exact,
+        holderConcentration: unverified || thin ? null : h.largest,
+        top10Concentration: unverified || thin ? null : h.top10,
+        holderUnseen: unverified || thin ? null : h.unseen ?? 0,
+        top10Exact: unverified || thin ? false : h.top10Exact,
+        holderCoverage: h.coverage ?? null,
+        holderThin: thin,
+        holderWindowFrom: h.windowFrom ?? null,
+        holderCreationBlock: h.creationBlock ?? null,
         maxHolderShare: this.state.options.maxHolderShare,
         maxTop10Share: this.state.options.maxTop10Share,
       };
     }
     const r = gateToken(gate);
-    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate };
+    return { ok: r.ok, reason: r.reason, buyTax: g.buyTax ?? 0, sellTax: g.sellTax ?? 0, gate, warn: r.warn ?? null };
   }
 
-  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput) {
+  private async buy(pool: FreshPool, source: 'scan' | 'snipe', buyTax: number, sellTax: number, gate: GateInput, warn: string | null) {
     const o = this.state.options;
     if (this.state.positions.some((p) => p.pool.toLowerCase() === pool.pool.toLowerCase() && p.chainId === pool.chainId)) return;
     // Checked again after the safety check's awaits: a Stop all that landed meanwhile wins.
@@ -441,7 +452,7 @@ export class TokenTrader {
       tokenReserve: pool.tokenReserve, usdPerSpend: pool.usdPerSpend, buyTax, tp1Done: false, tp2Done: false, source, exitPlan: 'hold',
     };
     this.state.positions.push(pos);
-    const why = `buy ${sized.why}`;
+    const why = warn ? `buy ${sized.why}; ${warn}` : `buy ${sized.why}`;
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success');
@@ -455,7 +466,7 @@ export class TokenTrader {
     if (this.entriesStopped(pool.chainId)) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: 'new buys are stopped (Stop all)' }); return; }
     const a = await this.assess(pool);
     if (!a.ok || !a.gate) { this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why: a.reason ?? 'safety' }); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
-    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate);
+    await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate, a.warn);
   }
 
   private async scanEntries() {

@@ -2,7 +2,7 @@ import { getAddress, id } from 'ethers';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { chainByKey } from '../src/live/chains';
 import { V4_POOL_MANAGER } from '../src/market/poolEvents';
-import { DEFAULT_MAX_TOP10_SHARE, geckoTop10Share, holderBound, holderShares, isExcludedHolder, protocolExclusions } from '../src/market/holders';
+import { DEFAULT_MAX_TOP10_SHARE, geckoTop10Share, holderBound, holderCoverage, holderShares, isExcludedHolder, protocolExclusions, thinCoverageReason } from '../src/market/holders';
 import { ERC20, FACTORY } from '../src/server/dex/abis';
 import { clearHolderCache, holderApiBase, readHolderConcentration, type HolderChain } from '../src/server/market/holderRead';
 
@@ -82,6 +82,14 @@ describe('holder shares', () => {
     expect(holderBound({ largest: 0.05, top10: 0.2, unseen: 0.5, maxHolder: 0.1, maxTop10: 0.4 })).toBe('unread');
     expect(holderBound({ largest: 0.04, top10: 0.2, unseen: 0.05, maxHolder: 0.1, maxTop10: 0.4 })).toBeNull();
     expect(holderBound({ largest: 0.04, top10: 0.5, unseen: 0.6, top10Exact: true, maxHolder: 0.1, maxTop10: 0.4 })).toBe('top10');
+    const pools = 900n;
+    const wallets = 50n;
+    expect(holderCoverage({ totalSupply: 1_000n, explained: pools + wallets, scannedLogs: false }).thin).toBe(false);
+    expect(holderCoverage({ totalSupply: 1_000n, explained: 890n, scannedLogs: false }).thin).toBe(true);
+    expect(holderCoverage({ totalSupply: 1_000n, explained: 1_000n, scannedLogs: true, windowFrom: 500, creationBlock: 100 }).thin).toBe(true);
+    expect(holderCoverage({ totalSupply: 1_000n, explained: 1_000n, scannedLogs: true, windowFrom: 100, creationBlock: 100 }).thin).toBe(false);
+    expect(holderCoverage({ totalSupply: 1_000n, explained: 1_000n, scannedLogs: true, windowFrom: 0, creationBlock: null }).thin).toBe(true);
+    expect(thinCoverageReason({ coverage: 0.30286, windowFrom: 99645000, creationBlock: 99640000 })).toBe('holder concentration unknown: coverage thin (30.3% of supply, window from block 99645000, creation block 99640000)');
   });
 });
 
@@ -109,6 +117,7 @@ describe('holder read', () => {
           items: [
             { address: { hash: pool }, value: '400' },
             { address: { hash: whale }, value: '300' },
+            { address: { hash: '0x' + '99'.repeat(20) }, value: '110' },
             { address: { hash: dead, name: 'Dead address' }, value: '100' },
             ...Array.from({ length: 9 }, (_, i) => ({ address: { hash: '0x' + (i + 1).toString(16).padStart(40, '5') }, value: '10' })),
           ],
@@ -120,6 +129,8 @@ describe('holder read', () => {
     const q = { chainId: 4663, token, api: 'https://robinhoodchain.blockscout.com/api/v2', exclude: [pool] };
     const first = await readHolderConcentration(q, { fetchJson, now: () => now, paceMs: 0 });
     expect(first.unverified).toBe(false);
+    expect(first.thin).toBe(false);
+    expect(first.coverage).toBeCloseTo(1, 5);
     expect(first.largest).toBeCloseTo(300 / 500, 5);
     expect(calls).toHaveLength(2);
     await readHolderConcentration(q, { fetchJson, now: () => now, paceMs: 0 });
@@ -261,11 +272,80 @@ describe('holder read', () => {
       paceMs: 0, logChunks: 1, logSpan: 1_000, chain,
       fetchJson: async () => { throw new Error('HTTP 403 from robinhoodchain.blockscout.com'); },
     });
-    // Circulating = 1000 − pools 400 = 600. Largest 200. The other pool came from getPair, not the traded pool alone.
-    expect(r.unverified).toBe(false);
-    expect(r.largest).toBeCloseTo(200 / 600, 5);
-    expect(r.top10).toBeCloseTo(250 / 600, 5);
-    expect(r.unseen).toBeCloseTo(350 / 600, 5);
-    expect(holderBound({ largest: r.largest!, top10: r.top10!, unseen: r.unseen ?? 0, maxHolder: 0.1, maxTop10: 0.4 })).toBe('largest');
+    // 650 of 1000 explained, and no creation block, so the shares are not trusted.
+    expect(r.thin).toBe(true);
+    expect(r.holders).toBe('unknown, coverage thin');
+    expect(r.largest).toBeNull();
+    expect(r.coverage).toBeCloseTo(0.65, 2);
+    expect(r.creationBlock).toBeNull();
+    expect(r.coverage).not.toBeNull();
+  });
+
+  it('treats a short log window and a sub-90% sample as thin, and a full window as a real share', async () => {
+    const token = getAddress('0x' + 'cd'.repeat(20));
+    const poolA = getAddress('0x' + '71'.repeat(20));
+    const whale = getAddress('0x' + '81'.repeat(20));
+    const rest = getAddress('0x' + '91'.repeat(20));
+    const supplySel = ERC20.getFunction('totalSupply')!.selector;
+    const balSel = ERC20.getFunction('balanceOf')!.selector;
+    const word = (n: bigint) => `0x${n.toString(16).padStart(64, '0')}`;
+    const topic = (a: string) => `0x${a.slice(2).toLowerCase().padStart(64, '0')}`;
+    const transfer = id('Transfer(address,address,uint256)');
+    const bals: Record<string, bigint> = { [whale.toLowerCase()]: 40n, [rest.toLowerCase()]: 10n, [poolA.toLowerCase()]: 950n };
+    const logs = [{ topics: [transfer, topic(whale), topic(rest)], data: word(10n), blockNumber: 200 }];
+    const chain = (head: number, span: number): HolderChain => ({
+      getBlockNumber: async () => head,
+      getCode: async (_a, block) => (block !== 'latest' && block < 100 ? '0x' : '0x60016000'),
+      getLogs: async (f) => (f.topics[1] ? [] : logs),
+      call: async ({ data }) => {
+        if (data.startsWith(supplySel)) return word(1_000n);
+        if (data.startsWith(balSel)) return word(bals[getAddress(`0x${data.slice(-40)}`).toLowerCase()] ?? 0n);
+        throw new Error(data.slice(0, 10));
+      },
+    });
+    const read = (span: number, head = 5_000) => readHolderConcentration({
+      chainId: 4663, chainName: 'Robinhood Chain', token, api: null, exclude: [poolA],
+    }, { fetchJson: async () => { throw new Error('unused'); }, paceMs: 0, logChunks: 1, logSpan: span, chain: chain(head, span) });
+
+    const short = await read(100);
+    expect(short.thin).toBe(true);
+    expect(short.holders).toBe('unknown, coverage thin');
+    expect(short.windowFrom).toBe(4_750);
+    expect(short.creationBlock).toBe(100);
+    expect(short.coverage).toBeCloseTo(1, 5);
+    expect(short.largest).toBeNull();
+
+    clearHolderCache();
+    const thinSupply = await readHolderConcentration({
+      chainId: 4663, chainName: 'Robinhood Chain', token: getAddress('0x' + 'ef'.repeat(20)), api: null, exclude: [poolA],
+    }, {
+      fetchJson: async () => { throw new Error('unused'); }, paceMs: 0, logChunks: 1, logSpan: 5_000,
+      chain: {
+        ...chain(5_000, 5_000),
+        call: async ({ data }) => {
+          if (data.startsWith(supplySel)) return word(1_000n);
+          if (data.startsWith(balSel)) {
+            const who = getAddress(`0x${data.slice(-40)}`).toLowerCase();
+            const half: Record<string, bigint> = { [whale.toLowerCase()]: 200n, [poolA.toLowerCase()]: 100n };
+            return word(half[who] ?? 0n);
+          }
+          throw new Error(data.slice(0, 10));
+        },
+      },
+    });
+    expect(thinSupply.thin).toBe(true);
+    expect(thinSupply.coverage).toBeCloseTo(0.3, 2);
+    expect(thinSupply.creationBlock).toBe(100);
+    expect(thinSupply.windowFrom).toBe(0);
+
+    clearHolderCache();
+    const full = await read(5_000);
+    expect(full.thin).toBe(false);
+    expect(full.coverage).toBeCloseTo(1, 5);
+    expect(full.creationBlock).toBe(100);
+    expect(full.windowFrom).toBe(0);
+    // Circulating = 1000 − pool 950 = 50. Largest 40 is 80% of circulating, over the 10% cap.
+    expect(full.largest).toBeCloseTo(40 / 50, 5);
+    expect(full.top10).toBeCloseTo(50 / 50, 5);
   });
 });

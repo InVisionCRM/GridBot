@@ -327,6 +327,30 @@ describe('token trader engine', () => {
     expect(none.t.status().feed.map((f) => f.why).join(' | ')).toBe('holder concentration unavailable: no holder data source for PulseChain');
   });
 
+  it('skips safe and medium on thin coverage and only warns in aggressive mode', async () => {
+    const thin = async () => ({
+      largest: null, top10: null, unverified: false, thin: true, coverage: 0.30286,
+      windowFrom: 99645000, creationBlock: 99640000, chainName: 'Robinhood Chain',
+      holders: 'unknown, coverage thin' as const,
+    });
+    for (const risk of ['safe', 'medium'] as const) {
+      const { t } = trader({ discover: async () => [pool({ tokenSymbol: risk })], holders: thin });
+      t.configure({ minPoolAgeSec: 0, risk, enforceHolderCheck: true });
+      expect(t.status().options.minHolderCoverage).toBe(0.9);
+      t.turnOn();
+      await t.tick();
+      expect(t.status().positions).toHaveLength(0);
+      expect(t.status().feed.map((f) => f.why).join(' | ')).toBe('holder concentration unknown: coverage thin (30.3% of supply, window from block 99645000, creation block 99640000)');
+    }
+    const any = trader({ discover: async () => [pool({ tokenSymbol: 'ANY' })], holders: thin });
+    any.t.configure({ minPoolAgeSec: 0, risk: 'any', enforceHolderCheck: true, minHolderCoverage: 0.2 });
+    expect(any.t.status().options.minHolderCoverage).toBe(0.5);
+    any.t.turnOn();
+    await any.t.tick();
+    expect(any.t.status().positions).toHaveLength(1);
+    expect(any.t.status().trades[0].why).toMatch(/coverage thin \(30\.3%/);
+  });
+
   it('keeps the holder check off for a saved file that predates it, and the API can turn it on', async () => {
     const store = new MemoryStore<TraderState>();
     const old = {

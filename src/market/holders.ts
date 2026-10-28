@@ -11,10 +11,19 @@ import { V4_POOL_MANAGER } from './poolEvents';
  */
 export const DEFAULT_MAX_HOLDER_SHARE = 0.1;
 export const DEFAULT_MAX_TOP10_SHARE = 0.4;
+/** Explained balances must cover at least this much of totalSupply, or the read is thin. */
+export const DEFAULT_MIN_HOLDER_COVERAGE = 0.9;
 
 /** Settings clamp: 1% through 100% of circulating supply. */
 export const HOLDER_SHARE_MIN = 0.01;
 export const HOLDER_SHARE_MAX = 1;
+
+/** Coverage bar, forced into [50%, 100%]. A non-number keeps the 90% default. */
+export function clampHolderCoverage(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return DEFAULT_MIN_HOLDER_COVERAGE;
+  return Math.min(1, Math.max(0.5, n));
+}
 
 /** A share setting, forced into [1%, 100%]. A non-number keeps `fallback`. */
 export function clampHolderShare(v: unknown, fallback: number): number {
@@ -93,9 +102,18 @@ export interface HolderMath {
   unseen?: number | null;
   /** Top 10 came from a full list (explorer or GeckoTerminal), so `unseen` is not added to it. */
   top10Exact?: boolean;
+  /** Explained balances ÷ totalSupply. Always set; null when supply was never read. */
+  coverage: number | null;
+  /** Set when the window or the explained supply is too thin to trust the shares. */
+  holders?: 'unknown, coverage thin';
+  thin?: boolean;
+  /** Oldest block the log sample requested. null when the list did not come from logs. */
+  windowFrom?: number | null;
+  /** Contract creation block. null when the bounded search could not find it. */
+  creationBlock?: number | null;
 }
 
-const UNVERIFIED: HolderMath = { unverified: true, largest: null, top10: null, included: 0 };
+const UNVERIFIED: HolderMath = { unverified: true, largest: null, top10: null, included: 0, coverage: null };
 
 /** Share in [0, 1] at 1e-6 resolution, from raw balances, so a huge supply does not go through a float first. */
 function shareOf(balance: bigint, circulating: bigint): number {
@@ -125,7 +143,50 @@ export function holderShares(i: HolderMathInput): HolderMath {
   const largest = shareOf(included[0], circulating);
   const top10 = shareOf(top, circulating);
   if (!(largest >= 0) || largest > 1 || !(top10 >= 0) || top10 > 1) return UNVERIFIED;
-  return { unverified: false, largest, top10, included: included.length, unseen: 0, top10Exact: true };
+  return { unverified: false, largest, top10, included: included.length, unseen: 0, top10Exact: true, coverage: null };
+}
+
+/** Sum of measured balances, including pools, the position manager, the PoolManager, and burn addresses. */
+export function explainedBalance(rows: readonly { address: string; balance: bigint }[]): bigint {
+  const seen = new Set<string>();
+  let sum = 0n;
+  for (const r of rows) {
+    if (!(r.balance > 0n)) continue;
+    const a = r.address.toLowerCase();
+    if (seen.has(a)) continue;
+    seen.add(a);
+    sum += r.balance;
+  }
+  return sum;
+}
+
+/**
+ * Coverage is explained balances ÷ totalSupply. Excluded pools and burn addresses count, so a token that
+ * sits in its pools is not thin just because few wallets were listed. A log window that starts after
+ * creation, or a creation block we could not find, is thin even when the balances look complete.
+ */
+export function holderCoverage(p: {
+  totalSupply: bigint;
+  explained: bigint;
+  min?: number;
+  scannedLogs: boolean;
+  windowFrom?: number | null;
+  creationBlock?: number | null;
+}): { coverage: number | null; thin: boolean } {
+  if (!(p.totalSupply > 0n)) return { coverage: null, thin: true };
+  const explained = p.explained > p.totalSupply ? p.totalSupply : p.explained < 0n ? 0n : p.explained;
+  const coverage = Number((explained * 1_000_000n) / p.totalSupply) / 1_000_000;
+  const min = p.min ?? DEFAULT_MIN_HOLDER_COVERAGE;
+  const windowMissesCreation = p.scannedLogs && (p.creationBlock == null || p.windowFrom == null || p.windowFrom > p.creationBlock);
+  return { coverage, thin: coverage + 1e-9 < min || windowMissesCreation };
+}
+
+/** Skip text for safe and medium. Aggressive mode shows the same sentence as a warning. */
+export function thinCoverageReason(p: { coverage: number | null; windowFrom?: number | null; creationBlock?: number | null }): string {
+  const pct = p.coverage == null ? 'unknown' : `${(p.coverage * 100).toFixed(1)}%`;
+  const window = p.windowFrom == null ? 'n/a' : String(p.windowFrom);
+  const created = p.creationBlock == null ? 'unknown' : String(p.creationBlock);
+  return `holder concentration unknown: coverage thin (${pct} of supply, window from block ${window}, creation block ${created})`;
 }
 
 /** Position managers and the V4 PoolManager. Burn addresses are excluded by `isExcludedHolder`. */
