@@ -89,8 +89,8 @@ function client(clients: BridgeClients, provider: BridgeId): BridgeProvider {
 
 export { AcrossClient, ACROSS_API, ACROSS_SPOKE, ACROSS_PERIPHERY } from './across';
 export { RelayClient, RELAY_API } from './relay';
-export { LifiClient, LIFI_API, LIFI_DIAMOND } from './lifi';
-export { RELAY_PROXY_V3, RELAY_ROUTER_V3 } from './allow';
+export { LifiClient, LIFI_API, LIFI_DIAMOND, LIFI_DIAMONDS, lifiDiamond } from './lifi';
+export { RELAY_DEPOSITORY, RELAY_PROXY_V3, RELAY_ROUTER_V3 } from './allow';
 export { QuoteCache, QUOTE_CACHE_TTL_MS, QUOTE_HOLD_SEC } from './cache';
 export { RateLimiter, DEFAULT_LIMITS } from './rateLimit';
 export { withinEta, filterByEta } from './eta';

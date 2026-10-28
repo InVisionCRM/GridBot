@@ -25,8 +25,10 @@ export const MAX_RETRY_WAIT_MS = 5_000;
 /** About 1 MiB. Declared and streamed bodies both stop here. */
 export const MAX_BODY_BYTES = 1_048_576;
 
-function retryWait(attempt: number, retryAfterMs: number | null): number {
+function retryWait(attempt: number, status: number, retryAfterMs: number | null): number {
   if (retryAfterMs != null && Number.isFinite(retryAfterMs) && retryAfterMs >= 0 && retryAfterMs <= MAX_RETRY_WAIT_MS) return retryAfterMs;
+  // A 429 that omits Retry-After must not be retried in a fraction of a second.
+  if (status === 429) return Math.min(MAX_RETRY_WAIT_MS, 2_000 * 2 ** attempt);
   return Math.min(MAX_RETRY_WAIT_MS, 200 * 2 ** attempt);
 }
 
@@ -93,7 +95,7 @@ export async function requestJson(o: {
       throwLogged(o.provider, 'rate_limit', `${o.provider}: rate limit`, o.log);
     }
     if (retryable(res.status) && attempt < HTTP_MAX_ATTEMPTS - 1) {
-      await o.sleep(retryWait(attempt, res.retryAfterMs));
+      await o.sleep(retryWait(attempt, res.status, res.retryAfterMs));
       continue;
     }
     throwLogged(o.provider, res.status === 429 ? 'rate_limit' : 'http', last, o.log);

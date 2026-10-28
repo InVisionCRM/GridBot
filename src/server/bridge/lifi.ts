@@ -1,4 +1,4 @@
-import { LIFI_DIAMOND, assertDepositTarget, capApproval } from './allow';
+import { LIFI_DIAMOND, LIFI_DIAMONDS, assertDepositTarget, decodeDeposit, exactApproval, lifiDiamond } from './allow';
 import { QUOTE_HOLD_SEC, loadQuote } from './cache';
 import type { BridgeDeps } from './deps';
 import { sanitizeText } from './errors';
@@ -11,18 +11,22 @@ import { assertQuoteMatches } from './validate';
 /**
  * Li.Fi is discovery-only. GET /quote and GET /status never auto-select a route.
  * DONE + PARTIAL means the transfer finished in a different token than the one requested;
- * the status carries that token and amount. DONE + REFUNDED is a refund. FAILED is final.
+ * the status carries that token and amount. DONE + REFUNDED is a refund.
+ * FAILED is final: Li.Fi does not retry the transfer or move it back to pending.
  *
  * The 0.25% Li.Fi fee is always a bridge-fee line. When the body includes it, the amount
  * must match 0.25% of amountIn (1 raw unit of slack). When the body omits it, the line is
  * the computed 0.25%.
  *
  * An optional quote key is sent only as the `x-lifi-api-key` header.
- * The deposit must target the Li.Fi diamond. Anything else is rejected.
+ * The deposit must target that chain's Li.Fi diamond. Ethereum and Robinhood Chain
+ * do not share one. bridgeData.minAmount is the pre-bridge amount after the integrator
+ * fee. toAmountMin is the destination minimum and is checked against the slippage floor
+ * on its own. The two amounts are not compared with each other.
  */
 export const LIFI_API = 'https://li.quest/v1';
 
-export { LIFI_DIAMOND };
+export { LIFI_DIAMOND, LIFI_DIAMONDS, lifiDiamond };
 
 const P = 'lifi';
 
@@ -92,6 +96,7 @@ export class LifiClient implements BridgeProvider {
     const raw = clip(status, this.d.secrets);
     if (status === 'NOT_FOUND') return base('pending', false, null, depositId, 'not indexed yet');
     if (status === 'PENDING') return base('pending', false, null, depositId, sub || 'pending');
+    // FAILED is final. A later status poll will not turn it back into pending.
     if (status === 'FAILED') return base('failed', true, null, depositId, 'failed');
     if (status !== 'DONE') return base('pending', false, null, depositId, `unknown: ${raw}`);
     if (sub === 'COMPLETED') return base('filled', true, readReceived(body.receiving, false), depositId, 'filled');
@@ -126,7 +131,8 @@ function parseQuote(req: BridgeQuoteRequest, body: Record<string, unknown>, sec:
   const txChain = needChain(P, tx.chainId, 'deposit chain');
   if (txChain !== req.srcChain) bad(P, 'deposit is not on the source chain');
   const to = needAddress(P, tx.to, 'deposit');
-  if (!sameAddress(to, LIFI_DIAMOND)) bad(P, 'deposit is not the Li.Fi diamond');
+  const diamond = lifiDiamond(req.srcChain);
+  if (!diamond || !sameAddress(to, diamond)) bad(P, 'deposit is not the Li.Fi diamond');
   if (tx.from != null && !sameAddress(needAddress(P, tx.from, 'sender'), req.sender)) bad(P, 'sender does not match');
   const deposit: UnsignedTx = {
     chainId: req.srcChain,
@@ -139,7 +145,14 @@ function parseQuote(req: BridgeQuoteRequest, body: Record<string, unknown>, sec:
   assertDepositTarget(P, req.srcChain, deposit.to);
   const approvalAddress = needAddress(P, estimate.approvalAddress, 'approval');
   if (!sameAddress(approvalAddress, deposit.to)) bad(P, 'approval spender does not match the deposit');
-  const approval = capApproval(P, encodeApprove(req.tokenIn.address, approvalAddress, req.amountIn, req.srcChain), req.tokenIn.address, req.amountIn);
+  const decoded = decodeDeposit(P, deposit.data, req, deposit.to);
+  const approval = exactApproval(
+    P,
+    encodeApprove(req.tokenIn.address, approvalAddress, decoded.pullAmount, req.srcChain),
+    req.tokenIn.address,
+    decoded.pullAmount,
+    req.amountIn,
+  );
   const seconds = needInt(P, estimate.executionDuration, 'fill time', 0, 30 * 24 * 60 * 60);
   const fees = splitFees(estimate.feeCosts, estimate.gasCosts, req);
   return {

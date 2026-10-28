@@ -1,4 +1,4 @@
-import { assertDepositTarget, capApproval } from './allow';
+import { assertDepositTarget, decodeDeposit, exactApproval } from './allow';
 import { QUOTE_HOLD_SEC, loadQuote } from './cache';
 import type { BridgeDeps } from './deps';
 import { baseHeaders, requestJson } from './http';
@@ -118,6 +118,7 @@ function parseQuote(req: BridgeQuoteRequest, body: Record<string, unknown>, sec:
     ? { amount: 0n, decimals: req.tokenIn.decimals, token: req.tokenIn.address, chainId: req.srcChain, label: 'app' }
     : { ...readMoney(asObj(fees.app), 'bridge fee', req), label: 'app' };
   const built = readSteps(body, req);
+  assertRelayOrder(body, req, built.depositId, minOut);
   const seconds = needUint32(P, details.timeEstimate, 'fill time');
   return {
     provider: P,
@@ -160,7 +161,7 @@ function readMoney(node: Record<string, unknown>, label: string, req: BridgeQuot
   return { label, amount, token: token.address, chainId: token.chainId, decimals: token.decimals };
 }
 
-function readSteps(body: Record<string, unknown>, req: BridgeQuoteRequest): { approval: UnsignedTx | null; deposit: UnsignedTx; requestId: string } {
+function readSteps(body: Record<string, unknown>, req: BridgeQuoteRequest): { approval: UnsignedTx | null; deposit: UnsignedTx; requestId: string; depositId: string | null } {
   const v = body.steps;
   if (!Array.isArray(v) || v.length === 0) bad(P, 'deposit is missing');
   let approval: UnsignedTx | null = null;
@@ -177,7 +178,7 @@ function readSteps(body: Record<string, unknown>, req: BridgeQuoteRequest): { ap
       if (tx.data.startsWith(APPROVE_SELECTOR)) {
         if (approval) bad(P, 'approval is missing');
         if (!sameAddress(tx.to, req.tokenIn.address)) bad(P, 'approval is not for the input token');
-        approval = capApproval(P, tx, req.tokenIn.address, req.amountIn);
+        approval = tx;
       } else if (deposit) {
         bad(P, 'deposit is missing');
       } else {
@@ -187,7 +188,28 @@ function readSteps(body: Record<string, unknown>, req: BridgeQuoteRequest): { ap
     }
   }
   if (!deposit) bad(P, 'deposit is missing');
-  return { approval, deposit, requestId: needId(P, requestId, 'quote id') };
+  const decoded = decodeDeposit(P, deposit.data, req, deposit.to);
+  if (approval) approval = exactApproval(P, approval, req.tokenIn.address, decoded.pullAmount, req.amountIn);
+  return { approval, deposit, requestId: needId(P, requestId, 'quote id'), depositId: decoded.depositId };
+}
+
+/** The order's output payment is the destination recipient. nftRecipient is not. */
+function assertRelayOrder(body: Record<string, unknown>, req: BridgeQuoteRequest, depositId: string | null, minOut: bigint) {
+  if (!depositId) return;
+  const protocol = asObj(body.protocol);
+  const v2 = asObj(protocol.v2);
+  const orderId = typeof v2.orderId === 'string' ? v2.orderId.toLowerCase() : bad(P, 'deposit id does not match');
+  if (!/^0x[0-9a-f]{64}$/.test(orderId) || orderId !== depositId.toLowerCase()) bad(P, 'deposit id does not match');
+  const payments = asObj(asObj(v2.orderData).output).payments;
+  if (!Array.isArray(payments) || payments.length === 0) bad(P, 'deposit recipient does not match');
+  for (const payment of payments) {
+    const row = asObj(payment);
+    const recipient = needAddress(P, row.recipient, 'deposit recipient');
+    if (!sameAddress(recipient, req.recipient)) bad(P, 'deposit recipient does not match');
+    const currency = typeof row.currency === 'string' ? row.currency : asObj(row.currency).address;
+    if (!sameAddress(needAddress(P, currency, 'token out'), req.tokenOut.address)) bad(P, 'deposit output token does not match');
+    if (needUint(P, row.minimumAmount, 'minOut') !== minOut) bad(P, 'minOut does not match the order');
+  }
 }
 
 function readTx(data: Record<string, unknown>, req: BridgeQuoteRequest): UnsignedTx {

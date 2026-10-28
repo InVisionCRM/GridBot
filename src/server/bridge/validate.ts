@@ -67,5 +67,5 @@ export function assertQuoteMatches(req: BridgeQuoteRequest, quote: BridgeQuote, 
       throw new BridgeError(p, 'invalid', `${p}: approval is not an ERC-20 approve`);
     }
   }
-  assertGuarded(p, req, quote.deposit, quote.approval, quote.minOut);
+  assertGuarded(p, req, quote.deposit, quote.approval);
 }

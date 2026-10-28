@@ -1,13 +1,15 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Interface, getAddress } from 'ethers';
+import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  ACROSS_API, ACROSS_PERIPHERY, ACROSS_SPOKE, DEFAULT_LIMITS, LIFI_API, LIFI_DIAMOND, RELAY_API, RELAY_PROXY_V3, RELAY_ROUTER_V3,
+  ACROSS_API, ACROSS_PERIPHERY, ACROSS_SPOKE, DEFAULT_LIMITS, LIFI_API, RELAY_API, RELAY_DEPOSITORY, RELAY_PROXY_V3, RELAY_ROUTER_V3, lifiDiamond,
   assertQuoteMatches,   createBridgeProviders, createFetchHttp, filterByEta, lifiFeeAmount, withinEta,
   type BridgeId, type BridgeQuote, type HttpClient,
 } from '../src/server/bridge';
-import { encodeRelayDeposit } from '../src/server/bridge/allow';
+import { BRIDGE_CAPTURED_AT, BRIDGE_CAPTURED_AT_MS } from './fixtures/bridge/captured';
+import { ERC20_TRANSFER, RELAY, encodeAcrossSwap, encodeRelayDeposit, encodeRelayErc20Deposit } from '../src/server/bridge/allow';
 import { BridgeError } from '../src/server/bridge/errors';
 import {
   ETH_CAPITAL, ETH_DEST_GAS, ETH_IN, ETH_LP, ETH_OUT, FILL_TX, LEGS, NOW_MS, NOW_SEC, ORIGIN_GAS,
@@ -30,12 +32,12 @@ function ok(body: unknown): Queued {
   return { status: 200, body, retryAfterMs: null };
 }
 
-function harness(keys?: { across?: string; relay?: string; lifi?: string }) {
+function harness(keys?: { across?: string; relay?: string; lifi?: string }, startMs = NOW_MS) {
   const calls: Call[] = [];
   const sleeps: number[] = [];
   const logs: string[] = [];
   const queue: Queued[] = [];
-  let t = NOW_MS;
+  let t = startMs;
   const http: HttpClient = async (req) => {
     calls.push({ url: req.url, method: req.method, headers: { ...req.headers }, body: req.body });
     const next = queue.shift();
@@ -150,9 +152,9 @@ describe('bridge quote normalization', () => {
           expect(quote.fees.relayer.amount).toBe(leg.sameAsset ? ETH_CAPITAL : USDC_CAPITAL);
           expect(quote.fees.sourceGas.amount).toBe(ORIGIN_GAS);
           expect(quote.fees.destinationGas).toBeNull();
-          expect(quote.deposit.to).toBe(getAddress(LIFI_DIAMOND));
+          expect(quote.deposit.to).toBe(lifiDiamond(leg.src.chainId));
           const [spender, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);
-          expect(getAddress(String(spender))).toBe(getAddress(LIFI_DIAMOND));
+          expect(getAddress(String(spender))).toBe(lifiDiamond(leg.src.chainId));
           expect(amount).toBe(leg.amountIn);
           expect(h.calls.at(-1)!.url.startsWith(`${LIFI_API}/quote`)).toBe(true);
         }
@@ -417,7 +419,7 @@ describe('quote cache, rate limit, and retries', () => {
     expect(limited).toBeInstanceOf(BridgeError);
     expect((limited as BridgeError).code).toBe('rate_limit');
     expect(h.calls).toHaveLength(8);
-    expect(h.sleeps).toEqual([50, 200, 200, 400]);
+    expect(h.sleeps).toEqual([50, 200, 2_000, 4_000]);
   });
 });
 
@@ -580,11 +582,12 @@ describe('bridge module boundaries', () => {
     const dir = join(__dirname, '../src/server/bridge');
     const files = readdirSync(dir).filter((f) => f.endsWith('.ts'));
     expect(files.length).toBeGreaterThan(5);
+    expect(signingViolations(`export const gone = obj['sendTransaction']();`, 'probe.ts')).toEqual(['probe.ts: calls sendTransaction']);
+    expect(signingViolations(`const method = 'signMessage'; wallet[method]();`, 'probe.ts')).toEqual(['probe.ts: calls signMessage']);
+    expect(signingViolations(`const slot = 'env'; process[slot];`, 'probe.ts')).toEqual(['probe.ts: process.env']);
     for (const f of files) {
       const code = readFileSync(join(dir, f), 'utf8');
-      expect(code, f).not.toMatch(/process\.env/);
-      expect(code, f).not.toMatch(/sendTransaction|eth_sendRawTransaction|broadcastTransaction|getSigner|JsonRpcProvider/);
-      expect(code, f).not.toMatch(/\bsign[A-Z]\w*|\.sign\s*\(|\.send\s*\(|\bWallet\b/);
+      expect(signingViolations(code, f), f).toEqual([]);
       expect(code, f).not.toMatch(/ACROSS_API_KEY|RELAY_API_KEY|LIFI_API_KEY/);
     }
   });
@@ -764,6 +767,64 @@ describe('QA review of quote safety', () => {
   });
 });
 
+const CALLS = new Set(['sendtransaction', 'signtransaction', 'signmessage', 'signtypeddata', '_signtypeddata', 'broadcasttransaction', 'getsigner', 'send', 'sign']);
+const NEWS = new Set(['wallet', 'jsonrpcprovider', 'hdnodewallet']);
+
+function boundStrings(source: ts.SourceFile): Map<string, string> {
+  const map = new Map<string, string>();
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isStringLiteral(node.initializer)) {
+      map.set(node.name.text, node.initializer.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return map;
+}
+
+function propertyName(expr: ts.Expression, strings: Map<string, string>): string | null {
+  if (ts.isIdentifier(expr)) return expr.text;
+  if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
+  if (ts.isElementAccessExpression(expr)) {
+    const arg = expr.argumentExpression;
+    if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) return arg.text;
+    if (ts.isIdentifier(arg)) return strings.get(arg.text) ?? null;
+  }
+  if (ts.isParenthesizedExpression(expr)) return propertyName(expr.expression, strings);
+  return null;
+}
+
+/** AST scan so obj['sendTransaction']() and const method = 'signMessage'; wallet[method]() are visible. */
+function signingViolations(code: string, file: string): string[] {
+  const source = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const strings = boundStrings(source);
+  const found: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node)) {
+      const name = propertyName(node.expression, strings);
+      if (name && CALLS.has(name.toLowerCase())) found.push(`${file}: calls ${name}`);
+    }
+    if (ts.isNewExpression(node)) {
+      const name = propertyName(node.expression, strings);
+      if (name && NEWS.has(name.toLowerCase())) found.push(`${file}: new ${name}`);
+    }
+    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'process' && node.name.text === 'env') {
+      found.push(`${file}: process.env`);
+    }
+    if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'process') {
+      const key = propertyName(node, strings);
+      if (key === 'env') found.push(`${file}: process.env`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
+function liveBody(name: string): unknown {
+  return JSON.parse(readFileSync(join(__dirname, 'fixtures/bridge/live', name), 'utf8'));
+}
+
 function baseQuote(req: ReturnType<typeof requestOf>): BridgeQuote {
   const fee = { amount: 0n, decimals: req.tokenIn.decimals, token: req.tokenIn.address, chainId: req.srcChain, label: 'lp' };
   return {
@@ -803,3 +864,228 @@ function baseQuote(req: ReturnType<typeof requestOf>): BridgeQuote {
     sameAsset: req.sameAsset,
   };
 }
+
+describe('live calldata and the guard', () => {
+  const ORDER = `0x${'ab'.repeat(32)}`;
+
+  it('rejects a deposit whose calldata recipient is not the requested one, which assertGuarded is responsible for', async () => {
+    const h = harness();
+    const usd = LEGS[2];
+    const body = acrossSwap(usd) as { swapTx: { data: string } };
+    const req = requestOf(usd);
+    body.swapTx.data = encodeAcrossSwap({
+      swapToken: usd.src.address,
+      amount: usd.amountIn,
+      outputToken: usd.dst.address,
+      outputAmount: USDC_OUT,
+      depositor: SENDER,
+      recipient: OTHER,
+      dstChain: usd.dst.chainId,
+      spoke: ACROSS_SPOKE[usd.src.chainId],
+      fillDeadline: NOW_SEC + 10_000,
+    });
+    h.queue.push(ok(body));
+    await expect(h.clients.across.quote(req)).rejects.toThrow(/deposit recipient does not match/);
+  });
+
+  it('rejects a Relay multicall that pays an attacker while the user appears only as nftRecipient', async () => {
+    const h = harness();
+    const usd = LEGS[2];
+    const body = relayQuote(usd) as { steps: Array<{ items: Array<{ data: { data: string; to: string } }> }> };
+    const transfer = ERC20_TRANSFER.encodeFunctionData('transfer', [OTHER, USDC_IN]);
+    body.steps[0].items[1].data.data = RELAY.encodeFunctionData('transferAndMulticall', [
+      [usd.src.address],
+      [USDC_IN],
+      [[usd.src.address, false, 0n, transfer]],
+      SENDER,
+      RECIPIENT,
+      '0x',
+    ]);
+    h.queue.push(ok(body));
+    await expect(h.clients.relay.quote(requestOf(usd))).rejects.toThrow(/deposit recipient does not match/);
+  });
+
+  it('rejects a Relay order whose payment recipient is not the requested recipient', async () => {
+    const h = harness();
+    const usd = LEGS[2];
+    const req = requestOf(usd);
+    const body = relayQuote(usd) as {
+      steps: Array<{ items: Array<{ data: { data: string; to: string } }> }>;
+      protocol?: unknown;
+    };
+    body.steps[0].items[0].data.data = approveData(RELAY_DEPOSITORY, USDC_IN);
+    body.steps[0].items[1].data.to = RELAY_DEPOSITORY;
+    body.steps[0].items[1].data.data = encodeRelayErc20Deposit({
+      depositor: SENDER,
+      token: usd.src.address,
+      amount: USDC_IN,
+      id: ORDER,
+    });
+    body.protocol = {
+      v2: {
+        orderId: ORDER,
+        orderData: { output: { payments: [{ recipient: OTHER, currency: usd.dst.address, minimumAmount: USDC_MIN.toString() }] } },
+      },
+    };
+    h.queue.push(ok(body));
+    await expect(h.clients.relay.quote(req)).rejects.toThrow(/deposit recipient does not match/);
+
+    const honest = relayQuote(usd) as typeof body;
+    honest.steps[0].items[0].data.data = approveData(RELAY_DEPOSITORY, USDC_IN);
+    honest.steps[0].items[1].data.to = RELAY_DEPOSITORY;
+    honest.steps[0].items[1].data.data = encodeRelayErc20Deposit({
+      depositor: SENDER,
+      token: usd.src.address,
+      amount: USDC_IN,
+      id: ORDER,
+    });
+    honest.protocol = {
+      v2: {
+        orderId: ORDER,
+        orderData: { output: { payments: [{ recipient: RECIPIENT, currency: usd.dst.address, minimumAmount: USDC_MIN.toString() }] } },
+      },
+    };
+    h.queue.push(ok(honest));
+    const quote = await h.clients.relay.quote(req);
+    const [spender, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);
+    expect(getAddress(String(spender))).toBe(RELAY_DEPOSITORY);
+    expect(amount).toBe(USDC_IN);
+  });
+
+  it('rejects maxInputAmount above the quoted input unless the swap is exactOutput and still within amountIn', async () => {
+    const h = harness();
+    const usd = LEGS[2];
+    const req = requestOf(usd);
+    const high = acrossSwap(usd) as { amountType?: string; inputAmount?: string; maxInputAmount?: string };
+    high.amountType = 'exactInput';
+    high.inputAmount = USDC_IN.toString();
+    high.maxInputAmount = (USDC_IN + 1n).toString();
+    h.queue.push(ok(high));
+    await expect(h.clients.across.quote(req)).rejects.toThrow(/max input is above the quoted input/);
+
+    const exact = acrossSwap(usd) as { amountType?: string; inputAmount?: string; maxInputAmount?: string; swapTx: { data: string } };
+    exact.amountType = 'exactOutput';
+    exact.inputAmount = (USDC_IN - 1n).toString();
+    exact.maxInputAmount = USDC_IN.toString();
+    exact.swapTx.data = encodeAcrossSwap({
+      swapToken: usd.src.address,
+      amount: USDC_IN,
+      outputToken: usd.dst.address,
+      outputAmount: USDC_OUT,
+      depositor: SENDER,
+      recipient: RECIPIENT,
+      dstChain: usd.dst.chainId,
+      spoke: ACROSS_SPOKE[usd.src.chainId],
+      fillDeadline: NOW_SEC + 10_000,
+    });
+    h.queue.push(ok(exact));
+    const quote = await h.clients.across.quote(req);
+    const [, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);
+    expect(amount).toBe(USDC_IN);
+  });
+
+  it('includes an Across submission fee in the approval and rejects a pull above amountIn', async () => {
+    const h = harness();
+    const usd = LEGS[2];
+    const req = requestOf(usd);
+    const body = acrossSwap(usd) as { swapTx: { data: string }; approvalTxns: Array<{ data: string }> };
+    body.swapTx.data = encodeAcrossSwap({
+      swapToken: usd.src.address,
+      amount: USDC_IN - 50n,
+      outputToken: usd.dst.address,
+      outputAmount: USDC_OUT,
+      depositor: SENDER,
+      recipient: RECIPIENT,
+      dstChain: usd.dst.chainId,
+      spoke: ACROSS_SPOKE[usd.src.chainId],
+      fillDeadline: NOW_SEC + 10_000,
+      submissionFee: 50n,
+    });
+    h.queue.push(ok(body));
+    const quote = await h.clients.across.quote(req);
+    const [, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);
+    expect(amount).toBe(USDC_IN);
+
+    h.advance(61_000);
+    const over = acrossSwap(usd) as { swapTx: { data: string } };
+    over.swapTx.data = encodeAcrossSwap({
+      swapToken: usd.src.address,
+      amount: USDC_IN,
+      outputToken: usd.dst.address,
+      outputAmount: USDC_OUT,
+      depositor: SENDER,
+      recipient: RECIPIENT,
+      dstChain: usd.dst.chainId,
+      spoke: ACROSS_SPOKE[usd.src.chainId],
+      fillDeadline: NOW_SEC + 10_000,
+      submissionFee: 1n,
+    });
+    h.queue.push(ok(over));
+    await expect(h.clients.across.quote(req)).rejects.toThrow(/approval is above the input/);
+  });
+
+  it('approves the Li.Fi pre-bridge amount when Across V4 has no source swap', async () => {
+    const h = harness();
+    const usd = LEGS[2];
+    h.queue.push(ok(lifiQuote(usd, { variant: 'direct' })));
+    const quote = await h.clients.lifi.quote(requestOf(usd));
+    const [, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);
+    expect(amount).toBe(USDC_IN - lifiFeeAmount(USDC_IN));
+    expect(quote.minOut).toBe(USDC_MIN);
+  });
+
+  it('runs the captured 2026-10-27 quotes through the guard', async () => {
+    expect(BRIDGE_CAPTURED_AT).toBe('2026-10-27T23:53:36.000Z');
+    const h = harness(undefined, BRIDGE_CAPTURED_AT_MS);
+    const cases: Array<{ file: string; provider: 'across' | 'relay' | 'lifi'; leg: Leg; sameAsset: boolean; pass: boolean }> = [
+      { file: 'across-usdc-1-4663.json', provider: 'across', leg: LEGS[2], sameAsset: false, pass: true },
+      { file: 'across-usdc-4663-1.json', provider: 'across', leg: LEGS[3], sameAsset: false, pass: true },
+      { file: 'across-weth-1-4663.json', provider: 'across', leg: LEGS[0], sameAsset: false, pass: false },
+      { file: 'across-weth-4663-1.json', provider: 'across', leg: LEGS[1], sameAsset: false, pass: false },
+      { file: 'relay-usdc-1-4663.json', provider: 'relay', leg: LEGS[2], sameAsset: false, pass: true },
+      { file: 'relay-usdc-4663-1.json', provider: 'relay', leg: LEGS[3], sameAsset: false, pass: true },
+      { file: 'relay-weth-1-4663.json', provider: 'relay', leg: LEGS[0], sameAsset: true, pass: true },
+      { file: 'relay-weth-4663-1.json', provider: 'relay', leg: LEGS[1], sameAsset: true, pass: true },
+      { file: 'lifi-usdc-1-4663.json', provider: 'lifi', leg: LEGS[2], sameAsset: false, pass: true },
+      { file: 'lifi-usdc-4663-1.json', provider: 'lifi', leg: LEGS[3], sameAsset: false, pass: true },
+      { file: 'lifi-weth-1-4663.json', provider: 'lifi', leg: LEGS[0], sameAsset: true, pass: true },
+      { file: 'lifi-weth-4663-1.json', provider: 'lifi', leg: LEGS[1], sameAsset: true, pass: false },
+    ];
+    const passed: string[] = [];
+    for (const row of cases) {
+      const req = { ...requestOf(row.leg), recipient: SENDER, sameAsset: row.sameAsset };
+      h.queue.push(ok(liveBody(row.file)));
+      const client = row.provider === 'across' ? h.clients.across : row.provider === 'relay' ? h.clients.relay : h.clients.lifi;
+      if (!row.pass) {
+        await expect(client.quote(req), row.file).rejects.toThrow(/deposit message is not empty|deposit calldata is not decodable/);
+        continue;
+      }
+      const quote = await client.quote(req);
+      expect(quote.recipient, row.file).toBe(SENDER);
+      expect(quote.amountIn, row.file).toBe(row.leg.amountIn);
+      const [spender, amount] = APPROVE.decodeFunctionData('approve', quote.approval!.data);
+      expect(amount, row.file).toBeLessThanOrEqual(row.leg.amountIn);
+      expect(amount > 0n, row.file).toBe(true);
+      if (row.provider === 'lifi') expect(getAddress(String(spender)), row.file).toBe(lifiDiamond(row.leg.src.chainId));
+      passed.push(row.file);
+    }
+    expect(passed).toEqual([
+      'across-usdc-1-4663.json',
+      'across-usdc-4663-1.json',
+      'relay-usdc-1-4663.json',
+      'relay-usdc-4663-1.json',
+      'relay-weth-1-4663.json',
+      'relay-weth-4663-1.json',
+      'lifi-usdc-1-4663.json',
+      'lifi-usdc-4663-1.json',
+      'lifi-weth-1-4663.json',
+    ]);
+
+    h.queue.push(ok(liveBody('relay-status.json')));
+    const status = await h.clients.relay.status({ provider: 'relay', originChainId: 1, depositId: REQUEST_ID });
+    expect(status.state).toBe('pending');
+    expect(status.final).toBe(false);
+    expect(JSON.stringify(liveBody('across-status.json'))).toContain('Deposit not found');
+    expect(JSON.stringify(liveBody('lifi-status.json'))).toContain('not found');
+  });
+});

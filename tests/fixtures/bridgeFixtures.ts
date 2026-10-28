@@ -5,7 +5,7 @@
  */
 import { Interface, getAddress } from 'ethers';
 import { chainById } from '../../src/live/chains';
-import { ACROSS_PERIPHERY, ACROSS_SPOKE, LIFI_DIAMOND, RELAY_PROXY_V3, RELAY_ROUTER_V3, lifiFeeAmount } from '../../src/server/bridge';
+import { ACROSS_PERIPHERY, ACROSS_SPOKE, RELAY_PROXY_V3, RELAY_ROUTER_V3, lifiDiamond, lifiFeeAmount } from '../../src/server/bridge';
 import { encodeAcrossSwap, encodeLifiDeposit, encodeRelayDeposit } from '../../src/server/bridge/allow';
 import type { BridgeQuoteRequest, BridgeToken } from '../../src/server/bridge';
 
@@ -213,10 +213,11 @@ export function relayQuote(leg: Leg, patch: { amountOut?: bigint; minOut?: bigin
   };
 }
 
-export function lifiQuote(leg: Leg, opts: { omitLifiFee?: boolean; feeAmount?: bigint; percentage?: string; diamond?: string } = {}): unknown {
+export function lifiQuote(leg: Leg, opts: { omitLifiFee?: boolean; feeAmount?: bigint; percentage?: string; diamond?: string; variant?: 'swap' | 'direct' } = {}): unknown {
   const amountOut = leg.sameAsset ? ETH_OUT : USDC_OUT;
   const minOut = leg.sameAsset ? ETH_OUT : USDC_MIN;
   const fee = opts.feeAmount ?? lifiFeeAmount(leg.amountIn);
+  const diamond = opts.diamond ?? lifiDiamond(leg.src.chainId)!;
   const feeCosts = [
     ...(opts.omitLifiFee ? [] : [{
       name: 'LIFI Fixed Fee',
@@ -251,7 +252,7 @@ export function lifiQuote(leg: Leg, opts: { omitLifiFee?: boolean; feeAmount?: b
       fromAmount: leg.amountIn.toString(),
       toAmount: amountOut.toString(),
       toAmountMin: minOut.toString(),
-      approvalAddress: LIFI_DIAMOND,
+      approvalAddress: diamond,
       executionDuration: 20,
       feeCosts,
       gasCosts: [{
@@ -262,14 +263,17 @@ export function lifiQuote(leg: Leg, opts: { omitLifiFee?: boolean; feeAmount?: b
     },
     transactionRequest: {
       from: SENDER,
-      to: opts.diamond ?? LIFI_DIAMOND,
+      to: diamond,
       chainId: leg.src.chainId,
       data: encodeLifiDeposit({
         token: leg.src.address,
+        outputToken: leg.dst.address,
         recipient: RECIPIENT,
         sender: SENDER,
+        amountIn: leg.amountIn,
         minOut,
         dstChain: leg.dst.chainId,
+        variant: opts.variant ?? 'swap',
       }),
       value: '0',
       gasLimit: '0x425a5',

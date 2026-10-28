@@ -1,5 +1,5 @@
 import { getAddress } from 'ethers';
-import { ACROSS_PERIPHERY, ACROSS_SPOKE, DEPOSIT_V3, assertDepositTarget, capApproval, decodeDeposit } from './allow';
+import { ACROSS_PERIPHERY, ACROSS_SPOKE, DEPOSIT_V3, assertDepositTarget, decodeDeposit, exactApproval } from './allow';
 import { loadQuote } from './cache';
 import type { BridgeDeps } from './deps';
 import { sanitizeText } from './errors';
@@ -150,7 +150,7 @@ export class AcrossClient implements BridgeProvider {
     ]).toLowerCase();
     const deposit: UnsignedTx = { chainId: req.srcChain, to: spoke, data, value: 0n };
     assertDepositTarget(P, req.srcChain, deposit.to);
-    const approval = capApproval(P, encodeApprove(req.tokenIn.address, spoke, req.amountIn, req.srcChain), req.tokenIn.address, req.amountIn);
+    const approval = exactApproval(P, encodeApprove(req.tokenIn.address, spoke, req.amountIn, req.srcChain), req.tokenIn.address, req.amountIn, req.amountIn);
     return {
       provider: P,
       srcChain: req.srcChain,
@@ -191,16 +191,22 @@ export class AcrossClient implements BridgeProvider {
       slippage: bpsFraction(req.slippageBps ?? 50),
     });
     const body = asObj(await this.get(`/swap/approval?${params}`));
+    // Live /swap/approval bodies have no top-level recipient. When one is present it still
+    // has to name the requested recipient. The address that is paid is the one in the calldata.
+    if (typeof body.recipient === 'string' && !sameAddress(needAddress(P, body.recipient, 'recipient'), req.recipient)) {
+      bad(P, 'recipient does not match');
+    }
     const input = needToken(P, body.inputToken, 'input token');
     const output = needToken(P, body.outputToken, 'output token');
     if (!tokensMatch(input, req.tokenIn)) bad(P, 'token in does not match');
     if (!tokensMatch(output, req.tokenOut)) bad(P, 'token out does not match');
-    const recipient = needAddress(P, body.recipient, 'recipient');
-    if (!sameAddress(recipient, req.recipient)) bad(P, 'recipient does not match');
     const amountOut = needPositive(P, body.expectedOutputAmount, 'amountOut');
     const minOut = needPositive(P, body.minOutputAmount, 'minOut');
     const swapTx = asObj(body.swapTx);
-    if (swapTx.simulationSuccess !== true) bad(P, 'swap simulation failed');
+    const gas = readGasLimit(P, swapTx.gas);
+    // gas 0 means the host did not simulate (an unfunded placeholder cannot). A failed
+    // simulation that still published a gas limit is rejected.
+    if (swapTx.simulationSuccess !== true && gas != null) bad(P, 'swap simulation failed');
     const txChain = needUint32(P, swapTx.chainId, 'deposit chain');
     if (txChain !== req.srcChain) bad(P, 'deposit is not on the source chain');
     const deposit: UnsignedTx = {
@@ -209,10 +215,13 @@ export class AcrossClient implements BridgeProvider {
       data: needHex(P, swapTx.data, 'deposit'),
       value: swapTx.value == null ? 0n : needValue(P, swapTx.value, 'deposit value'),
     };
-    const gas = readGasLimit(P, swapTx.gas);
     if (gas != null) deposit.gasLimit = gas;
     assertDepositTarget(P, req.srcChain, deposit.to);
-    const approval = readApproval(body.approvalTxns, req);
+    const decoded = decodeDeposit(P, deposit.data, req, deposit.to);
+    if (decoded.outputAmount != null && decoded.outputAmount !== amountOut) bad(P, 'amountOut does not match');
+    const pull = quotedPull(body, req, decoded.amount, decoded.pullAmount);
+    const rawApproval = readApproval(body.approvalTxns, req);
+    const approval = rawApproval ? exactApproval(P, rawApproval, req.tokenIn.address, pull, req.amountIn) : null;
     const details = asObj(asObj(asObj(asObj(body.steps).bridge).fees).details);
     const lp = readFee(asObj(details.lp), req, 'bridge fee');
     const capital = readFee(asObj(details.relayerCapital), req, 'relayer fee');
@@ -222,8 +231,7 @@ export class AcrossClient implements BridgeProvider {
     const p90 = body.expectedFillTimeP90 == null ? seconds : needUint32(P, body.expectedFillTimeP90, 'fill time');
     let expiresAt = needUint32(P, body.quoteExpiryTimestamp, 'expiry');
     if (body.fillDeadline != null) expiresAt = Math.min(expiresAt, needUint32(P, body.fillDeadline, 'fill deadline'));
-    const decodedDeadline = decodeDeposit(P, deposit.data, req).fillDeadline;
-    if (decodedDeadline != null) expiresAt = Math.min(expiresAt, decodedDeadline);
+    if (decoded.fillDeadline != null) expiresAt = Math.min(expiresAt, decoded.fillDeadline);
     return {
       provider: P,
       srcChain: req.srcChain,
@@ -239,7 +247,7 @@ export class AcrossClient implements BridgeProvider {
       approval,
       deposit,
       quoteId: needId(P, body.id, 'quote id'),
-      recipient,
+      recipient: req.recipient,
       sender: req.sender,
       discoveryOnly: false,
       sameAsset: false,
@@ -303,7 +311,28 @@ function readApproval(v: unknown, req: BridgeQuoteRequest): UnsignedTx | null {
   const data = needHex(P, tx.data, 'approval');
   const value = tx.value == null ? 0n : needValue(P, tx.value, 'approval value');
   if (value !== 0n) bad(P, 'approval value must be zero');
-  return capApproval(P, { chainId, to, data, value }, req.tokenIn.address, req.amountIn);
+  return { chainId, to, data, value };
+}
+
+/**
+ * inputAmount is what deposit() pulls. maxInputAmount may be higher only for exactOutput,
+ * and even then it has to stay within amountIn. The approval uses that higher pull.
+ */
+function quotedPull(body: Record<string, unknown>, req: BridgeQuoteRequest, calldataAmount: bigint | null, calldataPull: bigint): bigint {
+  if (body.inputAmount == null && body.maxInputAmount == null) return calldataPull;
+  const quoted = body.inputAmount == null ? calldataAmount : needUint(P, body.inputAmount, 'input amount');
+  if (quoted == null) bad(P, 'input amount is missing');
+  const max = body.maxInputAmount == null ? quoted : needUint(P, body.maxInputAmount, 'max input');
+  const exactOut = body.amountType === 'exactOutput';
+  if (!exactOut) {
+    if (max > quoted) bad(P, 'max input is above the quoted input');
+    if (calldataAmount !== quoted) bad(P, 'deposit amount does not match');
+    return calldataPull;
+  }
+  if (max > req.amountIn) bad(P, 'approval is above the input');
+  if (quoted > max) bad(P, 'deposit amount does not match');
+  if (calldataAmount !== max) bad(P, 'deposit amount does not match');
+  return max + (calldataPull - (calldataAmount ?? max));
 }
 
 function clip(v: string, secrets: readonly string[]): string {
