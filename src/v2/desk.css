@@ -126,6 +126,10 @@
 .v2-body {
   position: relative;
   z-index: 1;
+}
+/* The sheet is position:fixed inside this stacking context, so lift the whole body above the tab bar while it is open. */
+.v2-body:has(.sheet-back) { z-index: 30; }
+.v2-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
@@ -133,7 +137,7 @@
 }
 .v2 main { min-width: 0; }
 
-.v2 .sheet.glass { background: rgba(22, 26, 30, 0.98); }
+.v2 .sheet.glass { background: rgba(22, 26, 30, 1); }
 .v2 .glass {
   background: rgba(22, 26, 30, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -343,8 +347,8 @@
 .v2 .chart-frame { position: relative; margin: 12px 0; padding: 12px 12px 28px; border-radius: 16px; background: rgba(22, 26, 30, 0.55); border: 1px solid var(--line); }
 .v2 .chart-frame.is-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; }
 .v2 .chart-frame.is-empty .curve-empty { margin: 0; min-height: 0; font-family: var(--font); font-size: 13px; flex: 1 1 180px; }
-.v2 .chart-frame.is-empty .range-on-chart { position: static; flex: 1 1 140px; }
-.v2 .chart-frame.is-empty .range-track { margin: 0; }
+.v2 .chart-frame.is-empty .range-on-chart { position: static; flex: 1 1 140px; width: 100%; min-width: 120px; }
+.v2 .chart-frame.is-empty .range-track { margin: 0; width: 100%; }
 .v2 .chart-frame .candle-host { margin: 8px 0 0; }
 .v2 .range-on-chart { position: absolute; left: 12px; right: 12px; bottom: 10px; }
 .v2 .range-on-chart .range-track { margin: 0; background: rgba(11, 14, 17, 0.72); }
@@ -492,7 +496,7 @@
 
 .v2 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
-  display: grid; grid-template-columns: repeat(3, 1fr);
+  display: grid; grid-template-columns: repeat(4, 1fr);
   background: rgba(11, 14, 17, 0.92);
   border-top: 1px solid var(--line);
   padding: 6px 8px calc(8px + env(safe-area-inset-bottom));
@@ -510,7 +514,8 @@
 }
 .v2 .tabbar button {
   background: transparent; border: 0; color: var(--label); cursor: pointer;
-  display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; padding: 6px;
+  display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; padding: 6px 2px;
+  white-space: nowrap;
 }
 .v2 .tabbar button.on { color: var(--accent); }
 
@@ -549,6 +554,8 @@
   .v2 .tabbar { display: none; }
   .v2 .bot-feed { display: none; }
   .v2 .bot-page .chart-frame { min-height: 48vh; display: flex; flex-direction: column; }
+  .v2 .bot-page .chart-frame.is-empty { align-items: stretch; }
+  .v2 .bot-page .chart-frame.is-empty .range-on-chart { align-self: stretch; width: 100%; flex: 0 0 auto; }
   .v2 .bot-page .chart-frame .curve-empty { flex: 1; display: flex; align-items: center; }
   .v2 .side-tape { min-height: calc(100vh - 140px); }
 }
