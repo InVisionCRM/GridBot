@@ -246,7 +246,7 @@ export class GridEngine {
   get id() { return this.state.id; }
 
   private ev(type: Parameters<Emit>[0]['type'], msg: string, extra: Partial<Parameters<Emit>[0]> = {}) {
-    this.d.emit?.({ type, msg, botId: this.state.id, kind: 'grid', pair: this.state.stable, chainId: this.chainId, ...extra });
+    this.d.emit?.({ type, msg, botId: this.state.id, kind: 'grid', pair: this.state.stable, chainId: this.chainId, ...extra, mode: this.state.mode });
   }
 
   private tag(level: 'info' | 'warn' | 'error', msg: string) {
