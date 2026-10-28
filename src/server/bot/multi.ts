@@ -15,6 +15,7 @@ import { FEE_BPS } from '../../live/economics';
 import { GridEngine, freshState, type BotState, type EngineDeps, type Mode, type ProfitMode, type StartParams } from './engine';
 import { TrendEngine, freshTrend, type TrendStartParams, type TrendState, type TrendTrade } from './trend';
 import { LpEngine, freshLp, upgradeLp, type LpStartParams, type LpState } from './lpEngine';
+import type { LpCompoundPolicy, LpRangePolicy } from '../../market/lpPolicy';
 import { MANUAL_CHECK, TaxWatch } from './taxWatch';
 import type { Logger } from './logger';
 import type { Store } from './store';
@@ -37,6 +38,7 @@ import { simBuy, simSell, type CostModel, DEFAULT_COSTS } from '../../market/cos
 import { DEFAULT_TREND, type DrawnLine, type TrendConfig } from '../../market/strategy';
 import { runGridBacktest, runTrendBacktest, sweepTrend, SWEEP_AXES, type BtResult, type SweepKey } from '../../market/backtest';
 import { drawdown, pushCapped, tradeStats } from '../../market/stats';
+import { rpcHost, safeRpcHealth, safeRpcStatus } from '../chains/rpcUrl';
 
 /** A LIVE resume whose safety check was still running when Stop all / STOP chain / Stop landed: the stop won. */
 export class ResumeCancelled extends Error { readonly code = 'RESUME_CANCELLED'; }
@@ -471,6 +473,7 @@ export class MultiBot {
     eng = new LpEngine({
       net: this.d.net, store: new SliceStore(() => this.multi.lps, () => this.persist(), id), log: this.d.log, hub: this.hub,
       emit: (e) => this.activity.emitEvent(e), approval: this.d.approval, receiptTimeoutMs: this.d.receiptTimeoutMs, now: this.d.now, id,
+      candles: (market) => this.candles.get(market, '1h'),
     });
     this.lpEngines.set(id, eng);
     return eng;
@@ -683,6 +686,8 @@ export class MultiBot {
     return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
   }
   setLpRerange(id: string, enabled: boolean) { this.lp(id).setRerange(enabled); }
+  setLpPolicy(id: string, p: { range?: Partial<LpRangePolicy>; compound?: Partial<LpCompoundPolicy>; bandPct?: number }) { this.lp(id).setPolicy(p); }
+  compoundLp(id: string) { return this.lp(id).compoundNow(); }
   /** Move a liquidity bot's range to the price now, at a new width or the same one; it starts on the next tick. */
   moveLp(id: string, bandPct?: number) { return this.lp(id).move(bandPct); }
   setLpProfits(id: string, p: ProfitMode) { return this.lp(id).setProfits(p); }
@@ -1706,8 +1711,9 @@ export class MultiBot {
         dexes: c.dexes.map((x) => ({ id: x.id, name: x.name, kind: x.kind })),
         hasSigner: !!rt.signer, address: w?.address ?? rt.gas.address, gasNative: w?.native ?? rt.gas.native, lowGas: rt.gas.low,
         lowGasNative: c.lowGasNative, nativeUsd: this.hub.nativeUsd(c.id), walletError: w?.error ?? rt.gas.error ?? null,
-        txBusy: rt.gate.busy, rpc: rt.reader.currentUrl ?? null, rpcStatus: rt.reader.status ?? null,
-        rpcHealth: rt.reader.health?.() ?? null, bots,
+        // RPC URLs can hold an API key: the status shows scheme://host[:port] only (chains/rpcUrl.ts).
+        txBusy: rt.gate.busy, rpc: rpcHost(rt.reader.currentUrl ?? null), rpcStatus: safeRpcStatus(rt.reader.status),
+        rpcHealth: safeRpcHealth(rt.reader.health?.()), bots,
       };
     });
   }
