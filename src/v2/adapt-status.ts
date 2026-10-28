@@ -232,7 +232,7 @@ function desk(metrics: BotMetrics, label: string, base: string, quote: string, c
     : metrics.range.inRange ? 'in' : 'out';
   return {
     metrics, pair: shownPair(base, quote, price, label), base, quote, chain: chain.short, chainName: chain.name, chainColor: chain.color, dex: dex || '—',
-    tone, spark: spark.length > 1 ? spark : [], levels: [], candles: [], fills: [], flashLevel: null,
+    tone, spark: spark.length > 1 ? spark : [],
     price, change24h: null, feeBps, priceAt, archived,
   };
 }

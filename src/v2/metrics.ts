@@ -98,8 +98,6 @@ export interface BotMetrics {
   moveLoss: TokenQty[];
 }
 
-export interface CandleBar { t: number; o: number; h: number; l: number; c: number; v: number }
-export interface FillMark { id: string; t: number; price: number; side: 'buy' | 'sell' }
 
 export interface BotDesk {
   metrics: BotMetrics;
@@ -114,10 +112,6 @@ export interface BotDesk {
   /** in / out / idle from the payload. "near" is only set when the server says so. */
   tone: 'in' | 'near' | 'out' | 'idle';
   spark: number[];
-  levels: number[];
-  candles: CandleBar[];
-  fills: FillMark[];
-  flashLevel: number | null;
   price: number | null;
   /** Saved with archivedAt. Listed under Closed, and left out of section totals. */
   archived: boolean;

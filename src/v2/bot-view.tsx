@@ -3,14 +3,12 @@ import { useState } from 'react';
 import { CoinMark } from './coin-mark';
 import type { View } from '../ui/model';
 import { ActivityTape } from './activity-tape';
-import { CandlePane } from './candle-pane';
 import { estimatesVisible, hasEarnings, hasGenerated, ledgerLines, sheetRows } from './figures';
 import { formatBag, formatQuotePx, formatStamp, shortenFigures } from './format';
 import { LpRangeSlot } from './lp-range-slot';
 import type { ActivityItem, BotDesk, BotMetrics, TapePrice } from './metrics';
 import { PairTitle } from './pair-label';
 import { press } from './press';
-import { candlesInRange, RangeSelect, type RangeKey } from './range-tabs';
 import { RangeTrack } from './range-track';
 import { StatusMark } from './status-mark';
 import { TokenHeadline, TokenLine } from './tokens';
@@ -46,10 +44,7 @@ export function BotView({
   showFeed?: boolean;
 }) {
   const [shot, setShot] = useState<BotMetrics | null>(() => (breakdown ? structuredClone(bot.metrics) : null));
-  const [span, setSpan] = useState<RangeKey>('ALL');
   const m = bot.metrics;
-  const timed = bot.candles.length > 0 && bot.candles.every((c) => c.t > 0);
-  const candles = candlesInRange(bot.candles, span, m.asOf);
   const [shownBase, shownQuote] = bot.pair.split('/');
   const beside = `${activity.map((a) => shortenFigures(a.text).replace(/\$/g, '')).join('\n')} ${prices.map((p) => formatQuotePx(p.price, p.symbol.split('/')[1] || '')).join(' ')}`;
   const rows = shot ? sheetRows(shot, { base: shownBase || bot.base, quote: shownQuote || bot.quote }, beside) : [];
@@ -91,14 +86,8 @@ export function BotView({
           <p className="muted small">No earnings yet, so no estimate.</p>
         )}
       </section>
-      <div className={candles.length > 1 ? 'chart-frame' : 'chart-frame is-empty'}>
-        <RangeSelect value={span} onChange={setSpan} timed={timed} />
-        {candles.length > 1
-          ? <CandlePane candles={candles} levels={bot.levels} fills={bot.fills} flashLevel={bot.flashLevel} />
-          : <p className="curve-empty">Chart fills in as history builds</p>}
-        <div className="range-on-chart">
-          <RangeTrack range={m.range} tone={bot.tone} />
-        </div>
+      <div className="range-slot">
+        <RangeTrack range={m.range} tone={bot.tone} />
       </div>
       <button type="button" className="v2-btn" data-open="breakdown" onClick={() => { press(); setShot(structuredClone(m)); }}>Breakdown</button>
       {showFeed && (
