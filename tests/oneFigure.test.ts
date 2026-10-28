@@ -10,12 +10,17 @@
  * (its own scale and readout; it draws on a canvas), and counts.
  * "Seen on a desktop": the stat table's `in-row` cells are hidden (the row's columns show them). "Seen on a phone": the
  * row's value/% /age/APR/moves/fees columns are hidden (styles.css, max-width 860px) and the `in-row` cells show.
+ * A closed <details> shows only its summary (a label); the LP page's net breakdown is checked closed and open.
  */
 import { createElement as h, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DeskTable } from '../src/ui/DeskTable';
+import { GridDetail } from '../src/ui/GridDetail';
+import { Home } from '../src/ui/Home';
 import { LpDetail } from '../src/ui/LpDetail';
+import { StatTable } from '../src/ui/StatTable';
+import { TrendDetail } from '../src/ui/TrendDetail';
 import { ShowUsdCtx } from '../src/ui/money';
 
 // A rendered page shows a counting number at its end value (the static render would show where the count starts).
@@ -60,12 +65,12 @@ const grid = {
   kind: 'grid', id: 'g-eth', mode: 'paper', status: 'running', chainId: 4663, stable: 'robinhood:ETH/USDG', quoteSym: 'USDG', base: 'ETH',
   usdPerQuote: 1, price: 2_348.87, startedAt: NOW - 0.5 * H, moveCount: 1, lastMoveAt: NOW - 12 * 60_000,
   config: { lowerPrice: 2_100, upperPrice: 2_600, gridCount: 10, totalCapitalUsd: 2_000 }, stats: { roundTrips: 0, wins: 0 },
-  pnl: { realized: 0.0925, unrealized: -0.0177, fees: 0.31, gas: 0.02 }, intervals: [], equityHist: [[NOW - 0.5 * H, 2_000], [NOW, 2_000.0748]],
+  pnl: { realized: 0.0925, unrealized: -0.0177, fees: 0.31, gas: 0.02 }, intervals: [], trades: [], levels: [], equityHist: [[NOW - 0.5 * H, 2_000], [NOW, 2_000.0748]],
 };
 const trend = {
   kind: 'trend', id: 't-nvda', name: 'EMA NVDA/USDG-HOOD 1h', mode: 'paper', status: 'running', chainId: 4663, quote: 'robinhood:NVDA/USDG',
-  quoteSym: 'USDG', base: 'NVDA', usdPerQuote: 1, tf: '1h', cfg: { strategy: 'ema' }, capital: 1_000, startedAt: NOW - 5 * D,
-  moveCount: 7, lastMoveAt: NOW - 2.3 * H, stats: { winRate: 0.5714 }, position: null,
+  quoteSym: 'USDG', base: 'NVDA', usdPerQuote: 1, tf: '1h', cfg: { strategy: 'ema', fast: 9, slow: 21, lines: [] }, capital: 1_000, startedAt: NOW - 5 * D,
+  moveCount: 7, lastMoveAt: NOW - 2.3 * H, stats: { winRate: 0.5714 }, position: null, signals: [], trades: [],
   pnl: { realized: 61.5, unrealized: -4.2, returnPct: 0.0573, fees: 3.1, gas: 0.2 }, equityHist: [[NOW - 5 * D, 1_000], [NOW, 1_057.3]],
 };
 const s = { ...s0, grids: [grid], trends: [trend], lps: [stonkd, nvdaLp] };
@@ -74,7 +79,7 @@ const bots = [{ ...grid, kind: 'grid' }, { ...trend, kind: 'trend' }, stonkd, nv
 // ---------------------------------------------------------------- what a person sees
 const VOID = new Set(['input', 'br', 'img', 'hr', 'meta', 'link', 'source', 'wbr', 'col', 'area', 'path', 'circle', 'rect', 'line', 'polyline', 'stop']);
 const ALWAYS_HIDDEN = (tag: string, cls: string[]) => ['input', 'select', 'option', 'th', 'title', 'textarea'].includes(tag)
-  || cls.some((c) => ['btn', 'stat-note', 'bot-title', 'chip-btn', 'chart-wrap', 'eq-chart'].includes(c)) || tag === 'h2';
+  || cls.some((c) => ['btn', 'stat-note', 'bot-title', 'chip-btn', 'chart-wrap', 'eq-chart'].includes(c)) || tag === 'h2' || tag === 'summary';
 const PHONE_HIDDEN = ['desk-spark', 'desk-val', 'desk-pct', 'desk-age', 'desk-apr', 'desk-moves', 'desk-fees', 'desk-status'];
 type View = 'desktop' | 'phone';
 
@@ -88,7 +93,8 @@ export function visibleText(html: string, view: View): string {
     const [, close, tag0, attrs, self] = m; const tag = tag0.toLowerCase();
     if (close) { const hid = stack.pop(); if (hid) skip--; out += ' '; continue; }
     const cls = (/class="([^"]*)"/.exec(attrs)?.[1] ?? '').split(/\s+/);
-    const hidden = ALWAYS_HIDDEN(tag, cls) || (view === 'desktop' && cls.includes('in-row')) || (view === 'phone' && cls.some((c) => PHONE_HIDDEN.includes(c)));
+    const shut = tag === 'details' && !/\sopen(?:[\s=>]|$)/.test(attrs); // a closed <details>: only its summary shows
+    const hidden = ALWAYS_HIDDEN(tag, cls) || shut || (view === 'desktop' && cls.includes('in-row')) || (view === 'phone' && cls.some((c) => PHONE_HIDDEN.includes(c)));
     if (self || VOID.has(tag)) { out += ' '; continue; }
     stack.push(hidden); if (hidden) skip++; out += ' ';
   }
@@ -133,6 +139,10 @@ const wrap = (el: ReactElement, usdOn: boolean) => h(ShowUsdCtx.Provider, { valu
 const noop = () => undefined;
 const desk = (open: string | null, usdOn: boolean) => renderToStaticMarkup(wrap(h(DeskTable, { s, bots, nav: noop, pause: noop, close: noop, initialOpen: open }), usdOn));
 const lpPage = (id: string, usdOn: boolean) => renderToStaticMarkup(wrap(h(LpDetail, { s, id, events: [], ticks: null, nav: noop, act: noop, busy: false }), usdOn));
+/** The same page with its collapsed Details opened. */
+const opened = (html: string) => html.replace(/<details(?![^>]*\sopen)/g, '<details open=""');
+const gridPage = (usdOn: boolean) => renderToStaticMarkup(wrap(h(GridDetail, { s, id: grid.id, events: [], ticks: null, nav: noop, act: noop, busy: false }), usdOn));
+const trendPage = (usdOn: boolean) => renderToStaticMarkup(wrap(h(TrendDetail, { s, id: trend.id, events: [], ticks: null, nav: noop, act: noop, busy: false }), usdOn));
 
 beforeAll(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
 afterAll(() => { vi.useRealTimers(); });
@@ -165,10 +175,26 @@ describe('each figure once per screen', () => {
           expect(repeats(figures(text))).toEqual([]);
         });
       }
+      it(`Grid page, a run under a day (${tag})`, () => {
+        expect(repeats(figures(visibleText(gridPage(usdOn), view)))).toEqual([]);
+      });
+      it(`Home (${tag})`, () => {
+        const html = renderToStaticMarkup(wrap(h(Home, { s, nav: noop, holdings: null, act: noop }), usdOn));
+        expect(repeats(figures(visibleText(html, view)))).toEqual([]);
+      });
+      it(`Trend page (${tag})`, () => {
+        expect(repeats(figures(visibleText(trendPage(usdOn), view)))).toEqual([]);
+      });
       for (const id of ['lp-stonkd', 'lp-nvda']) {
         it(`LP page ${id} (${tag})`, () => {
           const text = visibleText(lpPage(id, usdOn), view);
-          expect(text).toMatch(/Earned after costs/);
+          expect(text).toMatch(/Generated, net of costs/);
+          expect(repeats(figures(text))).toEqual([]);
+        });
+        it(`LP page ${id}, Details opened (${tag})`, () => {
+          const html = opened(lpPage(id, usdOn));
+          expect(html).toMatch(/Costs paid/);
+          const text = visibleText(html, view);
           expect(repeats(figures(text))).toEqual([]);
         });
       }
@@ -180,5 +206,63 @@ describe('each figure once per screen', () => {
     expect(text).toMatch(/Grid 1 \$ HOOD/); // straight to the row: no totals
     expect(text).toMatch(/Trend 1 N \$ HOOD/);
     expect(text).toMatch(/Liquidity 2 +38,537 USDG +−463\.3 USDG/);
+  });
+});
+
+/** The figures (in the page's dollar unit: USDG is a dollar coin here) that equal `v` to the shown precision. */
+const shown = (text: string, v: number) => figures(text).filter((f) => f.unit === '$' && Math.abs(f.v - v) <= f.tol + 1e-9);
+
+describe('LP page: one headline net (gate findings on #72 and #73)', () => {
+  const p = stonkd.pnl;
+  const parts = {
+    'costs paid': -(p.gas + p.swapCost), 'lost to range moves': -p.moveLoss, 'net with the price move': p.net + p.price, 'the price move': p.price,
+  };
+  for (const view of ['desktop', 'phone'] as View[]) {
+    it(`shows the net once and nothing else net-looking until Details is opened (${view})`, () => {
+      const text = visibleText(lpPage('lp-stonkd', true), view);
+      expect(text).not.toMatch(/Earned after costs/); // #72 gate: it repeated the headline net
+      expect(shown(text, p.net)).toHaveLength(1);
+      for (const [what, v] of Object.entries(parts)) expect(shown(text, v), what).toHaveLength(0);
+      expect(figures(text).filter((f) => f.unit === '%' && Math.abs(f.v - (p.net / stonkd.startValue) * 100) <= f.tol + 1e-9), 'net %').toHaveLength(0);
+    });
+    it(`moves the rest into Details, with plain labels, not removing it (${view})`, () => {
+      const html = opened(lpPage('lp-stonkd', true));
+      const text = visibleText(html, view);
+      expect(shown(text, p.net)).toHaveLength(1);
+      for (const [what, v] of Object.entries(parts)) expect(shown(text, v), what).toHaveLength(1);
+      // plain labels saying what each one is (labels are <th>, not figures, so read from the markup)
+      for (const label of ['Fees earned', 'Costs paid: gas and swaps', 'Lost to range moves (0 moves)', 'Net as a share of what you put in', 'Price move of the SPY and USDG held (not in the net)', 'Net including that price move']) {
+        expect(html).toContain(`<th>${label.replace(/&/g, '&amp;')}</th>`);
+      }
+      expect(text).toMatch(/[−-]2\.55%/);
+    });
+  }
+});
+
+describe('amounts lead with the coin, dollars small', () => {
+  it('a Bots-list row opened on a phone shows Value and Invested in the coin, not dollars first', () => {
+    const html = desk('lp-stonkd', true);
+    expect(html).toMatch(/<th>Value<\/th><td class="mono">33,122 USDG<\/td>/);
+    expect(html).toMatch(/<th>Invested<\/th><td class="mono">34,000 USDG<\/td>/);
+    expect(visibleText(html, 'phone')).not.toMatch(/\$3[34],/);
+  });
+  it('a coin not worth a dollar: the coin first, the dollars after it in small print', () => {
+    const weth = { ...grid, id: 'g-weth', quoteSym: 'WETH', usdPerQuote: 2_500, config: { ...grid.config, totalCapitalUsd: 0.8 } };
+    const html = renderToStaticMarkup(h(StatTable, { b: weth, s }));
+    expect(html).toMatch(/<th>Invested<\/th><td class="mono">0\.8 WETH<small class="usd"> \$2,000<\/small>/);
+  });
+});
+
+describe('APR under a day (gate finding on #72)', () => {
+  it('shows "—", not the P&L % again, for every bot under a day', () => {
+    const html = desk(null, true);
+    // each row: its name, then its APR cell. Grid (30m) and STONKD (8.8h) are under a day; the trend (5d) and NVDA LP (3.2d) are not.
+    const rows = [...html.matchAll(/<span class="bot-title">([^<]*)<\/span>[\s\S]*?<span class="desk-apr"[^>]*>([\s\S]*?)<\/span><span class="desk-moves">/g)]
+      .map((m) => [m[1], m[2]] as const);
+    expect(rows.map(([n]) => n).sort()).toEqual(['EMA NVDA/USDG-HOOD 1h', 'NVDA LP', 'STONKD LP #2', 'PLS/robinhood:ETH/USDG'].sort());
+    for (const [n, apr] of rows) {
+      if (n === 'STONKD LP #2' || n === 'PLS/robinhood:ETH/USDG') expect(apr, n).toBe('—');
+      else expect(apr, n).toMatch(/^[+−-]?[\d.,]+%$/);
+    }
   });
 });

@@ -10,7 +10,7 @@ import { ChainMark, TokenMark } from './icons';
 import { useShowUsd } from './money';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { bookUsd, botSpark } from './series';
-import { StatTable } from './StatTable';
+import { coinFirst, StatTable } from './StatTable';
 
 export function listBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
   return [
@@ -280,7 +280,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           </button>
           <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
           <span className="desk-range"><BotRange b={b} fills={fills} /></span>
-          <span className="desk-val">{value == null ? '—' : usd(value)}</span>
+          <span className="desk-val">{coinFirst(b)(value)}</span>
           <span className="desk-pnl">
             <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
             {!metrics && <small className={cls(pnl.pct)}>{pct(pnl.pct, 1, true)}</small>}
@@ -293,7 +293,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
               ? '—'
               : facts.est.d365?.pct == null ? '—' : pct(facts.est.d365.pct, 1, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
-            <span className="desk-fees">{facts.feesEarnedUsd == null ? '—' : usd(facts.feesEarnedUsd)}</span>
+            <span className="desk-fees">{coinFirst(b)(facts.feesEarnedUsd)}</span>
           </>}
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
         </div>

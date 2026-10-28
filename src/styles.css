@@ -1269,6 +1269,14 @@ label.wide input { min-width: 180px; }
 .desk-chev { color: var(--muted); width: 12px; }
 .desk-pct, .desk-age, .desk-apr, .desk-moves, .desk-fees { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
 .desk-expand { padding: 4px 0 12px; }
+/* LP page: what the headline net is made of, collapsed under it */
+.net-details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.net-details[open] > summary { margin-bottom: 8px; }
+.net-table { width: 100%; border-collapse: collapse; }
+.net-table th, .net-table td { text-align: left; padding: 7px 0; border-bottom: 1px solid var(--line); font-weight: 400; font-size: 13px; }
+.net-table th { color: var(--muted); width: 55%; }
+.net-table td { text-align: right; color: var(--text); }
+.stat-table .usd, .desk-val .usd, .desk-fees .usd { margin-left: 2px; }
 .stat-table { margin-top: 8px; }
 .stat-note { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
 .stat-table table { width: 100%; border-collapse: collapse; }
