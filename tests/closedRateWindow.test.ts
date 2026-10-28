@@ -48,6 +48,30 @@ describe('history window of a stopped / closed bot', () => {
     expect(historyEnd({ status: 'closed' }, now)).toBe(now);
   });
 
+  it('a paused LP with its position open keeps earning: its window runs to now, so rates and APR don\'t inflate (review #50)', () => {
+    const lp = (net: number, at: number) => ({
+      kind: 'lp', id: 'l', status: 'stopped', startedAt: now - 10 * DAY_MS, usdPerQuote: 1, startValue: 100, config: { capital: 100 },
+      position: { id: 1, lower: 1, upper: 2, openedAt: now - 10 * DAY_MS }, halt: { at: now - 8 * DAY_MS, what: 'Pause' },
+      pnl: { net, price: 0, fees: net }, priceAt: at,
+    });
+    // paused 8 days ago; P&L 2 at the pause, then the position kept earning: 10 by now (+8 more over 30 more days later)
+    expect(historyEnd(lp(10, now), now)).toBe(now);
+    const a = botFacts(lp(10, now), now), later = botFacts(lp(18, now + 30 * DAY_MS), now + 30 * DAY_MS);
+    expect(a.ageMs).toBe(10 * DAY_MS);
+    expect(a.est.h24!.amount).toBeCloseTo(1, 12); // 10 over 10 days, not 10 over the 2 days before the pause
+    expect(later.ageMs).toBe(40 * DAY_MS);
+    expect(later.est.h24!.amount).toBeCloseTo(18 / 40, 12); // stays at the real pace, never runs away
+    expect(later.est.d365!.pct!).toBeLessThan(a.est.d365!.pct!);
+    // frozen at the pause, the same bot would have read 18 over 2 days: 9 a day, 32.85 = 3285% APR
+    // once the position is gone (or the bot closed / archived), the window ends at the stop again
+    const { position: _p, ...noPos } = lp(10, now); // eslint-disable-line @typescript-eslint/no-unused-vars
+    expect(historyEnd(noPos, now)).toBe(now - 8 * DAY_MS);
+    expect(historyEnd({ ...lp(10, now), status: 'closed' }, now)).toBe(now - 8 * DAY_MS);
+    expect(historyEnd({ ...lp(10, now), archivedAt: now - DAY_MS }, now)).toBe(now - 8 * DAY_MS);
+    // a paused grid still freezes (it stops ticking when paused)
+    expect(historyEnd({ kind: 'grid', status: 'stopped', halt: { at: now - 8 * DAY_MS } }, now)).toBe(now - 8 * DAY_MS);
+  });
+
   it('the end is never after now, and a stopped bot\'s figures stop drifting as time passes', () => {
     expect(historyEnd({ status: 'stopped', halt: { at: now + DAY_MS } }, now)).toBe(now);
     const b = grid({ status: 'stopped', priceAt: now - 8 * DAY_MS });

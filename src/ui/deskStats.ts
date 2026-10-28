@@ -24,14 +24,18 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
 }
 
 /**
- * Where a bot's history ends, for rates and estimates. A running (or still-closing) bot: now. A stopped or closed one:
- * its recorded stop / close time (halt.at), else the last thing it did (latest of its last reading, last fill, last
- * range move, last trade), else when it was archived; never later than now. Otherwise a closed bot's per-day figures
- * keep shrinking as time passes after it stopped.
+ * Where a bot's history ends, for rates and estimates. A running (or still-closing) bot, an idle one (not started, so
+ * it has no age anyway) or one with no status: now. A paused liquidity bot that still has its position open: now as
+ * well, since it keeps earning fees while paused (it still refreshes and its P&L keeps growing); freezing the window
+ * at the pause would inflate its per-day figures and APR without limit. A stopped grid / trend, or a closed / archived
+ * LP or one with no position left: its recorded stop / close time (halt.at), else the last thing it did (latest of its
+ * last reading, last fill, last range move, last trade), else when it was archived; never later than now. Otherwise a
+ * closed bot's per-day figures keep shrinking as time passes after it stopped.
  */
 export function historyEnd(b: AnyObj, now: number): number {
   const status = typeof b?.status === 'string' ? b.status : null;
   if (!status || status === 'running' || status === 'idle' || b.closing) return now;
+  if (b.kind === 'lp' && status === 'stopped' && b.position && !b.archivedAt) return now;
   const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
   const cap = (v: number) => Math.min(v, now);
   if (ok(b.halt?.at)) return cap(b.halt.at);
