@@ -198,7 +198,8 @@ export function echoes(shown: string | null | undefined, extra: string | null | 
 export function unitsText(gen: Record<string, number> | null | undefined, max = 2, signed = true): string {
   if (!gen) return '—';
   const legs = Object.entries(gen).filter(([, u]) => Number.isFinite(u) && u !== 0);
-  if (!legs.length) return '0';
+  // all zero: still name the coin ('0 USDG'), a bare 0 has no unit (Kyle)
+  if (!legs.length) { const ks = Object.keys(gen).slice(0, max); return ks.length ? ks.map((k) => `0 ${k}`).join(' · ') : '0'; }
   const f = (u: number) => {
     const a = Math.abs(u);
     const d = a >= 1000 ? 0 : a >= 1 ? 2 : Math.min(8, 2 - Math.floor(Math.log10(a)));

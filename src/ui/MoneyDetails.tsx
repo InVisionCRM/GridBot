@@ -14,7 +14,7 @@
  */
 import type { ReactNode } from 'react';
 import { echoes, metricsOf, unitsText } from './deskStats';
-import { pct, qty } from './fmt';
+import { pctShown, qty, qtyFixed } from './fmt';
 
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 import type { AnyObj } from './model';
@@ -23,7 +23,7 @@ import type { BotMetrics } from '../metrics/botMetrics';
 /** A Details row: label, value, tooltip. */
 export type DetailRow = [string, ReactNode, string?];
 /** Rows a page can leave out because it already shows them: 'Total P&L', 'Value now' (keeps the deposit), or a label. */
-export type DetailHide = 'Made at event prices' | 'Total P&L' | 'Price change' | 'Open positions' | 'Value now';
+export type DetailHide = 'Made at event prices' | 'Total P&L' | 'Price change' | 'Open positions' | 'Value now' | 'Deposit';
 
 /**
  * The per-coin lines of metrics.breakdownByCoin, in that coin's units: earned, then each non-zero cost with a minus,
@@ -55,7 +55,14 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
   return rows;
 }
 
-export function MoneyDetails({ b, breakdown, hide = [], note }: { b: AnyObj; breakdown?: DetailRow[]; hide?: readonly DetailHide[]; note?: string }) {
+/**
+ * A value-change row a page adds after Price change: a quote-coin figure that sits outside Generated (the grid's
+ * cash-out sale at stop/close). Label, amount in the quote coin, tooltip. Merged like any other row when it prints the
+ * same as one (a stopped grid's whole Total P&L can be its stop sale).
+ */
+export type ValueChangeRow = [string, number | null | undefined, string];
+
+export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { b: AnyObj; breakdown?: DetailRow[]; changes?: readonly ValueChangeRow[]; hide?: readonly DetailHide[]; note?: string }) {
   const m = metricsOf(b);
   if (!m) return null;
   const q = m.quote, sym = q.symbol ?? '';
@@ -66,6 +73,7 @@ export function MoneyDetails({ b, breakdown, hide = [], note }: { b: AnyObj; bre
     ['Made at event prices', signed(q.made), `Fees / round-trip profit minus gas, swap fees, taxes and range-move losses, each in ${sym} at the time it happened. Generated is the same counted in coins, valued at today's price.`],
     ['Total P&L', signed(q.totalPnl), m.calc],
     ['Price change', signed(q.priceChange), `Total P&L − Generated (in ${sym} at today's price): what the coins' own price did (impermanent loss and the inventory's market move).`],
+    ...changes.map(([k, v, t]): [string, string, string] => [k, signed(v), t]),
     ['Open positions', signed(q.unrealized), 'Coins bought and not sold yet / the position\'s price side, at today\'s price minus what they cost. Not in Generated until they sell.'],
   ];
   // Made at event prices is the headline's number when everything was generated in the quote coin (prices don't matter then)
@@ -83,17 +91,19 @@ export function MoneyDetails({ b, breakdown, hide = [], note }: { b: AnyObj; bre
     rows.push([k, v, t]);
   }
   const tp = rows.find((r) => r[0].startsWith('Total P&L'));
-  if (tp && m.totalPnlPct != null) tp[1] = `${tp[1]} · ${pct(m.totalPnlPct, 2, true)} of capital in`;
-  const deposit = plain(q.capitalIn);
-  const value: [string, string, string] = no.has('Value now')
-    ? ['Deposit', `${deposit} in`, `The capital put in, in ${sym} at today's price.`]
+  if (tp && m.totalPnlPct != null && pctShown(m.totalPnlPct, 2) !== '—') tp[1] = `${tp[1]} · ${pctShown(m.totalPnlPct, 2, true)} of capital in`;
+  const deposit = q.capitalIn == null ? '—' : qtyFixed(q.capitalIn, sym, 5); // exact: reads apart from the value beside it
+  // 'Deposit' hidden: the page shows Invested elsewhere (Kyle: each figure once), so this row is the value now alone
+  const value: [string, string, string] | null = no.has('Value now') && no.has('Deposit') ? null
+    : no.has('Value now') ? ['Deposit', `${deposit} in`, `The capital put in, in ${sym} at today's price.`]
+    : no.has('Deposit') ? ['Value now', plain(q.currentValue), `Current value of the bot's coins, in ${sym} at today's price.`]
     : ['Value vs deposit', `${plain(q.currentValue)} now · ${deposit} in`, `Current value of the bot's coins and the capital put in, in ${sym} at today's price.`];
   return (
     <details className="more money-details" data-testid="money-details">
       <summary>Details <span className="muted small">{note ?? 'made at event prices, total P&L, price change'}</span></summary>
       <table className="stat-table"><tbody>
         {[...coinBreakdownRows(m, num(b.reranges)), ...(breakdown ?? [])].map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
-        {[...rows, value].map(([k, v, t]) => <tr key={k} title={t}><th>{k}</th><td className="mono">{v}</td></tr>)}
+        {[...rows, ...(value ? [value] : [])].map(([k, v, t]) => <tr key={k} title={t}><th>{k}</th><td className="mono">{v}</td></tr>)}
       </tbody></table>
     </details>
   );

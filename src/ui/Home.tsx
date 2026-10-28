@@ -1,8 +1,8 @@
 /** Home: net worth, the book chart, a joined strip, the bots, then the two cards that used to live only under More. */
 import { useEffect, useMemo, useState } from 'react';
 import { http } from './api';
-import { bestLiveBot, BotRow, feesTodayOf, generatedByMode, generatedParts, listBots, pnlUnits, todaySeries, totalGeneratedUsd, useRowActions } from './botRow';
-import { unitsText } from './deskStats';
+import { bestLiveBot, BotRow, feesTodayOf, generatedByMode, generatedParts, listBots, pnlUnits, sharedUnits, todaySeries, totalGeneratedUsd, useRowActions } from './botRow';
+import { metricsOf, unitsText } from './deskStats';
 import { AreaChart, Donut, Meter, Sparkline } from './charts';
 import { chainOf, chains, useChainFilter } from './chains';
 import { cls, pct } from './fmt';
@@ -85,7 +85,15 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
   const month = useMemo(() => portfolioSeries(bots, '1M'), [bots]);
   // Live and paper are never mixed: the headline is live bots only, in units per coin; paper is a separate small line
   const gen = generatedByMode(bots);
+  const paperGen = sharedUnits(bots.filter((b) => b.mode !== 'live').map((b) => metricsOf(b)?.generated));
   const livePnl = pnlUnits(bots, 'live');
+  // a coin only one live bot counts is that bot's own figure, already on its row below: the headline keeps the coins
+  // two or more live bots share and points to the rows for the rest (each figure once; same rule as the paper line)
+  const liveBots = bots.filter((b) => b.mode === 'live');
+  const liveShared = sharedUnits(liveBots.map((b) => metricsOf(b)?.generated));
+  const pnlShared = sharedUnits(liveBots.map((b) => { const m = metricsOf(b); return m?.quote.symbol && m.quote.totalPnl != null ? { [m.quote.symbol]: m.quote.totalPnl } : null; }));
+  const genFrom = liveBots.filter((b) => Object.keys(metricsOf(b)?.generated ?? {}).length);
+  const onRows = genFrom.length === 1 ? `on ${genFrom[0].label || genFrom[0].name || genFrom[0].base} below` : 'on the rows below';
   const genTone = totalGeneratedUsd(bots, 'live'); // sign only (colour); no dollars on screen
   const today = useMemo(() => feesTodayOf(s, bots), [s, bots]);
   const feesLine = today.liveSeries;
@@ -160,9 +168,9 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
       <section className="join" aria-label="Summary">
         <div>
           <span title={GEN_CALC}>Generated</span>
-          <b className={`units ${cls(gen.live ? genTone : null)}`} data-testid="home-generated">{gen.live ? unitsText(gen.live, 3) : '—'}</b>
-          <small className="muted fees-sub units" title="Total P&L of your live bots, per quote coin: current value + paid out − capital in, price change included.">P&L {livePnl ? unitsText(livePnl, 3) : '—'}</small>
-          {gen.paper && <small className="muted fees-sub units" data-testid="home-generated-paper" title="Paper bots' Generated, kept apart from the live headline.">paper {unitsText(gen.paper, 3)}</small>}
+          <b className={`units ${cls(liveShared ? genTone : null)}`} data-testid="home-generated">{liveShared ? unitsText(liveShared, 3) : gen.live ? <span className="muted" data-testid="home-generated-rows">{onRows}</span> : '—'}</b>
+          {(pnlShared || !livePnl) && <small className="muted fees-sub units" title="Total P&L of your live bots, per quote coin: current value + paid out − capital in, price change included.">P&L {pnlShared ? unitsText(pnlShared, 3) : '—'}</small>}
+          {paperGen && <small className="muted fees-sub units" data-testid="home-generated-paper" title="Paper bots' Generated, kept apart from the live headline: the coins two or more paper bots count in (a coin only one bot counts is on its row below).">paper {unitsText(paperGen, 3)}</small>}
           <Sparkline points={span >= 20 * 86_400_000 ? month : series} width={120} height={32} />
         </div>
         <div>

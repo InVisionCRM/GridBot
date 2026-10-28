@@ -95,17 +95,17 @@ describe('MED 3: the LP page does not restate its headline under a day', () => {
     expect(top).not.toMatch(/over 8\.8h/);
     expect(top).not.toMatch(/of what you put in/);
     // each coin of Generated is printed once in the strip's Generated tile
-    const tile = text(top.slice(0, top.indexOf('Liquidity provided')));
+    const tile = text(top.slice(top.indexOf('Generated'), top.indexOf('Liquidity provided'))); // the Generated tile (Invested sits before it)
     for (const [sym, u] of Object.entries(b.metrics.generated as Record<string, number>)) {
       expect(tile.split(` ${sym}`).length - 1, `${u} ${sym}`).toBe(1);
     }
-    expect(pace(html)).toMatch(/A day—shows after a dayA week—shows after a day/);
-    expect(pace(html)).not.toMatch(/A month/); // Kyle: day, 7d and 365d only on screen
+    // Kyle (#73): no pace card at all under a day (botMetrics' day estimate is null then, #86)
+    expect(html).not.toMatch(/data-testid="generated-pace"/);
   });
   it('from a day on, the pace rows are back', () => {
     const html = page(lp(2 * DAY_MS));
     expect(pace(html)).not.toMatch(/shows after a day/);
-    expect(pace(html)).toMatch(/A day[−+-]?\d/);
+    expect(pace(html)).toMatch(/Est\. a day[−+-]?\d/);
   });
 });
 
@@ -113,8 +113,8 @@ describe('kept from #72 through the merge: no Est. rows scaled up from under a d
   const table = (ageMs: number) => text(render(createElement(StatTable, { b: grid('t', ageMs), s: S })));
   it('under a day the Est. rows are dashes until a day', () => {
     const t = table(8.8 * H);
-    for (const k of ['Est. 24h', 'Est. 7d', 'Est. 365d', 'APR']) expect(t).toContain(`${k}— (shows after a day)`);
-    expect(t).not.toContain('Est. 30d');
+    for (const k of ['Est. 24h', 'Est. 7d', 'Est. 365d', 'APR']) expect(t).toContain(`${k}— (shows after a day)`); // botMetrics' EST_HINT (#86)
+    expect(t).not.toContain('Est. 30d'); // Kyle: day, 7d and 365d only
   });
   it('from a day on the Est. 24h row has a figure', () => {
     expect(table(2 * DAY_MS)).not.toContain('Est. 24h— (shows after a day)');

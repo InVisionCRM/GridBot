@@ -2,7 +2,8 @@
 import { useEffect, useState } from 'react';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
-import { Chart, EquityChart } from './Chart';
+import { Chart } from './Chart';
+import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
 import { ago, cls, dur, num, pct, px, qty, time } from './fmt';
@@ -14,7 +15,6 @@ import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
 import { strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
-import { T } from './theme';
 import { quoteSym, type AnyObj, type Nav } from './model';
 import { Amt } from './money';
 import { metricsOf } from './deskStats';
@@ -98,7 +98,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi"><span>Worst drop</span><div className="kpi-v">{pct(t.stats.maxDrawdown, 1)}</div><span className="sub">from the bot's peak value</span></div>
         <div className="kpi"><span>Fees + gas</span><div className="kpi-v"><Amt v={-(t.pnl.fees + t.pnl.gas)} sym={q} k={k} sig={4} /></div><span className="sub">paid so far</span></div>
       </div>
-      <MoneyDetails b={t} />
+      <MoneyDetails b={t} hide={t.position ? ['Open positions'] : []} />
 
       <div className="split wide-left">
         <div className="card">
@@ -108,7 +108,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
             : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact desk height={480}
                 emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
           <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
-          <StatTable b={t} s={s} hide={['Generated']} />
+          <StatTable b={t} s={s} hide={['Generated', 'Win rate']} />
         </div>
         <div className="stack">
           <div className="card">
@@ -151,10 +151,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="card"><h3>Log</h3><BotLog events={events} botId={t.id} /></div>
       </div>
 
-      <div className="card">
-        <h3>Value over time <span className="muted small">{q}</span></h3>
-        <EquityChart series={[{ name: `value ${q}`, data: t.equityHist ?? [], color: T.text }]} />
-      </div>
+      <ValueOverTime q={q} data={t.equityHist ?? []} />
     </main>
   );
 }

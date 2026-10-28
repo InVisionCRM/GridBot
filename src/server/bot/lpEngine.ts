@@ -443,7 +443,8 @@ export class LpEngine {
     };
     this.lastError = null;
     this.save();
-    this.ev('started', `Liquidity ${this.label}: opening ±${(p.bandPct * 100).toFixed(0)}% around ${v.price.toPrecision(6)} with ${p.capital} ${this.quoteSym}${baseAmount > 0 ? ` + ${baseAmount} ${this.baseSym}` : ''} (${p.mode})`, { level: 'success' });
+    // no amount here (Kyle): the page's Invested tile shows it once; the 'opened … with X + Y' line follows with what went in
+    this.ev('started', `Liquidity ${this.label}: opening ±${(p.bandPct * 100).toFixed(0)}% around ${v.price.toPrecision(6)} (${p.mode})`, { level: 'success' });
   }
 
   /** Pause managing (no re-range, no sends); a position stays open and keeps earning. A tx already sent is still settled. */

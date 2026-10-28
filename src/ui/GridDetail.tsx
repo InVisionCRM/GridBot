@@ -4,14 +4,15 @@ import { formatPrice } from '../lib/format';
 import { botApi } from './api';
 import { AnimatedNumber, StatusDot } from './motion';
 import { RangeBar } from './charts';
-import { Chart, EquityChart } from './Chart';
+import { Chart } from './Chart';
+import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
-import { MoneyDetails } from './MoneyDetails';
+import { MoneyDetails, type ValueChangeRow } from './MoneyDetails';
+import { isCloseOut } from '../live/ledger';
 import { metricsOf } from './deskStats';
-import { ago, cls, num, pct, px, qty, time, pxShort } from './fmt';
+import { ago, cls, num, pct, px, qty, sameShown, time, pxShort } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
-import { T } from './theme';
 import { errMsg, gridName, quoteSym, rangeState, spendFunds, type AnyObj, type Nav } from './model';
 import { AmountField, fundsProblem, isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
 import { reserveCfg } from '../live/gasReserve';
@@ -68,7 +69,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
         <label>Lowest price<input value={lower} onChange={(e) => setLower(e.target.value)} /></label>
         <label>Highest price<input value={upper} onChange={(e) => setUpper(e.target.value)} /></label>
         <label>Levels<input value={count} onChange={(e) => setCount(e.target.value)} /></label>
-        <AmountField label={`Amount (${q})`} value={amount} f={funds} onChange={setAmount} />
+        <AmountField label={`Amount (${q})`} value={amount} f={funds} onChange={setAmount} echo={false} />
       </div>
       <div className="quick">
         <span className="muted small">Centre on today's price {g.price ? px(g.price) : '—'}:</span>
@@ -88,7 +89,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
 }
 
 /** Figures the grid page shows elsewhere, left out of the chart's stat table: Generated (headline), the range (under the chart). */
-const GRID_SHOWN_ELSEWHERE = ['Generated', 'Range'] as const;
+const GRID_SHOWN_ELSEWHERE = ['Generated', 'Range', 'Fees paid'] as const; // fees: the Fees tile
 
 /** Something on the grid still has to sell (or a trade is queued / in flight): the range can't move yet. */
 const busyLevels = (g: AnyObj) => !!g.inFlight || g.queue.length > 0 || g.intervals.some((i: AnyObj) => i.status !== 'inactive' && i.status !== 'waitingBuy');
@@ -118,7 +119,7 @@ function FollowUp({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolea
   const at = recenterAt(r);
   const now = rangeState(g) === 'above' && r.enabled
     ? busyLevels(g) ? `Price is above the range. Waiting for the last ${g.base} to sell before moving it.` : at ? `Price is above the range. If it stays there, the range moves up at ${time(at)}.` : 'Price is above the range.'
-    : r.enabled ? (r.count ? `Moved up ${r.count} time${r.count === 1 ? '' : 's'}, last ${ago(r.lastAt)}.` : 'On. It hasn\'t needed to move yet.') : 'Off. The range stays where you set it.';
+    : r.enabled ? (r.count ? `Moved up ${r.count} time${r.count === 1 ? '' : 's'}${r.lastAt && Math.abs(r.lastAt - (g.lastMoveAt ?? 0)) < 60_000 ? ' (the last move above)' : `, last ${ago(r.lastAt)}`}.` : 'On. It hasn\'t needed to move yet.') : 'Off. The range stays where you set it.';
   return (
     <div className="follow-row">
       <label className="check follow">
@@ -146,7 +147,7 @@ function Limits({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean 
   );
 }
 
-function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
+function Fills({ s, g, gen }: { s: AnyObj; g: AnyObj; gen: number | null }) {
   const [all, setAll] = useState(false);
   const q = quoteSym(g), base = g.base ?? 'PLS';
   const net = (t: AnyObj) => t.roundTripNet ?? t.realizedPnlQuote;
@@ -166,8 +167,12 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
         </thead>
         <tbody>
           {g.trades.map((t: AnyObj) => {
-            const profit = t.side === 'sell' || t.failed ? net(t) : null;
-            const profitTxt = profit == null ? '' : qty(profit, q, 4);
+            // the cash-out sale at stop/close isn't a trade profit and its value change is in Details (one figure, once)
+            const stop = !t.failed && isCloseOut(t as Parameters<typeof isCloseOut>[0]);
+            const profit = stop ? null : t.side === 'sell' || t.failed ? net(t) : null;
+            const shown = profit == null ? '' : qty(profit, q, 4);
+            // one trade that is all of Generated: point there rather than print the figure twice
+            const profitTxt = stop ? 'Sold at stop (see Details)' : profit == null ? '' : gen != null && sameShown(shown, qty(gen, q, 5)) ? 'all of Generated' : shown;
             return all ? (
               <tr key={t.id} className={t.failed ? 'failed-row' : ''}>
                 <td>{time(t.timestamp)}</td><td className={`side ${t.side}`} title={t.seed ? `Start-up buy for levels ${t.seed.join(', ')} above the start price` : undefined}>{t.side}{t.seed ? ' (start-up)' : ''}{t.failed ? ' ✗' : ''}</td><td className="muted">{t.intervalIndex}</td>
@@ -193,10 +198,47 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
   );
 }
 
+/**
+ * The grid's cash-out sale when it was stopped or closed (Kyle: not generated, so it stays out of Generated, but its
+ * value change belongs in Details). The server's own figure: `stats.closeOutNet` from roundTripStats (src/live/ledger.ts),
+ * what the cash-out sells got minus what those coins cost, in the quote coin. No row when the grid has none.
+ */
+/**
+ * The levels table's amounts. An amount that several levels share (each waiting level buys the same, each holding level
+ * holds the same) is stated once above the table and left off those rows (Kyle: each figure once per screen).
+ */
+export function levelAmounts(g: AnyObj): { same: string[]; cell: (iv: AnyObj) => string; buyEcho: (cost: string) => string } {
+  const text = (iv: AnyObj): string => (iv.plsAmount ? `${num(iv.plsAmount, iv.plsAmount < 10 ? 6 : 0)} ${g.base}` : iv.status === 'waitingBuy' || iv.status === 'pendingBuy' ? `buys ${qty(iv.buyAmount, quoteSym(g), 4, false)}` : '');
+  const count = new Map<string, number>();
+  for (const iv of (g.intervals ?? []) as AnyObj[]) { const t = text(iv); if (t) count.set(t, (count.get(t) ?? 0) + 1); }
+  const shared = new Set([...count].filter(([, n]) => n > 1).map(([t]) => t));
+  const same = [...shared].map((t) => (t.startsWith('buys ') ? `Each level waiting to buy ${t}` : `Each level holding has ${t}`));
+  // what the grid holds (Details) is often one level's coins: that level's row then points there instead of repeating it
+  const h = Number(g.pnl?.plsHeld ?? 0), held = num(h, h < 10 ? 6 : 2); // as the Holding line prints it
+  const buyTxt = [...shared].find((t) => t.startsWith('buys '));
+  return {
+    same,
+    cell: (iv) => {
+      const t = text(iv);
+      if (shared.has(t)) return t.startsWith('buys ') ? 'buys (above)' : '(above)';
+      return iv.plsAmount && sameShown(t, `${held} ${g.base}`) ? 'the coins under Holding' : t;
+    },
+    // the Holding line's cost when it prints as each level's buy: say so instead of a second figure
+    buyEcho: (cost) => (buyTxt && sameShown(cost, buyTxt.slice(5)) ? "one level's buy" : cost),
+  };
+}
+
+export function stopSale(g: AnyObj): ValueChangeRow[] {
+  const n = g.stats?.closeOuts ?? 0;
+  if (!(n > 0) || typeof g.stats?.closeOutNet !== 'number') return [];
+  return [['Value change from the stop sale', g.stats.closeOutNet, `What the ${n === 1 ? 'sale' : `${n} sales`} of the remaining coins at stop/close got, minus what those coins cost. A change in value, not generated, so it is not in Generated.`]];
+}
+
 export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const chk = useSafetyChecking();
   const g: AnyObj | undefined = s.grids.find((x: AnyObj) => x.id === id);
   if (!g) return null;
+  const lv = levelAmounts(g);
 
   const m = metricsOf(g);
   const q = quoteSym(g);
@@ -269,8 +311,8 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v" title={g.price ? px(g.price) : undefined}>{g.price ? pxShort(g.price) : '—'}</div><span className="sub">{q} per {g.base}</span></div>
         <div className="kpi"><span><L tip="Pool fees paid on this grid's fills, in the quote coin.">Fees</L></span><div className="kpi-v">{qty(((g.trades ?? []) as AnyObj[]).reduce((a, t) => a + (typeof t.feeQuote === 'number' ? t.feeQuote : 0), 0), q, 4, false)}</div><span className="sub">paid on fills</span></div>
       </div>
-      <MoneyDetails b={g} note="what it holds, open positions, total P&L" hide={held > 0 ? ['Open positions'] : []} breakdown={held > 0 ? [
-        ['Holding', <>{num(held, held < 10 ? 6 : 2)} {g.base}, bought for {qty(g.pnl.costQuote, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now</>, `The ${g.base} the grid bought and hasn't sold yet. It sells one level up.`],
+      <MoneyDetails b={g} note="what it holds, open positions, total P&L" hide={held > 0 ? ['Open positions'] : []} changes={stopSale(g)} breakdown={held > 0 ? [
+        ['Holding', <>{num(held, held < 10 ? 6 : 2)} {g.base}, bought for {lv.buyEcho(qty(g.pnl.costQuote, q, 5, false))}, worth {qty(held * (g.price ?? 0), q, 5, false)} now</>, `The ${g.base} the grid bought and hasn't sold yet. It sells one level up.`],
         [`Open positions, ${q}`, open == null ? '—' : qty(open, q, 5), `What those coins are worth now minus what they cost. It moves with the price until they sell, so it is not in Generated.`],
       ] : [['Holding', 'nothing waiting to sell']]} />
 
@@ -292,12 +334,13 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="split">
         <div className="card">
           <h3>Levels</h3>
+          {lv.same.length > 0 && <p className="muted small" data-testid="levels-same">{lv.same.join(' · ')}</p>}
           <div className="table-wrap"><table><tbody>
             {[...g.intervals].reverse().map((iv: AnyObj) => (
               <tr key={iv.index}>
                 <td className="muted">#{iv.index}</td><td>{formatPrice(iv.buyPrice)} → {formatPrice(iv.sellPrice)}</td>
                 <td className={`st ${iv.status}`}>{({ waitingBuy: 'waiting to buy', pendingBuy: 'buying', holding: 'holding', pendingSell: 'selling', inactive: 'inactive' } as Record<string, string>)[iv.status] ?? iv.status}{iv.needsRearm ? ' (re-arm)' : ''}</td>
-                <td>{iv.plsAmount ? `${num(iv.plsAmount, iv.plsAmount < 10 ? 6 : 0)} ${g.base}` : iv.status === 'waitingBuy' || iv.status === 'pendingBuy' ? `buys ${qty(iv.buyAmount, quoteSym(g), 4, false)}` : ''}</td>
+                <td>{lv.cell(iv)}</td>
               </tr>
             ))}
             {!g.intervals.length && <tr><td className="txt muted">No levels.</td></tr>}
@@ -306,12 +349,9 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="card"><h3>Log</h3><BotLog events={events} botId={g.id} /></div>
       </div>
 
-      <Fills s={s} g={g} />
+      <Fills s={s} g={g} gen={earned} />
 
-      <div className="card">
-        <h3>Value over time <span className="muted small">{q}</span></h3>
-        <EquityChart series={[{ name: `value ${q}`, data: g.equityHist ?? [], color: T.text }]} />
-      </div>
+      <ValueOverTime q={q} data={g.equityHist ?? []} />
     </main>
   );
 }

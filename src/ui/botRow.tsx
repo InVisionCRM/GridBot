@@ -6,7 +6,7 @@ import { chainOf, RefreshCtx } from './chains';
 import { botFacts, EST_HINT, metricsOf, unitsText } from './deskStats';
 import { isShortRun } from './runRate';
 import type { FeesToday } from '../metrics/feesToday';
-import { cls, dur, pct, px, qty } from './fmt';
+import { cls, dur, pctShown, px, qty, qtyFixed } from './fmt';
 import { ChainMark, TokenMark } from './icons';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
 import { botSpark } from './series';
@@ -137,6 +137,18 @@ export function generatedByMode(bots: AnyObj[]): { live: Record<string, number> 
   };
 }
 
+/**
+ * Summed units keeping only the coins two or more of the records count in: a coin one bot alone counts is that bot's
+ * own figure, already on its row on the same screen (Kyle: each figure once, #73).
+ */
+export function sharedUnits(recs: (Record<string, number> | null | undefined)[]): Record<string, number> | null {
+  const sum = sumUnits(recs);
+  if (!sum) return null;
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(sum)) if (recs.filter((r) => r && r[k] != null).length > 1) out[k] = v;
+  return Object.keys(out).length ? out : null;
+}
+
 /** Total P&L per quote coin over the bots of one mode (units; the server's metrics.quote.totalPnl). */
 export function pnlUnits(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): Record<string, number> | null {
   return sumUnits(bots.filter((b) => (mode === 'live' ? b.mode === 'live' : b.mode !== 'live')).map((b) => {
@@ -259,7 +271,7 @@ function Expanded({ b, nav, desk = false }: { b: AnyObj; nav: Nav; desk?: boolea
     return (
       <div className="bot-more">
         <p>{b.tf} · {b.cfg?.strategy ?? 'trend'} · {b.position ? 'in a trade' : 'flat'}</p>
-        <p>Fees {qty(fees, sym, 4, false)}</p>
+        {!desk && <p>Fees {qty(fees, sym, 4, false)}</p>}{/* desktop: Fees paid is in the table under it */}
         <button type="button" className="text-link" onClick={() => nav(botView(b.kind, b.id))}>Open</button>
       </div>
     );
@@ -269,7 +281,7 @@ function Expanded({ b, nav, desk = false }: { b: AnyObj; nav: Nav; desk?: boolea
   return (
     <div className="bot-more">
       <p>Range {b.config ? `${px(b.config.lowerPrice)} – ${px(b.config.upperPrice)}` : '—'}{rs ? ` · ${rs}` : ''} · {b.config?.gridCount ?? levels.length} levels</p>
-      <p>Fees {qty(fees, sym, 4, false)} · {b.stats?.roundTrips ?? 0} round trips</p>
+      <p>{!desk && <>Fees {qty(fees, sym, 4, false)} · </>}{b.stats?.roundTrips ?? 0} round trips</p>
       <div className="lvls" data-testid="levels" style={{ display: 'contents' }}>{levels.slice(0, 6).map((iv) => (
         <p key={iv.index} className="lvl">{px(iv.buyPrice)} → {px(iv.sellPrice)} · {iv.status === 'holding' ? 'filled' : iv.status === 'waitingBuy' ? 'waiting' : iv.status}</p>
       ))}</div>
@@ -311,6 +323,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   const m = metricsOf(b);
   // Crypto units only: the value and fees in the bot's quote coin
   const value = m?.quote.currentValue ?? null;
+  const invested = m?.quote.capitalIn ?? null; // Kyle: each row shows Invested and Generated
   const feesEarned = m?.quote.feesEarned ?? null;
   const facts = metrics ? botFacts(b) : null;
   const gen = generatedParts(b);
@@ -335,6 +348,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           </button>
           <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
           <span className="desk-range"><BotRange b={b} fills={fills} /></span>
+          {metrics && <span className="desk-inv" title="Invested: what was put into this bot at the start, in its quote coin">{invested == null ? '—' : qtyFixed(invested, pair.quote, 5)}<small className="inv-label"> invested</small></span>}
           <span className="desk-val">{value == null ? '—' : qty(value, pair.quote, 5, false)}</span>
           {metrics && facts ? <>
             <span className="desk-gen" title={m?.calc ?? undefined}>
@@ -343,12 +357,12 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
             <span className="desk-pnl" title={m?.calc ?? undefined}>
               <b className={cls(pnl.quote)}>{money}</b>
             </span>
-            <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
+            <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pctShown(facts.pnlPct, 1, true)}</span></span>
             <span className="desk-fees">{feesEarned == null ? '—' : qty(feesEarned, pair.quote, 4, false)}</span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
             <span className="desk-apr" title={isShortRun(facts.ageMs) ? `Est. APR ${EST_HINT}. Until then P&L % is the figure for the run, and Age its length.` : facts.aprPct == null ? facts.estHint.d365 ?? undefined : m?.calc ?? undefined}>{
               // under a day: no yearly rate, and not the run's % again (it is one column to the left): a dash only (pr-72 MED 1)
-              isShortRun(facts.ageMs) || facts.aprPct == null ? '—' : pct(facts.aprPct, 1, true)}</span>
+              isShortRun(facts.ageMs) || facts.aprPct == null ? '—' : pctShown(facts.aprPct, 1, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
           </> : (
             <span className="desk-pnl" title={m?.calc ?? undefined}>
@@ -359,7 +373,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
         </div>
         {bad && <p className="line-note">{b.lastError}</p>}
-        {open && <div className="desk-expand"><Expanded b={b} nav={nav} desk /><StatTable b={b} s={s} hide={DESK_SHOWN_ELSEWHERE} /><MoneyDetails b={b} hide={['Total P&L', 'Value now']} /></div>}
+        {open && <div className="desk-expand"><Expanded b={b} nav={nav} desk /><StatTable b={b} s={s} hide={DESK_SHOWN_ELSEWHERE} /><MoneyDetails b={b} hide={['Total P&L', 'Value now', 'Deposit']} /></div>}
       </div>
     );
   }

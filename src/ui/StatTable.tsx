@@ -1,9 +1,8 @@
 /** The figures under a chart. A dash is a figure the stored bot does not have. */
 import { chainOf, mk } from './chains';
-import { botFacts, EST_HINT, figuresOf, unitsText } from './deskStats';
-import { ago, dur, pct, px, qty } from './fmt';
+import { botFacts, figuresOf, unitsText } from './deskStats';
+import { dur, pct, pctShown, px, qty } from './fmt';
 import type { AnyObj } from './model';
-import { isShortRun } from './runRate';
 
 function poolText(pool: string | null) {
   if (!pool) return '—';
@@ -30,9 +29,8 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   const range = f.range ? `${px(f.range.lower)} – ${px(f.range.upper)}` : '—';
   const spacing = f.spacingFrac != null ? `${(f.spacingFrac * 100).toFixed(3)}%` : f.bandPct != null ? `±${(f.bandPct * 100).toFixed(2)}%` : '—';
   const calc = f.calc ?? undefined;
-  // under a day: no Est. rows scaled up from a few hours (runRate.ts, #72); Generated above is the run's figure
-  const short = isShortRun(f.ageMs);
-  const rate = (r: Record<string, number> | null | undefined, hint: string | null | undefined) => (short ? `— (${EST_HINT})` : r ? unitsText(r) : hint ? `— (${hint})` : '—');
+  // botMetrics' estimates as they are (#86: null under a day, with its own EST_HINT); nothing scaled here
+  const rate = (r: Record<string, number> | null | undefined, hint: string | null | undefined) => (r ? unitsText(r) : hint ? `— (${hint})` : '—');
   const gr = f.generatedRate;
   const sym = f.quoteSym ?? '';
   // Est. = Generated ÷ age × the window, per token (the server's generatedRate); a dash and "shows after a day" until the history is long enough
@@ -43,7 +41,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
     ['Est. 24h', rate(gr?.d1, gr?.needs.d1), calc],
     ['Est. 7d', rate(gr?.d7, gr?.needs.d7), calc],
     ['Est. 365d', rate(gr?.d365, gr?.needs.d365), calc],
-    ['APR', f.aprPct == null ? (f.estHint.d365 || short ? `— (${f.estHint.d365 ?? EST_HINT})` : '—') : pct(f.aprPct, 1, true), calc],
+    ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pctShown(f.aprPct, 1, true), calc],
     ['Age', f.ageMs == null ? '—' : dur(f.ageMs)],
     ['Moves', f.moves.text ?? '—'],
     ['Win rate', f.winRate == null ? '—' : pct(f.winRate, 0)],
@@ -52,7 +50,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
     ['Time in range', f.timeInRange == null ? '—' : pct(f.timeInRange, 0)],
     ['Range', range],
     ['Spacing', spacing],
-    ['Last move', f.lastMoveAt == null ? '—' : ago(f.lastMoveAt)],
+    ['Last move', f.lastMoveAt == null ? '—' : `${dur(Date.now() - f.lastMoveAt)} ago`], // to the tenth, like Age
     ['Chain', f.chain || '—'],
     ['DEX', f.dex || '—'],
     ['Pool', poolText(f.pool)],
@@ -68,7 +66,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   });
   return (
     <div className="stat-table" data-testid="stat-table">
-      <p className="stat-note">Generated leads. Est. 24h/7d/365d = Generated ÷ age × the days, per coin, and APR scales it the same way; not a forecast.{short && ` They ${EST_HINT}.`}{calc && <> <abbr className="calc-hint" title={calc}>How it's calculated</abbr></>}</p>
+      <p className="stat-note">Generated leads. Est. 24h/7d/365d = Generated ÷ age × the days, per coin, from a day old, and APR scales it the same way; not a forecast.{calc && <> <abbr className="calc-hint" title={calc}>How it's calculated</abbr></>}</p>
       <table>
         <tbody>
           {shown.map(([k, v, t]) => (
