@@ -34,7 +34,7 @@ export function DeskApp() {
               Connection dropped. Numbers are frozen until the stream returns. <a href="/?classic=1">Open classic view</a>
             </p>
           )}
-          <div className="v2-body">
+          <div className={page.v === 'activity' ? 'v2-body is-wide' : 'v2-body'}>
             <main>
               {!snap && !failed && <Skeleton />}
               {snap && page.v === 'home' && (

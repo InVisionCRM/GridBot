@@ -138,10 +138,10 @@ export function ledgerLines(m: BotMetrics): LedgerLines | null {
   const entry = (tokens: TokenQty[], sign: 1 | -1) => symbols
     .map((symbol) => ({ symbol, amount: sign * Math.abs(amountOf(tokens, symbol)), decimals: scale.get(symbol) ?? 0 }))
     .filter((e) => amountOf(tokens, e.symbol) !== 0);
-  const generated = symbols.map((symbol) => ({
-    symbol,
-    amount: amountOf(m.grossFees, symbol) - Math.abs(amountOf(m.feesPaid, symbol)) - Math.abs(amountOf(m.moveLoss, symbol)),
-    decimals: scale.get(symbol) ?? 0,
+  const generated = m.generated.map((t) => ({
+    symbol: t.symbol,
+    amount: t.amount,
+    decimals: scale.get(t.symbol) ?? ledgerDecimals(t.amount, 0, 0),
   })).filter((e) => formatFixedAmt(e.amount, e.decimals) !== '0');
   return {
     gross: ledgerLine(entry(m.grossFees, 1)),

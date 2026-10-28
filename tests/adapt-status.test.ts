@@ -208,6 +208,31 @@ describe('adaptStatus', () => {
     expect(grid!.metrics.range!.current).toBeLessThanOrEqual(grid!.metrics.range!.upper);
   });
 
+  it('maps a trend bot through generatedTokens and names the chain', () => {
+    const now = 1_700_000_000_000;
+    const desk = adaptStatus({
+      spotsAt: now,
+      chains: [{ id: 1, short: 'ETH', name: 'Ethereum', color: '#000' }],
+      trends: [{
+        id: 'trend-paper', mode: 'paper', status: 'running', label: 'ETH/USDC',
+        base: 'ETH', quoteSym: 'USDC', chainId: 1, dexName: 'Uniswap V3',
+        usdPerQuote: 1, price: 2300, startedAt: now - 3 * 86_400_000,
+        capital: 100,
+        pnl: { realized: 4.5, unrealized: 1, equity: 105.5, gas: 0.2, fees: 0.1 },
+        stats: { count: 2 },
+        moveCount: 2,
+      }],
+    }, [], now);
+    const bot = desk.bots.find((b) => b.metrics.kind === 'trend');
+    expect(bot?.pair).toBe('ETH/USDC');
+    expect(bot?.chainName).toBe('Ethereum');
+    expect(bot?.dex).toBe('Uniswap V3');
+    expect(bot?.metrics.mode).toBe('paper');
+    expect(bot?.metrics.generated).toEqual([{ symbol: 'USDC', amount: 4.5, usd: 4.5 }]);
+    expect(bot?.metrics.est.d1?.[0].amount).toBeCloseTo(4.5 / 3);
+    expect(bot?.metrics.invested).toEqual([{ symbol: 'USDC', amount: 100, usd: null }]);
+  });
+
   it('keeps one price per pool and labels a second fee tier', () => {
     const now = 1_700_000_000_000;
     const grid = (id: string, extra: Record<string, unknown>) => ({

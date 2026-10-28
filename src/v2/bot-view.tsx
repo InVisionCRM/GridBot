@@ -61,12 +61,11 @@ export function BotView({
         <CoinMark symbol={bot.base} size={36} />
         <div>
           <motion.h1 layoutId={`pair-${m.botId}`}><PairTitle pair={bot.pair} chainName={bot.chainName} dex={bot.dex} /></motion.h1>
-          <p>{bot.dex} · {m.kind} · {m.mode}</p>
+          <p>{m.kind} · {m.mode === 'paper' ? 'Paper' : 'Live'}</p>
         </div>
         <StatusMark tone={bot.tone} status={m.status} />
       </header>
       <section className="stat-strip glass" aria-label="Generated">
-        <p className="eyebrow">Generated</p>
         <p className="eyebrow">Invested</p>
         <p className="hero-rate">{formatBag(m.invested)}</p>
         {showsNoFills(m) ? <div className="hero-gen">No fills yet</div> : (

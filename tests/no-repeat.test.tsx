@@ -148,6 +148,18 @@ describe('no money or token figure is repeated on a screen', () => {
     }
   });
 
+  it('does not repeat a label in the bot hero', () => {
+    for (const row of desk.bots) {
+      const html = renderToStaticMarkup(
+        <BotView bot={row} activity={[]} prices={desk.prices} onBack={() => {}} onActivity={() => {}} showFeed={false} />,
+      );
+      const hero = html.split('data-open="breakdown"')[0];
+      const labels = [...hero.matchAll(/class="eyebrow">([^<]+)/g)].map((m) => m[1]);
+      const dupes = labels.filter((label, i) => labels.indexOf(label) !== i);
+      expect(dupes, row.pair).toEqual([]);
+    }
+  });
+
   it('a single live contributor does not restate the hero', () => {
     const now = 1_700_000_000_000;
     const one = adaptStatus({

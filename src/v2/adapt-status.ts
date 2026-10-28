@@ -247,6 +247,57 @@ function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
   return desk(metrics, str(g.label) || `${base}/${quote}`, base, quote, chain, str(g.dexName), price, spark, num(g.feeBps), num(g.priceAt));
 }
 
+function trendBot(status: Rec, t: Rec, asOf: number): BotDesk {
+  const k = rate(t.usdPerQuote);
+  const quote = str(t.quoteSym) || str(t.quote) || 'quote';
+  const base = str(t.base) || 'base';
+  const pnl = rec(t.pnl);
+  const stats = rec(t.stats);
+  const realizedQ = num(pnl?.realized);
+  const unrealQ = num(pnl?.unrealized);
+  const capitalQ = num(t.capital);
+  const price = num(t.price);
+  const startedAt = num(t.startedAt);
+  const generatedUsd = mul(realizedQ, k);
+  const generated = generatedTokens({ kind: 'trend', quote, realized: realizedQ })
+    .map((row) => ({ symbol: row.symbol, amount: row.amount, usd: generatedUsd }));
+  const chain = chainOf(status, t.chainId);
+  const samples = num(stats?.count) ?? num(t.moveCount);
+  const metrics = shell({
+    botId: str(t.id),
+    mode: modeOf(t.mode),
+    kind: 'trend',
+    status: statusOf(t.status),
+    startedAt,
+    ageSec: ageOf(startedAt, asOf),
+    capitalInUsd: mul(capitalQ, k),
+    currentValueUsd: mul(num(pnl?.equity), k),
+    realizedUsd: centsOrNull(generatedUsd),
+    unrealizedUsd: mul(unrealQ, k),
+    feesCollected: [],
+    feesOwed: [],
+    feesCollectedUsd: null,
+    feesUncollectedUsd: null,
+    gasUsd: mul(num(pnl?.gas), k),
+    swapCostUsd: null,
+    tokenTaxesUsd: null,
+    realizedRebalanceLossUsd: null,
+    priceChangeUsd: mul(unrealQ, k),
+    generated,
+    generatedUsd,
+    moveCount: num(t.moveCount),
+    fillCount: samples,
+    range: null,
+    asOf,
+    calc: blankCalc('trend', quote),
+    invested: coin(quote, capitalQ),
+    grossFees: [],
+    feesPaid: [],
+    moveLoss: [],
+  }, samples);
+  return desk(metrics, str(t.label) || str(t.name) || `${base}/${quote}`, base, quote, chain, str(t.dexName), price, [], num(t.feeBps), num(t.priceAt));
+}
+
 function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
   const k = rate(lp.usdPerQuote);
   const base = str(lp.base) || 'base';
@@ -518,7 +569,12 @@ function activityOf(events: ActivityEvent[], names: Map<string, { pair: string; 
 export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = num(status.spotsAt) ?? Date.now(), source: DeskSnapshot['source'] = 'snapshot'): DeskSnapshot {
   const grids = (Array.isArray(status.grids) ? status.grids : []).map(rec).filter((g): g is Rec => !!g);
   const lps = (Array.isArray(status.lps) ? status.lps : []).map(rec).filter((g): g is Rec => !!g);
-  const bots = [...grids.map((g) => gridBot(status, g, asOf)), ...lps.map((lp) => lpBot(status, lp, asOf))];
+  const trends = (Array.isArray(status.trends) ? status.trends : []).map(rec).filter((g): g is Rec => !!g);
+  const bots = [
+    ...grids.map((g) => gridBot(status, g, asOf)),
+    ...lps.map((lp) => lpBot(status, lp, asOf)),
+    ...trends.map((t) => trendBot(status, t, asOf)),
+  ];
   const rank = (b: BotDesk) => (b.metrics.status === 'running' ? 0 : 1) + (b.metrics.mode === 'live' ? 0 : 2);
   bots.sort((a, b) => rank(a) - rank(b) || Math.abs(b.metrics.generatedUsd ?? 0) - Math.abs(a.metrics.generatedUsd ?? 0));
   return {

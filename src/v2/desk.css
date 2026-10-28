@@ -133,6 +133,7 @@
 }
 .v2 main { min-width: 0; }
 
+.v2 .sheet.glass { background: rgba(22, 26, 30, 0.98); }
 .v2 .glass {
   background: rgba(22, 26, 30, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -531,17 +532,25 @@
   .v2 .hero-rate { font-size: 15px; margin: 0; white-space: normal; }
   .v2 .hero-curve { flex-wrap: wrap; }
   .v2 .hero-curve .seg button,
-  .v2 .chart-frame .seg button { min-height: 44px; min-width: 44px; padding: 0 8px; font-size: 12px; }
+  .v2 .chart-frame .seg button,
+  .v2 .slot .seg button { min-height: 44px; min-width: 44px; padding: 0 8px; font-size: 12px; }
   .v2 .hero-curve .curve-empty { font-size: 12px; }
   .v2 .hero-gen { font-size: 20px; }
   .v2 .ests { grid-template-columns: 1fr; }
   .v2 .tape-who { flex-direction: column; align-items: flex-start; gap: 2px; }
   .v2 .bot-card { padding: 10px 12px; }
 }
+@media (pointer: coarse) {
+  .v2 .slot .seg button { min-height: 44px; min-width: 44px; padding: 0 8px; }
+}
 @media (min-width: 1280px) {
   .v2-body { grid-template-columns: minmax(0, 1fr) 340px; max-width: none; margin: 0; padding: 8px 24px 48px; }
+  .v2-body.is-wide { grid-template-columns: minmax(0, 1fr); }
   .v2 .tabbar { display: none; }
   .v2 .bot-feed { display: none; }
+  .v2 .bot-page .chart-frame { min-height: 48vh; display: flex; flex-direction: column; }
+  .v2 .bot-page .chart-frame .curve-empty { flex: 1; display: flex; align-items: center; }
+  .v2 .side-tape { min-height: calc(100vh - 140px); }
 }
 @media (max-width: 1279px) {
   .v2 .side-tape { display: none; }

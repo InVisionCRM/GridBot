@@ -158,8 +158,8 @@ function ModeSection({
     <section>
       <h2 className="group-title">
         <span className="section-name">{title}</span>
-        {invested.length > 0 && <span className="section-units">{formatBag(invested)} invested</span>}
-        {tokens.length > 0 && <span className="section-units"><TokenLine tokens={tokens} /></span>}
+        {invested.length > 0 && <span className="section-units"><span className="section-name">Invested</span> {formatBag(invested)}</span>}
+        {tokens.length > 0 && <span className="section-units"><span className="section-name">Generated</span> <TokenLine tokens={tokens} /></span>}
       </h2>
       {open.length > 0 && <ul className="bot-list">{open.map(item)}</ul>}
       {closed.length > 0 && (
