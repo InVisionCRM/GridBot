@@ -103,9 +103,11 @@ function apr(generatedUsd: number | null, capital: number | null, ageSec: number
   return generatedUsd / capital;
 }
 
-function blankCalc(kind: BotKind): string {
-  if (kind === 'lp') return 'Generated = fees in each coin, with gas, swap fees and rebalance loss taken out of the quote coin. Dollars are the engine net × the quote price. Taxes are not in this payload.';
-  return 'Generated = realized trade profit in the quote coin (already net of pool fees and gas). Taxes and a separate swap fee are not in this payload.';
+/** Gas, swap cost, and rebalance loss are denominated in the engine's quote coin, and the desk subtracts them from that coin. */
+function blankCalc(kind: BotKind, quote: string): string {
+  const coin = quote || 'the quote coin';
+  if (kind === 'lp') return `Generated = fees in each coin, with gas, swap fees and rebalance loss taken out of ${coin}. Dollars are the engine net × the ${coin} price. Taxes are not in this payload.`;
+  return `Generated = realized trade profit in ${coin} (already net of pool fees and gas). Taxes and a separate swap fee are not in this payload.`;
 }
 
 interface ChainInfo { short: string; color: string }
@@ -128,10 +130,26 @@ function statusOf(v: unknown): BotStatus {
   return 'stopped';
 }
 
-function rangeBlock(lower: number | null, upper: number | null, current: number | null, inRange: boolean | null): RangeBlock | null {
-  if (lower == null || upper == null || current == null || !(upper > lower)) return null;
-  const inside = inRange ?? (current >= lower && current <= upper);
-  return { lower, upper, current, inRange: inside };
+const STABLES = new Set(['USDC', 'USDG', 'USDT', 'DAI', 'USD']);
+
+/** Same flip as the tape: a stable base priced under 1 is shown as quote per base. */
+function readsInverted(base: string, quote: string, price: number | null): boolean {
+  if (price == null || !(price > 0) || !(price < 1)) return false;
+  return STABLES.has(base.toUpperCase()) && !STABLES.has(quote.toUpperCase());
+}
+
+/**
+ * Range in the orientation the tape uses. Engine bounds are quote per base; a flipped pair
+ * shows base per quote, so the ends swap when they are inverted.
+ */
+function shownRange(base: string, quote: string, lower: number | null, upper: number | null, current: number | null, inRange: boolean | null): RangeBlock | null {
+  if (lower == null || upper == null || current == null || !(upper > lower) || !(current > 0)) return null;
+  const flip = readsInverted(base, quote, current);
+  const lo = flip ? 1 / upper : lower;
+  const hi = flip ? 1 / lower : upper;
+  const cur = flip ? 1 / current : current;
+  if (!(hi > lo)) return null;
+  return { lower: lo, upper: hi, current: cur, inRange: inRange ?? (cur >= lo && cur <= hi) };
 }
 
 function shell(partial: Omit<BotMetrics, 'est' | 'aprPct' | 'totalPnlUsd' | 'totalPnlPct' | 'headline' | 'generatedUsd'> & { generated: TokenQty[]; generatedUsd: number | null }, samples: number | null): BotMetrics {
@@ -208,9 +226,9 @@ function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
     generatedUsd,
     moveCount: num(g.moveCount),
     fillCount: num(stats?.roundTrips),
-    range: rangeBlock(lower, upper, price, null),
+    range: shownRange(base, quote, lower, upper, price, null),
     asOf,
-    calc: blankCalc('grid'),
+    calc: blankCalc('grid', quote),
   }, num(stats?.roundTrips) ?? (trades.length ? trades.map(rec).filter((t) => t && t.failed !== true).length : null));
   return desk(metrics, str(g.label) || `${base}/${quote}`, base, quote, chain, str(g.dexName), price, spark, num(g.feeBps), num(g.priceAt));
 }
@@ -298,14 +316,12 @@ function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
     generatedUsd,
     moveCount: num(lp.reranges),
     fillCount: null,
-    range: rangeBlock(num(pos?.lower), num(pos?.upper), price, inRange),
+    range: shownRange(base, quote, num(pos?.lower), num(pos?.upper), price, inRange),
     asOf,
-    calc: blankCalc('lp'),
+    calc: blankCalc('lp', quote),
   }, null);
   return desk(metrics, str(lp.label) || `${base}/${quote}`, base, quote, chain, str(lp.dexName), price, [], num(lp.feeBps), num(lp.priceAt));
 }
-
-const STABLES = new Set(['USDC', 'USDG', 'USDT', 'DAI', 'USD']);
 
 /** Pair people read, without a chain suffix. A stable base under $1 flips to quote/base. */
 function shownPair(base: string, quote: string, price: number | null, label: string): string {

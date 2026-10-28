@@ -3,7 +3,7 @@
  * Cards that would restate the hero or the section total say so in words.
  */
 import type { BotMetrics, EstimateBlock, RangeBlock, TapePrice, TokenQty } from './metrics';
-import { formatAge, formatAmt, formatTokenLine, formatUsd, pct, shortenFigures, showsNoFills } from './format';
+import { formatAge, formatAmt, formatPx, formatTokenLine, formatUsd, pct, showsNoFills } from './format';
 
 const SUBSCRIPT_PRICE = /\$0\.0[₀₁₂₃₄₅₆₇₈₉]+\d+/g;
 const FIGURE = /[+−-]?\s*\$\d[\d,]*(?:\.\d+)?|[+−-]\s*\d[\d,]*(?:\.\d+)?[kMB]?\s+[A-Z][A-Z0-9]*|[+−-]?\d+(?:\.\d+)?%/g;
@@ -130,8 +130,8 @@ export function sheetRows(m: BotMetrics, covered = ''): SheetRow[] {
   add('Moves', m.moveCount == null ? '—' : String(m.moveCount));
   add('Fills', m.fillCount == null ? '—' : String(m.fillCount));
   if (m.range) {
-    add('Range lower', shortenFigures(String(m.range.lower)));
-    add('Range upper', shortenFigures(String(m.range.upper)));
+    add('Range lower', formatPx(m.range.lower));
+    add('Range upper', formatPx(m.range.upper));
     add('In range', m.range.inRange ? 'yes' : 'no');
   }
   return rows;

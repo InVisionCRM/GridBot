@@ -133,6 +133,18 @@ describe('no money or token figure is repeated on a screen', () => {
     }
   });
 
+  it('an in-range bot shows its range around the displayed price', () => {
+    for (const row of desk.bots) {
+      const range = row.metrics.range;
+      if (!range?.inRange) continue;
+      expect(range.lower, row.pair).toBeLessThanOrEqual(range.current);
+      expect(range.current, row.pair).toBeLessThanOrEqual(range.upper);
+      const text = screen(bot(desk, row, 390, true), 390, `range ${row.pair}`);
+      expect(text).toContain(formatPx(range.lower));
+      expect(text).toContain(formatPx(range.upper));
+    }
+  });
+
   it('a single live contributor does not restate the hero', () => {
     const now = 1_700_000_000_000;
     const one = adaptStatus({

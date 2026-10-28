@@ -62,7 +62,7 @@ export function BotView({
   const m = bot.metrics;
   const timed = bot.candles.length > 0 && bot.candles.every((c) => c.t > 0);
   const candles = candlesInRange(bot.candles, span, m.asOf);
-  const formula = 'Total P&L = generated + price change';
+  const formula = 'Value change incl. price = generated + price change';
   const beside = `${activity.map((a) => shortenFigures(a.text)).join('\n')} ${prices.map((p) => formatPx(p.price)).join(' ')}`;
   const totalText = shot ? formatUsd(shot.totalPnlUsd, true) : '';
   const totalRepeats = shot != null && totalText !== '—' && figureAtoms(heroFigureText(shot)).some((atom) => normFigure(atom) === normFigure(totalText));
@@ -145,10 +145,11 @@ export function BotView({
             <p className="muted small">Snapshot · {formatStamp(shot.asOf)}</p>
             {totalShown && (
               <p className="sheet-eq">
-                Total P&L <b title={formula}>{totalText}</b>
+                <span>Value change incl. price</span>
+                <small title={formula}>{totalText}</small>
               </p>
             )}
-            {totalRepeats && <p className="muted small" title={formula}>Total P&L is the generated dollars above.</p>}
+            {totalRepeats && <p className="muted small" title={formula}>Value change incl. price is the generated dollars above.</p>}
             <ul className="break">
               {rows.map((row) => <Row key={row.label} label={row.label} value={row.value} />)}
             </ul>

@@ -188,6 +188,26 @@ describe('adaptStatus', () => {
     expect(row?.fee).toBeNull();
   });
 
+  it('shows the range in the tape orientation so it brackets the displayed price', () => {
+    const lp = desk.bots.find((b) => b.metrics.botId === 'lp-live');
+    const range = lp?.metrics.range;
+    const tape = desk.prices.find((p) => p.symbol === 'ETH/USDC');
+    expect(range?.inRange).toBe(true);
+    expect(range!.lower).toBeLessThanOrEqual(range!.current);
+    expect(range!.current).toBeLessThanOrEqual(range!.upper);
+    expect(range!.current).toBeCloseTo(tape!.price!);
+    expect(range!.current).toBeCloseTo(2000);
+    expect(range!.lower).toBeCloseTo(1 / 0.0006);
+    expect(range!.upper).toBeCloseTo(1 / 0.0004);
+    expect(lp?.metrics.calc).toContain('taken out of ETH');
+    const grid = desk.bots.find((b) => b.metrics.botId === 'grid-paper');
+    expect(grid?.metrics.range?.lower).toBe(10);
+    expect(grid?.metrics.range?.current).toBeCloseTo(12.5);
+    expect(grid?.metrics.range?.upper).toBe(15);
+    expect(grid!.metrics.range!.lower).toBeLessThanOrEqual(grid!.metrics.range!.current);
+    expect(grid!.metrics.range!.current).toBeLessThanOrEqual(grid!.metrics.range!.upper);
+  });
+
   it('keeps one price per pool and labels a second fee tier', () => {
     const now = 1_700_000_000_000;
     const grid = (id: string, extra: Record<string, unknown>) => ({
