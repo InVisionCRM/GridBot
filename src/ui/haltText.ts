@@ -26,3 +26,14 @@ export function showHalt(b: { status?: string; closing?: boolean; halt?: HaltVie
   if (b.status === 'running' && !closing && !b.closing) return null;
   return haltText(b.halt, now);
 }
+
+/** A LIVE run started with Start anyway (the safety check couldn't complete): who pressed it, when, and why it was blocked. */
+export function overrideText(b: { mode?: string; startOverride?: (HaltView & { blockedBy?: string; kind?: string }) | null }, now = Date.now()): string | null {
+  const o = b.startOverride;
+  if (!o || b.mode !== 'live') return null;
+  const who = haltText(o, now);
+  const head = o.kind === 'resume' ? `Resumed on the last passing safety report${who ? ` (${who})` : ''}`
+    : o.kind === 'boot' ? `Kept running after the app restarted, on the last passing safety report${who ? ` (${who})` : ''}`
+    : `Started with Start anyway (${who ?? 'Start anyway'})`;
+  return `${head}: the safety check couldn't complete${o.blockedBy ? ` (${o.blockedBy})` : ''}.`;
+}

@@ -44,7 +44,7 @@ export function More({ s, nav, onGuide, onActivity }: { s: AnyObj; nav: Nav; onG
       <details className="more-sec">
         <summary><Icon name="gear" size={18} /><span>Tools</span></summary>
         {tool('convert', 'swap', 'Convert', 'Swap a coin you already hold')}
-        {tool('alerts', 'bell', 'Alerts', 'Which events ping this browser')}
+        <button type="button" className="more-row" onClick={() => nav({ v: 'alerts' })}><Icon name="bell" size={18} /><span>Alerts<small>Lock screen and this tab</small></span></button>
         {tool('analytics', 'activity', 'Analytics', 'What the bots made')}
         {tool('system', 'pulse', 'System', 'Version and what is healthy')}
         {!s.copy && tool('friends', 'users', 'Friends', 'Share a copy of this bot')}
