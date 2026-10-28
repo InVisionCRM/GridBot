@@ -1,9 +1,10 @@
 /** Sticky Pro Desk bar. Four destinations stay; chevrons open the strategy menu. Phone uses the bottom bar. */
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { chainOf, chains, type ChainFilter } from './chains';
 import { Sparkline } from './charts';
 import { Icon, type IconName } from './icons';
-import { formatUsdChip, type HoldingsSnapshot } from '../live/holdingsMath';
+import type { HoldingsSnapshot } from '../live/holdingsMath';
+import { EthUsdCtx, inEthShort } from './units';
 import { pct } from './fmt';
 import type { AnyObj, Nav, View } from './model';
 import type { Opportunity } from '../market/scan';
@@ -99,15 +100,13 @@ function DeskMenu({ s, nav, onGuide, onActivity, close }: { s: AnyObj; nav: Nav;
 }
 
 export function Header({
-  s, view, nav, chain, setChain, showUsd, setShowUsd, connected, ver, holdings, onActivity, onGuide,
+  s, view, nav, chain, setChain, connected, ver, holdings, onActivity, onGuide,
 }: {
   s: AnyObj;
   view: View;
   nav: Nav;
   chain: ChainFilter;
   setChain: (c: ChainFilter) => void;
-  showUsd: boolean;
-  setShowUsd: (on: boolean) => void;
   connected: boolean;
   ver: AnyObj | null;
   holdings: HoldingsSnapshot | null;
@@ -122,8 +121,9 @@ export function Header({
   const phoneCurrent = view.v === 'alerts' ? 'alerts' : current;
   const cs = chains(s);
   const sel = chain === 'all' ? null : chainOf(s, chain);
+  const ethUsd = useContext(EthUsdCtx);
   const worth = !holdings ? null : !holdings.hasSigner ? null : holdings.netWorthExDustUsd ?? holdings.netWorthUsd;
-  const worthText = !holdings ? '…' : !holdings.hasSigner ? '—' : worth == null ? '—' : formatUsdChip(worth);
+  const worthText = !holdings ? '…' : !holdings.hasSigner ? '—' : worth == null ? '—' : inEthShort(worth, ethUsd);
   const letter = s.address ? s.address.slice(2, 4).toUpperCase() : 'P';
   const showAccount = !!s.copy || (typeof window !== 'undefined' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname));
 
@@ -175,7 +175,6 @@ export function Header({
           {menu && (
             <div className="menu" role="menu">
               <p className="menu-note">{s.address ? `${s.address.slice(0, 6)}…${s.address.slice(-4)}` : 'Paper only. No signing key.'}</p>
-              <button type="button" role="menuitem" onClick={() => setShowUsd(!showUsd)}>{showUsd ? 'Hide dollar amounts' : 'Show dollar amounts'}</button>
               <button type="button" role="menuitem" onClick={() => { setMenu(false); onActivity(); }}>Activity</button>
               {!s.copy && ver && <button type="button" role="menuitem" onClick={() => { setMenu(false); nav({ v: 'tools', tab: 'system' }); }}>{ver.title ?? 'Version'}</button>}
               {showAccount && <a role="menuitem" href="/account">Account</a>}

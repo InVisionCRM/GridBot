@@ -14,6 +14,7 @@
  * methods, min-out after tax, taxes in every gate, PnL from actual balance changes); on V3 only if the round trip
  * through that pool was simulated successfully; above the cap / honeypot / paused / unverified → paper only.
  */
+import { usdAsEth } from '../../lib/ethUnits';
 import { Interface } from 'ethers';
 import type { MarketDef, SafetyReport } from '../../live/markets';
 import { fromUnits } from '../../live/swapMath';
@@ -124,13 +125,13 @@ export function classify(i: SafetyInputs): SafetyReport {
   if (maxWalletTokens != null) { bump('medium'); reasons.push(`Max wallet ${maxWalletTokens.toPrecision(6)} tokens — buys that would exceed it are skipped.`); }
   if (i.proxy) { bump('medium'); reasons.push(`Upgradeable proxy (${i.proxy.kind}) — the owner can change the token logic.`); }
   if (i.liquidityUsd != null) {
-    if (i.liquidityUsd < 10_000) { bump('high'); reasons.push(`Thin pool: ≈$${Math.round(i.liquidityUsd).toLocaleString('en-US')} liquidity.`); }
-    else if (i.liquidityUsd < 50_000) { bump('medium'); reasons.push(`Modest pool: ≈$${Math.round(i.liquidityUsd).toLocaleString('en-US')} liquidity.`); }
+    if (i.liquidityUsd < 10_000) { bump('high'); reasons.push(`Thin pool: ${usdAsEth(i.liquidityUsd)} liquidity.`); }
+    else if (i.liquidityUsd < 50_000) { bump('medium'); reasons.push(`Modest pool: ${usdAsEth(i.liquidityUsd)} liquidity.`); }
   }
   const d100 = i.depth.find((d) => d.usd === 100), d1k = i.depth.find((d) => d.usd === 1000);
   const worst = (d?: { buyImpactPct: number | null; sellImpactPct: number | null }) => Math.max(d?.buyImpactPct ?? 0, d?.sellImpactPct ?? 0);
-  if (d100 && worst(d100) > 0.03) { bump('high'); reasons.push(`$100 trade moves the price ${(worst(d100) * 100).toFixed(2)}%.`); }
-  else if (d1k && worst(d1k) > 0.05) { bump('medium'); reasons.push(`$1k trade moves the price ${(worst(d1k) * 100).toFixed(2)}%.`); }
+  if (d100 && worst(d100) > 0.03) { bump('high'); reasons.push(`A ${usdAsEth(100)} trade moves the price ${(worst(d100) * 100).toFixed(2)}%.`); }
+  else if (d1k && worst(d1k) > 0.05) { bump('medium'); reasons.push(`A ${usdAsEth(1000)} trade moves the price ${(worst(d1k) * 100).toFixed(2)}%.`); }
   if (!reasons.length) reasons.push('Simulated buy, transfer and sell matched quotes exactly; no proxy; adequate depth.');
   const r = risk as SafetyReport['risk'];
   return {

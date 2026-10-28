@@ -47,7 +47,7 @@ describe('smart trader (paper, mock chain)', () => {
     expect(a.bots[0]).toMatchObject({ kind: 'grid', label: 'PLS/DAI', market: 'DAI', capital: 300, pool: poolId({ chainId: NET.chainId, key: 'DAI', ref: daiOpp(0).ref }, 'grid') });
     expect(a.coins.DAI ?? 0).toBeCloseTo(0, 9);
     const g = bot.status().grids.find((x) => x.id === a.bots[0].id)!;
-    expect(g).toMatchObject({ mode: 'paper', status: 'running', config: { totalCapitalUsd: 300, gridCount: 10 } });
+    expect(g).toMatchObject({ mode: 'paper', status: 'running', config: { totalCapitalQuote: 300, gridCount: 10 } });
     expect(g.config!.lowerPrice / g.config!.upperPrice).toBeCloseTo(0.88 / 1.12, 12); // ±12% around the price
     await bot.tickAll();
     expect(ap.status().accounts[0].value).toBeGreaterThan(290);

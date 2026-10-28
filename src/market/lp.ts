@@ -29,6 +29,8 @@ export const LP_MIN_SWAP_SHARE = 0.01;
 /** Ranges a liquidity bot allows: ±1% … ±50% around the price. */
 export const LP_BAND = { min: 0.01, max: 0.5 };
 export const LP_GAS = { v3: { open: 480_000, close: 250_000 }, v2: { open: 170_000, close: 215_000 } } as const;
+/** increaseLiquidity gas, beside a collect (LP_GAS.v3.close), when fees are compounded without moving the range. */
+export const LP_INCREASE_GAS = 200_000;
 
 /** Gas for `units` in the base coin: `gasPricePls` is per gas unit in base units, `extraPlsPerSwap` an L2's L1 part per transaction. */
 export function gasInBase(units: number, m: { gasPricePls: number; extraPlsPerSwap?: number }): number {

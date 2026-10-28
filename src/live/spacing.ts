@@ -33,12 +33,12 @@ export function analyzeSpacing(lowerPrice: number, upperPrice: number, gridCount
   return { step, worstSpacingFrac, roundTripFee: ROUND_TRIP_FEE, clearsFees, warning };
 }
 
-export function validateGridParams(lowerPrice: number, upperPrice: number, gridCount: number, totalCapitalUsd: number): string[] {
+export function validateGridParams(lowerPrice: number, upperPrice: number, gridCount: number, totalCapitalQuote: number): string[] {
   const e: string[] = [];
   if (!(lowerPrice > 0) || !(upperPrice > lowerPrice)) e.push('upperPrice must be > lowerPrice > 0');
   if (!Number.isInteger(gridCount) || gridCount < MIN_GRID_COUNT || gridCount > MAX_GRID_COUNT) {
     e.push(`gridCount must be ${MIN_GRID_COUNT}–${MAX_GRID_COUNT}`);
   }
-  if (!(totalCapitalUsd > 0)) e.push('totalCapitalUsd must be > 0');
+  if (!(totalCapitalQuote > 0)) e.push('totalCapitalQuote must be > 0');
   return e;
 }

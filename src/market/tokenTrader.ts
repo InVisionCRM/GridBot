@@ -9,6 +9,7 @@
  * Exits, in order: sell simulation failed, tax appeared or rose, liquidity pulled, hard stop, trailing stop,
  * take-profit ladders, time stop, volume decay. A sell is split so each piece stays under the price-impact cap.
  */
+import { usdAsEth } from '../lib/ethUnits';
 import { HARD_CAPS } from '../live/limits';
 import { MAX_TAX, TAX_TOLERANCE } from '../live/tax';
 import { simBuy, simSell, type CostModel } from './costs';
@@ -99,7 +100,7 @@ export function filterFresh(pools: FreshPool[], o: { now: number; minAgeMs: numb
     if (p.kind === 'v4') { skipped.push({ pool: p.pool, why: "this app doesn't swap V4" }); continue; }
     if (!(p.price > 0) || !(p.quoteReserve > 0)) { skipped.push({ pool: p.pool, why: 'no price or depth' }); continue; }
     const minL = o.minLiquidityUsd ?? 0;
-    if (p.liquidityUsd < minL) { skipped.push({ pool: p.pool, why: `liquidity $${Math.round(p.liquidityUsd).toLocaleString('en-US')} is below $${minL.toLocaleString('en-US')}` }); continue; }
+    if (p.liquidityUsd < minL) { skipped.push({ pool: p.pool, why: `liquidity ${usdAsEth(p.liquidityUsd)} is below ${usdAsEth(minL)}` }); continue; }
     if (p.createdAt != null && o.minAgeMs > 0 && o.now - p.createdAt < o.minAgeMs) {
       const h = Math.max(0, Math.round((o.now - p.createdAt) / 3600_000));
       skipped.push({ pool: p.pool, why: `pool is ${h}h old (minimum ${Math.round(o.minAgeMs / 3600_000)}h for scan discovery)` });
@@ -239,7 +240,7 @@ export function gateToken(g: GateInput): GateResult {
   if (g.sellSimOk === false) return hard('sell simulation failed');
   if (g.paused === true) return hard('token is paused');
   if (g.decimals == null || !(g.decimals >= 0 && g.decimals <= 36)) return hard('decimals unreadable');
-  if (g.liquidityUsd < g.minLiquidityUsd) return hard(`liquidity $${Math.round(g.liquidityUsd).toLocaleString('en-US')} is under the $${g.minLiquidityUsd.toLocaleString('en-US')} minimum`);
+  if (g.liquidityUsd < g.minLiquidityUsd) return hard(`liquidity ${usdAsEth(g.liquidityUsd)} is under the ${usdAsEth(g.minLiquidityUsd)} minimum`);
   if (g.canMint === true) return hard('owner can mint');
   if (g.recentLiqPull) return hard('liquidity was pulled');
   const tax = Math.max(g.buyTax ?? 0, g.sellTax ?? 0);
@@ -327,8 +328,8 @@ export function sizeBuy(p: {
   const fill = simBuy(fit.amount, sellSidePrice(p.price, p.feeBps), model);
   const usd = fit.amount * p.usdPerSpend;
   const why = fit.why
-    ? `${fit.why}; ${usd.toFixed(2)} USD after fees and ${(((p.buyTax ?? 0) * 100).toFixed(1))}% buy tax`
-    : `${usd.toFixed(2)} USD, price impact ${(fit.impact * 100).toFixed(2)}%`;
+    ? `${fit.why}; ${usdAsEth(usd)} after fees and ${(((p.buyTax ?? 0) * 100).toFixed(1))}% buy tax`
+    : `${usdAsEth(usd)}, price impact ${(fit.impact * 100).toFixed(2)}%`;
   return { spend: fit.amount, usd, tokens: fill.pls, impact: fit.impact, why };
 }
 

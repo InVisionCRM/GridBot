@@ -1,9 +1,9 @@
 /**
- * Coins first, dollars on request: every result is shown in the coin it was earned in. The "$" switch in the top bar
- * adds the dollar value beside it, at today's price of that coin.
+ * Crypto units only: every result is shown in the coin it was earned in. The old "$" switch (dollar value beside
+ * it) is gone; `Usd` renders nothing and `Amt` is the coin amount alone. The context stays so callers compile.
  */
 import { createContext, useContext } from 'react';
-import { qty, usd } from './fmt';
+import { qty } from './fmt';
 
 export const ShowUsdCtx = createContext<{ on: boolean; set: (on: boolean) => void } | null>(null);
 
@@ -20,11 +20,9 @@ export function saveShowUsd(on: boolean) {
   try { localStorage.setItem('showUsd', on ? '1' : '0'); } catch { /* storage unavailable */ }
 }
 
-/** " ≈ $12.50" with the switch on and a dollar price for the coin (k = dollars per coin); nothing otherwise. */
-export function Usd({ v, k, sign = true }: { v: number | null | undefined; k: number | null | undefined; sign?: boolean }) {
-  const { on } = useShowUsd();
-  if (!on || k == null || v == null || !Number.isFinite(v)) return null;
-  return <span className="usd"> ≈ {usd(v * k, sign)}</span>;
+/** Was " ≈ $12.50" with the "$" switch on. No dollar amounts are shown any more: always nothing. */
+export function Usd(_: { v: number | null | undefined; k: number | null | undefined; sign?: boolean }) {
+  return null;
 }
 
 /** "+12.5 DAI", then the dollars when the switch is on. */

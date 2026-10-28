@@ -12,6 +12,10 @@ import { shownMinLiquidityUsd } from '../src/market/liquidityFloor';
 import { MemoryStore } from '../src/server/bot/store';
 import { TokenTrader, type TraderState } from '../src/server/bot/tokenTrader';
 import type { PoolSniper, SnipeHit } from '../src/server/market/sniper';
+import { setEthUsdSource } from '../src/lib/ethUnits';
+
+// screen text shows dollar-only figures in ETH; pin the price so the wording is fixed (gates stay in USD)
+setEthUsdSource(() => 2500);
 
 const clean = (o: Partial<GateInput> = {}): GateInput => ({
   mode: 'paper', risk: 'safe', honeypot: false, sellSimOk: true, paused: false, decimals: 18,
@@ -382,7 +386,8 @@ describe('token trader engine', () => {
     await t.tick();
     expect(t.status().positions.map((p) => p.label)).toEqual(['OK/WETH']);
     const why = t.status().feed.map((f) => f.why).join(' | ');
-    expect(why).toMatch(/\$10,000/);
+    expect(why).toMatch(/under the ≈ 4 ETH minimum/); // the $10,000 gate, in ETH at 2,500 a coin
+    expect(why).not.toMatch(/\$/);
     expect(why).toMatch(/under the/);
   });
 
@@ -410,7 +415,7 @@ describe('token trader engine', () => {
     on.t.turnOn();
     await on.t.tick();
     expect(on.t.status().positions.map((p) => p.label)).toEqual(['FAT/WETH']);
-    expect(on.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/\$50,000/);
+    expect(on.t.status().feed.map((f) => f.why).join(' | ')).toMatch(/≈ 20 ETH/); // the $50,000 floor
   });
 
   it('does not let the $50,000 flag lower a higher sniper minimum', async () => {
@@ -429,7 +434,8 @@ describe('token trader engine', () => {
     t.turnOn();
     await t.tick();
     expect(t.status().positions.map((p) => p.label)).toEqual(['FAT/WETH']);
-    expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/\$80,000/);
+    expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/liquidity under ≈ 32 ETH/); // the $80,000 sniper minimum
+    expect(t.status().feed.map((f) => f.why).join(' | ')).not.toMatch(/\$/);
   });
 
   it('the API reports the floor in force, which is what the panel shows', async () => {
