@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { FetchRequest, JsonRpcProvider, Wallet } from 'ethers';
 import { getNetwork, type NetworkKey } from '../live/networks';
-import { registerSecret } from './bot/logger';
+import { REDACT_FLOOR, registerSecret } from './bot/logger';
 import { ownerLoginFrom, parsePassHash, type OwnerConfig } from './friends/owner';
 
 /** Load .env from the working directory (Node ≥ 20.12). Missing file is fine. */
@@ -64,21 +64,34 @@ export interface BridgeConfigured { across: boolean; relay: boolean; lifi: boole
 
 /**
  * Quote keys for the capital router. Like PRIVATE_KEY they are removed from process.env at once and registered
- * for redaction. The strings stay in this module; callers only get whether each one was set.
+ * for redaction when they are at least REDACT_FLOOR characters. A shorter key is kept for the configured
+ * flag and is not a redaction needle; shortQuoteKeyWarnings() names it and never includes the value.
  * A friend's copy never sees them (they are not on the copy's environment allow-list).
  */
 let bridgeKeys: { across: string | null; relay: string | null; lifi: string | null } = { across: null, relay: null, lifi: null };
+/** Names only. A short quote key is not a redaction needle, and the value is never in this list. */
+let shortQuoteWarnings: string[] = [];
+
+/** Warnings from the last takeBridgeKeys(). Each line names the variable, never the value. */
+export function shortQuoteKeyWarnings(): readonly string[] {
+  return shortQuoteWarnings;
+}
 
 function takeOne(name: 'ACROSS_API_KEY' | 'RELAY_API_KEY' | 'LIFI_API_KEY'): string | null {
   const raw = process.env[name];
   delete process.env[name];
   if (!raw || !raw.trim()) return null;
   const v = raw.trim();
-  registerSecret(v, 1);
+  if (v.length < REDACT_FLOOR) {
+    shortQuoteWarnings.push(`${name} is shorter than ${REDACT_FLOOR} characters, so it is not redacted from logs`);
+    return v;
+  }
+  registerSecret(v, REDACT_FLOOR);
   return v;
 }
 
 export function takeBridgeKeys(): BridgeConfigured {
+  shortQuoteWarnings = [];
   bridgeKeys = { across: takeOne('ACROSS_API_KEY'), relay: takeOne('RELAY_API_KEY'), lifi: takeOne('LIFI_API_KEY') };
   return bridgeConfigured();
 }

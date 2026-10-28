@@ -3,8 +3,8 @@ import { join, relative } from 'node:path';
 import { Wallet } from 'ethers';
 import { describe, expect, it } from 'vitest';
 import { GridEngine, type BotState } from '../src/server/bot/engine';
-import { Logger, redact } from '../src/server/bot/logger';
-import { takeBridgeKeys } from '../src/server/env';
+import { Logger, REDACT_FLOOR, redact, registerSecret } from '../src/server/bot/logger';
+import { shortQuoteKeyWarnings, takeBridgeKeys } from '../src/server/env';
 import { MemoryStore } from '../src/server/bot/store';
 import { NET, MockChain } from './helpers/mockChain';
 
@@ -90,6 +90,7 @@ describe('private key handling', () => {
     const snap = index.indexOf('...process.env');
     expect(take).toBeGreaterThanOrEqual(0);
     expect(snap).toBeGreaterThan(take);
+    expect(index).toMatch(/for \(const msg of shortQuoteKeyWarnings\(\)\) log\.warn\(msg\)/);
   });
   it('a built client bundle does not contain quote key or private key names', () => {
     const dir = join(root, 'dist', 'client');
@@ -118,6 +119,44 @@ describe('private key handling', () => {
       log.error(`leak ${key}`);
       expect(log.entries[0].msg).toContain('[REDACTED]');
       expect(log.entries[0].msg).not.toContain(key);
+    } finally {
+      delete process.env.ACROSS_API_KEY;
+      delete process.env.RELAY_API_KEY;
+      delete process.env.LIFI_API_KEY;
+    }
+  });
+  it('does not redact a quote key shorter than the floor, and warns with the name only', () => {
+    const one = '§';
+    const five = 'qK7m2';
+    const six = 'qK7m2p';
+    expect(one).toHaveLength(1);
+    expect(five).toHaveLength(REDACT_FLOOR - 1);
+    expect(six).toHaveLength(REDACT_FLOOR);
+    delete process.env.ACROSS_API_KEY;
+    delete process.env.RELAY_API_KEY;
+    delete process.env.LIFI_API_KEY;
+    process.env.ACROSS_API_KEY = one;
+    process.env.RELAY_API_KEY = five;
+    process.env.LIFI_API_KEY = six;
+    try {
+      expect(takeBridgeKeys()).toEqual({ across: true, relay: true, lifi: true });
+      expect(redact(`${one} ${five} ${six}`)).toBe(`${one} ${five} [REDACTED]`);
+      registerSecret(one, 1);
+      expect(redact(one)).toBe(one);
+      const warnings = shortQuoteKeyWarnings();
+      const text = warnings.join('\n');
+      expect(text).toContain('ACROSS_API_KEY');
+      expect(text).toContain('RELAY_API_KEY');
+      expect(text).not.toContain('LIFI_API_KEY');
+      expect(text).not.toContain(one);
+      expect(text).not.toContain(five);
+      expect(text).not.toContain(six);
+      const log = new Logger(true);
+      for (const msg of warnings) log.warn(msg);
+      const logged = log.entries.map((e) => e.msg).join('\n');
+      expect(logged).toContain('ACROSS_API_KEY');
+      expect(logged).not.toContain(one);
+      expect(logged).not.toContain(five);
     } finally {
       delete process.env.ACROSS_API_KEY;
       delete process.env.RELAY_API_KEY;
