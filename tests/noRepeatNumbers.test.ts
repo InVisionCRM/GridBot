@@ -25,10 +25,18 @@ import { LpDetail } from '../src/ui/LpDetail';
 import { GridDetail } from '../src/ui/GridDetail';
 import { BotRow } from '../src/ui/botRow';
 import { ShowUsdCtx } from '../src/ui/money';
+import { gridMetrics, lpMetrics } from '../src/metrics/botMetrics';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Obj = Record<string, any>;
-const S = JSON.parse(readFileSync(new URL('./fixtures/real-status-2026-10-27.json', import.meta.url), 'utf8')) as Obj;
+const RAW = JSON.parse(readFileSync(new URL('./fixtures/real-status-2026-10-27.json', import.meta.url), 'utf8')) as Obj;
+// the fixture's bots are the real pull; their metrics are recomputed with this checkout's code (same asOf), so new
+// fields and wording are what the pages get
+const S: Obj = {
+  ...RAW,
+  grids: RAW.grids.map((g: Obj) => ({ ...g, metrics: gridMetrics({ ...g, kind: 'grid' }, g.metrics.asOf) })),
+  lps: RAW.lps.map((l: Obj) => ({ ...l, metrics: lpMetrics(l, l.metrics.asOf) })),
+};
 const noop = () => {};
 
 const render = (el: ReactElement, usd: boolean) =>
@@ -66,6 +74,13 @@ export function repeats(parts: string[]): string[] {
 
 const page = { s: S, events: [], ticks: { prices: {} }, nav: noop, act: noop, busy: false };
 
+/** Kyle's rules: crypto units only (no dollars, even with the "$" switch on), no Realized / Unrealized labels. */
+export function dollarsOrRealized(html: string): string[] {
+  const text = html.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&amp;/g, '&');
+  const attrs = [...html.matchAll(/title="([^"]*)"/g)].map((m) => m[1]);
+  return [text, ...attrs].flatMap((t) => t.match(/\$\s?\d|\bUSD\b|[Dd]ollar|\b[Uu]nrealized\b|\b[Rr]ealized\b/g) ?? []);
+}
+
 describe('no number twice on a bot page', () => {
   for (const usd of [false, true]) {
     for (const lp of S.lps as Obj[]) {
@@ -76,6 +91,7 @@ describe('no number twice on a bot page', () => {
         expect(parts[0]).not.toMatch(/Fees earned|Costs/);
         expect(parts[1]).toMatch(/^<details/);
         expect(repeats(parts)).toEqual([]);
+        expect(dollarsOrRealized(parts.join(''))).toEqual([]);
       });
     }
     for (const g of S.grids as Obj[]) {
@@ -85,6 +101,7 @@ describe('no number twice on a bot page', () => {
         expect(parts[0]).toMatch(/>Generated, in /);
         expect(parts[0]).not.toMatch(/>Unrealized</);
         expect(repeats(parts)).toEqual([]);
+        expect(dollarsOrRealized(parts.join(''))).toEqual([]);
       });
     }
   }
@@ -95,6 +112,7 @@ describe('no number twice on a bot page', () => {
         const html = render(createElement(BotRow, { s: S, b, nav: noop, pause: noop, close: noop, expandable: true, open: true, columns: true, metrics: true }), usd);
         const ladder = region(html, 'levels');
         expect(repeats([ladder ? html.replace(ladder, '') : html]), `${b.id}${usd ? ' $' : ''}`).toEqual([]);
+        expect(dollarsOrRealized(html), `${b.id}${usd ? ' $' : ''}`).toEqual([]);
       }
     }
   });

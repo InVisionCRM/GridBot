@@ -14,7 +14,17 @@ export interface FeesToday {
   liveSeries: number[];
   dayStart: number;
   /** Per bot, so a chain-filtered view can add up only its bots. */
-  byBot: Record<string, { mode: 'live' | 'paper'; earnedUsd: number; paidUsd: number }>;
+  byBot: Record<string, FeesTodayBot>;
+}
+
+/** One bot's fees today: in its quote coin (`sym`, what the page shows) and in dollars (null-price bots: 0). */
+export interface FeesTodayBot {
+  mode: 'live' | 'paper';
+  earnedUsd: number;
+  paidUsd: number;
+  sym: string | null;
+  earned: number;
+  paid: number;
 }
 
 export function localDayStart(now: number): number {
@@ -48,13 +58,16 @@ export function feesToday(bots: Obj[], now = Date.now()): FeesToday {
   for (const b of bots) {
     if (b.archivedAt) continue;
     const k = typeof b.usdPerQuote === 'number' && b.usdPerQuote > 0 ? b.usdPerQuote : null;
-    if (k == null) continue;
+    const sym = (b.metrics?.quote?.symbol ?? b.quote ?? b.stable ?? null) as string | null;
     const paper = b.mode !== 'live';
-    const row = { mode: paper ? 'paper' as const : 'live' as const, earnedUsd: 0, paidUsd: 0 };
-    out.byBot[String(b.id)] = row;
+    const row: FeesTodayBot = { mode: paper ? 'paper' : 'live', earnedUsd: 0, paidUsd: 0, sym, earned: 0, paid: 0 };
+    // In coins every bot counts; the dollar figures (and the sparkline) only those with a dollar price, as before
+    if (k != null || sym != null) out.byBot[String(b.id)] = row;
     if (b.kind === 'lp') {
       const f = lpFeesToday(b, start);
       if (!f) continue;
+      row.earned = f.quote;
+      if (k == null) continue;
       row.earnedUsd = f.quote * k;
       if (paper) out.paperEarnedUsd += f.quote * k;
       else {
@@ -66,6 +79,8 @@ export function feesToday(bots: Obj[], now = Date.now()): FeesToday {
     }
     for (const tr of (b.trades ?? []) as Obj[]) {
       if (tr.failed || !(tr.timestamp >= start) || typeof tr.feeQuote !== 'number') continue;
+      row.paid += tr.feeQuote;
+      if (k == null) continue;
       row.paidUsd += tr.feeQuote * k;
       if (paper) out.paperPaidUsd += tr.feeQuote * k;
       else out.livePaidUsd += tr.feeQuote * k;

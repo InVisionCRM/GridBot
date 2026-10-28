@@ -1601,7 +1601,8 @@ export class MultiBot {
   }
 
   status() {
-    const now = Date.now();
+    // The injected clock, the same one that stamps each engine's lastPriceAt (a mocked startedAt never meets a wall-clock asOf)
+    const now = this.now();
     // Metrics are as of the bot's last price reading, not the wall clock: status() then only changes when a bot
     // actually ticks (the v2 stream sends no patch for a clock that moved), and a stopped bot's rates stop at its
     // last reading. A bot with no reading yet uses the current minute.

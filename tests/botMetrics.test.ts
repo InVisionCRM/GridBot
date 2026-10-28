@@ -7,7 +7,7 @@ import { botMetrics, DAY_MS, HEADLINE, type BotMetrics } from '../src/metrics/bo
 import { feesToday, localDayStart } from '../src/metrics/feesToday';
 import { botFacts } from '../src/ui/deskStats';
 import { bucketItems, deskItems, emptyQuery } from '../src/ui/deskTableModel';
-import { feesTodayOf, generatedParts, pnlParts, totalGeneratedUsd, totalPnlUsd } from '../src/ui/botRow';
+import { bestLiveBot, feesTodayOf, generatedByMode, generatedParts, pnlParts, pnlUnits, sumUnits, totalGeneratedUsd, totalPnlUsd } from '../src/ui/botRow';
 
 const now = Date.UTC(2026, 9, 27, 20, 27); // Oct 27 2026, 4:27 PM EDT
 type B = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -172,11 +172,32 @@ describe('every surface shows the server figure', () => {
       expect(f.aprPct).toBe(x.aprPct);
       expect(f.est.h24?.amount ?? null).toBe(x.est.d1);
       expect(f.calc).toBe(x.calc);
+      // the units the pages show (crypto units only) are the server's quote-coin twins
+      expect(f.feesEarned).toBe(x.quote.feesEarned);
+      expect(f.quoteSym).toBe(x.quote.symbol);
+      expect(pnlParts(b).quote).toBe(x.quote.totalPnl);
+      if (x.quote.totalPnl != null && x.quote.generatedValue != null) expect(x.quote.generatedValue + x.quote.priceChange!).toBeCloseTo(x.quote.totalPnl, 9);
+      if (x.generatedUsd != null && x.quote.usdPerQuote) expect(x.quote.generatedValue!).toBeCloseTo(x.generatedUsd / x.quote.usdPerQuote, 9);
       const row = items.find((i) => i.b.id === b.id);
       if (row) expect(row.facts.generatedUsd).toBe(x.generatedUsd);
     }
-    expect(totalGeneratedUsd(all)).toBeCloseTo(all.reduce((s, b) => s + (b.metrics.generatedUsd ?? 0), 0), 9);
-    expect(totalPnlUsd(all)).toBeCloseTo(all.reduce((s, b) => s + (b.metrics.totalPnlUsd ?? 0), 0), 9);
+    // Home: live and paper are never mixed (review #43 finding 1)
+    const live = all.filter((b) => b.mode === 'live'), paper = all.filter((b) => b.mode !== 'live');
+    expect(live.length).toBeGreaterThan(0);
+    expect(paper.length).toBeGreaterThan(0);
+    expect(totalGeneratedUsd(all)).toBeCloseTo(live.reduce((s, b) => s + (b.metrics.generatedUsd ?? 0), 0), 9);
+    expect(totalGeneratedUsd(all, 'paper')).toBeCloseTo(paper.reduce((s, b) => s + (b.metrics.generatedUsd ?? 0), 0), 9);
+    expect(totalPnlUsd(all)).toBeCloseTo(live.reduce((s, b) => s + (b.metrics.totalPnlUsd ?? 0), 0), 9);
+    const g = generatedByMode(all);
+    expect(g.live).toEqual(sumUnits(live.map((b) => b.metrics.generated)));
+    expect(g.paper).toEqual(sumUnits(paper.map((b) => b.metrics.generated)));
+    const pu = pnlUnits(all)!;
+    for (const [sym, v] of Object.entries(pu)) expect(v).toBeCloseTo(live.filter((b) => b.metrics.quote.symbol === sym).reduce((a, b) => a + b.metrics.quote.totalPnl, 0), 9);
+    expect(bestLiveBot(all)?.mode).toBe('live');
+    // a paper bot that generated far more never becomes the live headline or Best bot
+    const big = { ...paper[0], id: 'paper-huge', metrics: { ...paper[0].metrics, generated: { USDC: 1e9 }, generatedUsd: 1e9 } };
+    expect(generatedByMode([...all, big]).live).toEqual(g.live);
+    expect(bestLiveBot([...all, big])?.id).not.toBe('paper-huge');
   });
   it('the desk table sorts by generated dollars', () => {
     const items = deskItems(all, () => 'X', now);
@@ -223,6 +244,12 @@ describe('fees today', () => {
     const onlyPaper = feesTodayOf({ feesToday: ft }, all.filter((b) => b.mode === 'paper'));
     expect(onlyPaper.liveEarnedUsd).toBe(0);
     expect(onlyPaper.paperEarnedUsd).toBeCloseTo(ft.paperEarnedUsd, 9);
+  });
+  it('in coins too (what Home shows): live LP fees per quote coin, paper apart', () => {
+    const v = feesTodayOf({ feesToday: ft }, all);
+    expect(v.liveEarned[lpLive.quote]).toBeCloseTo(lpLive.pnl.fees - 100, 6);
+    expect(v.paperEarned[lpPaper.quote]).toBeCloseTo(lpPaper.pnl.fees - 50, 6);
+    expect(Object.values(v.livePaid).reduce((a, x) => a + x, 0)).toBeGreaterThan(0);
   });
 });
 

@@ -7,8 +7,8 @@ import { RangeBar } from './charts';
 import { Chart, EquityChart } from './Chart';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
-import { echoes, metricsOf } from './deskStats';
-import { ago, cls, num, pct, px, qty, time, usd } from './fmt';
+import { metricsOf } from './deskStats';
+import { ago, cls, num, pct, px, qty, time } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { T } from './theme';
@@ -19,7 +19,6 @@ import { humanAmount } from '../live/amount';
 import { recenterAt } from '../live/recenter';
 import { LiveLevels, livePrice } from './live';
 import { L, Tip } from './Tip';
-import { Amt } from './money';
 import { showHalt } from './haltText';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -86,7 +85,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
 }
 
 /** Figures the grid page shows elsewhere, left out of the chart's stat table: Generated (headline), the range (under the chart). */
-const GRID_SHOWN_ELSEWHERE = ['Generated', "Generated, today's value", 'Range'] as const;
+const GRID_SHOWN_ELSEWHERE = ['Generated', 'Range'] as const;
 
 /** Something on the grid still has to sell (or a trade is queued / in flight): the range can't move yet. */
 const busyLevels = (g: AnyObj) => !!g.inFlight || g.queue.length > 0 || g.intervals.some((i: AnyObj) => i.status !== 'inactive' && i.status !== 'waitingBuy');
@@ -146,7 +145,7 @@ function Limits({ g, act, busy }: { g: AnyObj; act: Props['act']; busy: boolean 
 
 function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
   const [all, setAll] = useState(false);
-  const q = quoteSym(g), base = g.base ?? 'PLS', k: number | null = g.usdPerQuote ?? null;
+  const q = quoteSym(g), base = g.base ?? 'PLS';
   const net = (t: AnyObj) => t.roundTripNet ?? t.realizedPnlQuote;
   const tx = (h: string) => (h && !h.startsWith('paper')
     ? <a href={explorerTx(s, g.chainId, h)} target="_blank" rel="noreferrer">{h.slice(0, 10)}…</a>
@@ -165,7 +164,7 @@ function Fills({ s, g }: { s: AnyObj; g: AnyObj }) {
         <tbody>
           {g.trades.map((t: AnyObj) => {
             const profit = t.side === 'sell' || t.failed ? net(t) : null;
-            const profitTxt = profit == null ? '' : <Amt v={profit} sym={q} k={k} sig={4} />;
+            const profitTxt = profit == null ? '' : qty(profit, q, 4);
             return all ? (
               <tr key={t.id} className={t.failed ? 'failed-row' : ''}>
                 <td>{time(t.timestamp)}</td><td className={`side ${t.side}`} title={t.seed ? `Start-up buy for levels ${t.seed.join(', ')} above the start price` : undefined}>{t.side}{t.seed ? ' (start-up)' : ''}{t.failed ? ' ✗' : ''}</td><td className="muted">{t.intervalIndex}</td>
@@ -196,7 +195,6 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   if (!g) return null;
 
   const m = metricsOf(g);
-  const k: number | null = m?.quote.usdPerQuote ?? g.usdPerQuote ?? null;
   const q = quoteSym(g);
   const rs = rangeState(g);
   // Money figures come from the server's metrics (src/metrics/botMetrics.ts); nothing is added up here.
@@ -259,15 +257,15 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={m?.calc ?? 'Generated'}>Generated, in {q}</L></span>
           <div className={`kpi-v ${cls(earned)}`}>{earned == null ? '—' : <AnimatedNumber value={earned} format={(x) => qty(x, q, 5)} />}</div>
-          <span className="sub">from completed buy → sell trades, after fees and gas{m?.generatedUsd != null && !(earned != null && echoes(qty(earned, q, 5), usd(m.generatedUsd, true))) && <span className="usd"> ≈ {usd(m.generatedUsd, true)}</span>}</span>
+          <span className="sub">from completed buy → sell trades, after fees and gas</span>
         </div>
-        <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">{g.stats.roundTrips > 1 && <>avg <Amt v={g.stats.avgNet} sym={q} k={k} sig={4} /> each · </>}{g.stats.wins} profitable</span></div>
+        <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">{g.stats.roundTrips > 1 && <>avg {qty(g.stats.avgNet, q, 4)} each · </>}{g.stats.wins} profitable</span></div>
         <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v">{g.price ? px(g.price) : '—'}</div><span className="sub">{q} per {g.base}</span></div>
         <div className="kpi"><span><L tip="Pool fees paid on this grid's fills, in the quote coin.">Fees</L></span><div className="kpi-v">{qty(((g.trades ?? []) as AnyObj[]).reduce((a, t) => a + (typeof t.feeQuote === 'number' ? t.feeQuote : 0), 0), q, 4, false)}</div><span className="sub">paid on fills</span></div>
       </div>
-      <MoneyDetails b={g} note="what it holds, unrealized, dollars made, total P&L" breakdown={held > 0 ? [
+      <MoneyDetails b={g} note="what it holds, open positions, total P&L" hide={held > 0 ? ['Open positions'] : []} breakdown={held > 0 ? [
         ['Holding', <>{num(held, held < 10 ? 6 : 2)} {g.base}, bought for {qty(g.pnl.costQuote, q, 5, false)}, worth {qty(held * (g.price ?? 0), q, 5, false)} now</>, `The ${g.base} the grid bought and hasn't sold yet. It sells one level up.`],
-        [`Unrealized, ${q}`, open == null ? '—' : qty(open, q, 5), `What those coins are worth now minus what they cost. It moves with the price until they sell, so it is not in Generated.`],
+        [`Open positions, ${q}`, open == null ? '—' : qty(open, q, 5), `What those coins are worth now minus what they cost. It moves with the price until they sell, so it is not in Generated.`],
       ] : [['Holding', 'nothing waiting to sell']]} />
 
       {g.config && (

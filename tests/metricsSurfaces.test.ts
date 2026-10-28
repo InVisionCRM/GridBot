@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { lpMetrics, DAY_MS, MAX_SCALE } from '../src/metrics/botMetrics';
 import { MoneyDetails } from '../src/ui/MoneyDetails';
+import { qty } from '../src/ui/fmt';
 import { midFactor, unitsLabel } from '../src/ui/Chart';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -38,11 +39,13 @@ describe('one headline per bot page', () => {
     const html = renderToStaticMarkup(createElement(MoneyDetails, { b: { ...b, metrics: m } }));
     expect(html).toMatch(/^<details class="more money-details"/);
     expect(html).not.toMatch(/<details[^>]*\sopen/);
-    for (const label of ['Dollars made', 'Total P&amp;L', 'Price change', 'Unrealized', 'Value vs deposit']) expect(html).toContain(label);
-    const dollars = (v: number) => `${v < 0 ? '−' : '+'}$${Math.abs(v).toFixed(2)}`;
-    expect(html).toContain(dollars(m.dollarsMadeUsd!));
-    expect(html).toContain(dollars(m.totalPnlUsd!));
-    expect(html).toContain(dollars(m.priceChangeUsd!));
+    for (const label of ['Made at event prices', 'Total P&amp;L', 'Price change', 'Open positions', 'Value vs deposit']) expect(html).toContain(label);
+    // crypto units only: the quote-coin figures, no dollars, no Realized / Unrealized labels
+    const units = (v: number) => qty(v, m.quote.symbol!, 5);
+    expect(html).toContain(units(m.quote.made!));
+    expect(html).toContain(units(m.quote.totalPnl!));
+    expect(html).toContain(units(m.quote.priceChange!));
+    expect(html).not.toMatch(/\$|\bUSD\b|dollar|[Rr]ealized/);
   });
 });
 
@@ -63,7 +66,7 @@ describe('pace from BotMetrics, with the min-history rule', () => {
   it('the LP page has no client-side pace math left', () => {
     const s = src('LpDetail.tsx');
     expect(s).not.toMatch(/3_600_000|PositionPace|\['A month', 720\]/);
-    expect(s).toMatch(/m\.generatedRate\.d30, m\.est\.d30, m\.generatedRate\.needs\.d30/);
+    expect(s).toMatch(/m\.generatedRate\.d30, m\.generatedRate\.needs\.d30/);
   });
 });
 

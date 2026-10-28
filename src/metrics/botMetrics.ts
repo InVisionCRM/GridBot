@@ -86,7 +86,16 @@ export interface BotMetrics {
   /** Funds of this bot reserved for a cross-chain move that hasn't landed (one "In transit" holdings line). Null = none. */
   inTransitUsd: number | null;
   /** Extra: the same totals in the quote coin (the "show in quote coin" toggle and detail KPIs). */
-  quote: { symbol: string | null; usdPerQuote: number | null; capitalIn: number | null; currentValue: number | null; totalPnl: number | null; realized: number | null; unrealized: number | null; feesEarned: number | null };
+  quote: {
+    symbol: string | null; usdPerQuote: number | null; capitalIn: number | null; currentValue: number | null; totalPnl: number | null; realized: number | null; unrealized: number | null; feesEarned: number | null;
+    /** Generated valued in the quote coin at today's mid (generatedUsd ÷ usdPerQuote; a coin-only bot: its quote-coin units). */
+    generatedValue: number | null;
+    /** totalPnl − generatedValue (the quote-coin twin of priceChangeUsd). */
+    priceChange: number | null;
+    /** Event-priced: the quote-coin twin of dollarsMadeUsd. */
+    made: number | null;
+    paidOut: number | null; gas: number | null; swapCost: number | null; rebalanceLoss: number | null;
+  };
 }
 
 type Obj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -151,17 +160,17 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
   return now - startedAt;
 }
 
-const RATES = 'Per day / week / month / year, the 24h/7d/30d/365d estimates and APR (Generated ÷ capital in, annualized) scale Generated linearly, not compounded, and need 28 min / 3.2h / 13.8h / 7d of history.';
+const RATES = 'The 24h/7d/30d/365d estimates are Generated ÷ age × the days, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; they need 28 min / 3.2h / 13.8h / 7d of history.';
 const GENERATED_CALC: Record<MetricsKind, string> = {
-  lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin), swap fees (in the coin swapped in) and range-move losses (in the coin the move sold, locked in at each move); dollars at today\'s mid price.',
-  grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown as Unrealized. A close / stop cash-out sale is not a round trip; its result is in Price change.',
-  trend: 'Generated = profit from closed trades after pool fees and gas, in the quote coin. An open trade is Unrealized.',
-  token: 'Generated = profit from closed sells, in dollars (positions spend different coins). Open positions are Unrealized.',
+  lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin), swap fees (in the coin swapped in) and range-move losses (in the coin the move sold, locked in at each move).',
+  grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown under Open positions. A close / stop cash-out sale is not a round trip; its result is in Price change.',
+  trend: 'Generated = profit from closed trades after pool fees and gas, in the quote coin. An open trade is under Open positions.',
+  token: 'Generated = profit from closed sells, in dollars (positions spend different coins). Open positions are not in it.',
 };
 const TOTAL_CALC: Record<MetricsKind, string> = {
   grid: 'Total P&L = coins held at today\'s price + profits paid out − capital in. Price change = Total P&L − Generated.',
   trend: 'Total P&L = cash + position at today\'s price − capital in. Price change = Total P&L − Generated.',
-  lp: 'Total P&L = position + waiting fees + idle coins at today\'s price + fees sent out − gas − start value. Price change = Total P&L − Generated (unrealized IL + the coins\' market move).',
+  lp: 'Total P&L = position + waiting fees + idle coins at today\'s price + fees sent out − gas − start value. Price change = Total P&L − Generated (impermanent loss not yet locked in + the coins\' market move).',
   token: 'Total P&L = open positions at what a sell would get now + sale proceeds − buys. Price change = Total P&L − Generated.',
 };
 
@@ -206,6 +215,10 @@ function finish(c: Core, now: number): BotMetrics {
     : c.generated;
   c = { ...c, generated };
   const genUsd = unitsUsd(c.generated, c.px);
+  // Generated in the quote coin: its dollar value ÷ the quote coin's price; with no dollar price, only a bot whose
+  // Generated is all in the quote coin has one (its units).
+  const genOnlyQuote = c.generated && c.symbol != null && Object.entries(c.generated).every(([s, u]) => s === c.symbol || u === 0);
+  const genQuote = genUsd != null && c.k != null && c.k > 0 ? genUsd / c.k : genOnlyQuote ? (c.generated![c.symbol!] ?? 0) : null;
   const est = (w: number) => (genUsd == null || age == null ? null : extrapolate(genUsd, capUsd ?? 0, age, w));
   const need = (w: number): string | null => (genUsd == null && !c.generated ? null : estHint(age, w));
   const rateOf = (w: number) => (!c.generated || age == null || !extrapolate(1, 0, age, w) ? null
@@ -230,7 +243,11 @@ function finish(c: Core, now: number): BotMetrics {
     moveCount: c.moveCount, fillCount: c.fillCount, range: c.range, asOf: now,
     bridgeCosts: bridge, inTransitUsd: c.inTransitUsd ?? null,
     calc: `${GENERATED_CALC[c.kind]} ${RATES} ${TOTAL_CALC[c.kind]}`,
-    quote: { symbol: c.symbol, usdPerQuote: c.k, capitalIn: c.capitalIn, currentValue: c.currentValue, totalPnl: total, realized: c.realized, unrealized: c.unrealized, feesEarned: c.feesEarned },
+    quote: {
+      symbol: c.symbol, usdPerQuote: c.k, capitalIn: c.capitalIn, currentValue: c.currentValue, totalPnl: total, realized: c.realized, unrealized: c.unrealized, feesEarned: c.feesEarned,
+      generatedValue: genQuote, priceChange: total == null || genQuote == null ? null : total - genQuote,
+      made: c.dollarsMade, paidOut: c.paidOut, gas: c.gas, swapCost: c.swapCost, rebalanceLoss: c.rebalanceLoss,
+    },
   };
 }
 

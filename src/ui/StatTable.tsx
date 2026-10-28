@@ -1,26 +1,21 @@
 /** The figures under a chart. A dash is a figure the stored bot does not have. */
 import { chainOf, mk } from './chains';
-import { botFacts, echoes, figuresOf, unitsText } from './deskStats';
-import { ago, dur, pct, px, usd } from './fmt';
+import { botFacts, figuresOf, unitsText } from './deskStats';
+import { ago, dur, pct, px, qty } from './fmt';
 import type { AnyObj } from './model';
-
-/** An estimate in dollars; when the rate above (`rate`, in coins) already prints the same number (a stablecoin), only the %. */
-function est(v: { amount: number; pct: number | null } | null, hint: string | null, rate?: [string, string]) {
-  if (!v) return hint ? `— (${hint})` : '—';
-  const p = v.pct == null ? '' : pct(v.pct, 2, true);
-  if (rate && echoes(rate[1], usd(v.amount, true))) return p ? `${p} (in dollars, same as ${rate[0]})` : `same as ${rate[0]}, in dollars`;
-  return `${usd(v.amount, true)}${p ? ` · ${p}` : ''}`;
-}
 
 function poolText(pool: string | null) {
   if (!pool) return '—';
   return pool.startsWith('0x') && pool.length > 12 ? `${pool.slice(0, 6)}…${pool.slice(-4)}` : pool;
 }
 
-/** Generated, its rates and the bot's facts. Total P&L, price change, unrealized and value vs deposit are in MoneyDetails. */
+/**
+ * Generated, its estimates and the bot's facts, in crypto units only (no dollars). Total P&L, price change, open
+ * positions and value vs deposit are in MoneyDetails.
+ */
 /** Rows a page can leave out because it shows the same figure elsewhere (no number twice on a screen). */
-export type StatRow = 'Generated' | "Generated, today's value" | 'Per day' | 'Per week' | 'Per month' | 'Per year' | 'APR' | 'Age'
-  | 'Est. 24h' | 'Est. 7d' | 'Est. 365d' | 'Moves' | 'Win rate' | 'Fees paid' | 'Fees earned' | 'Time in range' | 'Range' | 'Spacing' | 'Last move';
+export type StatRow = 'Generated' | 'APR' | 'Age'
+  | 'Est. 24h' | 'Est. 7d' | 'Est. 30d' | 'Est. 365d' | 'Moves' | 'Win rate' | 'Fees paid' | 'Fees earned' | 'Time in range' | 'Range' | 'Spacing' | 'Last move';
 
 export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: readonly StatRow[] }) {
   const key = (b.stable || b.market || b.quote) as string | undefined;
@@ -36,22 +31,20 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   const calc = f.calc ?? undefined;
   const rate = (r: Record<string, number> | null | undefined, hint: string | null | undefined) => (r ? unitsText(r) : hint ? `— (${hint})` : '—');
   const gr = f.generatedRate;
+  const sym = f.quoteSym ?? '';
+  // Est. = Generated ÷ age × the window, per token (the server's generatedRate); a dash and "needs …" until the history is long enough
   const rows: [string, string, string?][] = [
     ['Generated', unitsText(f.generated), calc],
-    ['Generated, today\'s value', f.generatedUsd == null ? '—' : usd(f.generatedUsd, true), calc],
-    ['Per day', rate(gr?.d1, gr?.needs.d1), calc],
-    ['Per week', rate(gr?.d7, gr?.needs.d7), calc],
-    ['Per month', rate(gr?.d30, gr?.needs.d30), calc],
-    ['Per year', rate(gr?.d365, gr?.needs.d365), calc],
+    ['Est. 24h', rate(gr?.d1, gr?.needs.d1), calc],
+    ['Est. 7d', rate(gr?.d7, gr?.needs.d7), calc],
+    ['Est. 30d', rate(gr?.d30, gr?.needs.d30), calc],
+    ['Est. 365d', rate(gr?.d365, gr?.needs.d365), calc],
     ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pct(f.aprPct, 1, true), calc],
     ['Age', f.ageMs == null ? '—' : dur(f.ageMs)],
-    ['Est. 24h', est(f.est.h24, f.estHint.h24, hide.includes('Per day') ? undefined : ['Per day', rate(gr?.d1, null)]), calc],
-    ['Est. 7d', est(f.est.d7, f.estHint.d7, hide.includes('Per week') ? undefined : ['Per week', rate(gr?.d7, null)]), calc],
-    ['Est. 365d', est(f.est.d365, f.estHint.d365, hide.includes('Per year') ? undefined : ['Per year', rate(gr?.d365, null)]), calc],
     ['Moves', f.moves.text ?? '—'],
     ['Win rate', f.winRate == null ? '—' : pct(f.winRate, 0)],
-    ['Fees paid', f.feesPaidUsd == null ? '—' : usd(f.feesPaidUsd), 'Gas + swap fees paid; for an LP also what range moves locked in (fees earned − fees paid = Generated, in dollars at each event).'],
-    ['Fees earned', f.feesEarnedUsd == null ? '—' : usd(f.feesEarnedUsd)],
+    ['Fees paid', f.feesPaid == null ? '—' : qty(f.feesPaid, sym, 4, false), `Gas + swap fees paid, in ${sym || 'the quote coin'}; for an LP also what range moves locked in.`],
+    ['Fees earned', f.feesEarned == null ? '—' : qty(f.feesEarned, sym, 4, false), `In ${sym || 'the quote coin'}, both coins' fees at today's price.`],
     ['Time in range', f.timeInRange == null ? '—' : pct(f.timeInRange, 0)],
     ['Range', range],
     ['Spacing', spacing],
@@ -60,8 +53,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
     ['DEX', f.dex || '—'],
     ['Pool', poolText(f.pool)],
   ];
-  // no number twice: leave out the rows the page shows elsewhere, and a row whose figures the rows above already
-  // print (a stablecoin's Est. 7d in dollars is its Per week in coins)
+  // no number twice: leave out the rows the page shows elsewhere, and a row whose figures the rows above already print
   const seen = new Set<string>();
   const shown = rows.filter(([k, v]) => {
     if ((hide as readonly string[]).includes(k)) return false;
@@ -72,7 +64,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
   });
   return (
     <div className="stat-table" data-testid="stat-table">
-      <p className="stat-note">Generated leads. Rates, Est. 24h/7d/365d and APR scale Generated so far linearly; they are not a forecast.{calc && <> <abbr className="calc-hint" title={calc}>How it's calculated</abbr></>}</p>
+      <p className="stat-note">Generated leads. Est. 24h/7d/30d/365d = Generated ÷ age × the days, per coin, and APR scales it the same way; not a forecast.{calc && <> <abbr className="calc-hint" title={calc}>How it's calculated</abbr></>}</p>
       <table>
         <tbody>
           {shown.map(([k, v, t]) => (

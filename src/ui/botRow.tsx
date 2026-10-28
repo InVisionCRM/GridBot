@@ -3,13 +3,12 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { botApi } from './api';
 import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
-import { botFacts, echoes, metricsOf, unitsText } from './deskStats';
+import { botFacts, metricsOf, unitsText } from './deskStats';
 import type { FeesToday } from '../metrics/feesToday';
-import { cls, dur, pct, px, qty, usd } from './fmt';
+import { cls, dur, pct, px, qty } from './fmt';
 import { ChainMark, TokenMark } from './icons';
-import { useShowUsd } from './money';
 import { botView, gridName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
-import { bookUsd, botSpark } from './series';
+import { botSpark } from './series';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
 
@@ -97,23 +96,64 @@ export function todaySeries(bots: AnyObj[], includePaper: boolean): number[] {
 }
 
 /** Home's "Fees earned today", from the server's `feesToday` (status payload), limited to the bots on screen. */
-export function feesTodayOf(s: AnyObj, bots: AnyObj[]): { liveEarnedUsd: number; paperEarnedUsd: number; livePaidUsd: number; liveSeries: number[] } {
+export interface FeesTodayView {
+  liveEarnedUsd: number; paperEarnedUsd: number; livePaidUsd: number; liveSeries: number[];
+  /** The same in coins, per quote coin (what Home shows: units only). */
+  liveEarned: Record<string, number>; paperEarned: Record<string, number>; livePaid: Record<string, number>;
+}
+export function feesTodayOf(s: AnyObj, bots: AnyObj[]): FeesTodayView {
   const ft = s?.feesToday as FeesToday | undefined;
-  if (!ft) return { liveEarnedUsd: 0, paperEarnedUsd: 0, livePaidUsd: 0, liveSeries: [0] };
+  const liveEarned: Record<string, number> = {}, paperEarned: Record<string, number> = {}, livePaid: Record<string, number> = {};
+  if (!ft) return { liveEarnedUsd: 0, paperEarnedUsd: 0, livePaidUsd: 0, liveSeries: [0], liveEarned, paperEarned, livePaid };
   const ids = new Set(bots.map((b) => String(b.id)));
   const all = Object.keys(ft.byBot ?? {}).every((id) => ids.has(id));
   let liveEarnedUsd = 0, paperEarnedUsd = 0, livePaidUsd = 0;
+  const add = (to: Record<string, number>, sym: string | null | undefined, v: number | undefined) => { if (sym && v) to[sym] = (to[sym] ?? 0) + v; };
   for (const [id, r] of Object.entries(ft.byBot ?? {})) {
     if (!ids.has(id)) continue;
-    if (r.mode === 'live') { liveEarnedUsd += r.earnedUsd; livePaidUsd += r.paidUsd; } else paperEarnedUsd += r.earnedUsd;
+    if (r.mode === 'live') { liveEarnedUsd += r.earnedUsd; livePaidUsd += r.paidUsd; add(liveEarned, r.sym, r.earned); add(livePaid, r.sym, r.paid); }
+    else { paperEarnedUsd += r.earnedUsd; add(paperEarned, r.sym, r.earned); }
   }
-  return { liveEarnedUsd, paperEarnedUsd, livePaidUsd, liveSeries: all ? ft.liveSeries : [0, liveEarnedUsd] };
+  return { liveEarnedUsd, paperEarnedUsd, livePaidUsd, liveSeries: all ? ft.liveSeries : [0, liveEarnedUsd], liveEarned, paperEarned, livePaid };
 }
 
-/** Σ generatedUsd over the bots on screen (Home headline). Null when none has a dollar value. */
-export function totalGeneratedUsd(bots: AnyObj[]): number | null {
+/** Units per token added up over bots (null when none has any). */
+export function sumUnits(recs: (Record<string, number> | null | undefined)[]): Record<string, number> | null {
+  let out: Record<string, number> | null = null;
+  for (const r of recs) {
+    if (!r) continue;
+    out ??= {};
+    for (const [k, u] of Object.entries(r)) if (Number.isFinite(u)) out[k] = (out[k] ?? 0) + u;
+  }
+  return out;
+}
+
+/** Home's headline: Generated per token, live bots only; paper bots separately (never mixed in). */
+export function generatedByMode(bots: AnyObj[]): { live: Record<string, number> | null; paper: Record<string, number> | null } {
+  return {
+    live: sumUnits(bots.filter((b) => b.mode === 'live').map((b) => metricsOf(b)?.generated)),
+    paper: sumUnits(bots.filter((b) => b.mode !== 'live').map((b) => metricsOf(b)?.generated)),
+  };
+}
+
+/** Total P&L per quote coin over the bots of one mode (units; the server's metrics.quote.totalPnl). */
+export function pnlUnits(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): Record<string, number> | null {
+  return sumUnits(bots.filter((b) => (mode === 'live' ? b.mode === 'live' : b.mode !== 'live')).map((b) => {
+    const m = metricsOf(b);
+    return m?.quote.symbol && m.quote.totalPnl != null ? { [m.quote.symbol]: m.quote.totalPnl } : null;
+  }));
+}
+
+/** The live bot that generated the most (ranked by today's value; shown in units). Paper bots never compete. */
+export function bestLiveBot(bots: AnyObj[]): AnyObj | null {
+  const live = bots.filter((b) => b.mode === 'live' && metricsOf(b)?.generated);
+  return live.sort((a, b) => (generatedParts(b).usd ?? -Infinity) - (generatedParts(a).usd ?? -Infinity))[0] ?? null;
+}
+
+/** Σ generatedUsd over the bots of one mode (API / tests; the page shows units). Null when none has a dollar value. */
+export function totalGeneratedUsd(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): number | null {
   let sum = 0, any = false;
-  for (const b of bots) {
+  for (const b of bots.filter((x) => (mode === 'live' ? x.mode === 'live' : x.mode !== 'live'))) {
     const v = metricsOf(b)?.generatedUsd;
     if (v == null) continue;
     sum += v;
@@ -122,9 +162,9 @@ export function totalGeneratedUsd(bots: AnyObj[]): number | null {
   return any ? sum : null;
 }
 
-export function totalPnlUsd(bots: AnyObj[]): number | null {
+export function totalPnlUsd(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): number | null {
   let sum = 0, any = false;
-  for (const b of bots) {
+  for (const b of bots.filter((x) => (mode === 'live' ? x.mode === 'live' : x.mode !== 'live'))) {
     const p = pnlParts(b);
     if (p.usd == null) continue;
     sum += p.usd;
@@ -193,7 +233,7 @@ function RowMenu({ b, nav, pause, close }: { b: AnyObj; nav: Nav; pause: (b: Any
  * What a desk row's columns (Value, Generated, P&L, %, Fees, Age, APR, Moves) and its expanded summary (range) already
  * show, left out of the expanded stat table and Details so no number appears twice.
  */
-const DESK_SHOWN_ELSEWHERE = ['Generated', "Generated, today's value", 'Age', 'APR', 'Fees earned', 'Moves', 'Range'] as const;
+const DESK_SHOWN_ELSEWHERE = ['Generated', 'Age', 'APR', 'Fees earned', 'Moves', 'Range'] as const;
 
 function Expanded({ b, nav, desk = false }: { b: AnyObj; nav: Nav; desk?: boolean }) {
   if (isTrader(b)) return null;
@@ -254,17 +294,18 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   columns?: boolean;
   metrics?: boolean;
 }) {
-  const { on: showUsd } = useShowUsd();
   const pair = pairOf(b);
   const chain = chainOf(s, b.chainId ?? s.legacyChainId);
   const pnl = pnlParts(b);
   const fills = fillsToday(b);
   const bad = !!b.lastError;
   const on = b.status === 'running' && !bad;
-  const money = showUsd && pnl.usd != null ? usd(pnl.usd, true) : pnl.quote != null ? qty(pnl.quote, pair.quote, 4) : '—';
+  const money = pnl.quote != null ? qty(pnl.quote, pair.quote, 4) : '—';
   const pos = b.position;
   const m = metricsOf(b);
-  const value = m ? m.currentValueUsd : bookUsd(b);
+  // Crypto units only: the value and fees in the bot's quote coin
+  const value = m?.quote.currentValue ?? null;
+  const feesEarned = m?.quote.feesEarned ?? null;
   const facts = metrics ? botFacts(b) : null;
   const gen = generatedParts(b);
   const go = () => (isTrader(b) ? nav({ v: 'auto' }) : expandable ? onToggle?.() : nav(botView(b.kind, b.id)));
@@ -288,24 +329,23 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           </button>
           <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
           <span className="desk-range"><BotRange b={b} fills={fills} /></span>
-          <span className="desk-val">{value == null ? '—' : usd(value)}</span>
+          <span className="desk-val">{value == null ? '—' : qty(value, pair.quote, 5, false)}</span>
           {metrics && facts ? <>
             <span className="desk-gen" title={m?.calc ?? undefined}>
               <b className={cls(gen.usd)}>{gen.text}</b>
-              {gen.usd != null && !echoes(gen.text, usd(gen.usd, true)) && <small>{usd(gen.usd, true)}</small>}
             </span>
             <span className="desk-pnl" title={m?.calc ?? undefined}>
-              <b className={cls(showUsd ? pnl.usd : pnl.quote)}>{money}</b>
+              <b className={cls(pnl.quote)}>{money}</b>
             </span>
             <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pct(facts.pnlPct, 1, true)}</span></span>
-            <span className="desk-fees">{facts.feesEarnedUsd == null ? '—' : usd(facts.feesEarnedUsd)}</span>
+            <span className="desk-fees">{feesEarned == null ? '—' : qty(feesEarned, pair.quote, 4, false)}</span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
             <span className="desk-apr" title={facts.aprPct == null ? facts.estHint.d365 ?? undefined : m?.calc ?? undefined}>{facts.aprPct == null ? '—' : pct(facts.aprPct, 1, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
           </> : (
             <span className="desk-pnl" title={m?.calc ?? undefined}>
               <b className={cls(gen.usd)}>{gen.text}</b>
-              <small className="muted">{gen.usd == null ? '' : `${usd(gen.usd, true)} generated`}</small>
+              <small className="muted">{gen.units ? 'generated' : ''}</small>
             </span>
           )}
           <RowMenu b={b} nav={nav} pause={pause} close={close} />
@@ -335,7 +375,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           </span>
           <span className="bot-pnl" title={m?.calc ?? undefined}>
             <b className={cls(gen.usd)}>{gen.text}</b>
-            <small className="muted">{gen.usd == null ? '' : `${usd(gen.usd, true)} generated`}</small>
+            <small className="muted">{gen.units ? 'generated' : ''}</small>
           </span>
         </button>
         <RowMenu b={b} nav={nav} pause={pause} close={close} />

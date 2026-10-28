@@ -75,6 +75,10 @@ export interface DeskFacts {
   winRate: number | null;
   feesPaidUsd: number | null;
   feesEarnedUsd: number | null;
+  /** The same in the bot's quote coin (`quoteSym`), which is what the pages show (crypto units only). */
+  feesPaid: number | null;
+  feesEarned: number | null;
+  quoteSym: string | null;
   timeInRange: number | null;
   range: { lower: number; upper: number } | null;
   spacingFrac: number | null;
@@ -136,6 +140,9 @@ export function botFacts(b: AnyObj, _now = Date.now(), extra?: { chain?: string 
   // fees earned − fees paid = Generated, at event prices). Grid / trend losing round trips are already in their profit.
   const paid = m && (m.swapCostUsd != null || m.gasUsd != null)
     ? (m.swapCostUsd ?? 0) + (m.gasUsd ?? 0) + (m.kind === 'lp' ? m.realizedRebalanceLossUsd ?? 0 : 0) : null;
+  const q = m?.quote;
+  const paidQ = q && (q.swapCost != null || q.gas != null)
+    ? (q.swapCost ?? 0) + (q.gas ?? 0) + (m!.kind === 'lp' ? q.rebalanceLoss ?? 0 : 0) : null;
   return {
     ageMs: m?.ageSec == null ? null : m.ageSec * 1000,
     investedUsd: m?.capitalInUsd ?? null,
@@ -158,6 +165,9 @@ export function botFacts(b: AnyObj, _now = Date.now(), extra?: { chain?: string 
     winRate: winRateOf(b),
     feesPaidUsd: paid,
     feesEarnedUsd: m?.feesEarnedUsd ?? null,
+    feesPaid: paidQ,
+    feesEarned: q?.feesEarned ?? null,
+    quoteSym: q?.symbol ?? null,
     timeInRange: inRange != null && inRange >= 0 && inRange <= 1 ? inRange : null,
     range: rangeOf(b),
     spacingFrac: space.frac,
@@ -185,14 +195,14 @@ export function echoes(shown: string | null | undefined, extra: string | null | 
   return add.length > 0 && add.every((f) => have.has(f));
 }
 
-export function unitsText(gen: Record<string, number> | null | undefined, max = 2): string {
+export function unitsText(gen: Record<string, number> | null | undefined, max = 2, signed = true): string {
   if (!gen) return '—';
   const legs = Object.entries(gen).filter(([, u]) => Number.isFinite(u) && u !== 0);
   if (!legs.length) return '0';
   const f = (u: number) => {
     const a = Math.abs(u);
     const d = a >= 1000 ? 0 : a >= 1 ? 2 : Math.min(8, 2 - Math.floor(Math.log10(a)));
-    return `${u > 0 ? '+' : '−'}${a.toLocaleString('en-US', { maximumFractionDigits: d })}`;
+    return `${u > 0 ? (signed ? '+' : '') : '−'}${a.toLocaleString('en-US', { maximumFractionDigits: d })}`;
   };
   return legs.slice(0, max).map(([k, u]) => `${f(u)} ${k}`).join(' · ') + (legs.length > max ? ' …' : '');
 }
