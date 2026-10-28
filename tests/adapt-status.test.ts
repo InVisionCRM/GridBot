@@ -39,8 +39,11 @@ describe('adaptStatus', () => {
     expect(lp?.metrics.tokenTaxesUsd).toBe(server.tokenTaxesUsd);
     expect(lp?.metrics.realizedRebalanceLossUsd).toBe(server.realizedRebalanceLossUsd);
     expect(lp?.metrics.est.d1?.map((t) => t.amount)).toEqual(units(server.generatedRate.d1).map((t) => t.amount));
-    expect(lp?.metrics.est.d365).toBeNull();
-    expect(server.generatedRate.d365).toBeNull();
+    expect(lp?.metrics.est.d7?.map((t) => t.amount)).toEqual(units(server.generatedRate.d7).map((t) => t.amount));
+    expect(lp?.metrics.est.d365?.map((t) => t.amount)).toEqual(units(server.generatedRate.d365).map((t) => t.amount));
+    expect(server.generatedRate.d1).not.toBeNull();
+    expect(server.generatedRate.d7).not.toBeNull();
+    expect(server.generatedRate.d365).not.toBeNull();
     expect(lp?.metrics.grossFees).toEqual([]);
     expect(lp?.metrics.feesPaid).toEqual([]);
     expect(lp?.metrics.moveLoss).toEqual([]);
@@ -141,11 +144,13 @@ describe('adaptStatus', () => {
     };
     const dayServer = gridMetrics(dayRaw, now);
     const d = day.bots[0].metrics;
-    expect(d.est.d1?.[0].amount).toBe(dayServer.generatedRate.d1?.USDC);
-    expect(d.est.d7?.[0].amount).toBe(dayServer.generatedRate.d7?.USDC);
-    expect(dayServer.generatedRate.d1).not.toBeNull();
+    expect(dayServer.generatedRate.d1).toBeNull();
+    expect(dayServer.generatedRate.d7).toBeNull();
+    expect(dayServer.generatedRate.d365).toBeNull();
+    expect(d.est.d1).toBeNull();
+    expect(d.est.d7).toBeNull();
     expect(d.est.d365).toBeNull();
-    expect(d.aprPct).toBe(dayServer.aprPct);
+    expect(d.aprPct).toBeNull();
 
     const week = adaptStatus({
       spotsAt: now,
@@ -193,7 +198,7 @@ describe('adaptStatus', () => {
     expect(mixed.portfolio.generatedUsd).toBe(sum);
   });
 
-  it('dashes APR on a one-minute bot with one fill, and on an older bot with one fill', () => {
+  it('copies botMetrics estimates: none under a day, all three from one day', () => {
     const now = 1_700_000_000_000;
     const bot = (id: string, ageMs: number, trips: number) => ({
       id, mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
@@ -209,8 +214,14 @@ describe('adaptStatus', () => {
     expect(minute.bots[0].metrics.est.d1).toBeNull();
     expect(minute.portfolio.generatedPerDayUsd).toBeNull();
 
-    const oneFill = adaptStatus({ spotsAt: now, grids: [bot('one', 2 * 86_400_000, 1)] }, [], now);
-    expect(oneFill.bots[0].metrics.aprPct).toBeNull();
+    const oneRaw = bot('one', 2 * 86_400_000, 1);
+    const oneFill = adaptStatus({ spotsAt: now, grids: [oneRaw] }, [], now);
+    const oneServer = gridMetrics(oneRaw, now);
+    expect(oneFill.bots[0].metrics.aprPct).toBe(oneServer.aprPct);
+    expect(oneFill.bots[0].metrics.aprPct).not.toBeNull();
+    expect(oneFill.bots[0].metrics.est.d1?.[0].amount).toBe(oneServer.generatedRate.d1?.USDC);
+    expect(oneFill.bots[0].metrics.est.d7?.[0].amount).toBe(oneServer.generatedRate.d7?.USDC);
+    expect(oneFill.bots[0].metrics.est.d365?.[0].amount).toBe(oneServer.generatedRate.d365?.USDC);
 
     const readyRaw = bot('two', 8 * 86_400_000, 2);
     const ready = adaptStatus({ spotsAt: now, grids: [readyRaw] }, [], now);

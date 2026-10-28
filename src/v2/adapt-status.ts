@@ -46,6 +46,14 @@ function screenCalc(calc: string): string {
     .join(' ');
 }
 
+/** Quote-coin capital only. A grid still named totalCapitalUsd has no quote.capitalIn, so this stays empty. USD is not a coin. */
+function coinInvested(m: ServerMetrics): TokenQty[] {
+  const symbol = m.quote.symbol;
+  const amount = m.quote.capitalIn;
+  if (amount == null || !symbol || symbol === 'USD') return [];
+  return [{ symbol, amount, usd: null }];
+}
+
 function recordTokens(rows: Record<string, number> | null): TokenQty[] | null {
   if (rows == null) return null;
   return Object.entries(rows)
@@ -66,7 +74,7 @@ function metricsOf(raw: Rec, kind: 'grid' | 'lp' | 'trend', asOf: number): Serve
 
 /**
  * Copy the screen fields off botMetrics. Per-coin fee, gas, and range-move rows are not on that
- * object, so those arrays stay empty and the sheet prints a dash.
+ * object, so those arrays stay empty and the sheet shows the Generated total with a note.
  */
 function viewOf(m: ServerMetrics, asOf: number): BotMetrics {
   const pace = (rows: Record<string, number> | null) => (rows == null ? null : recordTokens(rows) ?? []);
@@ -108,9 +116,7 @@ function viewOf(m: ServerMetrics, asOf: number): BotMetrics {
     range: null,
     asOf,
     calc: screenCalc(m.calc),
-    invested: m.quote.capitalIn != null && m.quote.symbol
-      ? [{ symbol: m.quote.symbol, amount: m.quote.capitalIn, usd: null }]
-      : [],
+    invested: coinInvested(m),
     grossFees: [],
     feesPaid: [],
     moveLoss: [],

@@ -219,7 +219,14 @@ describe('v2 copy stays in token units', () => {
         expect(rows.some((r) => r.value === 'Rows are rounded to add up exactly.'), bot.metrics.botId).toBe(true);
       }
       if (!bot.metrics.grossFees.length && !bot.metrics.feesPaid.length && (bot.metrics.kind === 'lp' || bot.metrics.kind === 'grid')) {
-        expect(rows.find((r) => r.label === 'Gas + swap fees')?.value, bot.metrics.botId).toBe('—');
+        expect(rows.find((r) => r.label === 'Gas + swap fees'), bot.metrics.botId).toBeUndefined();
+        expect(rows.find((r) => r.label === 'Trade profit before gas'), bot.metrics.botId).toBeUndefined();
+        expect(rows.find((r) => r.label.endsWith('fees earned')), bot.metrics.botId).toBeUndefined();
+        expect(rows.find((r) => r.label === 'Range-move loss'), bot.metrics.botId).toBeUndefined();
+        expect(rows.some((r) => r.value === 'Breakdown coming soon'), bot.metrics.botId).toBe(true);
+        if (bot.metrics.generated.some((t) => t.amount !== 0)) {
+          expect(rows.find((r) => r.label === 'Generated')?.value, bot.metrics.botId).toBe(formatTokenLine(bot.metrics.generated));
+        }
       }
     }
   });
@@ -317,6 +324,29 @@ describe('v2 copy stays in token units', () => {
     expect(rows.find((r) => r.label === 'Trade profit before gas')?.value).toBe('0');
     expect(rows.find((r) => r.label === 'Generated')?.value).toBe('0');
     expect(rows.map((r) => r.value).join(' ')).not.toContain('+20.3k');
+    expect(rows.some((r) => r.value === 'Breakdown coming soon')).toBe(false);
+  });
+
+  it('dashes grid invested when the payload only has totalCapitalUsd', () => {
+    const now = 1_700_000_000_000;
+    const desk = adaptStatus({
+      spotsAt: now,
+      grids: [{
+        id: 'usd', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
+        usdPerQuote: 1, price: 1, startedAt: now - 2 * 86_400_000,
+        config: { totalCapitalUsd: 1000 },
+        pnl: { realized: 5, unrealized: 0 },
+        moveCount: 1,
+      }],
+    }, [], now);
+    expect(desk.bots[0].metrics.invested).toEqual([]);
+    const text = textOf(renderToStaticMarkup(
+      <BotView bot={desk.bots[0]} activity={[]} prices={[]} onBack={() => {}} onActivity={() => {}} showFeed={false} breakdown />,
+    ));
+    expect(text).not.toMatch(/\bUSD\b/);
+    expect(text).not.toContain('1,000');
+    expect(text).toMatch(/Invested\s+—/);
+    expect(text).toContain('Breakdown coming soon');
   });
 });
 

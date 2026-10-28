@@ -50,7 +50,7 @@ describe("estimates: Generated ÷ age in days × the window, nothing under a day
   it('the stat table shows the dash with the hint under a day and the figures after', () => {
     const g = R.grids.find((x: Obj) => x.id === 'g-mvnlxta0-y6t4');
     const young = renderToStaticMarkup(createElement(StatTable, { b: { ...g, kind: 'grid', metrics: gridMetrics({ ...g, kind: 'grid' }, AS_OF) }, s: { chains: [] } }));
-    expect(young).toMatch(/Est\. 365d<\/th><td class="mono">— \(needs 1 day\)/);
+    expect(young).toMatch(/Est\. 365d<\/th><td class="mono">— \(shows after a day\)/);
     expect(young).toMatch(/APR<\/th><td class="mono">— \(needs 1 day\)/);
     expect(young).not.toMatch(/of history/);
     const l = R.lps.find((x: Obj) => x.id === 'lp-mvnm73sx-hghe');

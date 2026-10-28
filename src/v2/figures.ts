@@ -263,15 +263,12 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
     rows.push({ label: 'Round', value: 'Rows are rounded to add up exactly.' });
   }
   if (!ledger && (m.kind === 'lp' || m.kind === 'grid')) {
-    const labels = m.kind === 'grid'
-      ? ['Trade profit before gas', 'Gas + swap fees']
-      : ['Fees earned', 'Gas + swap fees', 'Range-move loss'];
-    for (const label of labels) rows.push({ label, value: '—' });
     if (!details) {
       const shown = m.generated.filter((t) => t.amount !== 0 && formatAmt(t.amount) !== '0');
       const text = shown.length ? formatTokenLine(shown) : (m.kind === 'grid' && m.fillCount === 0 ? '0' : '');
       if (text) rows.push({ label: 'Generated', value: text });
     }
+    rows.push({ label: 'Note', value: 'Breakdown coming soon' });
   }
   if (ledger?.untouched) add('Note', ledger.untouched);
   const pace = (tokens: TokenQty[] | null | undefined) => (tokens == null ? '—' : tokens.length ? formatTokenLine(tokens) : '0');

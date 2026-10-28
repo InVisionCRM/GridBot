@@ -4,7 +4,7 @@
  * Headline is token units generated, net of costs (`generated`), with `generatedUsd` under it.
  * Home's headline is live `generatedUsd` plus per-token chips. Paper is separate.
  * Price change and value versus capital are breakdown context, not the hero.
- * est.d1 / d7 / d365 are botMetrics generatedRate, in token units. Null until that module fills the window.
+ * est.d1 / d7 / d365 are botMetrics generatedRate, in token units. Kyle's rule: all three are null until the bot is one day old, then all three are set.
  * The screen prints a dash for a null window. APR is copied from botMetrics and is not rendered.
  * Percents are fractions. Null means the snapshot did not carry the figure.
  */
