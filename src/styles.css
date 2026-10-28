@@ -1307,6 +1307,28 @@ label.wide input { min-width: 180px; }
   .desk-group { width: calc(100% + 24px); margin-inline: -12px; padding-inline: 12px; }
 }
 
+/* Liquidity range health (LP bot page). The bar is the position; the mark is the price. */
+.lp-health { display: flex; flex-direction: column; gap: 8px; }
+.lp-health-top, .lp-health-scale { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.lp-health-scale { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+.lp-edge { font-family: var(--mono); font-size: 0.82rem; color: var(--accent); }
+.lp-edge.out { color: var(--loss); }
+.lp-health-bar { position: relative; height: 36px; margin-top: 4px; }
+.lp-health-track { position: absolute; left: 0; right: 0; top: 18px; height: 8px; border-radius: 99px; background: var(--line); }
+.lp-health-fill { position: absolute; top: 18px; height: 8px; border-radius: 99px; background: linear-gradient(90deg, #1f6b45, #8a9a2e 55%, #F0B90B); }
+.lp-health-fill.out { background: linear-gradient(90deg, #6b2a32, #F6465D); }
+.lp-health-mark { position: absolute; top: 8px; width: 2px; height: 22px; background: var(--text); transform: translateX(-1px); }
+.lp-health-mark i { position: absolute; top: -2px; left: 8px; font-style: normal; font-family: var(--mono); font-size: 11px; color: var(--accent); white-space: nowrap; }
+.lp-health-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.lp-health-stats .k { display: block; color: var(--muted); font-size: 0.75rem; }
+.lp-health-stats b { display: block; font-family: var(--mono); font-weight: 500; font-size: 0.95rem; }
+.lp-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.lp-policy { display: flex; flex-direction: column; gap: 10px; }
+@media (max-width: 640px) {
+  .lp-health-stats { grid-template-columns: 1fr 1fr; }
+  .lp-health-mark i { left: auto; right: 8px; }
+}
+
 /* Checking safety… (SafetyChecking.tsx) */
 .banner.checking { align-items: center; }
 .spinner { width: 14px; height: 14px; flex: none; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: currentColor; animation: spin 0.8s linear infinite; }

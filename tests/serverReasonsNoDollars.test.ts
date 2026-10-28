@@ -16,6 +16,7 @@ const INTERNAL = new Set([
   'lib/format.ts', // formatUsd: unused by any screen
   'live/holdingsMath.ts', // formatUsdAmount / formatUsdChip: API-side helpers, no screen uses them
   'backtest/report.ts', // CLI backtest report ("USD/day" secondary line)
+  'market/lpCandleReplay.ts', // range replay report, written only by scripts/lpRangeReplay.ts (not served or shown)
 ]);
 const DOLLAR = /\$\$\{|['"`]\$\d|[\s(]\$\d|≈\s?\$(?!\{)|\d\s?USD\b|\}\s?USD\b|\bUSD (a|open|after|test)\b/;
 

@@ -31,6 +31,7 @@ import { findRoute, type CoinId, type Hop, type RouteMarket } from '../../market
 import { NATIVE } from '../../live/swapMath';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import type { Opportunity } from '../../market/scan';
+import type { Generated } from '../../types/generated';
 
 export interface AutoOptions extends PlanOptions { stopLossPct: number }
 export interface Budget { chainId: number; coin: string; amount: number }
@@ -565,6 +566,37 @@ export class Autopilot {
     }
     return v;
   }
+  /**
+   * Generated, in the budget's coin, from what is already in hand: its budget coins, plus what its open bots and the
+   * bots removed by hand cost when they opened (open bots are not marked to the market: they count as their cost
+   * until they close back to cash), less the budget. Swap fees and taxes are inside those amounts. Gas comes out of it
+   * when the budget is the chain's own coin; otherwise it is reported apart (gasNative), never price-converted.
+   * Coins other than the budget's still held or in a swap (on their way back) are listed in `inTransit`, not counted.
+   * Derived from the saved account only (no new saved fields), so an old autopilot.json reads the same.
+   */
+  generated(a: Account): { generated: Generated; inTransit: { symbol: string; amount: number }[] } {
+    const c = a.budget.chainId, B = a.budget.coin;
+    const nativeSym = this.chainOn(c) ? this.nativeSym(c) : null, native = nativeSym === B;
+    const proceeds = (a.coins[B] ?? 0) + a.pending.filter((p) => p.from === B).reduce((s, p) => s + p.amountIn, 0)
+      + a.bots.reduce((s, b) => s + b.cost, 0) + a.withdrawn;
+    const t = this.chainOn(c) ? this.token(c, B) : null;
+    const inTransit = new Map<string, number>();
+    for (const [sym, x] of Object.entries(a.coins)) if (sym !== B && x > 0) inTransit.set(sym, (inTransit.get(sym) ?? 0) + x);
+    for (const p of a.pending) if (p.from !== B) inTransit.set(p.from, (inTransit.get(p.from) ?? 0) + p.amountIn);
+    return {
+      generated: {
+        coin: { chainId: c, address: t && !t.native ? t.address.toLowerCase() : null, symbol: B, native },
+        // gas is already out of coins[B] when B is the chain's own coin
+        amount: proceeds - a.budget.amount,
+        proceeds, cost: a.budget.amount, fees: null, taxes: null,
+        gasNative: a.gasNative, gasSymbol: nativeSym, gasInAmount: native, closed: null, basis: 'closed',
+        // One mode per account: configure() changes the mode only while off with nothing held, and starts new accounts
+        // (accounts: []), so an account's Generated never mixes paper and live.
+        mode: this.state.mode,
+      },
+      inTransit: [...inTransit].map(([symbol, amount]) => ({ symbol, amount })),
+    };
+  }
   /** Money not in a bot, in the budget's coin (coins without a price yet don't count) */
   private free(a: Account): number {
     return Object.entries(a.coins).reduce((s, [sym, x]) => s + (x > 0 ? x * (this.rate(a.budget.chainId, sym) ?? 0) : 0), 0);
@@ -753,6 +785,7 @@ export class Autopilot {
         return {
           chainId: c, chain: this.chainName(c), coin: a.budget.coin, amount: a.budget.amount,
           coins: a.coins, free: this.free(a), value: this.value(a), pending: a.pending.length, startedAt: a.startedAt,
+          ...this.generated(a),
           halted: a.halted, killed: a.killed ?? null, killHalt: a.killHalt ?? null, withdrawn: a.withdrawn, gasNative: a.gasNative, nativeSym: on ? this.nativeSym(c) : null, holds: this.holds(a),
           bots: a.bots.map((b) => {
             const here = on && this.d.bot.hasBot(b.kind, b.id);

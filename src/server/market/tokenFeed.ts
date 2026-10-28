@@ -153,6 +153,13 @@ export function createTokenTrader(o: {
     },
     // dynamic-fee pools: the fee at quote time (never cached)
     feeNow: (p) => readV3FeeBps(o.hub.rt(p.chainId).reader, p.pool),
+    // Generated only: is the spend coin the chain's own (wrapped or not), so its gas comes out of Generated
+    coinInfo: (chainId, spend) => {
+      try {
+        const cfg = o.hub.rt(chainId).cfg, a = spend.toLowerCase();
+        return { native: [cfg.wrappedNative.address, NATIVE_ZERO, NATIVE_EEEE].some((x) => x.toLowerCase() === a), nativeSymbol: cfg.nativeSymbol };
+      } catch { return null; } // a chain not on in this app: gas stays apart
+    },
     rejects: o.dataDir ? new PlayRejectLog(o.dataDir) : undefined,
     live: {
       buy: async (pool, spend, limits) => {

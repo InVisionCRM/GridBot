@@ -25,6 +25,7 @@ import type { Emit } from './activity';
 import type { Store } from './store';
 import type { PoolSniper, SnipeHit } from '../market/sniper';
 import { requestHalt, systemHalt, type Halt } from './audit';
+import type { Generated } from '../../types/generated';
 import type { ReservedBalance } from '../swap/holds';
 import { NATIVE } from '../../live/swapMath';
 
@@ -153,7 +154,46 @@ export interface Position {
    * sold toward it. The next time that take profit fires it sells only the rest, then counts as done.
    */
   tpPending?: { tp: 1 | 2; target: number; sold: number } | null;
+  /** Generated bookkeeping (in the spend coin). Missing = a position from before; read as zeros (genOf). */
+  gen?: PositionGen;
 }
+
+/**
+ * A position's share of Generated, in its spend coin. The buy fee is booked when paid (feeBooked), so a sell's cost
+ * basis is the rest of `spent` pro rata: a whole round trip costs exactly `spent`.
+ */
+export interface PositionGen {
+  /** Pool fee paid on the buy (spent × fee), already counted in the bot's Generated */
+  feeBooked: number;
+  /** Cost basis of the tokens sold so far */
+  costSold: number;
+  /** Coins received from its sells */
+  proceeds: number;
+  fees: number;
+  taxes: number;
+  /** Gas its buy and sells paid, in the chain's own coin */
+  gasNative: number;
+  /** Times tokens left the wallet with no fill known (reconcile): their coins received and cost are not counted */
+  unpriced?: number;
+}
+
+/**
+ * Generated per mode and spend coin (`mode:chainId:address`), kept after positions close. Paper and live never share
+ * an entry: a position books into the ledger of its own mode (p.mode, fixed at its buy), whatever the trader's mode is
+ * now.
+ */
+export interface GenLedger {
+  /** Missing only in a file from before the mode split (migrated on load: migrateLedgerModes) */
+  mode: 'paper' | 'live';
+  chainId: number; coin: string; symbol: string;
+  proceeds: number; cost: number; fees: number; taxes: number; gasNative: number; closed: number;
+  /** Set on an entry split from a pre-mode entry whose mode was inferred, not recorded (see migrateLedgerModes) */
+  modeInferred?: boolean;
+  /** Sells whose coins received are not known (a reported-failed send that landed); not in proceeds or cost */
+  unpriced?: number;
+}
+export type TradeMode = 'paper' | 'live';
+const genKey = (mode: TradeMode, chainId: number, coin: string) => `${mode}:${chainId}:${coin.toLowerCase()}`;
 
 /**
  * One fill. `usd`/`pnlUsd` are dollars (kept for the API); `spendSym`, `amount` (spend coin bought with / received) and
@@ -198,6 +238,11 @@ export interface TraderState {
    * owner must choose "run exits" or "keep fully off" (no real sell goes out before that). Cleared by any mode change.
    */
   pendingChoice?: { livePositions: number; at: number } | null;
+  /**
+   * Generated per mode and spend coin (key genKey). Missing = a file from before (starts empty; nothing else changes).
+   * Entries keyed `chainId:address` without a mode come from before the paper/live split: migrated on load.
+   */
+  generated?: Record<string, GenLedger>;
 }
 
 export type OffMode = 'exits' | 'full';
@@ -207,6 +252,10 @@ const MODE_LOG_MAX = 50;
 
 export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
 export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
+
+const genOf = (p: Position): PositionGen => p.gen ?? (p.gen = { feeBooked: 0, costSold: 0, proceeds: 0, fees: 0, taxes: 0, gasNative: 0 });
+/** Gas a failed send still paid (ExecError opts), else 0 */
+const gasOfError = (e: unknown): number => { const g = (e as { opts?: { gasNative?: number } } | null)?.opts?.gasNative; return typeof g === 'number' && g > 0 ? g : 0; };
 
 const HOUR = 3600_000;
 const num = (n: number) => +n.toPrecision(6);
@@ -300,6 +349,11 @@ export class TokenTrader {
     feeNow?: (p: { chainId: number; pool: string }) => Promise<number>;
     /** Turn a sniper hit into a pool with depth and price. null = can't price it. */
     resolve?: (hit: SnipeHit) => Promise<FreshPool | null>;
+    /**
+     * For Generated only: whether a spend coin is the chain's own coin (or its wrapped form), and that coin's symbol.
+     * Missing = not native (gas is reported apart, never price-converted).
+     */
+    coinInfo?: (chainId: number, spend: string) => { native: boolean; nativeSymbol: string } | null;
     /** Rejected candidates. Omitted in tests that only need the in-memory window. */
     rejects?: RejectSink;
   }) {
@@ -308,7 +362,66 @@ export class TokenTrader {
     this.state = loaded?.version === 1 ? { ...fresh(), ...loaded, options: { ...DEFAULT_TRADER, ...loaded.options, sniper: { ...DEFAULT_TRADER.sniper, ...loaded.options?.sniper } }, plays: Array.isArray(loaded.plays) ? loaded.plays : [] } : fresh();
     this.spillRejects();
     this.migrateEntries();
+    this.migrateLedgerModes();
     this.migrateOffMode(loaded);
+  }
+
+  /**
+   * Ledgers saved before paper and live were kept apart (no `mode`, keyed chainId:coin) may hold both. Split each:
+   *  1. Open positions carry their own exact share (p.gen) and their mode (p.mode, fixed at the buy): that share goes
+   *     to the position's mode. This part is recorded, not guessed.
+   *  2. The rest (positions already closed, and gas of failed buys) has no recorded mode. Gas is paid only by live
+   *     sends (paper books none), so a rest that paid gas is live; otherwise paper. A live rest whose broker reported no
+   *     gas cannot be told from paper and stays paper (the safe side: nothing is shown as live money without
+   *     evidence). Entries built from the rest are flagged modeInferred.
+   * The closed-sell count is not kept per position: it stays with the rest, or with the open positions' mode when the
+   * rest is empty and only one mode sold. Nothing is added or lost: per field, the split entries sum to the old one.
+   */
+  private migrateLedgerModes() {
+    const g = this.state.generated;
+    if (!g) return;
+    const old = Object.entries(g).filter(([, l]) => l.mode !== 'paper' && l.mode !== 'live');
+    if (!old.length) return;
+    const fields = ['proceeds', 'cost', 'fees', 'taxes', 'gasNative'] as const;
+    const into = (mode: TradeMode, src: GenLedger, add: Record<(typeof fields)[number], number>, closed: number, inferred: boolean) => {
+      const k = genKey(mode, src.chainId, src.coin);
+      const t = g[k] ?? (g[k] = { mode, chainId: src.chainId, coin: src.coin.toLowerCase(), symbol: src.symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0 });
+      for (const f of fields) t[f] += add[f];
+      t.closed += closed;
+      if (inferred) t.modeInferred = true;
+    };
+    const lines: string[] = [];
+    for (const [key, l] of old) {
+      delete g[key];
+      const coin = l.coin.toLowerCase();
+      const rest = { proceeds: l.proceeds, cost: l.cost, fees: l.fees, taxes: l.taxes, gasNative: l.gasNative };
+      const share: Record<TradeMode, typeof rest> = {
+        paper: { proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0 },
+        live: { proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0 },
+      };
+      for (const p of this.state.positions) {
+        if (!p.gen || p.chainId !== l.chainId || p.spend.toLowerCase() !== coin) continue;
+        const m: TradeMode = p.mode === 'live' ? 'live' : 'paper';
+        const x = { proceeds: p.gen.proceeds, cost: p.gen.costSold + p.gen.feeBooked, fees: p.gen.fees + p.gen.feeBooked, taxes: p.gen.taxes, gasNative: p.gen.gasNative };
+        for (const f of fields) { share[m][f] += x[f]; rest[f] -= x[f]; }
+      }
+      // float residue of the subtraction (or a position share above the entry: never negative)
+      for (const f of fields) if (Math.abs(rest[f]) <= 1e-12 * Math.max(1, Math.abs(l[f]))) rest[f] = 0;
+      const restEmpty = fields.every((f) => rest[f] === 0);
+      const restMode: TradeMode = rest.gasNative > 0 ? 'live' : 'paper';
+      const has = (m: TradeMode) => fields.some((f) => share[m][f] !== 0);
+      // the rest is kept as its own (inferred) part when it holds anything, or when no open position had a share
+      const keepRest = !restEmpty || (!has('paper') && !has('live'));
+      const sold = (['paper', 'live'] as const).filter((m) => share[m].proceeds > 0);
+      const closedTo: TradeMode = keepRest ? restMode : sold.length === 1 ? sold[0] : restMode;
+      const zero = { proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0 };
+      for (const m of ['paper', 'live'] as const) if (has(m)) into(m, l, share[m], !keepRest && closedTo === m ? l.closed : 0, false);
+      if (keepRest) into(restMode, l, rest, l.closed, !restEmpty);
+      else if (l.closed && !has(closedTo)) into(closedTo, l, zero, l.closed, true);
+      lines.push(`${l.symbol} on chain ${l.chainId}: ${restEmpty ? 'open positions only' : `the rest as ${restMode}${restMode === 'live' ? ' (it paid gas)' : ' (no gas paid)'}`}`);
+    }
+    this.save();
+    this.say(`Token trader: Generated now keeps paper and live apart; ${old.length} older entr${old.length === 1 ? 'y' : 'ies'} split (${lines.join('; ')})`);
   }
 
   /** Older state files kept rejects next to passed plays. Move them out so the hot file stays small. */
@@ -429,9 +542,11 @@ export class TokenTrader {
       offMode: this.state.offMode ?? 'exits',
       modeLog: this.state.modeLog ?? [],
       pendingChoice: this.state.pendingChoice ?? null,
-      positions: positions.map((p) => ({ ...p, exitsBlocked: this.blocked(p) })),
+      positions: positions.map((p) => ({ ...p, exitsBlocked: this.blocked(p), generated: this.posGenerated(p) })),
       /** Live positions whose exits are blocked until the wallet balance can be read (lasting, until reconciled) */
       exitsBlocked: this.state.positions.filter((p) => this.blocked(p)).length,
+      /** Generated per mode and spend coin (closed sells, less buy fees and gas paid); see types/generated.ts */
+      generated: this.generated(),
     };
     return { ...out, metrics: tokenMetrics(out, Date.now()), spendTotals: tokenSpendTotals(out) };
   }
@@ -444,6 +559,70 @@ export class TokenTrader {
 
   /** Leaderboard. Reads the reject log here, never from tick(). */
   scorecard() { return playLeaderboard([...this.state.plays, ...this.rejects.read()]); }
+
+  // ── Generated (coins, no USD): bookkeeping only, read by nothing that trades ──
+  /** The ledger of one mode (paper or live, never both) and spend coin */
+  private ledger(mode: TradeMode, chainId: number, coin: string, symbol: string): GenLedger {
+    const g = this.state.generated ?? (this.state.generated = {});
+    const k = genKey(mode, chainId, coin);
+    return g[k] ?? (g[k] = { mode, chainId, coin: coin.toLowerCase(), symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0 });
+  }
+  private spendSymbol(p: Pick<Position, 'label' | 'spend'>) { return p.label.split('/')[1] ?? p.spend; }
+  private view(coin: { chainId: number; coin: string; symbol: string }, x: Omit<GenLedger, 'chainId' | 'coin' | 'symbol'>): Generated {
+    const info = this.d.coinInfo?.(coin.chainId, coin.coin) ?? null;
+    const gasInAmount = !!info?.native;
+    return {
+      coin: { chainId: coin.chainId, address: coin.coin, symbol: coin.symbol, native: gasInAmount },
+      amount: x.proceeds - x.cost - (gasInAmount ? x.gasNative : 0),
+      proceeds: x.proceeds, cost: x.cost, fees: x.fees, taxes: x.taxes,
+      gasNative: x.gasNative, gasSymbol: info?.nativeSymbol ?? null, gasInAmount, closed: x.closed, basis: 'closed',
+      mode: x.mode, ...(x.modeInferred ? { modeInferred: true } : {}), ...(x.unpriced ? { unpriced: x.unpriced } : {}),
+    };
+  }
+  /** Per mode and spend coin (paper and live apart), every position since this was added (closed ones included) */
+  generated(): Generated[] {
+    return Object.values(this.state.generated ?? {}).map((l) => this.view(l, l));
+  }
+  /** One position: its sells so far, less its buy fee and gas (its unsold tokens count nothing: no mark to market) */
+  private posGenerated(p: Position): Generated {
+    const g = p.gen ?? { feeBooked: 0, costSold: 0, proceeds: 0, fees: 0, taxes: 0, gasNative: 0 };
+    return this.view({ chainId: p.chainId, coin: p.spend, symbol: this.spendSymbol(p) }, {
+      mode: p.mode, proceeds: g.proceeds, cost: g.costSold + g.feeBooked, fees: g.fees + g.feeBooked, taxes: g.taxes, gasNative: g.gasNative, closed: 0, unpriced: g.unpriced,
+    });
+  }
+  /** A buy: its pool fee (paid in the spend coin) and its gas are booked now; the rest of what it spent is cost when sold */
+  private bookBuy(p: Position, gasNative: number) {
+    const g = genOf(p), l = this.ledger(p.mode, p.chainId, p.spend, this.spendSymbol(p));
+    const fee = p.spent * (p.feeBps / 10_000);
+    g.feeBooked = fee; g.gasNative += gasNative;
+    l.cost += fee; l.fees += fee; l.gasNative += gasNative;
+  }
+  /**
+   * A sell of `sold` tokens that brought `quote` spend coins (actual: after fee, tax and impact). Live: called once per
+   * landed part of a split sell; `countClose` counts the exit as one closed sell (its first landed part only).
+   */
+  private bookSell(p: Position, sold: number, quote: number, gasNative: number, countClose: boolean) {
+    const g = genOf(p), l = this.ledger(p.mode, p.chainId, p.spend, this.spendSymbol(p));
+    const basis = p.entryTokens > 0 ? (p.spent - g.feeBooked) * (sold / p.entryTokens) : 0;
+    // For reference (already inside `quote`): the pool fee and the sell tax that came off it
+    const f = p.feeBps / 10_000, t = Math.max(0, Math.min(p.sellTax, 0.99));
+    const gross = quote / ((1 - f) * (1 - t));
+    const fee = gross * (1 - t) * f, tax = gross * t;
+    g.costSold += basis; g.proceeds += quote; g.fees += fee; g.taxes += tax; g.gasNative += gasNative;
+    l.cost += basis; l.proceeds += quote; l.fees += fee; l.taxes += tax; l.gasNative += gasNative; if (countClose) l.closed++;
+  }
+  /** Tokens left the wallet without a known fill (see reconcile): counted, not priced */
+  private bookUnpriced(p: Position) {
+    const g = genOf(p), l = this.ledger(p.mode, p.chainId, p.spend, this.spendSymbol(p));
+    g.unpriced = (g.unpriced ?? 0) + 1;
+    l.unpriced = (l.unpriced ?? 0) + 1;
+  }
+  /** Gas a failed send paid (nothing else changed hands) */
+  private bookGas(mode: TradeMode, chainId: number, spend: string, symbol: string, gasNative: number, p?: Position) {
+    if (!(gasNative > 0)) return;
+    this.ledger(p?.mode ?? mode, chainId, spend, symbol).gasNative += gasNative;
+    if (p) genOf(p).gasNative += gasNative;
+  }
 
   configure(o: Partial<TraderOptions> & { sniper?: Partial<SniperOptions> }) {
     const n = { ...this.state.options, ...o, sniper: { ...this.state.options.sniper, ...(o.sniper ?? {}) } };
@@ -805,6 +984,8 @@ export class TokenTrader {
     let txEntry: string | null = null, gasUsed: number | null = null, gasPrice: number | null = null, gasNative: number | null = null;
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('live broker missing');
+      // #59: reserve the spend before the send so other bots can't use it; released on success or failure.
+      // #76: gas a failed send still paid is booked once (catch), a filled buy's gas once (bookBuy below).
       this.pendingBuy = { chainId: pool.chainId, address: pool.spend, amount: sized.spend };
       try {
         const fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
@@ -812,6 +993,9 @@ export class TokenTrader {
         txEntry = fill.tx ?? null;
         if (fill.gasUsed != null && fill.gasPriceWei != null) { gasUsed = fill.gasUsed; gasPrice = fill.gasPriceWei; }
         if (typeof fill.gasNative === 'number' && Number.isFinite(fill.gasNative)) gasNative = fill.gasNative;
+      } catch (e) {
+        this.bookGas(o.mode, pool.chainId, pool.spend, pool.spendSymbol, gasOfError(e));
+        throw e;
       } finally {
         this.pendingBuy = null;
       }
@@ -831,6 +1015,7 @@ export class TokenTrader {
       tokenReserve: pool.tokenReserve, usdPerSpend: pool.usdPerSpend, buyTax, tp1Done: false, tp2Done: false, source, exitPlan: 'hold',
     };
     this.state.positions.push(pos);
+    this.bookBuy(pos, gasNative ?? 0);
     const why = warn ? `buy ${sized.why}; ${warn}` : `buy ${sized.why}`;
     this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
@@ -961,6 +1146,9 @@ export class TokenTrader {
     const gone = before - p.tokens;
     // a take-profit tranche in progress: what the wallet shows also left counts toward it
     if (gone > 0 && p.tpPending) p.tpPending.sold += gone;
+    // #76: tokens that left with no fill known (a part reported failed that landed): what they brought is unknown, so
+    // Generated counts neither their coins nor their cost (never guessed, never booked twice); flagged as unpriced.
+    if (gone > p.entryTokens * 1e-6) this.bookUnpriced(p);
     p.reconcile = false;
     p.reconcileBase = null;
     p.blockedSince = null;
@@ -1022,7 +1210,16 @@ export class TokenTrader {
           let s: LiveSell;
           try {
             s = await this.d.live.sell(p, part, this.limits());
-          } catch (e) { stopped = (e as Error).message; break; }
+          } catch (e) {
+            // #76: gas a failed send still paid, once. Its tokens are not booked here: reconcile reads the wallet.
+            this.bookGas(p.mode, p.chainId, p.spend, this.spendSymbol(p), gasOfError(e), p);
+            stopped = (e as Error).message;
+            break;
+          }
+          // #76: a landed part is booked into Generated at once (tokens, proceeds, gas), so a later part that fails
+          // never loses it; the closed sell is counted once per exit (its first landed part).
+          p.tokens = Math.max(0, p.tokens - s.tokensIn);
+          this.bookSell(p, s.tokensIn, s.quoteOut, typeof s.gasNative === 'number' && Number.isFinite(s.gasNative) ? s.gasNative : 0, sold === 0);
           quote += s.quoteOut; sold += s.tokensIn;
           if (Number.isFinite(s.impact)) { impactW += s.impact * s.tokensIn; impactN += s.tokensIn; } else impactGap = true;
           if (s.tx) exitTxs.push(s.tx);
@@ -1035,6 +1232,7 @@ export class TokenTrader {
               else if (gasPrice !== s.gasPriceWei) { gasMixed = true; gasPrice = null; }
             }
           } else gasGap = true;
+          this.save(); // the landed part is on disk before the next part is sent (a restart keeps it)
         }
       } else {
         const model = this.model(p);
@@ -1044,8 +1242,10 @@ export class TokenTrader {
           quote += sim.quote; sold += part;
           if (Number.isFinite(sim.impactPct)) { impactW += sim.impactPct * part; impactN += part; } else impactGap = true;
         }
+        // paper: the whole simulated sell at once (live parts were booked as they landed, above)
+        p.tokens = Math.max(0, p.tokens - sold);
+        if (sold > 0) this.bookSell(p, sold, quote, 0, true);
       }
-      p.tokens = Math.max(0, p.tokens - sold);
       if (sold > 0) {
         const usd = quote * p.usdPerSpend;
         const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
