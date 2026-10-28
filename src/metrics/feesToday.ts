@@ -3,6 +3,7 @@
  * Headline: fees live liquidity bots earned since local midnight (collected + waiting). Paper bots and the pool
  * fees grid / trend trades paid (a cost) are separate figures, never added into the headline.
  */
+import { unitOf } from '../lib/marketKey';
 type Obj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 export interface FeesToday {
@@ -58,7 +59,7 @@ export function feesToday(bots: Obj[], now = Date.now()): FeesToday {
   for (const b of bots) {
     if (b.archivedAt) continue;
     const k = typeof b.usdPerQuote === 'number' && b.usdPerQuote > 0 ? b.usdPerQuote : null;
-    const sym = (b.metrics?.quote?.symbol ?? b.quote ?? b.stable ?? null) as string | null;
+    const sym = (unitOf(b.metrics?.quote?.symbol) ?? unitOf(b.quoteSym) ?? unitOf(b.quote) ?? unitOf(b.stable) ?? null) as string | null; // never a market key
     const paper = b.mode !== 'live';
     const row: FeesTodayBot = { mode: paper ? 'paper' : 'live', earnedUsd: 0, paidUsd: 0, sym, earned: 0, paid: 0 };
     // In coins every bot counts; the dollar figures (and the sparkline) only those with a dollar price, as before

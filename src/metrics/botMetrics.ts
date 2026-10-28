@@ -19,6 +19,7 @@
  */
 
 import { isCloseOut } from '../live/ledger';
+import { keySymbols, unitOf } from '../lib/marketKey';
 
 export const MIN_AGE_MS = 60_000;
 export const DAY_MS = 86_400_000;
@@ -304,7 +305,7 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   const lo = num(b.config?.lowerPrice), hi = num(b.config?.upperPrice), price = num(b.price);
   // Round-trip profit lands in the quote coin: engine.ts applySell → realized; reinvest adds it to the level's next buy
   // and send mode pays it out, both in the quote. The base the grid "stacks" is inventory (Unrealized).
-  const sym = String(b.quoteSym ?? b.stable ?? 'quote');
+  const sym = String(unitOf(b.quoteSym) ?? unitOf(b.stable) ?? 'quote'); // never a market key as the unit
   // Generated = completed round trips (minus gas lost on failed / manual trades). A close / stop cash-out sale is a
   // liquidation at the day's price, so it is in Total P&L (price change) but not here. Older payloads: realized.
   const gen = num(b.stats?.generated) ?? realized;
@@ -326,7 +327,7 @@ export function trendMetrics(b: Obj, now = Date.now()): BotMetrics {
   const realized = num(b.pnl?.realized), unrealized = num(b.pnl?.unrealized);
   const equity = num(b.pnl?.equity) ?? (cap == null ? null : cap + (realized ?? 0) + (unrealized ?? 0));
   const n = num(b.moveCount);
-  const sym = String(b.quoteSym ?? b.quote ?? 'quote');
+  const sym = String(unitOf(b.quoteSym) ?? unitOf(b.quote) ?? 'quote'); // never a market key as the unit
   return finish({
     kind: 'trend', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'trend' }, now),
     capitalIn: cap, currentValue: equity, paidOut: 0, extraCost: 0,
@@ -350,7 +351,7 @@ const coinsOf = (c: unknown): Coins | null => {
  * charged to the quote coin.
  */
 export function lpGenerated(b: Obj): { generated: Record<string, number> | null; px: Record<string, number | null> } {
-  const baseSym = String(b.base ?? 'base'), quoteSym = String(b.quote ?? 'quote');
+  const baseSym = String(unitOf(b.base) ?? keySymbols(b.market)?.base ?? 'base'), quoteSym = String(unitOf(b.quote) ?? keySymbols(b.market)?.quote ?? 'quote');
   const k = rate(b), price = num(b.price);
   const px: Record<string, number | null> = { [baseSym]: price != null && k != null ? price * k : null, [quoteSym]: k };
   // A closed bot has no reading (pnl null) and nothing owed: its fees are what it collected.
@@ -403,7 +404,7 @@ export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
     gas, swapCost: num(b.totals?.swapCost) ?? num(p?.swapCost),
     moveCount: n, fillCount: null,
     range: lo != null && hi != null && hi > lo ? { lower: lo, upper: hi, current: price, inRange: typeof b.inRange === 'boolean' ? b.inRange : inside(lo, hi, price) } : null,
-    k: rate(b), symbol: b.quote ?? null,
+    k: rate(b), symbol: unitOf(b.quote) ?? keySymbols(b.market)?.quote ?? null,
     ...lpGenerated(b), dollarsMade: num(p?.net), rebalanceLoss: num(b.totals?.moveLoss) ?? num(p?.moveLoss), taxes: null,
     bridge: bridgeCostsOf(b),
   }, now);

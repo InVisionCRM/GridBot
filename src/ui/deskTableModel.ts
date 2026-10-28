@@ -1,5 +1,5 @@
 /** Group, filter, and sort the bots table. Presentation only. */
-import { rangeState, type AnyObj } from './model';
+import { quoteSym, rangeState, type AnyObj } from './model';
 import { botFacts, type DeskFacts } from './deskStats';
 
 export const GROUPS = ['Grid', 'Trend', 'Liquidity', 'Token trader', 'Paper'] as const;
@@ -55,7 +55,7 @@ export interface DeskItem {
 export function deskItems(bots: AnyObj[], chainName: (b: AnyObj) => string, now = Date.now()): DeskItem[] {
   return bots.map((b) => ({
     b,
-    name: String(b.label || b.name || (b.kind === 'grid' ? `${b.base ?? ''}/${b.quoteSym ?? ''}` : b.base) || b.id),
+    name: String(b.label || b.name || (b.kind === 'grid' ? `${b.base ?? ''}/${quoteSym(b) ?? ''}` : b.base) || b.id),
     chain: chainName(b),
     chainId: typeof b.chainId === 'number' ? b.chainId : null,
     group: groupOf(b),
