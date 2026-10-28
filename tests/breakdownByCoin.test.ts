@@ -95,6 +95,22 @@ describe('grid / trend: trade profit before costs', () => {
     expect(c.taxes).toBeCloseTo(1.1, 12);
     expect(c.roundTrips).toBe(1);
   });
+  it('grid: the gas spent sending profits out is a cost of Generated and of Total P&L', () => {
+    const g = {
+      id: 'gp', kind: 'grid', status: 'running', quoteSym: 'USDC', config: { totalCapitalQuote: 100 }, pnl: { realized: 10, unrealized: 0 },
+      stats: { generated: 10, roundTrips: 2, totalGas: 1, totalFees: 0.5, rtCosts: { gas: 1, poolFees: 0.5, taxes: 0, lostGas: 0, roundTrips: 2, unmatched: 0 } },
+      payout: { sent: 8, gasQuote: 0.3 }, trades: [], startedAt: 1,
+    };
+    const m = gridMetrics(g, AS_OF);
+    expect(m.generated!.USDC).toBeCloseTo(9.7, 12);
+    expect(m.quote.totalPnl).toBeCloseTo(9.7, 12); // value now 102 + paid out 8 − gas 0.3 − capital 100
+    expect(m.quote.gas).toBeCloseTo(1.3, 12);
+    expect(m.breakdownByCoin!.USDC.gasSwap).toBeCloseTo(1.8, 12);
+    identity(m);
+    const kept = gridMetrics({ ...g, payout: { sent: 0, gasQuote: 0 } }, AS_OF);
+    expect(kept.generated!.USDC).toBe(10);
+    expect(kept.quote.totalPnl).toBeCloseTo(10, 12);
+  });
   it('a sell whose buy is not in the log: not itemized, still adds up', () => {
     const m = gridMetrics({ id: 'g2', kind: 'grid', status: 'running', quoteSym: 'DAI', config: { totalCapitalQuote: 200 }, pnl: { realized: 8 }, stats: { generated: 8 }, trades: [sell] }, AS_OF);
     expect(m.breakdownBasis!.itemized).toBe(false);

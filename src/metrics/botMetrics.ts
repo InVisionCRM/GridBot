@@ -367,6 +367,8 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   const capitalSource: CapitalSource = capQ != null ? 'config' : capLegacy != null ? 'legacy-config' : null;
   const realized = num(b.pnl?.realized), unrealized = num(b.pnl?.unrealized);
   const sent = num(b.payout?.sent) ?? 0;
+  // sending profits out costs gas too (payout.gasQuote, booked in the quote): a cost of the profit, like trade gas
+  const payoutGas = num(b.payout?.gasQuote) ?? 0;
   const equity = cap == null ? null : cap + (realized ?? 0) + (unrealized ?? 0);
   const fills = num(b.moveCount), rec = num(b.recenter?.count);
   const lo = num(b.config?.lowerPrice), hi = num(b.config?.upperPrice), price = num(b.price);
@@ -375,15 +377,18 @@ export function gridMetrics(b: Obj, now = Date.now()): BotMetrics {
   const sym = String(unitOf(b.quoteSym) ?? unitOf(b.stable) ?? 'quote'); // never a market key as the unit
   // Generated = completed round trips (minus gas lost on failed / manual trades). A close / stop cash-out sale is a
   // liquidation at the day's price, so it is in Total P&L (price change) but not here. Older payloads: realized.
-  const gen = num(b.stats?.generated) ?? realized ?? (noFills(b) ? 0 : null);
+  const gross = num(b.stats?.generated) ?? realized ?? (noFills(b) ? 0 : null);
+  const gen = gross == null ? null : gross - payoutGas;
   const fromStats = num(b.stats?.generated) != null;
-  const rt = fromStats && b.stats?.rtCosts ? b.stats.rtCosts as RoundTripCosts : Array.isArray(b.trades) && fromStats ? roundTripCosts(b.trades, 'grid') : null;
+  const rt0 = fromStats && b.stats?.rtCosts ? b.stats.rtCosts as RoundTripCosts : Array.isArray(b.trades) && fromStats ? roundTripCosts(b.trades, 'grid') : null;
+  const rt = rt0 && payoutGas ? { ...rt0, gas: rt0.gas + payoutGas } : rt0;
+  const tradeGas = num(b.stats?.totalGas);
   return finish({
     ...tradeParts(sym, gen, rt, !b.stats?.rtCosts, b.trades), capitalSource,
     kind: 'grid', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'grid' }, now),
-    capitalIn: cap, currentValue: equity == null ? null : equity - sent, paidOut: sent, extraCost: 0,
+    capitalIn: cap, currentValue: equity == null ? null : equity - sent, paidOut: sent, extraCost: payoutGas,
     realized, unrealized, feesEarned: null, feesCollected: null, feesUncollected: null,
-    gas: num(b.stats?.totalGas), swapCost: num(b.stats?.totalFees),
+    gas: tradeGas == null ? (payoutGas || null) : tradeGas + payoutGas, swapCost: num(b.stats?.totalFees),
     moveCount: fills == null && rec == null ? null : (fills ?? 0) + (rec ?? 0), fillCount: fills,
     range: lo != null && hi != null && hi > lo ? { lower: lo, upper: hi, current: price, inRange: inside(lo, hi, price) } : null,
     k: rate(b), symbol: sym,
