@@ -22,12 +22,13 @@ export const pxShort = (x: number | null | undefined, sig = 6) => {
 };
 export const num = (x: number | null | undefined, d = 2) => (x == null || !Number.isFinite(x) ? '—' : x.toLocaleString(undefined, { maximumFractionDigits: d }));
 export const pct = (x: number | null | undefined, d = 2, sign = false) =>
-  x == null || !Number.isFinite(x) ? '—' : `${sign && x > 0 ? '+' : ''}${(x * 100).toFixed(d)}%`;
+  x == null || !Number.isFinite(x) ? '—' : `${x < 0 ? '−' : sign && x > 0 ? '+' : ''}${Math.abs(x * 100).toFixed(d)}%`;
 /**
- * A percent for display (Kyle): "—" when it would round to zero at the digits shown (0.0%, +0.0%, −0.0%), since a
- * zero there only says "too small to show". Display only: sorting, APR and every other sum keep the exact value.
+ * A percent for display (Kyle): two decimals, so a small move reads as a number ("−0.03%"), and "—" when it would still
+ * round to zero at the digits shown (0.00%, +0.00%, −0.00%), since a zero there only says "too small to show". Display
+ * only: sorting, APR and every other sum keep the exact value.
  */
-export const pctShown = (x: number | null | undefined, d = 1, sign = false) =>
+export const pctShown = (x: number | null | undefined, d = 2, sign = false) =>
   x == null || !Number.isFinite(x) || Number((x * 100).toFixed(d)) === 0 ? '—' : pct(x, d, sign);
 export const usd = (x: number | null | undefined, sign = false) => {
   if (x == null || !Number.isFinite(x)) return '—';

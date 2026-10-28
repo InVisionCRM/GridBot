@@ -41,7 +41,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
     ['Est. 24h', rate(gr?.d1, gr?.needs.d1), calc],
     ['Est. 7d', rate(gr?.d7, gr?.needs.d7), calc],
     ['Est. 365d', rate(gr?.d365, gr?.needs.d365), calc],
-    ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pctShown(f.aprPct, 1, true), calc],
+    ['APR', f.aprPct == null ? (f.estHint.d365 ? `— (${f.estHint.d365})` : '—') : pctShown(f.aprPct, 2, true), calc],
     ['Age', f.ageMs == null ? '—' : dur(f.ageMs)],
     ['Moves', f.moves.text ?? '—'],
     ['Win rate', f.winRate == null ? '—' : pct(f.winRate, 0)],

@@ -357,12 +357,12 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
             <span className="desk-pnl" title={m?.calc ?? undefined}>
               <b className={cls(pnl.quote)}>{money}</b>
             </span>
-            <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pctShown(facts.pnlPct, 1, true)}</span></span>
+            <span className="desk-pct"><span className={cls(facts.pnlPct)}>{pctShown(facts.pnlPct, 2, true)}</span></span>
             <span className="desk-fees">{feesEarned == null ? '—' : qty(feesEarned, pair.quote, 4, false)}</span>
             <span className="desk-age">{facts.ageMs == null ? '—' : dur(facts.ageMs)}</span>
             <span className="desk-apr" title={isShortRun(facts.ageMs) ? `Est. APR ${EST_HINT}. Until then P&L % is the figure for the run, and Age its length.` : facts.aprPct == null ? facts.estHint.d365 ?? undefined : m?.calc ?? undefined}>{
               // under a day: no yearly rate, and not the run's % again (it is one column to the left): a dash only (pr-72 MED 1)
-              isShortRun(facts.ageMs) || facts.aprPct == null ? '—' : pctShown(facts.aprPct, 1, true)}</span>
+              isShortRun(facts.ageMs) || facts.aprPct == null ? '—' : pctShown(facts.aprPct, 2, true)}</span>
             <span className="desk-moves">{facts.moves.n == null ? '—' : facts.moves.n}</span>
           </> : (
             <span className="desk-pnl" title={m?.calc ?? undefined}>

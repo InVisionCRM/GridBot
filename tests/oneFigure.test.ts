@@ -281,10 +281,12 @@ describe('LP pace card: Est. a day / 7 days / 365 days from botMetrics, hidden u
 
 describe('a percent that rounds to 0.0% reads "—" (display only; sort and APR keep the exact value)', () => {
   it('pctShown', () => {
-    expect(pctShown(0.00004, 1, true)).toBe('—');
-    expect(pctShown(-0.0004, 1, true)).toBe('—');
-    expect(pctShown(0.0005, 1, true)).toBe('+0.1%');
-    expect(pctShown(0.00004, 2)).toBe('—');
+    // two decimals: a small move is a number, and only what still rounds to 0.00% is a dash
+    expect(pctShown(0.00004, 2, true)).toBe('—');
+    expect(pctShown(-0.0004, 2, true)).toBe('−0.04%');
+    expect(pctShown(0.0005, 2, true)).toBe('+0.05%');
+    expect(pctShown(-0.00004)).toBe('—');
+    expect(pctShown(0.1234, undefined, true)).toBe('+12.34%');
     expect(pctShown(null)).toBe('—');
   });
   it('the Bots row and the Details: "—" for a tiny % (desktop and phone), and the sort still orders by the exact value', () => {
