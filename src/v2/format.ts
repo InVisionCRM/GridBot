@@ -40,6 +40,46 @@ export function formatUsd(x: number | null | undefined, sign = false): string {
   return usd(x, sign);
 }
 
+/** Round half away from zero so displayed ledger lines use one scale. */
+export function roundAmt(n: number, decimals: number): number {
+  const f = 10 ** decimals;
+  const x = Math.round((Math.abs(n) + Number.EPSILON) * f) / f;
+  return n < 0 ? -x : x;
+}
+
+function minDecimals(n: number): number {
+  const a = Math.abs(n);
+  if (!(a > 0)) return 0;
+  if (a >= 100) return 1;
+  if (a >= 1) return 2;
+  return Math.max(0, Math.ceil(-Math.log10(a)) + 2);
+}
+
+/**
+ * Decimal scale at which the shown gross, costs, and generated add up,
+ * without collapsing a coin down to a coarser figure than its size needs.
+ * Costs are passed as positive magnitudes.
+ */
+export function ledgerDecimals(gross: number, paid: number, move: number): number {
+  const generated = gross - paid - move;
+  const start = Math.max(minDecimals(gross), minDecimals(paid), minDecimals(move), minDecimals(generated));
+  for (let d = start; d <= 12; d++) {
+    const g = roundAmt(gross, d);
+    const p = roundAmt(-Math.abs(paid), d);
+    const m = roundAmt(-Math.abs(move), d);
+    const gen = roundAmt(generated, d);
+    if (roundAmt(g + p + m, d) === gen) return d;
+  }
+  return 12;
+}
+
+/** Fixed decimals, with a sign. Trailing zeros stay so the ledger still adds up. */
+export function formatFixedAmt(n: number, decimals: number): string {
+  const r = roundAmt(n, decimals);
+  const sign = r < 0 ? '−' : r > 0 ? '+' : '';
+  return `${sign}${Math.abs(r).toFixed(decimals)}`;
+}
+
 export function formatAmt(n: number): string {
   if (!Number.isFinite(n)) return '—';
   const sign = n < 0 ? '−' : n > 0 ? '+' : '';

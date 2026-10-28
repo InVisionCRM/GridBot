@@ -4,7 +4,7 @@
  */
 import type { BotMetrics, RangeBlock, TapePrice, TokenQty } from './metrics';
 import { estimates } from '../shared/generated';
-import { formatAge, formatAmt, formatRangePx, formatTokenLine, showsNoFills } from './format';
+import { formatAge, formatAmt, formatFixedAmt, formatRangePx, formatTokenLine, ledgerDecimals, showsNoFills } from './format';
 
 const SUBSCRIPT_PRICE = /\$0\.0[₀₁₂₃₄₅₆₇₈₉]+\d+/g;
 const FIGURE = /[+−-]?\s*\$\d[\d,]*(?:\.\d+)?|[+−-]\s*\d[\d,]*(?:\.\d+)?[kMB]?\s+[A-Z][A-Z0-9]*|[+−-]?\d+(?:\.\d+)?%/g;
@@ -97,9 +97,62 @@ function formatBagSafe(tokens: TokenQty[]): string {
 
 export interface SheetRow { label: string; value: string }
 
-/** Omit a gross-fee atom that is already the generated amount, so an unchanged leg is not printed twice. */
-function freshTokens(tokens: TokenQty[], used: Set<string>): TokenQty[] {
-  return tokens.filter((t) => !used.has(tokenKey(t)));
+export interface LedgerLines {
+  gross: string;
+  paid: string;
+  move: string;
+  generated: string;
+}
+
+function amountOf(tokens: TokenQty[], symbol: string): number {
+  return tokens.find((t) => t.symbol === symbol)?.amount ?? 0;
+}
+
+function ledgerLine(entries: { symbol: string; amount: number; decimals: number }[]): string {
+  const shown = entries.filter((e) => formatFixedAmt(e.amount, e.decimals) !== '0');
+  if (!shown.length) return '';
+  return shown.map((e, i) => {
+    const text = formatFixedAmt(e.amount, e.decimals);
+    if (i === 0) return `${text} ${e.symbol}`;
+    if (e.amount < 0) return `${text} ${e.symbol}`;
+    return `+ ${text.replace(/^\+/, '')} ${e.symbol}`;
+  }).join(' ');
+}
+
+/** Gross fees, costs as negatives, and the generated total, at a scale where they add up. */
+export function ledgerLines(m: BotMetrics): LedgerLines | null {
+  if (!m.grossFees.length && !m.feesPaid.length && !m.moveLoss.length) return null;
+  const symbols = [...new Set([
+    ...m.grossFees.map((t) => t.symbol),
+    ...m.feesPaid.map((t) => t.symbol),
+    ...m.moveLoss.map((t) => t.symbol),
+    ...m.generated.map((t) => t.symbol),
+  ])];
+  const scale = new Map<string, number>();
+  for (const symbol of symbols) {
+    const gross = amountOf(m.grossFees, symbol);
+    const paid = Math.abs(amountOf(m.feesPaid, symbol));
+    const move = Math.abs(amountOf(m.moveLoss, symbol));
+    scale.set(symbol, ledgerDecimals(gross, paid, move));
+  }
+  const entry = (tokens: TokenQty[], sign: 1 | -1) => symbols
+    .map((symbol) => ({ symbol, amount: sign * Math.abs(amountOf(tokens, symbol)), decimals: scale.get(symbol) ?? 0 }))
+    .filter((e) => amountOf(tokens, e.symbol) !== 0);
+  const generated = symbols.map((symbol) => ({
+    symbol,
+    amount: amountOf(m.grossFees, symbol) - Math.abs(amountOf(m.feesPaid, symbol)) - Math.abs(amountOf(m.moveLoss, symbol)),
+    decimals: scale.get(symbol) ?? 0,
+  })).filter((e) => formatFixedAmt(e.amount, e.decimals) !== '0');
+  return {
+    gross: ledgerLine(entry(m.grossFees, 1)),
+    paid: ledgerLine(entry(m.feesPaid, -1)),
+    move: ledgerLine(entry(m.moveLoss, -1)),
+    generated: ledgerLine(generated),
+  };
+}
+
+export function isLedgerLabel(label: string): boolean {
+  return label === 'Gross fees' || label === 'Gas + swap fees' || label === 'Range-move loss' || label === 'Generated';
 }
 
 /**
@@ -125,10 +178,11 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
     }
     rows.push({ label, value: next });
   };
-  const gross = freshTokens(m.grossFees, used);
-  if (gross.length) add('Gross fees', formatTokenLine(gross));
-  if (m.feesPaid.length) add('Fees paid', formatTokenLine(m.feesPaid));
-  if (m.moveLoss.length) add('Range-move loss', formatTokenLine(m.moveLoss));
+  const ledger = ledgerLines(m);
+  if (ledger?.gross) add('Gross fees', ledger.gross, true);
+  if (ledger?.paid) add('Gas + swap fees', ledger.paid, true);
+  if (ledger?.move) add('Range-move loss', ledger.move, true);
+  if (ledger?.generated) add('Generated', ledger.generated, true);
   const est = estimates(m.generated, m.ageSec);
   add('Est. 7d', est.d7 == null ? '—' : est.d7.length ? formatTokenLine(est.d7) : '—', true);
   add('Est. 365d', est.d365 == null ? '—' : est.d365.length ? formatTokenLine(est.d365) : '—', true);

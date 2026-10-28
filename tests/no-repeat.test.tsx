@@ -12,7 +12,9 @@ import { applyDelta } from '../src/v2/use-desk';
 import type { BotDesk, DeskSnapshot } from '../src/v2/metrics';
 
 function textOf(html: string): string {
-  const kept = html.replace(/<([a-z0-9]+)\b[^>]*\bdata-est\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+  const kept = html
+    .replace(/<([a-z0-9]+)\b[^>]*\bdata-est\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<([a-z0-9]+)\b[^>]*\bdata-ledger\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
   return kept
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')

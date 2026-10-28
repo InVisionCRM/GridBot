@@ -5,7 +5,7 @@ import { EquityCurve, Spark } from './equity-curve';
 import { cardReadout, coverFigures, uniqueTape, type CardReadout } from './figures';
 import { formatBag, formatQuotePx, formatTokenLine, pct } from './format';
 import type { BotDesk, BotStatus, PortfolioSnapshot, TapePrice, TokenQty } from './metrics';
-import { sheetRows } from './figures';
+import { isLedgerLabel, ledgerLines, sheetRows } from './figures';
 import { useReducedMotion } from './motion';
 import { PairLabel, PairTitle } from './pair-label';
 import { press } from './press';
@@ -116,7 +116,7 @@ export function HomeView({
         <div className="hero-top">
           <div className="hero-units">
             {portfolio.tokens.length
-              ? <TokenHeadline tokens={portfolio.tokens} />
+              ? (live.length === 1 && ledgerLines(live[0].metrics)?.generated) || <TokenHeadline tokens={portfolio.tokens} />
               : '—'}
           </div>
         </div>
@@ -221,7 +221,7 @@ function BotCard({ bot, readout, invested, onOpen }: { bot: BotDesk; readout: Ca
           <summary>Details</summary>
           <ul className="break">
             {sheetRows(bot.metrics, shownPairParts(bot.pair)).map((row) => (
-              <li key={row.label}><span>{row.label}</span><b {...(row.label.startsWith('Est.') ? { 'data-est': '' } : {})}>{row.value}</b></li>
+              <li key={row.label}><span>{row.label}</span><b {...(row.label.startsWith('Est.') ? { 'data-est': '' } : {})} {...(isLedgerLabel(row.label) ? { 'data-ledger': '' } : {})}>{row.value}</b></li>
             ))}
           </ul>
           <p className="muted small">Estimate, not a forecast.</p>

@@ -4,7 +4,7 @@ import { CoinMark } from './coin-mark';
 import type { View } from '../ui/model';
 import { ActivityTape } from './activity-tape';
 import { CandlePane } from './candle-pane';
-import { sheetRows } from './figures';
+import { isLedgerLabel, ledgerLines, sheetRows } from './figures';
 import { formatBag, formatQuotePx, formatStamp, shortenFigures, showsNoFills } from './format';
 import { LpRangeSlot } from './lp-range-slot';
 import type { ActivityItem, BotDesk, BotMetrics, TapePrice } from './metrics';
@@ -27,7 +27,8 @@ function classicView(m: BotMetrics): View {
 
 function Row({ label, value }: { label: string; value: string }) {
   const est = label.startsWith('Est.');
-  return <li><span>{label}</span><b {...(est ? { 'data-est': '' } : {})}>{value}</b></li>;
+  const ledger = isLedgerLabel(label);
+  return <li><span>{label}</span><b {...(est ? { 'data-est': '' } : {})} {...(ledger ? { 'data-ledger': '' } : {})}>{value}</b></li>;
 }
 
 export function BotView({
@@ -71,7 +72,7 @@ export function BotView({
         {showsNoFills(m) ? <div className="hero-gen">No fills yet</div> : (
           <>
             <p className="eyebrow">Generated</p>
-            <div className="hero-gen"><TokenHeadline tokens={m.generated} /></div>
+            <div className="hero-gen">{ledgerLines(m)?.generated ?? <TokenHeadline tokens={m.generated} />}</div>
             <p className="hero-rate" data-est="">
               {day == null ? '—' : day.length ? <TokenLine tokens={day} /> : '0'}
               <span>/day</span>
