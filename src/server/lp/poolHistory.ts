@@ -10,6 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { addSwaps, type PoolMinute, type PoolSwap } from '../../market/lpReplay';
+import { QUERY_TOO_WIDE } from '../chains/fallback';
 import { PCS_V3_SWAP_TOPIC, V3_SWAP_TOPIC, type LogReader } from '../market/onchain';
 
 /** Days of history kept per pool: the replay's window */
@@ -22,7 +23,6 @@ const GAP_MS = 250;
 const RETRIES = 5;
 const RATE_LIMITED = /\b429\b|rate.?limit|too many requests/i;
 /** An RPC refusing a request because its answer would hold too many logs (or span too many blocks): ask for fewer blocks */
-const TOO_MANY_LOGS = /exceeds limit|more than \d+ results|response size|block range|range (is )?too (large|wide)/i;
 
 export interface HistoryOpts { now?: () => number; gapMs?: number; sleep?: (ms: number) => Promise<void> }
 
@@ -81,7 +81,7 @@ export class PoolHistory {
       this.lastAsk = Date.now();
       try { return await fn(); } catch (e) {
         const msg = String((e as Error)?.message ?? e);
-        if (i >= RETRIES || (!RATE_LIMITED.test(msg) && TOO_MANY_LOGS.test(msg))) throw e;
+        if (i >= RETRIES || (!RATE_LIMITED.test(msg) && QUERY_TOO_WIDE.test(msg))) throw e;
         await this.sleep(1000 * 2 ** i);
       }
     }
@@ -131,7 +131,7 @@ export class PoolHistory {
           logs = await this.ask(() => this.reader.getLogs({ address: this.ref.pool, topics: [[V3_SWAP_TOPIC, PCS_V3_SWAP_TOPIC]], fromBlock: from, toBlock: to }));
         } catch (e) {
           const msg = String((e as Error)?.message ?? e);
-          if (to === from || RATE_LIMITED.test(msg) || !TOO_MANY_LOGS.test(msg)) throw e;
+          if (to === from || RATE_LIMITED.test(msg) || !QUERY_TOO_WIDE.test(msg)) throw e;
           refused = Math.min(refused, to - from + 1);
           this.span = Math.max(1, Math.floor((to - from + 1) / 2));
           continue;

@@ -10,6 +10,7 @@
  */
 import { getAddress, id } from 'ethers';
 import type { ChainConfig } from '../../live/chains';
+import { QUERY_TOO_WIDE } from '../chains/fallback';
 import { V4_POOL_MANAGER } from '../../market/poolEvents';
 import { DEFAULT_MIN_HOLDER_COVERAGE, HOLDER_PAGE_CAP, explainedBalance, geckoTop10Share, holderCoverage, holderShares, includedHolders, isExcludedHolder, protocolExclusions, type HolderMath, type HolderRow } from '../../market/holders';
 import { ERC20, FACTORY, V3_FACTORY } from '../dex/abis';
@@ -349,7 +350,7 @@ async function readLogs(q: HolderQuery, opts: HolderReadOpts, exclude: readonly 
       cursor = from - 1;
     } catch (e) {
       const msg = `${(e as Error).message ?? ''} ${JSON.stringify((e as { error?: unknown }).error ?? '')}`;
-      if (span > 250 && /exceeds limit|too many|10000/i.test(msg)) { span = Math.floor(span / 2); i--; continue; }
+      if (span > 250 && QUERY_TOO_WIDE.test(msg)) { span = Math.floor(span / 2); i--; continue; }
       break;
     }
   }

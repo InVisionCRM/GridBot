@@ -69,4 +69,16 @@ describe('FallbackReader: rate limits', () => {
     expect(await settle(r.call(tx))).toMatchObject({ e: 'connect ECONNREFUSED' });
     expect([a.at, b.at, c.at].map((x) => x.map((t) => t - T0))).toEqual([[0], [0], [0]]);
   });
+
+  it('one RPC: a log query the node refuses as too wide is thrown at once; the endpoint stays healthy, no episode opens', async () => {
+    // ethers' wrapping of Robinhood's answer to a wide eth_getLogs (a liquidity bot's swap-history sync, 2026-10-28)
+    const wide = () => Object.assign(new Error('could not coalesce error (error={ "code": -32000, "message": "logs matched by query exceeds limit of 10000" }, payload={ "id": 750, "jsonrpc": "2.0", "method": "eth_getLogs", "params": [ ] }, code=UNKNOWN_ERROR, version=6.17.0)'), { code: 'UNKNOWN_ERROR' });
+    let calls = 0;
+    const p = { getLogs: async () => { calls++; throw wide(); } } as unknown as JsonRpcProvider;
+    const r = new FallbackReader(['https://rpc.mainnet.chain.robinhood.com'], 4663, [p]);
+    expect(await settle(r.getLogs({ address: '0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca', topics: [], fromBlock: 1, toBlock: 2 } as never))).toMatchObject({ e: expect.stringMatching(/exceeds limit of 10000/) });
+    expect(calls).toBe(1);
+    expect(r.health().state).toBe('ok');
+    expect(r.checkHealth(0)).toBeNull();
+  });
 });

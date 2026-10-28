@@ -47,6 +47,13 @@ type CallErr = {
 };
 /** What a node says when a call really reverted (or ran out of gas / hit a bad opcode): deterministic, any RPC agrees. */
 const REVERT_TEXT = /revert|invalid opcode|out of gas|stack (underflow|overflow)|invalid jump/i;
+/**
+ * What a node says about an eth_getLogs span that matched more logs than it serves. Every RPC says the same for that
+ * span, so the caller halves it (poolHistory, holderRead); it is the node answering, not the transport failing.
+ * (2026-10-28: a liquidity bot's swap-history sync on Robinhood's single RPC raised the "RPC failing on every
+ * endpoint" alert, with a push, this way.)
+ */
+export const QUERY_TOO_WIDE = /exceeds limit|more than \d+ results|response size|block range|range (is )?too (large|wide)/i;
 
 /**
  * ethers v6 turns ANY JSON-RPC error on eth_call / eth_estimateGas into CALL_EXCEPTION "missing revert data"
@@ -73,6 +80,7 @@ export function isTransportError(e: unknown): boolean {
   if (code && FINAL.has(code)) return false;
   const msg = String((e as Error)?.message ?? e);
   if (/execution reverted|revert/i.test(msg) && code !== 'SERVER_ERROR') return false;
+  if (QUERY_TOO_WIDE.test(msg)) return false;
   return true;
 }
 
