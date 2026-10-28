@@ -137,16 +137,16 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
       <section className="join" aria-label="Summary">
         <div>
           <span title={GEN_CALC}>Generated</span>
-          <b className={cls(gen.live ? genTone : null)} data-testid="home-generated">{gen.live ? unitsText(gen.live, 3) : '—'}</b>
-          <small className="muted fees-sub" title="Total P&L of your live bots, per quote coin: current value + paid out − capital in, price change included.">P&L {livePnl ? unitsText(livePnl, 3) : '—'}</small>
-          {gen.paper && <small className="muted fees-sub" data-testid="home-generated-paper" title="Paper bots' Generated, kept apart from the live headline.">paper {unitsText(gen.paper, 3)}</small>}
+          <b className={`units ${cls(gen.live ? genTone : null)}`} data-testid="home-generated">{gen.live ? unitsText(gen.live, 3) : '—'}</b>
+          <small className="muted fees-sub units" title="Total P&L of your live bots, per quote coin: current value + paid out − capital in, price change included.">P&L {livePnl ? unitsText(livePnl, 3) : '—'}</small>
+          {gen.paper && <small className="muted fees-sub units" data-testid="home-generated-paper" title="Paper bots' Generated, kept apart from the live headline.">paper {unitsText(gen.paper, 3)}</small>}
           <Sparkline points={span >= 20 * 86_400_000 ? month : series} width={120} height={32} />
         </div>
         <div>
           <span title={FEES_TODAY_CALC}>Fees earned today</span>
-          <b>{unitsText(today.liveEarned, 3)}</b>
+          <b className="units">{unitsText(today.liveEarned, 3)}</b>
           {(Object.keys(today.paperEarned).length > 0 || Object.keys(today.livePaid).length > 0) && (
-            <small className="muted fees-sub">
+            <small className="muted fees-sub units">
               {[Object.keys(today.paperEarned).length ? `paper ${unitsText(today.paperEarned, 3)}` : '', Object.keys(today.livePaid).length ? `trade fees paid ${unitsText(today.livePaid, 3, false)}` : ''].filter(Boolean).join(' · ')}
             </small>
           )}
@@ -160,7 +160,8 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
         <div>
           <span>Best bot</span>
           <b className={cls(bestGen?.usd)}>{best ? (best.label || best.name || best.base) : '—'}</b>
-          {best && bestGen && <small className="muted fees-sub">{bestGen.text}</small>}
+          {/* no number twice: with one live bot earning, its Generated is the headline's */}
+          {best && bestGen && <small className="muted fees-sub units">{gen.live && unitsText(best.metrics?.generated, 3) === unitsText(gen.live, 3) ? 'all of the live Generated' : bestGen.text}</small>}
           {best && <Sparkline points={portfolioSeries([best], 'ALL').length > 2 ? portfolioSeries([best], 'ALL') : [0, bestGen?.usd ?? 0]} width={120} height={32} />}
           {!best && bots.length > 0 && <small className="muted fees-sub">live bots only</small>}
         </div>

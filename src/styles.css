@@ -1048,6 +1048,10 @@ label.wide input { min-width: 180px; }
 .join .sparkline, .join .segs { grid-column: 2; grid-row: 1 / span 2; justify-self: end; align-self: center; }
 .join .sparkline { width: 88px; height: 36px; max-width: none; }
 .join .fees-sub { grid-column: 1; grid-row: 3; font-size: 11px; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* units per coin ("+63.24 USDC · +0.00173 ETH"): wrap at the separators instead of cutting the figure off */
+.join b.units { font-size: 20px; white-space: normal; overflow-wrap: anywhere; }
+.join .fees-sub.units { white-space: normal; overflow: visible; }
+.join .fees-sub.units + .fees-sub.units { grid-row: 4; }
 .segs { display: flex; flex-wrap: wrap; gap: 3px; width: 72px; height: auto; margin: 0; justify-content: flex-end; }
 .segs i { flex: 1; background: var(--raised); border-radius: 1px; max-width: 18px; }
 .segs i.on { background: var(--profit); }
@@ -1196,6 +1200,7 @@ label.wide input { min-width: 180px; }
   .join > div:nth-child(2n) { border-right: 0; }
   .join > div:nth-last-child(-n+2) { border-bottom: 0; }
   .join b { font-size: 24px; white-space: normal; }
+  .join b.units { font-size: 16px; }
   .join .sparkline { width: 52px; height: 28px; }
   .segs { width: 52px; }
   .home-num { font-size: 36px; }
