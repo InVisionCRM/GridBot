@@ -543,14 +543,17 @@ export class MultiBot {
     const guard = p.guard ?? this.startGuard(() => this.hub.def(p.stable ?? eng.state.stable).chainId);
     p = { ...p, guard };
     // A running grid is refused by eng.start; checking coverage first would report a misleading shortfall.
-    if (p.mode === 'live' && eng.state.status !== 'running') await this.assertCovers(p.stable ?? eng.state.stable, p.totalCapitalQuote, p.limits);
+    // its own coins (a stopped grid keeps them reserved) are what it restarts with: not counted twice
+    if (p.mode === 'live' && eng.state.status !== 'running') await this.assertCovers(p.stable ?? eng.state.stable, p.totalCapitalQuote, p.limits, id);
     await eng.start(p);
   }
   /** Paper, or no safety report: resumes at once (as before). LIVE on a market with a report: fresh check first. */
   resume(id: string): Promise<void> {
     const e = this.engine(id);
-    if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.stable)) { e.resume(); return Promise.resolve(); }
-    return this.resumeSafety(id, e.state.stable, `Grid ${this.hub.label(e.state.stable)}`, (o) => e.resume(o));
+    return this.resumeFunded(e.state.mode, e.state.stable, () => {
+      if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.stable)) { e.resume(); return Promise.resolve(); }
+      return this.resumeSafety(id, e.state.stable, `Grid ${this.hub.label(e.state.stable)}`, (o) => e.resume(o));
+    });
   }
   stop(id: string, why?: Halt) {
     const halt = why ?? requestHalt('bot-stop', 'POST /api/bot/grids/:id/stop', this.now());
@@ -651,8 +654,10 @@ export class MultiBot {
   /** Paper, or no safety report: resumes at once (as before). LIVE on a market with a report: fresh check first. */
   resumeTrend(id: string): Promise<void> {
     const e = this.trend(id);
-    if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.quote)) { e.resume(); return Promise.resolve(); }
-    return this.resumeSafety(id, e.state.quote, e.state.name || this.hub.label(e.state.quote), (o) => e.resume(o));
+    return this.resumeFunded(e.state.mode, e.state.quote, () => {
+      if (!this.needsResumeCheck(e.state.mode, e.state.status, e.state.quote)) { e.resume(); return Promise.resolve(); }
+      return this.resumeSafety(id, e.state.quote, e.state.name || this.hub.label(e.state.quote), (o) => e.resume(o));
+    });
   }
   stopTrend(id: string, why?: Halt) {
     const halt = why ?? requestHalt('bot-stop', 'POST /api/bot/trends/:id/stop', this.now());
@@ -874,14 +879,15 @@ export class MultiBot {
     for (const h of this.holdings?.() ?? []) addCoin(h.chainId, h.token, h.id, 'trader', h.amount);
     for (const e of this.engines.values()) {
       const s = e.state, d = e.def;
-      if (!d || s.mode !== 'live' || !s.config || (s.status !== 'running' && !s.inFlight)) continue;
+      // a stopped live grid still owns its lots and free quote (it trades them on Resume); archiving releases them
+      if (!d || s.mode !== 'live' || !s.config || s.archivedAt || (s.status === 'idle' && !s.inFlight)) continue;
       const t = totals(e.modeTrades(), s.lastPrice);
       add(d, 'quote', s.id, 'grid', Math.max(0, s.config.totalCapitalQuote + t.realized - t.pos.costQuote - sentProfit(s)));
       add(d, 'base', s.id, 'grid', t.pos.plsHeld);
     }
     for (const e of this.trendEngines.values()) {
       const s = e.state, d = e.def;
-      if (!d || s.mode !== 'live' || (s.status !== 'running' && !s.position)) continue;
+      if (!d || s.mode !== 'live' || s.archivedAt || (s.status === 'idle' && !s.position)) continue;
       add(d, 'quote', s.id, 'trend', s.cash);
       add(d, 'base', s.id, 'trend', s.position?.pls ?? 0);
     }
@@ -973,16 +979,25 @@ export class MultiBot {
     }
   }
 
-  private async assertCovers(key: string, amount: number, limits?: Partial<SafetyLimits>) {
+  private async assertCovers(key: string, amount: number, limits?: Partial<SafetyLimits>, except?: string) {
     const d = this.hub.def(key);
     if (!this.hub.rt(d.chainId).signer) return;
-    await this.assertCoin(d.chainId, d.quote, amount, limits);
+    await this.assertCoin(d.chainId, d.quote, amount, limits, except);
+  }
+  /**
+   * Resume of a live bot with a key: first the wallet must still hold what every live bot counts of its market's coins
+   * (they may have been spent while it was stopped). Paper, or no key (the engine says why), resume as before.
+   */
+  private resumeFunded(mode: string, key: string, go: () => Promise<void>): Promise<void> {
+    const d = this.hub.def(key);
+    if (mode !== 'live' || !this.hub.rt(d.chainId).signer) return go();
+    return this.assertBooked(d.chainId, d.quote).then(() => this.assertBooked(d.chainId, d.base)).then(go);
   }
   /**
    * Live: `amount` of a coin is in the wallet on top of what live bots and the smart trader already count; spending the
    * native coin also keeps the gas reserve. Reads the wallet first.
    */
-  async assertCoin(chainId: number, token: Holding['token'], amount: number, limits?: Partial<SafetyLimits>) {
+  async assertCoin(chainId: number, token: Holding['token'], amount: number, limits?: Partial<SafetyLimits>, except?: string) {
     await this.refreshWallet(true);
     const label = this.tokLabel(chainId, token.symbol);
     // A balance that couldn't be read stops a live start: it used to skip this check entirely.
@@ -990,7 +1005,8 @@ export class MultiBot {
     const unread = !w ? 'no balance read yet' : w.error ?? (token.native ? null : tok ? tok.error : `${label} isn't tracked in this wallet`);
     if (unread) throw new FundsError(`Couldn't read your ${label} balance (${unread}), so nothing was started. Try again in a minute.`);
     const have = this.walletAmount(chainId, token)!;
-    const row = this.allocations().rows.find((r) => r.token === label), cur = row?.allocated ?? 0;
+    const row = this.allocations().rows.find((r) => r.token === label);
+    const cur = (row?.allocated ?? 0) - (row?.bots.filter((b) => b.id === except).reduce((a, b) => a + b.amount, 0) ?? 0);
     const f = humanAmount, held = row?.bots.filter((b) => b.kind === 'trader').reduce((a, b) => a + b.amount, 0) ?? 0;
     const trader = held > 0 ? ` (the smart trader counts ${f(held)} ${label} of it)` : '';
     if (token.native) {
