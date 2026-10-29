@@ -76,16 +76,22 @@ export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { 
     ...changes.map(([k, v, t]): [string, string, string] => [k, signed(v), t]),
     ['Open positions', signed(q.unrealized), 'Coins bought and not sold yet / the position\'s price side, at today\'s price minus what they cost. Not in Generated until they sell.'],
   ];
-  // Made at event prices is the headline's number when everything was generated in the quote coin (prices don't matter then)
+  // Made at event prices is the headline's number when everything was generated in the quote coin (prices don't matter
+  // then); with nothing generated yet it says nothing and is left out
   const gen = m.generated, onlyQuote = gen && Object.entries(gen).every(([k, u]) => k === sym || u === 0);
+  const genZero = !!gen && Object.values(gen).every((u) => u === 0);
   if (q.made != null && onlyQuote && Math.abs(q.made - (gen![sym] ?? 0)) <= 1e-9 * Math.max(1, Math.abs(q.made))) raw[0][1] = 'same as Generated';
   else if (raw[0][1] !== '—' && echoes(unitsText(gen, 9), raw[0][1])) raw[0][1] = 'same as Generated';
-  // a row printing what a hidden row (shown elsewhere on the screen) prints is left out; rows printing the same
-  // value as each other are merged into one row with both names (a real dash is not a value)
-  const hidden = new Set(raw.filter(([k]) => no.has(k)).map(([, v]) => v));
+  if (genZero) raw.shift();
+  // a row printing what a hidden row (shown elsewhere on the screen) prints says "same as <it>" instead of the figure
+  // (never deleted: Total P&L keeps its % of capital in); rows printing the same as each other are merged into one row
+  // with both names (a real dash is not a value)
+  const hiddenBy = new Map(raw.filter(([k, v]) => no.has(k) && v !== '—').map(([k, v]) => [v, k] as const));
   const rows: [string, string, string][] = [];
-  for (const [k, v, t] of raw) {
-    if (no.has(k) || (v !== '—' && hidden.has(v))) continue;
+  for (const [k, figure, t] of raw) {
+    if (no.has(k)) continue;
+    const h = figure !== '—' ? hiddenBy.get(figure) : undefined;
+    const v = h ? `same as ${h}` : figure;
     const same = v !== '—' ? rows.find((r) => r[1] === v) : undefined;
     if (same) { same[0] = `${same[0]} = ${k}`; same[2] = `${same[2]}\n${k}: ${t}`; continue; }
     rows.push([k, v, t]);
