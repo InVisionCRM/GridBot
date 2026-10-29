@@ -54,27 +54,6 @@ export function naturalPlaces(n: number): number {
   return Math.min(6, Math.max(0, 3 - Math.floor(Math.log10(a))));
 }
 
-/** Step size of `formatAmt` for this amount. Breakdown rows for a coin share its Generated step. */
-export function standardUnit(n: number): number {
-  const a = Math.abs(n);
-  if (!(a > 0)) return 1;
-  if (a >= 1e9) return 1e7;
-  if (a >= 1e6) return 1e4;
-  if (a >= 1e5) return 1e3;
-  if (a >= 1e4) return 1e2;
-  return 10 ** -naturalPlaces(n);
-}
-
-/** The number `formatAmt` actually shows, so parts can be aimed at that figure. */
-export function displayedValue(n: number): number {
-  if (!Number.isFinite(n) || n === 0) return 0;
-  const text = formatAmt(n).replace(/^[+−-]/, '').replace(/,/g, '');
-  const suffix = text.match(/[kMB]$/)?.[0];
-  const scale = suffix === 'B' ? 1e9 : suffix === 'M' ? 1e6 : suffix === 'k' ? 1e3 : 1;
-  const mantissa = Number(text.replace(/[kMB]$/, ''));
-  return (n < 0 ? -1 : 1) * mantissa * scale;
-}
-
 /**
  * Largest-remainder rounding. Each part moves by at most one `unit`,
  * and the parts then equal `target`.
