@@ -1128,6 +1128,8 @@ export class GridEngine {
       price: this.state.lastPrice, priceAt: this.state.lastPriceAt, balances: this.balances, walletBalances: this.walletBalances,
       intervals: this.state.intervals, quotePerBuy: this.state.quotePerBuy, usdPerBuy: this.state.quotePerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
       trades: trades.slice(-100).reverse().map(legacyTradeNames),
+      /** every trade row of this mode (the list above is the newest 100) */
+      tradeCount: trades.length,
       // gasUsd / costUsd: deprecated aliases (quote coin) for older API readers
       pnl: { realized: t.realized, unrealized: t.unrealized, gasQuote: t.gasQuote, plsHeld: t.pos.plsHeld, costQuote: t.pos.costQuote, gasUsd: t.gasQuote, costUsd: t.pos.costQuote },
       profits: this.state.profits,
