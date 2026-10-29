@@ -1059,11 +1059,15 @@ export class MultiBot {
       // polled every 3rd tick to spare public RPCs.
       const n = this.tickN++;
       let raw: Record<string, number> = {};
+      // the poll prices the outlier guard accepted; engines see only these
+      const px: Record<string, number> = {};
       try {
         raw = await this.prices(this.watchedKeys(n % 3 === 0));
-        const px: Record<string, number> = {};
-        for (const [pair, p] of Object.entries(raw)) {
-          if (this.candles.tick(pair, p, Math.floor(now / 1000))) { px[pair] = p; this.hub.setSpot(pair, p); }
+        // originals first: a flipped market (HEX~) is accepted only when its original (HEX) was, in this same poll
+        const pairs = Object.entries(raw).sort(([a], [b]) => Number(isFlipKey(a)) - Number(isFlipKey(b)));
+        for (const [pair, p] of pairs) {
+          const ok = isFlipKey(pair) ? unflipKey(pair) in px : this.candles.tick(pair, p, Math.floor(now / 1000));
+          if (ok) { px[pair] = p; this.hub.setSpot(pair, p); }
           else this.activity.emitEvent({ type: 'info', kind: 'system', level: 'warn', pair, chainId: this.hub.has(pair) ? this.hub.def(pair).chainId : undefined, msg: `${this.hub.label(pair)} poll price ${p.toPrecision(6)} is >${CandleStore.OUTLIER * 100}% from the last candle; ignored until ${CandleStore.CONFIRM} polls confirm it (trend stops keep the previous price)` });
         }
         this.spotsAt = now;
@@ -1077,7 +1081,8 @@ export class MultiBot {
       const traded = new Set<number>();
       const memo = new Map<number, Map<string, Promise<unknown>>>();
       const ctxFor = (cid: number, key: string) => ({
-        price: traded.has(cid) ? undefined : raw[key],
+        price: traded.has(cid) ? undefined : px[key],
+        held: key in raw && !(key in px),
         wallet: <T>(k: string, read: () => Promise<T>): Promise<T> => {
           const m = memo.get(cid) ?? new Map<string, Promise<unknown>>();
           memo.set(cid, m);

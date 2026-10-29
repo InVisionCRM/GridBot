@@ -138,6 +138,8 @@ export interface EngineDeps {
 export interface TickCtx {
   /** This market's price from the poll's price batch */
   price?: number;
+  /** The poll held this market's price back as an outlier (not confirmed yet): this tick only settles a swap in flight */
+  held?: boolean;
   /** One wallet read per key per poll (cleared after a trade on the chain) */
   wallet?: <T>(key: string, read: () => Promise<T>) => Promise<T>;
 }
@@ -755,6 +757,8 @@ export class GridEngine {
     this.ticking = true;
     try {
       if (this.state.inFlight && !this.draining) await this.reconcile();
+      // an unconfirmed outlier price is neither traded on nor republished as the spot (reading it again would get it too)
+      if (ctx.held) return;
       // The poll's price batch already read this market's price (MultiBot.tickAll); reading it again per grid doubled
       // the RPC calls. A grid ticked on its own (or after a trade on its chain this poll) reads its own.
       const price = ctx.price != null && ctx.price > 0 && !this.state.inFlight ? ctx.price : await this.executor.getPrice();
