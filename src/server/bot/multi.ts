@@ -1337,10 +1337,12 @@ export class MultiBot {
       const p = this.multi.portfolio[mode];
       if (p.length && this.now() - p[p.length - 1][0] < 60_000) continue;
       const rows = this.botRows(mode, this.metricsById());
-      if (!rows.length) continue;
-      const eq = rows.reduce((a, r) => a + (r.usdPerQuote ? r.equity * r.usdPerQuote : 0), 0);
-      const re = rows.reduce((a, r) => a + (r.usdPerQuote ? r.realized * r.usdPerQuote : 0), 0);
-      const cap = rows.reduce((a, r) => a + (r.usdPerQuote ? r.capital * r.usdPerQuote : 0), 0);
+      // a bot with no dollar rate (after a restart, or while its market's read fails) would count as 0 and later show
+      // its whole P&L as the period's change: no snapshot until every bot is priced
+      if (!rows.length || rows.some((r) => !r.usdPerQuote)) continue;
+      const eq = rows.reduce((a, r) => a + r.equity * r.usdPerQuote!, 0);
+      const re = rows.reduce((a, r) => a + r.realized * r.usdPerQuote!, 0);
+      const cap = rows.reduce((a, r) => a + r.capital * r.usdPerQuote!, 0);
       pushCapped(p, [this.now(), usdFmt(eq), usdFmt(re), usdFmt(cap)], 4000);
       changed = true;
     }
@@ -1355,8 +1357,11 @@ export class MultiBot {
     const now = this.now();
     const day = new Date(now); day.setHours(0, 0, 0, 0);
     const periods = { today: day.getTime(), d7: now - 7 * 86_400_000, all: 0 };
-    const usd = (r: (typeof rows)[number], v: number) => (r.usdPerQuote ? v * r.usdPerQuote : 0);
-    const realizedSince = (from: number) => rows.reduce((a, r) => a + usd(r, r.trades.filter((t) => t.timestamp >= from).reduce((s, t) => s + t.realizedPnlQuote, 0)), 0);
+    // dollars only for bots with a rate; an unpriced bot is unknown (null), counted in totals.unpriced, never 0
+    const usd = (r: (typeof rows)[number], v: number) => (r.usdPerQuote ? v * r.usdPerQuote : null);
+    const add = (a: number, v: number | null) => a + (v ?? 0);
+    const unpriced = rows.filter((r) => !r.usdPerQuote).length;
+    const realizedSince = (from: number) => rows.reduce((a, r) => add(a, usd(r, r.trades.filter((t) => t.timestamp >= from).reduce((s, t) => s + t.realizedPnlQuote, 0))), 0);
     // A closed bot gave its coins back: its history (trades, fees, gas) and its final P&L stay in the all-time sums,
     // the period changes and the table, but what the bots hold now and what is allocated to them count open bots only.
     const open = rows.filter((r) => r.status !== 'closed');
@@ -1364,8 +1369,8 @@ export class MultiBot {
     // adding or removing a bot is not counted as a gain or loss. A closed bot's equity − capital is its final P&L,
     // so closing one does not move the period changes either.
     const ph = this.multi.portfolio[mode];
-    const eqNow = rows.reduce((a, r) => a + usd(r, r.equity), 0);
-    const capNow = rows.reduce((a, r) => a + usd(r, r.capital), 0);
+    const eqNow = rows.reduce((a, r) => add(a, usd(r, r.equity)), 0);
+    const capNow = rows.reduce((a, r) => add(a, usd(r, r.capital)), 0);
     const pnlNow = eqNow - capNow;
     const pnlAt = (from: number) => {
       const p = ph.find((x) => x[0] >= from);
@@ -1374,6 +1379,8 @@ export class MultiBot {
     // All-time is since the bots started: every bot's equity − capital, with no snapshot to compare against (the first
     // snapshot can be far younger than the bots, e.g. after a state migration, and would hide what came before it).
     const per = Object.fromEntries(Object.entries(periods).map(([k, from]) => {
+      // with an unpriced bot the P&L now leaves it out: no change can be told (snapshots are taken only fully priced)
+      if (unpriced) return [k, { realized: realizedSince(from), equityChange: null, partial: false }];
       if (from === 0) return [k, { realized: realizedSince(0), equityChange: pnlNow, partial: false }];
       const e = pnlAt(from);
       return [k, { realized: realizedSince(from), equityChange: e ? pnlNow - e.v : null, partial: e?.partial ?? false }];
@@ -1393,11 +1400,11 @@ export class MultiBot {
         metrics: m,
         plsHeld: r.plsHeld, quoteFree: r.quoteFree, startedAt: r.startedAt,
         stats: { ...st, profitFactor: st.profitFactor === Infinity ? null : st.profitFactor, maxDrawdown: drawdown(r.equityHist).max, timeInMarket: r.inMarket },
-        equity_hist: r.equityHist.map(([t, v]) => [t, usd(r, v)] as [number, number]),
+        equity_hist: r.usdPerQuote ? r.equityHist.map(([t, v]) => [t, v * r.usdPerQuote!] as [number, number]) : [],
       };
     });
     const now_ = new Set(open.map((r) => r.id));
-    const sum = (k: 'valueUsd' | 'equityUsd' | 'capitalUsd' | 'realizedUsd' | 'unrealizedUsd' | 'feesUsd' | 'gasUsd', held = false) => bots.filter((b) => !held || now_.has(b.id)).reduce((a, b) => a + b[k], 0);
+    const sum = (k: 'valueUsd' | 'equityUsd' | 'capitalUsd' | 'realizedUsd' | 'unrealizedUsd' | 'feesUsd' | 'gasUsd', held = false) => bots.filter((b) => !held || now_.has(b.id)).reduce((a, b) => add(a, b[k]), 0);
     // Allocation by asset: base held (valued via the hub oracle) + free quote, labelled per chain.
     const alloc = new Map<string, { asset: string; chainId: number; usd: number; amount: number | null }>();
     const addA = (asset: string, chainId: number, v: number, amount: number | null) => {
@@ -1408,8 +1415,9 @@ export class MultiBot {
     for (const r of open) {
       const d = this.hub.has(r.pair) ? this.hub.def(r.pair) : null;
       if (!d) continue;
-      if (r.plsHeld > 0) addA(this.tokLabel(d.chainId, d.base.symbol), d.chainId, r.plsHeld * (this.hub.baseUsd(r.pair) ?? 0), r.plsHeld);
-      addA(this.tokLabel(d.chainId, d.quote.symbol), d.chainId, usd(r, r.quoteFree), r.quoteFree);
+      const baseUsd = this.hub.baseUsd(r.pair), freeUsd = usd(r, r.quoteFree);
+      if (r.plsHeld > 0 && baseUsd != null) addA(this.tokLabel(d.chainId, d.base.symbol), d.chainId, r.plsHeld * baseUsd, r.plsHeld);
+      if (freeUsd != null) addA(this.tokLabel(d.chainId, d.quote.symbol), d.chainId, freeUsd, r.quoteFree);
     }
     // Per-chain breakdown (aggregated ≈USD); live also shows each chain's gas wallet (paper spends no real gas).
     const chains = this.hub.runtimes().map((rt) => {
@@ -1420,17 +1428,17 @@ export class MultiBot {
       return {
         chainId: rt.cfg.id, key: rt.cfg.key, name: rt.cfg.name, short: rt.cfg.short, color: rt.cfg.color, status: rt.cfg.status,
         bots: bs.length, running: bs.filter((b) => b.status === 'running').length,
-        valueUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.valueUsd, 0),
-        equityUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.equityUsd, 0), capitalUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.capitalUsd, 0),
-        realizedUsd: bs.reduce((a, b) => a + b.realizedUsd, 0), unrealizedUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.unrealizedUsd, 0),
-        gasUsd: bs.reduce((a, b) => a + b.gasUsd, 0),
+        valueUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => add(a, b.valueUsd), 0),
+        equityUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => add(a, b.equityUsd), 0), capitalUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => add(a, b.capitalUsd), 0),
+        realizedUsd: bs.reduce((a, b) => add(a, b.realizedUsd), 0), unrealizedUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => add(a, b.unrealizedUsd), 0),
+        gasUsd: bs.reduce((a, b) => add(a, b.gasUsd), 0),
         gasNative: native, gasNativeUsd: native != null && nat ? native * nat : null,
         lowGas: mode === 'live' && rt.gas.low, nativeSymbol: rt.cfg.nativeSymbol,
       };
     }).filter((c) => c.bots > 0 || c.gasNative != null);
     return {
       t: now, mode,
-      totals: { valueUsd: sum('valueUsd', true), equityUsd: sum('equityUsd', true), capitalUsd: sum('capitalUsd', true), realizedUsd: sum('realizedUsd'), unrealizedUsd: sum('unrealizedUsd', true), feesUsd: sum('feesUsd'), gasUsd: sum('gasUsd') },
+      totals: { unpriced, valueUsd: sum('valueUsd', true), equityUsd: sum('equityUsd', true), capitalUsd: sum('capitalUsd', true), realizedUsd: sum('realizedUsd'), unrealizedUsd: sum('unrealizedUsd', true), feesUsd: sum('feesUsd'), gasUsd: sum('gasUsd') },
       periods: per,
       allocation: [...alloc.values()].filter((x) => x.usd > 0.005).sort((a, b) => b.usd - a.usd),
       chains,
