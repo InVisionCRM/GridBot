@@ -286,7 +286,7 @@ export class Converter {
         if (r.unwrap) {
           const units = amountToUnits(amt, row.coin.decimals), use = units < raw ? units : raw;
           const ex = this.executor(rt, hub.quoter(hub.usdRefKey(job.chainId) ?? r.hops[0].key));
-          const hash = await rt.gate.run(() => ex.sendTx({ to: cfg.wrappedNative.address, data: WRAPPED.encodeFunctionData('withdraw', [use]), value: 0n }));
+          const { hash } = await rt.gate.run(() => ex.sendTx({ to: cfg.wrappedNative.address, data: WRAPPED.encodeFunctionData('withdraw', [use]), value: 0n }));
           sent = true;
           row.steps[step].hash = hash;
           await this.mined(rt, hash);

@@ -89,7 +89,8 @@ export interface BotState {
   /** Profit waiting to be sent (send mode), in the spend coin */
   payoutPending: number;
   /** A transfer that was sent and isn't settled yet: never resend while this is set */
-  payoutInFlight: { hash: string; amount: number; to: string; at: number } | null;
+  /** nonce: absent on records from before it was kept. stuck: said once that it has no receipt (see TxFate). */
+  payoutInFlight: { hash: string; amount: number; to: string; at: number; nonce?: number; stuck?: boolean } | null;
   payouts: Payout[];
   /**
    * Live unwind in progress. The bot stays out of new entries and sells what it holds through the normal
@@ -650,7 +651,21 @@ export class GridEngine {
     if (s.payoutInFlight) {
       const f = s.payoutInFlight;
       const r = await this.executor.transferStatus(f.hash);
-      if (!r) return;
+      if (!r) {
+        const fate = await this.executor.txFate(f.nonce, f.at, this.now());
+        if (fate === 'dropped') {
+          // never ran: the profit is still in payoutPending, so it goes out again with the next payout
+          s.payoutInFlight = null;
+          this.ev('info', `Grid ${this.label}: profit transfer ${f.hash} was dropped by the network (never ran); it is sent again`, { level: 'warn' });
+          this.save();
+        } else if ((fate === 'used' || fate === 'stuck') && !f.stuck) {
+          f.stuck = true;
+          this.save();
+          const why = fate === 'used' ? 'its nonce was used by another transaction from this wallet (sped up or cancelled in a wallet app?)' : 'it is still not mined after an hour; speed it up or cancel it in your wallet app';
+          this.ev('info', `Grid ${this.label}: profit transfer ${f.hash} has no receipt: ${why}. Trading goes on; no other payout is sent until it settles`, { level: 'error', notify: true });
+        }
+        return;
+      }
       s.payoutInFlight = null;
       s.payouts.push({ at: this.now(), amount: r.ok ? f.amount : 0, to: f.to, txHash: f.hash, gasQuote: r.gasPls * price, ok: r.ok, paper: s.mode === 'paper' });
       const sym = this.def?.quote.symbol ?? s.stable;
@@ -673,8 +688,8 @@ export class GridEngine {
     if (s.payoutPending < this.payoutMin) return;
     const to = s.profits.to, amount = s.payoutPending;
     const send = async () => {
-      const hash = await this.executor.sendTransfer(to, amount);
-      s.payoutInFlight = { hash, amount, to, at: this.now() };
+      const { hash, nonce } = await this.executor.sendTransfer(to, amount);
+      s.payoutInFlight = { hash, amount, to, at: this.now(), nonce };
       this.save();
       this.tag('info', `sent profit transfer ${hash}: ${amount} → ${to}`);
     };

@@ -91,6 +91,10 @@ export interface LpStep {
   /** Tx sent for this stage and not settled yet: never resent while set */
   hash?: string;
   sentAt?: number;
+  /** The nonce that tx used (absent on records from before it was kept) */
+  nonce?: number;
+  /** Set when the bot stopped over this stage's tx (stuck, replaced, or unreadable): it is said once, then waited on */
+  halted?: string;
   /** A swap that was broadcast but not confirmed when the executor gave up waiting */
   swap?: {
     hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number;
@@ -1048,18 +1052,27 @@ export class LpEngine {
   private async settled(s: LpStep, v: PoolView, need?: { pool: LpPool; events: NpmEvent[] }): Promise<ReceiptLike | null> {
     const hash = s.hash!;
     const r = await this.hub.rt(this.chainId).reader.getTransactionReceipt(hash);
-    if (!r) return null;
+    if (!r) {
+      if (s.halted) return null; // already stopped over it: keep waiting quietly
+      const fate = await (this.executor as LiveExecutor).txFate(s.nonce, s.sentAt ?? this.now(), this.now());
+      if (fate === 'dropped') {
+        // the node doesn't have it and its nonce is unused: it never ran, so the stage is sent again
+        s.hash = undefined; s.sentAt = undefined; s.nonce = undefined;
+        this.ev('info', `Liquidity ${this.label}: ${s.action} ${s.stage} ${hash} was dropped by the network (never ran); sending it again`, { level: 'warn' });
+        this.save();
+        return null;
+      }
+      if (fate === 'used') this.haltOver(s, `${s.action} ${s.stage} ${hash} has no receipt, but its nonce was used by another transaction from this wallet (sped up or cancelled in a wallet app?); stopped. Nothing is sent again: check the wallet on the explorer`);
+      if (fate === 'stuck') this.haltOver(s, `${s.action} ${s.stage} ${hash} is still not mined after an hour; stopped. Speed it up or cancel it in your wallet app; the bot settles it once it has a receipt`);
+      return null;
+    }
     if (r.status === 1 && need && !need.events.every((n) => events(r, need.pool.npm, n).length)) {
       s.unread = (s.unread ?? 0) + 1;
-      if (s.unread < UNREADABLE_READS) return null;
-      const msg = `${s.action} ${s.stage} ${hash} was mined but its receipt has no ${need.events.join('/')} event after ${s.unread} reads; stopped. Nothing is sent again: check the tx on the explorer`;
-      this.state.halt = systemHalt('error', msg, this.now());
-      this.state.status = 'stopped';
-      this.save();
-      throw new Error(msg);
+      if (s.unread < UNREADABLE_READS || s.halted) return null;
+      this.haltOver(s, `${s.action} ${s.stage} ${hash} was mined but its receipt has no ${need.events.join('/')} event after ${s.unread} reads; stopped. Nothing is sent again: check the tx on the explorer`);
     }
     this.addGas(await this.receiptGas(r, v), v);
-    s.hash = undefined; s.sentAt = undefined; s.unread = undefined;
+    s.hash = undefined; s.sentAt = undefined; s.nonce = undefined; s.unread = undefined; s.halted = undefined;
     if (r.status === 1) return r;
     s.tries++;
     if (s.tries >= MAX_TRIES) {
@@ -1071,12 +1084,21 @@ export class LpEngine {
     this.ev('info', `Liquidity ${this.label}: ${s.stage} reverted; trying again`, { level: 'warn' });
     return null;
   }
+  /** Stop the bot over a stage's tx, once (it keeps its hash, so nothing is sent again, and keeps being read). */
+  private haltOver(s: LpStep, msg: string): never {
+    s.halted = msg;
+    this.state.halt = systemHalt('error', msg, this.now());
+    this.state.status = 'stopped';
+    this.save();
+    throw new Error(msg);
+  }
   /** Send a step's tx through the chain's queue; nothing is sent while the bot isn't running (KILL ALL, paused). */
   private async send(s: LpStep, req: { to: string; data: string; value: bigint }) {
     if (this.state.status !== 'running') return;
     const run = async () => {
       if (this.state.status !== 'running') return; // stopped while it waited its turn
-      s.hash = await (this.executor as LiveExecutor).sendTx(req);
+      const sent = await (this.executor as LiveExecutor).sendTx(req);
+      s.hash = sent.hash; s.nonce = sent.nonce;
       s.sentAt = this.now();
       this.save();
     };
