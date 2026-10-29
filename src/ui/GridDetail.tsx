@@ -9,7 +9,7 @@ import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { MoneyDetails, type ValueChangeRow } from './MoneyDetails';
 import { isCloseOut } from '../live/ledger';
-import { metricsOf } from './deskStats';
+import { botFacts, metricsOf } from './deskStats';
 import { ago, cls, num, pct, px, qty, sameShown, time, pxShort } from './fmt';
 import { ChainBadge, DexTag, Orientation, chainOf, dexName, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -89,7 +89,7 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
 }
 
 /** Figures the grid page shows elsewhere, left out of the chart's stat table: Generated (headline), the range (under the chart). */
-const GRID_SHOWN_ELSEWHERE = ['Generated', 'Range', 'Fees paid'] as const; // fees: the Fees tile
+const GRID_SHOWN_ELSEWHERE = ['Generated', 'Range', 'Fees paid'] as const; // fees paid: the Fees + gas tile
 
 /** Something on the grid still has to sell (or a trade is queued / in flight): the range can't move yet. */
 const busyLevels = (g: AnyObj) => !!g.inFlight || g.queue.length > 0 || g.intervals.some((i: AnyObj) => i.status !== 'inactive' && i.status !== 'waitingBuy');
@@ -157,7 +157,7 @@ function Fills({ s, g, gen }: { s: AnyObj; g: AnyObj; gen: number | null }) {
   return (
     <div className="card">
       <div className="card-head">
-        <h3>Fills <span className="muted small">{g.trades.length}</span></h3>
+        <h3>Fills <span className="muted small">{g.tradeCount ?? g.trades.length}{(g.tradeCount ?? 0) > g.trades.length ? ` · newest ${g.trades.length} shown` : ''}</span></h3>
         <label className="check small"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> All columns</label>
       </div>
       <div className="table-wrap"><table>
@@ -241,6 +241,8 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const lv = levelAmounts(g);
 
   const m = metricsOf(g);
+  // all fills (the trade list is the newest 100): pool fees + gas, the Fees paid figure
+  const feesPaid = botFacts(g).feesPaid;
   const q = quoteSym(g);
   const rs = rangeState(g);
   // Money figures come from the server's metrics (src/metrics/botMetrics.ts); nothing is added up here.
@@ -264,11 +266,11 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <span className="tag">Grid</span>
           {g.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
           <DexTag name={g.dexName} feeBps={g.feeBps} feeTier={g.feeTier} />
-          <span className={`st ${closing ? 'closing' : g.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{g.inFlight ? ' · swap in flight' : ''}</span>
+          <span className={`st ${closing ? 'closing' : g.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Paused'}{g.inFlight ? ' · swap in flight' : ''}</span>
         </div>
         <div className="detail-actions">
           {running
-            ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
+            ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Pause</button>
             : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => chk.run(g.mode === 'live', () => botApi(`grids/${g.id}/resume`, 'POST')))}>Resume</button>}
           <button type="button" className="btn danger" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
           <button type="button" className="btn danger" disabled={busy || running || !!g.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>
@@ -309,7 +311,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
         <div className="kpi"><span><L tip="Buy → sell round trips this grid finished. Profitable = made money after fees and gas.">Completed trades</L></span><div className="kpi-v">{g.stats.roundTrips}</div><span className="sub">{g.stats.roundTrips > 1 && <>avg {qty(g.stats.avgNet, q, 4)} each · </>}{g.stats.wins} profitable</span></div>
         <div className="kpi"><span><L tip={`The pool's price now, in ${q} per ${g.base}: what one sell would get, after the pool fee.`}>Price</L></span><div className="kpi-v" title={g.price ? px(g.price) : undefined}>{g.price ? pxShort(g.price) : '—'}</div><span className="sub">{q} per {g.base}</span></div>
-        <div className="kpi"><span><L tip="Pool fees paid on this grid's fills, in the quote coin.">Fees</L></span><div className="kpi-v">{qty(((g.trades ?? []) as AnyObj[]).reduce((a, t) => a + (typeof t.feeQuote === 'number' ? t.feeQuote : 0), 0), q, 4, false)}</div><span className="sub">paid on fills</span></div>
+        <div className="kpi"><span><L tip={`Pool fees and gas paid on every fill this grid made, in ${q} (the same as Fees paid).`}>Fees + gas</L></span><div className="kpi-v">{feesPaid == null ? '—' : qty(feesPaid, q, 4, false)}</div><span className="sub">all fills</span></div>
       </div>
       <MoneyDetails b={g} note="what it holds, open positions, total P&L" hide={held > 0 ? ['Open positions'] : []} changes={stopSale(g)} breakdown={held > 0 ? [
         ['Holding', <>{num(held, held < 10 ? 6 : 2)} {g.base}, bought for {lv.buyEcho(qty(g.pnl.costQuote, q, 5, false))}, worth {qty(held * (g.price ?? 0), q, 5, false)} now</>, `The ${g.base} the grid bought and hasn't sold yet. It sells one level up.`],

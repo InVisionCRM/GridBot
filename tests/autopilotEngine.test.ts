@@ -243,7 +243,8 @@ describe('smart trader (paper, mock chain)', () => {
     expect(bot.status().grids[0]).toMatchObject({ status: 'stopped', closing: false, archivedAt: null });
     expect(acct().bots).toHaveLength(1);
     bot.setLimits(id, { maxPriceImpact: 0.03 });
-    bot.resume(id);
+    await bot.resume(id); // a live resume reads the wallet first (it must still hold what the live bots count)
+    expect(bot.status().grids[0].status).toBe('running');
     await ap.tick(); // running again with no close under way: asked again
     await bot.whenSettled();
     for (let i = 0; i < 3; i++) await bot.tickAll(); // the unwind sells what it holds

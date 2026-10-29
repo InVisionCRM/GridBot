@@ -37,7 +37,6 @@ export interface RangeBlock {
 export interface CoinBreakdown {
   earned: number;
   gasSwap: number;
-  rangeMoveLoss: number;
   taxes: number;
   bridge: number;
   generated: number;

@@ -12,13 +12,13 @@ import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { Hub } from '../chains/hub';
 import { legacyTradeNames, roundTripCosts, upgradeQuoteNames, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
-import { TF_SEC, bucketStart, closedOnly, fillGaps, isTF, type Candle, type TF } from '../../market/candles';
+import { TF_SEC, bucketStart, closedOnly, isTF, type Candle, type TF } from '../../market/candles';
 import { DEFAULT_COSTS, type CostModel } from '../../market/costs';
 import {
   computeIndicators, costGate, expectedMovePct, htfAllows, openRisk, positionSize, priceExit, signalAt, trail,
   validateTrendConfig, warmup, DEFAULT_TREND, type DrawnLine, type ExitReason, type RiskState, type TrendConfig,
 } from '../../market/strategy';
-import { tradeStats, pushCapped, drawdown } from '../../market/stats';
+import { tradeStats, pushCapped, drawdown, downsampleByTime } from '../../market/stats';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type ChainReader, type Executor, type Fill, type MarketSnapshot, type Quote, type TxSender } from './chain';
 import type { Emit } from './activity';
 import { isHalt, requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
@@ -67,6 +67,8 @@ export interface TrendInFlight {
   swapTxHash?: string;
   /** Base units per native coin when the swap was sent (gas on a receipt reconciled after a restart). Absent on old records. */
   basePerNative?: number;
+  /** The least the swap could deliver (the quote's minimum): booked, flagged, when a mined swap's output log can't be read. Absent on old records. */
+  minOutHuman?: number;
 }
 
 export interface TrendTrade extends LiveTrade {
@@ -319,6 +321,8 @@ export class TrendEngine {
     this.state.closing = false;
     this.state.archivedAt = null;
     this.state.halt = null;
+    // nothing queued before the stop runs now: its price and ATR are from a candle that closed while it was stopped
+    if (!this.state.inFlight) this.state.queue = [];
     if (override !== undefined) this.state.startOverride = override;
     this.closeNote = null;
     this.save();
@@ -449,6 +453,7 @@ export class TrendEngine {
 
   private enqueue(j: Omit<TrendJob, 'id' | 'createdAt'>) {
     if (this.state.queue.some((q) => q.side === j.side)) return;
+    if (j.side === 'buy' && (this.state.status !== 'running' || this.state.closing)) return; // no entry once stopped or closing
     const job: TrendJob = { ...j, id: `${this.state.id}-${this.now().toString(36)}-${j.side}`, createdAt: this.now() };
     this.state.queue.push(job);
     const amt = j.side === 'buy' ? `${j.amount.toPrecision(5)} ${this.quoteSym}` : `${j.amount.toPrecision(6)} ${this.baseSym}`;
@@ -539,9 +544,13 @@ export class TrendEngine {
     }
   }
 
+  /**
+   * Real closed candles only. Hours the app did not poll are not flat candles: filling them in counted an outage toward
+   * max hold and warm-up, and decayed ATR and the EMAs toward a made-up price.
+   */
   private series(tf: TF) {
     const nowSec = Math.floor(this.now() / 1000);
-    return fillGaps(closedOnly(this.d.candles(this.state.quote, tf), tf, nowSec), tf);
+    return closedOnly(this.d.candles(this.state.quote, tf), tf, nowSec);
   }
 
   private async evaluateCandles(price: number) {
@@ -568,9 +577,11 @@ export class TrendEngine {
         this.signal('stop_moved', last.t, `trail ${before.toPrecision(6)} → ${pos.risk.stop.toPrecision(6)}`);
         this.emit('stop_moved', `${s.name}: trailing stop ${before.toPrecision(6)} → ${pos.risk.stop.toPrecision(6)}`, { data: { stop: pos.risk.stop } });
       }
-      if (sig.exit) {
-        this.signal('exit', last.t, sig.note);
-        this.emit('signal', `${s.name}: EXIT signal — ${sig.note}`, { level: 'warn' });
+      // every new candle in order, as the backtest does: an exit cross on an earlier one is not lost
+      const ex = fresh.map((f) => signalAt(ind, k, k.findIndex((x) => x.t === f.t), c)).find((g) => g.exit);
+      if (ex) {
+        this.signal('exit', last.t, ex.note);
+        this.emit('signal', `${s.name}: EXIT signal — ${ex.note}`, { level: 'warn' });
         this.enqueue({ side: 'sell', reason: 'signal', amount: pos.pls, triggerPrice: price });
       } else if (c.maxHoldBars > 0 && pos.bars >= c.maxHoldBars) {
         this.signal('exit', last.t, `max hold ${c.maxHoldBars} bars`);
@@ -598,6 +609,8 @@ export class TrendEngine {
     const risk = openRisk(price, atrV, c);
     const size = Math.min(s.cash, positionSize(s.cash, s.cash, risk.entry, risk.stop, c));
     const m = await (this.d.market ? this.d.market(s.quote) : this.hub.quoter(s.quote).market());
+    // a Stop, Close or archive that landed during the read: no entry from this candle
+    if (this.state.status !== 'running' || this.state.closing || this.state.archivedAt) return;
     // Real per-market costs: the pool's LP fee, chain gas units, base-converted gas price and any L2 L1-data fee.
     const model: CostModel = {
       feeBps: m.feeBps ?? this.def?.pool.feeBps ?? FEE_BPS, pool: { quoteReserve: m.quoteReserve, plsReserve: m.plsReserve }, gasPricePls: m.gasPricePls,
@@ -665,7 +678,7 @@ export class TrendEngine {
       }
       if (q.priceImpact > s.limits.maxPriceImpact) return this.skip(job, `price impact ${(q.priceImpact * 100).toFixed(2)}% > cap ${(s.limits.maxPriceImpact * 100).toFixed(2)}%`);
       if (!q.balanceOk) return this.skip(job, `insufficient balance (${q.balanceNote})`);
-      s.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative };
+      s.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative, minOutHuman: q.minOutHuman };
       this.save();
       try {
         const f = await this.executor.execute(q, {
@@ -761,10 +774,19 @@ export class TrendEngine {
       if (this.now() / 1000 > f.deadline + 300) { drop(); this.skip(job, `swap ${f.swapTxHash} never mined before its deadline`); this.save(); }
       return;
     }
+    // mined OK but what arrived can't be read: the guaranteed minimum is booked (flagged); an old record without it
+    // stops the bot naming the hash, keeping the record
+    const out = r.ok ? r.amountOutHuman ?? f.minOutHuman ?? null : null;
+    if (r.ok && out == null) {
+      this.state.status = 'stopped';
+      this.state.halt = systemHalt('error', `swap ${f.swapTxHash} mined, but what it brought could not be read from its receipt; stopped. Check the tx on the explorer.`, this.now());
+      this.save();
+      return;
+    }
     drop();
     if (r.gasUnknown) this.log('warn', `swap ${f.swapTxHash}: gas ${r.gasNative.toPrecision(4)} native not booked — the base/native rate was not saved with the swap and could not be read after the restart`);
-    if (r.ok && r.amountOutHuman > 0) {
-      this.recordFill(job, { txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman, amountOutHuman: r.amountOutHuman, gasPls: r.gasPls, fromReceipt: true }, f.price);
+    if (r.ok && out != null) {
+      this.recordFill(job, { txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman, amountOutHuman: out, gasPls: r.gasPls, fromReceipt: r.amountOutHuman != null }, f.price);
     } else {
       this.recordFailure(job, r.gasPls, f.price, f.swapTxHash, 'swap reverted (reconciled)');
       this.skip(job, 'swap reverted');
@@ -802,7 +824,7 @@ export class TrendEngine {
       stats: { ...tradeStats(closed), maxDrawdown: drawdown(s.equity).max, timeInMarket: s.startedAt ? inMarketMs / Math.max(1, this.now() - s.startedAt) : 0 },
       moveCount: trades.filter((t) => !t.failed).length,
       lastMoveAt: trades.reduce((m, t) => (!t.failed ? Math.max(m, t.timestamp || 0) : m), 0) || null,
-      equityHist: s.equity.slice(-600),
+      equityHist: downsampleByTime(s.equity, 600), // the whole life, not the newest 10 hours
       blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, lastError: this.lastError,
     };
   }

@@ -46,7 +46,7 @@ export function StatTable({ b, s, hide = [] }: { b: AnyObj; s: AnyObj; hide?: re
     ['Age', f.ageMs == null ? '—' : dur(f.ageMs)],
     ['Moves', f.moves.text ?? '—'],
     ['Win rate', f.winRate == null ? '—' : pct(f.winRate, 0)],
-    ['Fees paid', f.feesPaid == null ? '—' : qty(f.feesPaid, sym, 4, false), `Gas + swap fees paid, in ${sym || 'the quote coin'}; for an LP also what range moves locked in.`],
+    ['Fees paid', f.feesPaid == null ? '—' : qty(f.feesPaid, sym, 4, false), `Gas + swap fees paid, in ${sym || 'the quote coin'}.`],
     ['Fees earned', f.feesEarned == null ? '—' : qty(f.feesEarned, sym, 4, false), `In ${sym || 'the quote coin'}, both coins' fees at today's price.`],
     ['Range', range],
     ['Spacing', spacing],

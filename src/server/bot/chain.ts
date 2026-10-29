@@ -40,7 +40,7 @@ export interface ChainReader {
   call(tx: { to: string; data: string; from?: string }): Promise<string>;
   getBalance(address: string): Promise<bigint>;
   getFeeData(): Promise<{ gasPrice: bigint | null; maxFeePerGas: bigint | null }>;
-  getTransactionCount(address: string, blockTag: 'pending'): Promise<number>;
+  getTransactionCount(address: string, blockTag: 'pending' | 'latest'): Promise<number>;
   getTransactionReceipt(hash: string): Promise<ReceiptLike | null>;
 }
 
@@ -196,10 +196,23 @@ export interface Executor {
   /** Gas (base units) of one transfer of the spend coin, for the profit payout threshold */
   transferGasPls(): Promise<number>;
   /** Send `amountHuman` of the spend coin to `to`; returns the tx hash without waiting for it (paper: a simulated id) */
-  sendTransfer(to: string, amountHuman: number): Promise<string>;
+  sendTransfer(to: string, amountHuman: number): Promise<Sent>;
   /** A transfer by hash: null = not mined yet; ok false = reverted (gas still paid) */
   transferStatus(hash: string): Promise<{ ok: boolean; gasPls: number } | null>;
+  /** What became of a sent tx with no receipt yet (see TxFate). */
+  txFate(nonce: number | undefined, sentAt: number, now: number): Promise<TxFate>;
 }
+
+/** A transaction handed to the network: its hash and the nonce it used. */
+export interface Sent { hash: string; nonce: number }
+/**
+ * A sent tx with no receipt: wait (under TX_DROP_MS old, or still pending), dropped (the node doesn't have it and its
+ * nonce is unused: it never ran, safe to send again), used (its nonce was taken by another tx from this wallet, e.g. a
+ * speed-up or cancel in a wallet app: not safe to send again), stuck (still pending after TX_STUCK_MS).
+ */
+export type TxFate = 'wait' | 'dropped' | 'used' | 'stuck';
+export const TX_DROP_MS = 10 * 60_000;
+export const TX_STUCK_MS = 60 * 60_000;
 
 /** Gas units of one transfer: plain native send, or ERC-20 transfer (typical 35–55k; 65k covers proxied tokens like USDG). */
 export const TRANSFER_GAS = { native: 21_000, token: 65_000 };
@@ -213,7 +226,8 @@ function shortErr(e: unknown): string {
 /** A swap settled by hash: gas in base units (gasPls) and in the chain's native coin (gasNative). */
 export interface RecoverResult {
   ok: boolean;
-  amountOutHuman: number;
+  /** What arrived, from the receipt's logs. null = mined OK but no transfer to the wallet could be read (never 0). */
+  amountOutHuman: number | null;
   gasPls: number;
   gasNative: number;
   /** No base-per-native rate was saved with the swap or readable now: gasPls is 0, not native gas booked 1:1. */
@@ -530,7 +544,7 @@ export function parseAmountOut(receipt: ReceiptLike, account: string, tokenOut: 
   return sum;
 }
 
-function gasOf(r: ReceiptLike | null | undefined): bigint {
+export function gasOf(r: ReceiptLike | null | undefined): bigint {
   return r ? r.gasUsed * (r.gasPrice ?? 0n) : 0n;
 }
 
@@ -592,12 +606,27 @@ export class LiveExecutor implements Executor {
     const units = amountToUnits(amountHuman, t.decimals);
     if (!(units > 0n)) throw new Error(`nothing to send (${amountHuman} ${t.symbol})`);
     const req = t.native ? { to, data: '0x', value: units } : { to: t.address, data: ERC20.encodeFunctionData('transfer', [to, units]), value: 0n };
-    return (await this.send(req)).hash;
+    const { hash, nonce } = await this.send(req);
+    return { hash, nonce };
   }
 
-  /** Send any transaction (liquidity position calls) with this wallet's shared nonce; returns its hash without waiting. */
-  async sendTx(req: { to: string; data: string; value: bigint }): Promise<string> {
-    return (await this.send(req)).hash;
+  /** Send any transaction (liquidity position calls) with this wallet's shared nonce; returns its hash and nonce without waiting. */
+  async sendTx(req: { to: string; data: string; value: bigint }): Promise<Sent> {
+    const { hash, nonce } = await this.send(req);
+    return { hash, nonce };
+  }
+
+  async txFate(nonce: number | undefined, sentAt: number, now: number): Promise<TxFate> {
+    const age = now - sentAt;
+    if (age < TX_DROP_MS) return 'wait';
+    if (nonce == null) return age < TX_STUCK_MS ? 'wait' : 'stuck'; // a record from before the nonce was kept
+    const a = await this.address(), reader = this.quoter.reader;
+    if ((await reader.getTransactionCount(a, 'latest')) > nonce) return 'used';
+    if ((await reader.getTransactionCount(a, 'pending')) <= nonce) {
+      this.resetNonce(); // the next send reuses the freed nonce
+      return 'dropped';
+    }
+    return age < TX_STUCK_MS ? 'wait' : 'stuck';
   }
 
   async transferStatus(hash: string) {
@@ -639,7 +668,7 @@ export class LiveExecutor implements Executor {
   }
 
   /** Send with an explicit nonce. On a send error the local nonce is dropped and re-synced from the chain. */
-  private async send(req: { to: string; data: string; value: bigint }): Promise<SentTx> {
+  private async send(req: { to: string; data: string; value: bigint }): Promise<SentTx & { nonce: number }> {
     const a = await this.address();
     const shared = this.opts.sharedNonce;
     let n: number;
@@ -657,7 +686,7 @@ export class LiveExecutor implements Executor {
         const reader = this.quoter.reader;
         const timeout = this.opts.receiptTimeoutMs;
         return {
-          hash,
+          hash, nonce: n,
           wait: async () => {
             const deadline = Date.now() + timeout;
             while (Date.now() < deadline) {
@@ -671,25 +700,36 @@ export class LiveExecutor implements Executor {
       }
       const tx = await this.signer.sendTransaction({ ...req, nonce: n });
       if (!shared) this.nonce = n + 1;
-      return tx;
+      return { hash: tx.hash, wait: (c, t) => tx.wait(c, t), nonce: n };
     } catch (e) {
       if (shared) shared.invalidate(); else this.nonce = null;
       throw e;
     }
   }
 
-  /** Wait for a receipt. ethers v6 throws on revert with the receipt attached; normalize that. */
-  private async waitFor(tx: SentTx): Promise<ReceiptLike> {
+  /**
+   * Wait for a receipt. ethers v6 throws on revert with the receipt attached; normalize that. A transaction replaced
+   * from the wallet (same nonce, sent by another app) is never taken as ours: only a re-priced copy (same call, more
+   * gas) is, under its new hash. A cancel or another call throws REPLACED, and the nonce counter is re-read.
+   */
+  private async waitFor(tx: SentTx): Promise<{ receipt: ReceiptLike; hash: string }> {
     try {
       const r = await tx.wait(1, this.opts.receiptTimeoutMs);
       if (!r) throw Object.assign(new Error('receipt timeout'), { code: 'TIMEOUT' });
-      return r;
+      return { receipt: r, hash: tx.hash };
     } catch (e) {
-      const rec = (e as { receipt?: ReceiptLike }).receipt;
-      if (rec) return rec;
+      const err = e as { code?: string; reason?: string; receipt?: ReceiptLike; replacement?: { hash?: string } };
+      if (err.code === 'TRANSACTION_REPLACED') {
+        if (err.reason === 'repriced' && err.receipt) return { receipt: err.receipt, hash: err.replacement?.hash ?? tx.hash };
+        this.resetNonce();
+        throw Object.assign(new Error(`transaction ${tx.hash} was ${err.reason ?? 'replaced'} by another one from this wallet, so it never ran`), { code: 'REPLACED' });
+      }
+      if (err.receipt) return { receipt: err.receipt, hash: tx.hash };
       throw e;
     }
   }
+  /** The next send re-reads the wallet's pending nonce from the chain (after a timeout, a drop or a replacement). */
+  private resetNonce() { if (this.opts.sharedNonce) this.opts.sharedNonce.invalidate(); else this.nonce = null; }
 
   async execute(q: Quote, hooks: ExecHooks): Promise<Fill> {
     let gasWei = 0n;
@@ -716,8 +756,8 @@ export class LiveExecutor implements Executor {
       approvalTxHash = tx.hash;
       hooks.onSent('approve', tx.hash);
       let r: ReceiptLike;
-      try { r = await this.waitFor(tx); } catch (e) {
-        if (this.opts.sharedNonce) this.opts.sharedNonce.invalidate(); else this.nonce = null;
+      try { r = (await this.waitFor(tx)).receipt; } catch (e) {
+        this.resetNonce();
         throw fail(`approve not confirmed: ${shortErr(e)}`, { retryable: true });
       }
       gasWei += gasOf(r);
@@ -746,8 +786,8 @@ export class LiveExecutor implements Executor {
         approvalTxHash = approvalTxHash ? `${approvalTxHash},${tx.hash}` : tx.hash;
         hooks.onSent('approve', tx.hash);
         let r: ReceiptLike;
-        try { r = await this.waitFor(tx); } catch (e) {
-          if (this.opts.sharedNonce) this.opts.sharedNonce.invalidate(); else this.nonce = null;
+        try { r = (await this.waitFor(tx)).receipt; } catch (e) {
+          this.resetNonce();
           throw fail(`Permit2 approve not confirmed: ${shortErr(e)}`, { retryable: true });
         }
         gasWei += gasOf(r);
@@ -772,8 +812,16 @@ export class LiveExecutor implements Executor {
     swapTxHash = tx.hash;
     hooks.onSent('swap', tx.hash);
     let r: ReceiptLike;
-    try { r = await this.waitFor(tx); } catch (e) {
-      // Unknown outcome: the tx may still be mined. Never resend; the engine reconciles by hash.
+    try {
+      const w = await this.waitFor(tx);
+      r = w.receipt;
+      if (w.hash !== tx.hash) { swapTxHash = w.hash; hooks.onSent('swap', w.hash); } // re-priced from the wallet: same swap
+    } catch (e) {
+      // replaced or cancelled from the wallet: it never ran (nothing was filled; the nonce is re-read)
+      if ((e as { code?: string }).code === 'REPLACED') throw fail(shortErr(e), { retryable: true });
+      // Unknown outcome: the tx may still be mined. Never resend; the engine reconciles by hash. The nonce counter is
+      // re-read on the next send: a dropped tx then frees its nonce, a pending one is still counted.
+      this.resetNonce();
       throw fail(`swap not confirmed yet: ${shortErr(e)}`, { pending: true });
     }
     gasWei += gasOf(r) + q.l1FeeWei;
@@ -792,7 +840,7 @@ export class LiveExecutor implements Executor {
     }
     const outHuman = fromUnits(out, q.decimalsOut);
     return {
-      txHash: tx.hash, approvalTxHash, ...(permit2TxHash ? { permit2TxHash } : {}), amountInHuman: q.amountInHuman, amountOutHuman: outHuman,
+      txHash: swapTxHash, approvalTxHash, ...(permit2TxHash ? { permit2TxHash } : {}), amountInHuman: q.amountInHuman, amountOutHuman: outHuman,
       gasPls: fromUnits(gasWei, 18) * k, gasNative: fromUnits(gasWei, 18), fromReceipt: outSource !== 'minOut',
       outSource, expectedOutHuman: q.quotedOutHuman, shortfallPct: q.quotedOutHuman > 0 ? 1 - outHuman / q.quotedOutHuman : 0,
       taxPct: 1 - (1 - q.taxInPct) * (1 - q.taxOutPct),
@@ -810,7 +858,7 @@ export class LiveExecutor implements Executor {
     const unknown = k == null ? { gasUnknown: true as const } : {};
     if (r.status !== 1) return { ok: false, amountOutHuman: 0, gasPls, gasNative, ...unknown };
     const out = parseAmountOut(r, await this.address(), tokenOut, this.quoter.chain.wrappedNative.address);
-    return { ok: true, amountOutHuman: out != null ? fromUnits(out, decimalsOut) : 0, gasPls, gasNative, ...unknown };
+    return { ok: true, amountOutHuman: out != null && out > 0n ? fromUnits(out, decimalsOut) : null, gasPls, gasNative, ...unknown };
   }
 }
 
@@ -872,8 +920,9 @@ export class PaperExecutor implements Executor {
     return (this.quoter.stable.native ? TRANSFER_GAS.native : TRANSFER_GAS.token) * m.gasPricePls + (m.extraPlsPerSwap ?? 0);
   }
   /** Paper payouts are bookkeeping only: nothing leaves the wallet. */
-  async sendTransfer() { return `paper-payout-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+  async sendTransfer(): Promise<Sent> { return { hash: `paper-payout-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, nonce: 0 }; }
   async transferStatus() { return { ok: true, gasPls: await this.transferGasPls() }; }
+  async txFate(): Promise<TxFate> { return 'wait'; } // paper transfers settle at once
 }
 
 /** Placeholder executor for a bot whose market is no longer configured (custom market removed). */
@@ -887,6 +936,7 @@ export class UnavailableExecutor implements Executor {
   async execute(): Promise<Fill> { throw new ExecError(this.why, { aborted: true }); }
   async recover() { return null; }
   async transferGasPls(): Promise<number> { throw new Error(this.why); }
-  async sendTransfer(): Promise<string> { throw new Error(this.why); }
+  async sendTransfer(): Promise<Sent> { throw new Error(this.why); }
   async transferStatus(): Promise<{ ok: boolean; gasPls: number } | null> { throw new Error(this.why); }
+  async txFate(): Promise<TxFate> { throw new Error(this.why); }
 }

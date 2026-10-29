@@ -213,7 +213,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     await expect(lp.move()).rejects.toThrow(/Resume it first/);
   });
 
-  it('fees per coin; a move locks in what the range did to the coin mix ("lost to moves"); earned after costs adds it up', async () => {
+  it('fees per coin; a move locks in what the range did to the coin mix ("lost to moves", reported beside what it earned); earned = fees − gas − swap fees', async () => {
     const { lp, m, pool } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
     await lp.tick();
@@ -237,7 +237,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s2.reranges).toBe(1);
     // the range sold PLS on the way up; taken out at that mix, it's worth less than the coins it went in with
     expect(p2.moveLoss).toBeGreaterThan(0);
-    expect(p2.net).toBeCloseTo(p2.fees - p2.gas - p2.swapCost - p2.moveLoss, 9);
+    expect(p2.net).toBeCloseTo(p2.fees - p2.gas - p2.swapCost, 9); // the move loss is reported, not taken out
     // the fees collected at the move are counted per coin
     expect(s2.totals.feeCoins.base).toBeGreaterThan(0);
     expect(s2.totals.feeCoins.quote).toBeGreaterThan(0);
@@ -403,7 +403,8 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
       quote: async (side: 'buy' | 'sell', amount: number) => ({ side, amountInHuman: amount, quotedOutHuman: side === 'buy' ? amount / price : amount * price, balanceOk: true, priceImpact: 0, tokenOut: side === 'buy' ? WPLS.address : DAI.address, decimalsOut: 18, price }),
       execute: async (q: { side: string; amountInHuman: number; quotedOutHuman: number }) => ({ txHash: '0xswap', amountInHuman: q.amountInHuman, amountOutHuman: q.quotedOutHuman, gasPls: 0.1 }),
       recover: async () => null,
-      sendTx: async (req: { to: string; data: string; value: bigint }) => { const hash = `0x${(sent.length + 1).toString(16).padStart(64, '0')}`; sent.push({ ...req, hash }); return hash; },
+      sendTx: async (req: { to: string; data: string; value: bigint }) => { const hash = `0x${(sent.length + 1).toString(16).padStart(64, '0')}`; sent.push({ ...req, hash }); return { hash, nonce: sent.length - 1 }; },
+      txFate: async (): Promise<string> => 'wait',
     };
     const make = () => { const e = new LpEngine({ net: NET, store, log: new Logger(true), hub, now: () => 1_800_000_000_000 }); (e as unknown as { executor: unknown }).executor = exec; return e; };
     const ok = (hash: string, logs: ReceiptLike['logs'] = []) => receipts.set(hash, { status: 1, gasUsed: 100_000n, gasPrice: 10n ** 9n, logs });
@@ -575,6 +576,66 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(s.totals.feeCoins.quote).toBeCloseTo(0.01, 9);
   });
 
+  it('Pause during a close whose exit is being sent: the exit is kept by hash and settles; the position is not left behind (a039)', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    const ex = (w.make() as unknown as { executor: { sendTx: (r: { to: string; data: string; value: bigint }) => Promise<{ hash: string; nonce: number }> } }).executor;
+    (e as unknown as { executor: unknown }).executor = ex;
+    w.approve();
+    await e.tick();
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    e.close();
+    const send = ex.sendTx;
+    ex.sendTx = async (r) => { const h = await send(r); e.stop('Pause pressed'); return h; }; // Pause lands while the exit is sent
+    await e.tick();
+    expect(w.sent).toHaveLength(2);
+    expect(e.status().step).toMatchObject({ action: 'close', stage: 'exit', hash: w.sent[1].hash });
+    w.ok(w.sent[1].hash, [w.ev('DecreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n]), w.ev('Collect', [5n, '0x0000000000000000000000000000000000000000', 1010n * 10n ** 18n, 4n * 10n ** 16n])]);
+    await e.tick();
+    expect(e.status().position).toBeNull();
+    expect(e.status().totals.fees).toBeGreaterThan(0);
+  });
+
+  it('Pause during a close that has not gone out yet drops it (nothing sent); Resume does not close (a039)', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    e.close();
+    e.stop('Pause pressed');
+    expect(e.status().step).toBeNull();
+    e.resume();
+    await e.tick();
+    expect(w.sent).toHaveLength(1);
+    expect(e.status().position).toMatchObject({ id: '5' });
+  });
+
+  it('Profits can not be switched while a fee send is in flight; the sent fees are booked (a031)', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, profits: { mode: 'send', to: '0x00000000000000000000000000000000000beef1' } });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    e.state.step = { action: 'send', stage: 'collect', tries: 0 };
+    await e.tick();
+    const col = w.sent.at(-1)!;
+    expect(e.status().step).toMatchObject({ action: 'send', hash: col.hash });
+    await expect(e.setProfits({ mode: 'reinvest' })).rejects.toThrow(/busy/);
+    w.ok(col.hash, [w.ev('Collect', [5n, '0x00000000000000000000000000000000000beef1', 0n, 30n * 10n ** 18n])]);
+    await e.tick();
+    expect(e.status().step).toBeNull();
+    expect(e.status().totals.sent).toBeGreaterThan(29);
+  });
+
   it('a pricey native base (like ETH/USDG): the native side goes in, keeping only gas for the open (bug: 2% of the USDG amount was kept back as ETH)', async () => {
     // 1000 DAI at 2400 DAI per PLS: about half (≈0.21 PLS) is bought for the position; the wallet already had 0.46 PLS for gas.
     const w = live({ price: 2400, balances: { pls: 0.46 + 0.2083, stable: 500 } });
@@ -633,7 +694,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     const w = live();
     const e = w.make();
     await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
-    const ex = (w.make() as unknown as { executor: { sendTx: (r: unknown) => Promise<string> } }).executor;
+    const ex = (w.make() as unknown as { executor: { sendTx: (r: unknown) => Promise<{ hash: string; nonce: number }> } }).executor;
     (e as unknown as { executor: unknown }).executor = ex;
     w.approve();
     let release!: () => void;
@@ -753,6 +814,73 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     for (let i = 0; i < 3; i++) await e.tick();
     expect(e.state.status).toBe('closed');
     expect(e.state.idle.base).toBeLessThan(1000); // part sold, the rest went on gas
+  });
+
+  it('a mined mint whose receipt has no readable events yet is never sent again: it settles when they appear, gas booked once', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    expect(w.sent).toHaveLength(1);
+    const mint = w.sent[0];
+    expect(mint.to).toBe(NPM);
+    const gas0 = e.state.totals.gas;
+    w.ok(mint.hash, []); // mined, status 1, but the node has not indexed its logs yet
+    await e.tick(); await e.tick();
+    expect(w.sent).toHaveLength(1);
+    expect(e.status().step).toMatchObject({ stage: 'mint', hash: mint.hash });
+    expect(e.state.totals.gas).toBe(gas0);
+    w.ok(mint.hash, [w.ev('IncreaseLiquidity', [777n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    expect(e.status().position).toMatchObject({ id: '777' });
+    expect(e.status().step).toBeNull();
+    expect(w.sent).toHaveLength(1);
+    expect(e.state.totals.gas).toBeGreaterThan(gas0);
+  });
+
+  it('a mined step whose events never become readable stops the bot and names the hash; nothing is sent again', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    const mint = w.sent[0];
+    w.ok(mint.hash, []);
+    for (let i = 0; i < 12; i++) await e.tick();
+    expect(e.status().status).toBe('stopped');
+    expect(e.status().halt?.detail).toContain(mint.hash); // the stop's lasting reason (said once, not every tick)
+    expect(e.status().step).toMatchObject({ stage: 'mint', hash: mint.hash });
+    expect(w.sent).toHaveLength(1);
+  });
+
+  it('a step the network dropped is sent again; one stuck or replaced stops the bot once, naming it (a041)', async () => {
+    for (const fate of ['dropped', 'stuck', 'used'] as const) {
+      const w = live();
+      const e = w.make();
+      await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      const ex = (w.make() as unknown as { executor: { txFate: () => Promise<string> } }).executor;
+      (e as unknown as { executor: unknown }).executor = ex;
+      await e.tick();
+      expect(w.sent).toHaveLength(1); // the approve, never mined
+      ex.txFate = async () => fate;
+      await e.tick();
+      if (fate === 'dropped') {
+        expect(w.sent).toHaveLength(2); // never ran: sent again in the same tick, under a new hash
+        expect(e.status().step).toMatchObject({ stage: 'approve', hash: w.sent[1].hash });
+        continue;
+      }
+      expect(e.status().status).toBe('stopped');
+      expect(e.status().halt?.detail).toContain(w.sent[0].hash);
+      expect(e.status().step).toMatchObject({ hash: w.sent[0].hash }); // kept: settles if it ever mines
+      const errs = e.lastError;
+      await e.tick(); await e.tick();
+      expect(w.sent).toHaveLength(1);
+      expect(errs).toContain(w.sent[0].hash);
+      expect(e.lastError).toBeNull(); // said once, then waited on quietly
+    }
   });
 
   it('a step that keeps reverting stops the bot after 3 tries (nothing lost)', async () => {

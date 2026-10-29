@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { ActivityTape } from '../src/v2/activity-tape';
 import { BotView } from '../src/v2/bot-view';
 import { adaptStatus } from '../src/v2/adapt-status';
+import { deskOf } from './helpers/deskOf';
 import { figureAtoms, generatedCardLine, ledgerLines, normFigure, sheetRows } from '../src/v2/figures';
 import { formatRangePx, formatTokenLine, tokenLineParts } from '../src/v2/format';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
@@ -200,7 +201,13 @@ describe('v2 copy stays in token units', () => {
       const rows = sheetRows(bot.metrics, { base: bot.base, quote: bot.quote });
       const generated = rows.find((r) => r.label === 'Generated');
       if (generated) {
-        expect(generated.value, bot.metrics.botId).toBe(formatTokenLine(bot.metrics.generated));
+        // the sheet prints Generated at its parts' step (a006), so it is the metric to the digits it shows
+        for (const m of generated.value.matchAll(/([+\u2212-])?\s*(\d[\d,]*)(?:\.(\d+))?([kMB])?\s+([A-Z][A-Z0-9]*)/g)) {
+          const t = bot.metrics.generated.find((x) => x.symbol === m[5])!;
+          if (m[4]) { expect(formatTokenLine([t]), bot.metrics.botId).toContain(m[0].trim().replace(/^\+\s*/, '')); continue; }
+          const shown = (m[1] === '−' || m[1] === '-' ? -1 : 1) * Number(`${m[2].replace(/,/g, '')}.${m[3] ?? '0'}`);
+          expect(Math.abs(shown - t.amount), `${bot.metrics.botId} ${m[5]}`).toBeLessThanOrEqual(0.5 * 10 ** -(m[3]?.length ?? 0) + 1e-12);
+        }
       }
       for (const label of ['Est. 7d', 'Est. 365d'] as const) {
         const got = rows.find((r) => r.label === label)?.value;
@@ -225,7 +232,7 @@ describe('v2 copy stays in token units', () => {
 
   it('shows every generated coin on the card as a number', () => {
     const now = 1_700_000_000_000;
-    const desk = adaptStatus({
+    const desk = deskOf({
       spotsAt: now,
       lps: [
         {
@@ -275,7 +282,7 @@ describe('v2 copy stays in token units', () => {
         feeCoins: { base: baseAmt, quote: quoteAmt },
       },
     });
-    const desk = adaptStatus({ spotsAt: now, lps: [lp('one', 65.04, 0.01531), lp('two', 6, 0.01)] }, [], now);
+    const desk = deskOf({ spotsAt: now, lps: [lp('one', 65.04, 0.01531), lp('two', 6, 0.01)] }, [], now);
     const bot = desk.bots.find((b) => b.metrics.botId === 'one');
     const line = formatTokenLine(bot?.metrics.generated ?? []);
     expect(line).toBe('+65.04 USDG + 0.01531 ETH');
@@ -319,7 +326,7 @@ describe('v2 copy stays in token units', () => {
 
   it('shows legacy grid capital as quote-coin units, never USD', () => {
     const now = 1_700_000_000_000;
-    const desk = adaptStatus({
+    const desk = deskOf({
       spotsAt: now,
       grids: [{
         id: 'usd', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',

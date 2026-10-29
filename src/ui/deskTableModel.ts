@@ -13,7 +13,7 @@ export interface DeskQuery {
   q: string;
   type: 'all' | 'grid' | 'trend' | 'lp' | 'trader' | 'paper';
   chain: number | 'all';
-  status: 'all' | 'running' | 'paused' | 'stopped' | 'out';
+  status: 'all' | 'running' | 'paused' | 'out';
   mode: 'all' | 'live' | 'paper';
   sort: DeskSort;
   dir: SortDir;
@@ -38,10 +38,9 @@ export function outOfRange(b: AnyObj): boolean {
   return false;
 }
 
-export function statusOf(b: AnyObj): 'running' | 'paused' | 'stopped' {
-  if (b.status === 'running') return 'running';
-  if (b.status === 'stopped' || b.status === 'paused') return 'paused';
-  return 'stopped';
+/** One word per real state: a bot that isn't running can be resumed, so it is Paused ("Stop all" is the kill switch). */
+export function statusOf(b: AnyObj): 'running' | 'paused' {
+  return b.status === 'running' ? 'running' : 'paused';
 }
 
 export interface DeskItem {

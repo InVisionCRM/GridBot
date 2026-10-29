@@ -311,6 +311,20 @@ describe('Profits: reinvested by default, or sent to an address (#6)', () => {
     expect(chain.transfers).toHaveLength(1);
   });
 
+  it('a transfer the network dropped goes out again; the profit is not lost (a041)', async () => {
+    const { chain, engine } = await roundTrip({ profits: { mode: 'send', to: PAYEE } }, (c) => { c.faults = [undefined as never, 'timeout']; });
+    const first = engine.state.payoutInFlight!;
+    expect(first).not.toBeNull();
+    chain.unmined.delete(first.hash); // dropped: it will never have a receipt
+    (engine as unknown as { executor: { txFate: () => Promise<string> } }).executor.txFate = async () => 'dropped';
+    await engine.tick();
+    expect(engine.state.payoutInFlight).toBeNull();
+    expect(engine.state.payoutPending).toBeGreaterThan(0);
+    await engine.tick();
+    expect(chain.transfers).toHaveLength(2);
+    expect(engine.state.payoutInFlight?.hash).not.toBe(first.hash);
+  });
+
   it('refuses a bad address or the bot\'s own wallet; can switch while running', async () => {
     const { engine } = make();
     await expect(engine.start({ mode: 'live', ...grid, profits: { mode: 'send', to: '0x123' } })).rejects.toThrow(/0x… address/);

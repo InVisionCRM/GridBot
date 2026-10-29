@@ -18,6 +18,19 @@ function Kpi({ label, children, sub, tip }: { label: string; children: React.Rea
 }
 
 /** Per quote coin: Σ of one quote-coin field over the bots (crypto units only; no dollar totals on screen). */
+/**
+ * The portfolio's per-coin KPIs. What the bots hold now (value, allocated, open positions) counts open bots only, as the
+ * server's totals do; a closed bot's history (from trades, fees, gas) stays in.
+ */
+export function portfolioKpis(bots: AnyObj[]) {
+  const open = bots.filter((b) => b.status !== 'closed');
+  return {
+    openCount: open.length,
+    value: perCoin(open, (b) => b.value), allocated: perCoin(open, (b) => b.capital), unrealized: perCoin(open, (b) => b.unrealized),
+    realized: perCoin(bots, (b) => b.realized), fees: perCoin(bots, (b) => b.fees), gas: perCoin(bots, (b) => b.gas),
+  };
+}
+
 function perCoin(bots: AnyObj[], v: (b: AnyObj) => number | null | undefined): Record<string, number> | null {
   let out: Record<string, number> | null = null;
   for (const b of bots) {
@@ -110,14 +123,19 @@ export function ModeAnalytics({ s, mode, seed }: { s: AnyObj; mode: 'live' | 'pa
   const botsOfMode = [...(s.grids ?? []), ...(s.trends ?? [])].filter((b: AnyObj) => b.mode === mode);
   const tot = ov?.totals;
   const bots: AnyObj[] = ov?.bots ?? [];
+  // what the bots hold now and what is allocated count open bots only (as the server's totals); closed ones stay in the
+  // history (From trades, Fees / gas) and the table
+  const k = portfolioKpis(bots);
   const per = ov?.periods;
   const allocTotal = (ov?.allocation ?? []).reduce((a: number, x: AnyObj) => a + x.usd, 0);
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF((x) => ({ ...x, [k]: e.target.value }));
   const P = ({ k }: { k: 'today' | 'd7' | 'all' }) => {
     const p = per?.[k];
     if (!p || !bots.length) return <>—</>;
-    const v = p.equityChange ?? p.realized;
-    return <><AnimatedNumber value={v} format={(x) => inEth(x, ethUsd, true)} className={cls(v)} /><small className="muted"> from trades {inEth(p.realized, ethUsd, true)}{p.partial ? ' · partial' : ''}</small></>;
+    // an unknown change (no snapshot that far back, or a bot without a price yet) is a dash, never the realized figure
+    const v: number | null = p.equityChange;
+    const unpriced = tot?.unpriced ? ` · ${tot.unpriced} without a price yet` : '';
+    return <>{v == null ? '—' : <AnimatedNumber value={v} format={(x) => inEth(x, ethUsd, true)} className={cls(v)} />}<small className="muted"> from trades {inEth(p.realized, ethUsd, true)}{p.partial ? ' · partial' : ''}{unpriced}</small></>;
   };
 
   return (
@@ -128,14 +146,14 @@ export function ModeAnalytics({ s, mode, seed }: { s: AnyObj; mode: 'live' | 'pa
       <div className="card">
         <h3>{paper ? 'Paper portfolio' : 'Live portfolio'} <span className="muted small">{paper ? 'paper bots only' : 'live bots only: real money'} · all chains · per quote coin; cross-coin totals ≈ETH at ETH's price from the chain's native/stable market</span></h3>
         <div className="kpi-row">
-          <Kpi label="Total value" tip="Everything the bots hold (their coins at today's prices plus the coin they spend), per quote coin. It moves with the market every day." sub={`≈ ${inEth(tot?.equityUsd, ethUsd)}`}><span className="big units">{unitsText(perCoin(bots, (b) => b.equity), 3, false)}</span></Kpi>
-          <Kpi label="Allocated" tip="The amounts you gave the bots, per quote coin." sub={`${ov?.bots?.length ?? 0} bots`}><span className="units">{unitsText(perCoin(bots, (b) => b.capital), 3, false)}</span></Kpi>
-          <Kpi label="From trades" tip="Banked from completed trades and liquidity fees after gas, per quote coin. Price moves don't change it."><span className={`units ${cls(tot?.realizedUsd)}`}>{unitsText(perCoin(bots, (b) => b.realized), 3)}</span></Kpi>
-          <Kpi label="Open positions" tip="The change on coins bought and not sold yet, at today's price, per quote coin. It moves with the market until they sell."><span className={`units ${cls(tot?.unrealizedUsd)}`}>{unitsText(perCoin(bots, (b) => b.unrealized), 3)}</span></Kpi>
+          <Kpi label="Total value" tip="Everything the bots hold (their coins at today's prices plus the coin they spend), per quote coin. It moves with the market every day." sub={`≈ ${inEth(tot?.valueUsd, ethUsd)}`}><span className="big units">{unitsText(k.value, 3, false)}</span></Kpi>
+          <Kpi label="Allocated" tip="The amounts you gave the bots, per quote coin." sub={`${k.openCount} bots`}><span className="units">{unitsText(k.allocated, 3, false)}</span></Kpi>
+          <Kpi label="From trades" tip="Banked from completed trades and liquidity fees after gas, per quote coin. Price moves don't change it."><span className={`units ${cls(tot?.realizedUsd)}`}>{unitsText(k.realized, 3)}</span></Kpi>
+          <Kpi label="Open positions" tip="The change on coins bought and not sold yet, at today's price, per quote coin. It moves with the market until they sell."><span className={`units ${cls(tot?.unrealizedUsd)}`}>{unitsText(k.unrealized, 3)}</span></Kpi>
           <Kpi label="Today" tip="How much the bots' value changed since midnight (realized from trades shown below it)."><P k="today" /></Kpi>
           <Kpi label="7 days" tip="How much the bots' value changed over the last 7 days (realized from trades shown below it)."><P k="d7" /></Kpi>
           <Kpi label="All-time" tip="How much the bots' value changed since they started (realized from trades shown below it)."><P k="all" /></Kpi>
-          <Kpi label="Fees / gas" tip={`Pool fees and network gas paid by your ${mode} bots, per quote coin.${paper ? " Simulated: nothing was paid." : ""}`}><span className="units">{unitsText(perCoin(bots, (b) => b.fees), 3, false)} / {unitsText(perCoin(bots, (b) => b.gas), 3, false)}</span></Kpi>
+          <Kpi label="Fees / gas" tip={`Pool fees and network gas paid by your ${mode} bots, per quote coin.${paper ? " Simulated: nothing was paid." : ""}`}><span className="units">{unitsText(k.fees, 3, false)} / {unitsText(k.gas, 3, false)}</span></Kpi>
         </div>
         {allocTotal > 0 && (
           <div className="alloc">
@@ -149,8 +167,8 @@ export function ModeAnalytics({ s, mode, seed }: { s: AnyObj; mode: 'live' | 'pa
             <tbody>{ov!.chains.map((c: AnyObj) => { const cb = bots.filter((b) => b.chainId === c.chainId); return (
               <tr key={c.chainId} className={chain !== 'all' && chain !== c.chainId ? 'dim' : ''}>
                 <td><span className="chain-badge" style={{ ['--cc' as string]: c.color }}>{c.short}</span> {c.name}</td>
-                <td>{c.running}/{c.bots}</td><td>{unitsText(perCoin(cb, (b) => b.equity), 3, false)}</td><td>{unitsText(perCoin(cb, (b) => b.capital), 3, false)}</td>
-                <td className={cls(c.realizedUsd)}>{unitsText(perCoin(cb, (b) => b.realized), 3)}</td><td className={cls(c.unrealizedUsd)}>{unitsText(perCoin(cb, (b) => b.unrealized), 3)}</td>
+                <td>{c.running}/{c.bots}</td><td>{unitsText(portfolioKpis(cb).value, 3, false)}</td><td>{unitsText(portfolioKpis(cb).allocated, 3, false)}</td>
+                <td className={cls(c.realizedUsd)}>{unitsText(perCoin(cb, (b) => b.realized), 3)}</td><td className={cls(c.unrealizedUsd)}>{unitsText(portfolioKpis(cb).unrealized, 3)}</td>
                 <td>{unitsText(perCoin(cb, (b) => b.gas), 3, false)}</td>
                 {!paper && <td>{c.gasNative != null ? `${num(c.gasNative, c.gasNative < 1 ? 5 : 1)} ${c.nativeSymbol}` : '—'}{c.lowGas ? <b className="neg"> LOW</b> : null}</td>}
               </tr>
@@ -169,7 +187,7 @@ export function ModeAnalytics({ s, mode, seed }: { s: AnyObj; mode: 'live' | 'pa
         <div className="table-wrap"><table>
           <thead><tr><th>Bot</th><th>Status</th><th>Equity</th><th>Return</th><th>Trades</th><th>Win</th><th>PF</th><th>Avg</th><th>Max DD</th><th>Streak (max)</th><th>In mkt</th><th>Best / worst</th></tr></thead>
           <tbody>{[...(ov?.bots ?? [])].sort((a: AnyObj, b: AnyObj) => Number(b.status === 'running') - Number(a.status === 'running') || (a.kind === b.kind ? 0 : a.kind === 'trend' ? -1 : 1)).map((b: AnyObj) => (
-            <tr key={b.id}><td><span className={`kind ${b.kind}`}>{b.kind}</span> {b.chainId !== s.legacyChainId ? <ChainBadge c={chainOf(s, b.chainId)} testnet={false} /> : null}{b.name}</td><td>{b.status}</td><td>{b.metrics?.quote?.symbol ? unitsText({ [b.metrics.quote.symbol]: b.equity }, 1, false) : '—'}</td>
+            <tr key={b.id}><td><span className={`kind ${b.kind}`}>{b.kind}</span> {b.chainId !== s.legacyChainId ? <ChainBadge c={chainOf(s, b.chainId)} testnet={false} /> : null}{b.name}</td><td>{b.status}</td><td>{b.metrics?.quote?.symbol ? unitsText({ [b.metrics.quote.symbol]: b.value }, 1, false) : '—'}</td>
               <td className={cls(b.returnPct)} title={b.metrics?.calc}>{pct(b.returnPct, 2, true)}</td>
               <td>{b.stats.count}</td><td>{pct(b.stats.winRate, 0)}</td><td>{num(b.stats.profitFactor, 2)}</td><td className={cls(b.stats.avg)}>{num(b.stats.avg, 5)}</td>
               <td className="neg">{pct(b.stats.maxDrawdown, 1)}</td>

@@ -37,10 +37,10 @@ describe('LP screen figures', () => {
     expect(html.match(/2 range moves/g)).toHaveLength(1);
     expect(html).not.toMatch(/Realized|Unrealized/);
     const waiting = html.slice(html.indexOf('Fees waiting'), html.indexOf('Compound at'));
-    // #43: the range-move loss and its count are in Details' per-coin breakdown (− Range moves, DAI), not a KPI of their own
-    expect(html).toContain('− Range moves, DAI');
-    expect(html).toContain('−0.4 DAI');
-    const moves = html.slice(html.indexOf('− Range moves, DAI'), html.indexOf('= Generated, DAI'));
+    // the range-move loss and its count are a Details info row inside Price change, not a cost of Generated or a KPI
+    expect(html).not.toContain('− Range moves');
+    expect(html).toMatch(/2 range moves locked in[^>]*><th>Range moves \(in Price change\)<\/th><td class="mono">−0\.4 DAI/);
+    const moves = html.slice(html.indexOf('Range moves (in Price change)'), html.indexOf('Open positions'));
     expect(waiting).not.toContain('$');
     expect(moves).not.toContain('$');
   });

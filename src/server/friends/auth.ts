@@ -41,6 +41,16 @@ export interface Session { f: string; s: number; e: number; role?: 'host' }
 
 const b64 = (b: Buffer) => b.toString('base64url');
 const mac = (key: Buffer, body: string) => createHmac('sha256', key).update(body).digest();
+/**
+ * The signature bytes, or null unless `sig` is exactly the base64url text we would have written for them. Node's
+ * decoder ignores the unused low bits of the last character (a 32-byte HMAC is 43 characters, the last carrying only
+ * 4 bits), so 'A' and 'B' at the end decode to the same bytes. Without this, a genuine cookie with its last character
+ * changed still verified: not a forgery (it needs the genuine signature), but a tampered value must never be accepted.
+ */
+function canonicalSig(sig: string): Buffer | null {
+  const got = Buffer.from(sig, 'base64url');
+  return b64(got) === sig ? got : null;
+}
 
 export function signSession(key: Buffer, s: Session): string {
   const body = b64(Buffer.from(JSON.stringify(s)));
@@ -54,8 +64,8 @@ export function readSession(key: Buffer, value: string | undefined, now: number)
   if (dot <= 0) return null;
   const body = value.slice(0, dot), sig = value.slice(dot + 1);
   if (!body || !sig || sig.includes('.')) return null;
-  const want = mac(key, body), got = Buffer.from(sig, 'base64url');
-  if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+  const want = mac(key, body), got = canonicalSig(sig);
+  if (!got || got.length !== want.length || !timingSafeEqual(got, want)) return null;
   let s: Session;
   try { s = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Session; } catch { return null; }
   if (typeof s.f !== 'string' || !Number.isInteger(s.s) || !(typeof s.e === 'number' && s.e > now)) return null;
@@ -101,8 +111,8 @@ export function signDevice(sessionKey: Buffer, issuedAt: number, session: number
 export function readDevice(sessionKey: Buffer, value: string | undefined, now: number, session: number): number | null {
   const m = /^d2\.(\d{1,9})\.(\d{1,16})\.([A-Za-z0-9_-]+)$/.exec(value ?? '');
   if (!m) return null;
-  const want = mac(deviceKey(sessionKey), `d2.${m[1]}.${m[2]}`), got = Buffer.from(m[3], 'base64url');
-  if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+  const want = mac(deviceKey(sessionKey), `d2.${m[1]}.${m[2]}`), got = canonicalSig(m[3]);
+  if (!got || got.length !== want.length || !timingSafeEqual(got, want)) return null;
   if (Number(m[1]) !== session) return null;
   const at = Number(m[2]);
   return at <= now && now - at < DEVICE_MS ? at : null;

@@ -25,3 +25,15 @@ describe('desk series', () => {
     expect(rangeTone(100, 200, 150, false)).toBe('out');
   });
 });
+
+describe('Home chip span', () => {
+  it('names the range when history covers it, and the real span when it is shorter', async () => {
+    const { coveredLabel } = await import('../src/ui/series');
+    const H = 3_600_000;
+    expect(coveredLabel('1D', 30 * H)).toBe('1D');
+    expect(coveredLabel('1W', 10 * H)).toBe('last 10.0h');
+    expect(coveredLabel('1M', 3 * 24 * H)).toBe('last 3.0d');
+    expect(coveredLabel('ALL', 3 * 24 * H)).toBe('last 3.0d');
+    expect(coveredLabel('1W', 0)).toBe('1W');
+  });
+});

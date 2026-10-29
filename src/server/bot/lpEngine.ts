@@ -34,13 +34,13 @@ import { DEFAULT_MAX_POOL_SHARE } from '../../market/poolSize';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
 import { fromUnits } from '../../live/swapMath';
-import { pushCapped } from '../../market/stats';
+import { downsampleByTime, pushCapped } from '../../market/stats';
 import { Hub } from '../chains/hub';
 import { ERC20, V3_NPM } from '../dex/abis';
 import { readCall, sameAddr } from '../dex/types';
 import { LpPool, type Coins, type PoolView } from '../lp/lpPool';
 import { collectAllData, collectData, exitData, increaseTx, mintTx } from '../lp/npmCalls';
-import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type Quote, type ReceiptLike, type TxSender } from './chain';
+import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type Quote, type ReceiptLike, type RecoverResult, type TxSender } from './chain';
 import { checkProfitMode, GAS_UNKNOWN_NOTE, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
@@ -91,13 +91,21 @@ export interface LpStep {
   /** Tx sent for this stage and not settled yet: never resent while set */
   hash?: string;
   sentAt?: number;
+  /** The nonce that tx used (absent on records from before it was kept) */
+  nonce?: number;
+  /** Set when the bot stopped over this stage's tx (stuck, replaced, or unreadable): it is said once, then waited on */
+  halted?: string;
   /** A swap that was broadcast but not confirmed when the executor gave up waiting */
   swap?: {
     hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number;
     /** Base per native coin from the quote at send time (gas in base units on settle). Old saves omit it: read again. */
     basePerNative?: number;
+    /** The least the swap could deliver: booked when a mined swap's output log can't be read. Old saves omit it. */
+    minOut?: number;
   };
   tries: number;
+  /** Reads of this stage's mined receipt whose expected events were not readable yet (the node had not indexed them) */
+  unread?: number;
   /** close: after taking the position out, sell the base coin back to the quote coin ("close to cash") */
   toCash?: boolean;
   /** close to cash: even the smallest piece of the sale was over the price-impact cap; the next try is not before this */
@@ -223,6 +231,8 @@ export interface LpHold {
 
 /** A tx stage that keeps reverting stops the bot after this many tries. */
 const MAX_TRIES = 3;
+/** A mined receipt still missing its events after this many reads stops the bot (its hash is kept, never re-sent). */
+const UNREADABLE_READS = 10;
 /** Fee samples for "fees earned today": every 5 minutes, 600 kept (~2 days), the last 26h sent with status. */
 const FEE_HIST_MS = 5 * 60_000;
 const FEE_HIST_CAP = 600;
@@ -318,7 +328,8 @@ export function backfillMoveLoss(s: LpState): LpState {
 }
 
 /** Logs of `name` from the position manager in a receipt. */
-function events(r: ReceiptLike, npm: string, name: 'IncreaseLiquidity' | 'DecreaseLiquidity' | 'Collect') {
+type NpmEvent = 'IncreaseLiquidity' | 'DecreaseLiquidity' | 'Collect';
+function events(r: ReceiptLike, npm: string, name: NpmEvent) {
   const topic = V3_NPM.getEvent(name)!.topicHash;
   return r.logs.filter((l: LogLike) => sameAddr(l.address, npm) && l.topics[0] === topic).map((l) => V3_NPM.parseLog({ topics: [...l.topics], data: l.data })!);
 }
@@ -454,8 +465,9 @@ export class LpEngine {
     this.state.status = 'stopped';
     this.state.closing = false;
     this.state.halt = halt;
-    // A close that has not been sent yet is dropped. A tx already broadcast is still settled.
-    if (this.state.step?.action === 'close' && !this.state.step.hash && !this.state.step.swap) this.state.step = null;
+    // A close that has not been sent yet is dropped. A tx already broadcast is still settled. While a tick runs it may be
+    // sending that close right now: the tick drops it at its end only if nothing went out (the hash is never lost).
+    if (!this.ticking && this.state.step?.action === 'close' && !this.state.step.hash && !this.state.step.swap) this.state.step = null;
     this.save();
     const note = typeof why === 'string' ? `paused — ${why}` : `stopped — ${halt.detail}`;
     this.ev('stopped', `Liquidity ${this.label} ${note}${this.state.position ? '; the position stays open' : ''}`, { level: 'warn', notify: true, data: { halt } });
@@ -640,6 +652,9 @@ export class LpEngine {
   async setProfits(p: ProfitMode) {
     const next = checkProfitMode(p);
     if (next.mode === 'send' && this.signer && sameAddr(await this.signer.getAddress(), next.to)) throw new Error('That is the bot\'s own wallet: fees already stay there when reinvested.');
+    // a fee send in flight is settled under the mode it was sent with: no switch until the step is done
+    const busy = this.busyReason();
+    if (busy) throw new Error(busy);
     this.state.profits = next;
     this.save();
   }
@@ -687,6 +702,9 @@ export class LpEngine {
         this.state.step = null;
         this.markArchived();
       }
+      // a stop that landed during this tick: a close that never went out is dropped now (one sent keeps its hash)
+      const st = this.state.step;
+      if (this.state.status !== 'running' && st?.action === 'close' && !st.hash && !st.swap) this.state.step = null;
       await this.measure(pool, v);
       this.save();
       this.lastError = null;
@@ -900,7 +918,8 @@ export class LpEngine {
   /**
    * Where the money stands (null until the first reading), in the quote coin:
    *  feeCoins / fees = fees collected + waiting, per coin and their worth (collected: valued then; waiting: today)
-   *  net = fees − gas − swap costs − lost to moves: what it earned after costs, the same measure as the replay
+   *  net = fees − gas − swap costs: what it earned, the same measure as the replay. moveLoss (the coin mix the range
+   *    moves locked in) is reported beside it, not taken out: like the coins' own price change, it is in `price`
    *  equity = the bot's coins (position + fees waiting + idle) at today's price + fees sent out − gas paid
    *  price = equity − start value − net: what the coins' own price did
    */
@@ -910,7 +929,7 @@ export class LpEngine {
     const t = this.state.totals;
     const equity = vw.value + t.sent - t.gas;
     const fees = t.fees + vw.owed.base * vw.v.price + vw.owed.quote;
-    const net = fees - t.gas - t.swapCost - t.moveLoss;
+    const net = fees - t.gas - t.swapCost;
     return {
       equity, feeCoins: { base: t.feeCoins.base + vw.owed.base, quote: t.feeCoins.quote + vw.owed.quote }, fees,
       gas: t.gas, swapCost: t.swapCost, moveLoss: t.moveLoss, net, price: equity - start - net,
@@ -1026,12 +1045,35 @@ export class LpEngine {
     this.noteOnce(`set aside ${drop.quote.toPrecision(4)} ${this.quoteSym} + ${drop.base.toPrecision(4)} ${this.baseSym}: more than ${(DEFAULT_MAX_POOL_SHARE * 100).toFixed(0)}% of the pool's active liquidity`);
   }
 
-  /** A sent tx stage: null = not mined yet; otherwise the receipt (reverted ones are counted and retried up to MAX_TRIES). */
-  private async settled(s: LpStep, v: PoolView): Promise<ReceiptLike | null> {
-    const r = await this.hub.rt(this.chainId).reader.getTransactionReceipt(s.hash!);
-    if (!r) return null;
+  /**
+   * A sent tx stage: null = not mined yet, or mined without the position manager events `need` readable yet (the hash
+   * is kept, so the stage is never sent again); otherwise the receipt, with gas booked once. Reverted ones are counted
+   * and retried up to MAX_TRIES.
+   */
+  private async settled(s: LpStep, v: PoolView, need?: { pool: LpPool; events: NpmEvent[] }): Promise<ReceiptLike | null> {
+    const hash = s.hash!;
+    const r = await this.hub.rt(this.chainId).reader.getTransactionReceipt(hash);
+    if (!r) {
+      if (s.halted) return null; // already stopped over it: keep waiting quietly
+      const fate = await (this.executor as LiveExecutor).txFate(s.nonce, s.sentAt ?? this.now(), this.now());
+      if (fate === 'dropped') {
+        // the node doesn't have it and its nonce is unused: it never ran, so the stage is sent again
+        s.hash = undefined; s.sentAt = undefined; s.nonce = undefined;
+        this.ev('info', `Liquidity ${this.label}: ${s.action} ${s.stage} ${hash} was dropped by the network (never ran); sending it again`, { level: 'warn' });
+        this.save();
+        return null;
+      }
+      if (fate === 'used') this.haltOver(s, `${s.action} ${s.stage} ${hash} has no receipt, but its nonce was used by another transaction from this wallet (sped up or cancelled in a wallet app?); stopped. Nothing is sent again: check the wallet on the explorer`);
+      if (fate === 'stuck') this.haltOver(s, `${s.action} ${s.stage} ${hash} is still not mined after an hour; stopped. Speed it up or cancel it in your wallet app; the bot settles it once it has a receipt`);
+      return null;
+    }
+    if (r.status === 1 && need && !need.events.every((n) => events(r, need.pool.npm, n).length)) {
+      s.unread = (s.unread ?? 0) + 1;
+      if (s.unread < UNREADABLE_READS || s.halted) return null;
+      this.haltOver(s, `${s.action} ${s.stage} ${hash} was mined but its receipt has no ${need.events.join('/')} event after ${s.unread} reads; stopped. Nothing is sent again: check the tx on the explorer`);
+    }
     this.addGas(await this.receiptGas(r, v), v);
-    s.hash = undefined; s.sentAt = undefined;
+    s.hash = undefined; s.sentAt = undefined; s.nonce = undefined; s.unread = undefined; s.halted = undefined;
     if (r.status === 1) return r;
     s.tries++;
     if (s.tries >= MAX_TRIES) {
@@ -1043,12 +1085,21 @@ export class LpEngine {
     this.ev('info', `Liquidity ${this.label}: ${s.stage} reverted; trying again`, { level: 'warn' });
     return null;
   }
+  /** Stop the bot over a stage's tx, once (it keeps its hash, so nothing is sent again, and keeps being read). */
+  private haltOver(s: LpStep, msg: string): never {
+    s.halted = msg;
+    this.state.halt = systemHalt('error', msg, this.now());
+    this.state.status = 'stopped';
+    this.save();
+    throw new Error(msg);
+  }
   /** Send a step's tx through the chain's queue; nothing is sent while the bot isn't running (KILL ALL, paused). */
   private async send(s: LpStep, req: { to: string; data: string; value: bigint }) {
     if (this.state.status !== 'running') return;
     const run = async () => {
       if (this.state.status !== 'running') return; // stopped while it waited its turn
-      s.hash = await (this.executor as LiveExecutor).sendTx(req);
+      const sent = await (this.executor as LiveExecutor).sendTx(req);
+      s.hash = sent.hash; s.nonce = sent.nonce;
       s.sentAt = this.now();
       this.save();
     };
@@ -1070,10 +1121,9 @@ export class LpEngine {
       return this.exited(s, fees, coins, v);
     }
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['DecreaseLiquidity', 'Collect'] });
       if (!r) return;
       const dec = events(r, pool.npm, 'DecreaseLiquidity')[0], col = events(r, pool.npm, 'Collect')[0];
-      if (!dec || !col) throw new Error(`exit ${r.logs.length ? 'receipt has no DecreaseLiquidity/Collect' : 'receipt has no logs'}`);
       const got = pool.coinsFromRaw(col.args.amount0 as bigint, col.args.amount1 as bigint, v);
       const principal = pool.coinsFromRaw(dec.args.amount0 as bigint, dec.args.amount1 as bigint, v);
       const fees = { base: got.base - principal.base, quote: got.quote - principal.quote };
@@ -1140,13 +1190,29 @@ export class LpEngine {
     }
   }
 
+  /**
+   * What a recovered swap brought: null when it reverted. Mined OK but its output log unreadable: the swap's guaranteed
+   * minimum (a record from before it was saved stops the bot naming the hash; the record is kept, never guessed).
+   */
+  private recoveredOut(sw: NonNullable<LpStep['swap']>, r: RecoverResult): number | null {
+    if (!r.ok) return null;
+    const out = r.amountOutHuman ?? sw.minOut ?? null;
+    if (out != null) return out;
+    const msg = `swap ${sw.hash} mined, but what it brought could not be read from its receipt; stopped. Check the tx on the explorer.`;
+    this.state.halt = systemHalt('error', msg, this.now());
+    this.state.status = 'stopped';
+    this.save();
+    throw new Error(msg);
+  }
+
   /** Swap the idle coins to the range's mix at today's price. */
   private async swap(pool: LpPool, v: PoolView, s: LpStep) {
     if (s.swap) {
       const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut, s.swap.basePerNative);
       if (!r) return;
+      const out = this.recoveredOut(s.swap, r);
       this.bookRecoveredGas(s.swap.hash, r, v);
-      if (r.ok) this.applySwap(s.swap.side, s.swap.amountIn, r.amountOutHuman, v.price);
+      if (out != null) this.applySwap(s.swap.side, s.swap.amountIn, out, v.price);
       s.swap = undefined;
       s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
       return;
@@ -1190,7 +1256,7 @@ export class LpEngine {
         const o = e instanceof ExecError ? e.opts : {};
         if (o.gasPls) this.addGas(o.gasPls * v.price, v);
         if (o.aborted) return;
-        if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
+        if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative, minOut: q.minOutHuman }; return; }
         throw e;
       }
     }
@@ -1218,8 +1284,9 @@ export class LpEngine {
     if (s.swap) {
       const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut, s.swap.basePerNative);
       if (!r) return;
+      const out = this.recoveredOut(s.swap, r);
       this.bookRecoveredGas(s.swap.hash, r, v);
-      if (r.ok) this.applySwap('sell', s.swap.amountIn, r.amountOutHuman, v.price);
+      if (out != null) this.applySwap('sell', s.swap.amountIn, out, v.price);
       s.swap = undefined;
       return;
     }
@@ -1256,7 +1323,7 @@ export class LpEngine {
       const o = e instanceof ExecError ? e.opts : {};
       if (o.gasPls) this.addGas(o.gasPls * v.price, v);
       if (o.aborted) return;
-      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
+      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative, minOut: q.minOutHuman }; return; }
       throw e;
     }
   }
@@ -1308,10 +1375,9 @@ export class LpEngine {
       return this.minted(s, `paper-${this.now().toString(36)}`, BigInt(Math.floor(L)), used, v, pool, { g0: v.global0.toString(), g1: v.global1.toString(), inRange, owed0: '0', owed1: '0' });
     }
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['IncreaseLiquidity'] });
       if (!r) return;
       const inc = events(r, pool.npm, 'IncreaseLiquidity')[0];
-      if (!inc) throw new Error('mint receipt has no IncreaseLiquidity');
       return this.minted(s, (inc.args.tokenId as bigint).toString(), inc.args.liquidity as bigint, pool.coinsFromRaw(inc.args.amount0 as bigint, inc.args.amount1 as bigint, v), v, pool);
     }
     const ex = this.executor as LiveExecutor, me = await ex.address();
@@ -1388,10 +1454,9 @@ export class LpEngine {
       return this.sent(fees, v.price, to);
     }
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['Collect'] });
       if (!r) return;
       const col = events(r, pool.npm, 'Collect')[0];
-      if (!col) throw new Error('collect receipt has no Collect');
       return this.sent(pool.coinsFromRaw(col.args.amount0 as bigint, col.args.amount1 as bigint, v), v.price, to);
     }
     await this.send(s, { to: pool.npm, data: collectData({ tokenId: BigInt(p.id), to, nativeOther: this.nativeOther(pool) }), value: 0n });
@@ -1401,10 +1466,9 @@ export class LpEngine {
     const p = this.state.position!;
     if (this.state.mode === 'paper') return this.compoundPaper(pool, v, p);
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['Collect'] });
       if (!r) return;
       const col = events(r, pool.npm, 'Collect')[0];
-      if (!col) throw new Error('collect receipt has no Collect');
       const fees = pool.coinsFromRaw(col.args.amount0 as bigint, col.args.amount1 as bigint, v);
       this.addIdle(fees);
       this.addFees(fees, v.price);
@@ -1439,10 +1503,9 @@ export class LpEngine {
   private async increase(pool: LpPool, v: PoolView, s: LpStep) {
     const p = this.state.position!;
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['IncreaseLiquidity'] });
       if (!r) return;
       const inc = events(r, pool.npm, 'IncreaseLiquidity')[0];
-      if (!inc) throw new Error('increase receipt has no IncreaseLiquidity');
       const used = pool.coinsFromRaw(inc.args.amount0 as bigint, inc.args.amount1 as bigint, v);
       p.liquidity = (BigInt(p.liquidity) + (inc.args.liquidity as bigint)).toString();
       this.state.idle = { base: Math.max(0, this.state.idle.base - used.base), quote: Math.max(0, this.state.idle.quote - used.quote) };
@@ -1491,7 +1554,7 @@ export class LpEngine {
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
       status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, aside: s.aside ?? { base: 0, quote: 0 }, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, move: this.moveStatus(), hold: this.hold, positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, feeHist: (s.feeHist ?? []).filter(([t]) => t >= this.now() - FEE_HIST_SHOWN_MS), startPrice: s.startPrice, equityHist: s.equity.slice(-500),
+      outSince: s.outSince, move: this.moveStatus(), hold: this.hold, positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, feeHist: (s.feeHist ?? []).filter(([t]) => t >= this.now() - FEE_HIST_SHOWN_MS), startPrice: s.startPrice, equityHist: downsampleByTime(s.equity, 600),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }

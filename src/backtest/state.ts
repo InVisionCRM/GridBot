@@ -719,7 +719,7 @@ export function recordedQuoteNet(bot: SavedBot): number | null {
   if (bot.config.kind === 'lp') {
     if (!bot.actual) return null;
     const a = bot.actual;
-    return a.fees - a.gas - a.swapCost - a.moveLoss;
+    return a.fees - a.gas - a.swapCost; // Generated: the range-move loss is not taken out
   }
   return bot.recordedNet ?? null;
 }

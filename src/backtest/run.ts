@@ -255,7 +255,7 @@ function runLp(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
     shouldMove: e.lpShouldMove,
   });
   const price = r.priceEnd > 0 ? r.priceEnd : priceGuess;
-  // r.fees values each coin at the price of the minute it was earned. r.net subtracts gas, the open/move swap, and move loss.
+  // r.fees values each coin at the price of the minute it was earned. r.net subtracts gas, the open/move swap, move loss and the open position's loss.
   return finish(cfg, {
     base: 0,
     quote: r.net,
@@ -271,6 +271,7 @@ function runLp(cfg: BotConfig, data: HarnessData, e: EngineDeps): BotSummary {
       { label: 'Gas', value: r.gas, unit: cfg.quote.symbol, source: 'modeled' },
       { label: 'Swap cost', value: r.swapCost, unit: cfg.quote.symbol, source: 'modeled' },
       { label: 'Move loss', value: r.moveLoss, unit: cfg.quote.symbol, source: 'modeled' },
+      { label: 'Open position loss', value: r.openLoss, unit: cfg.quote.symbol, source: 'modeled' },
     ],
   });
 }

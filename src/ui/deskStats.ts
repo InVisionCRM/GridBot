@@ -134,13 +134,11 @@ export function botFacts(b: AnyObj, _now = Date.now(), extra?: { chain?: string 
   const m = metricsOf(b);
   const ex = (v: number | null | undefined, pct: number | null = null): Extrapolation | null => (v == null ? null : { amount: v, pct });
   const space = spacingOf(b);
-  // Everything that came off what the bot earned: gas + swap fees, and for an LP the range-move losses too (so
-  // fees earned − fees paid = Generated, at event prices). Grid / trend losing round trips are already in their profit.
-  const paid = m && (m.swapCostUsd != null || m.gasUsd != null)
-    ? (m.swapCostUsd ?? 0) + (m.gasUsd ?? 0) + (m.kind === 'lp' ? m.realizedRebalanceLossUsd ?? 0 : 0) : null;
+  // Everything that came off what the bot earned: gas + swap fees (fees earned − fees paid = Generated, at event
+  // prices). An LP's range-move loss is shown on its own, not taken out. Grid / trend losing round trips are in their profit.
+  const paid = m && (m.swapCostUsd != null || m.gasUsd != null) ? (m.swapCostUsd ?? 0) + (m.gasUsd ?? 0) : null;
   const q = m?.quote;
-  const paidQ = q && (q.swapCost != null || q.gas != null)
-    ? (q.swapCost ?? 0) + (q.gas ?? 0) + (m!.kind === 'lp' ? q.rebalanceLoss ?? 0 : 0) : null;
+  const paidQ = q && (q.swapCost != null || q.gas != null) ? (q.swapCost ?? 0) + (q.gas ?? 0) : null;
   return {
     ageMs: m?.ageSec == null ? null : m.ageSec * 1000,
     investedUsd: m?.capitalInUsd ?? null,

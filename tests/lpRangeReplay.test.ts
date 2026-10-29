@@ -106,7 +106,7 @@ describe('synthetic seeded ETH/USDG fixture (not market data)', () => {
     expect(report.source).toMatch(/Synthetic test fixture/);
     expect(report.source).toMatch(/not the Robinhood swap tape/);
     expect(report.readme).toMatchObject({ moves: 23, fees: 70.38, moveLoss: 84.23, net: -16.22 });
-    for (const r of report.rows) expect(r.net).toBeCloseTo(r.fees - r.gas - r.swapCost - r.moveLoss, 8);
+    for (const r of report.rows) expect(r.net).toBeCloseTo(r.fees - r.gas - r.swapCost, 8);
   });
 
   it('locks the seeded path, and does not pick a preset', () => {
@@ -119,7 +119,7 @@ describe('synthetic seeded ETH/USDG fixture (not market data)', () => {
     expect(stay.moveLoss).toBe(0);
     // Locked from scripts/lpRangeReplay.ts on seed 20261026. Update both together if the path changes.
     expect(defaults.moves).toBe(34);
-    expect(defaults.net).toBeCloseTo(-236.67657471809497, 8);
+    expect(defaults.net).toBeCloseTo(21.838855101372637, 8); // move loss shown, not taken out
     expect(defaults.fees).toBeCloseTo(25.07681192444486, 8);
     expect(defaults.moveLoss).toBeCloseTo(258.5154298194676, 8);
     // The scheduled trips on this seed are shorter than either preset's dwell, so both stay put.

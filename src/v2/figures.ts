@@ -3,7 +3,7 @@
  * itself. A card's figure may equal its section total; both are labelled, so that is one fact in two places, not two facts.
  */
 import type { BotMetrics, TapePrice, TokenQty } from './metrics';
-import { apportion, displayedValue, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, standardUnit, tokenLineParts } from './format';
+import { apportion, formatAge, formatAmt, formatBag, formatFixedDecimals, formatRangePx, formatTokenLine, naturalPlaces, roundAmt, tokenLineParts } from './format';
 
 const SUBSCRIPT_PRICE = /\$0\.0[₀₁₂₃₄₅₆₇₈₉]+\d+/g;
 const FIGURE = /[+−-]?\s*\$\d[\d,]*(?:\.\d+)?|[+−-]?\s*\d[\d,]*(?:\.\d+)?[kMB]\s+[A-Z][A-Z0-9]*|[+−-]\s*\d[\d,]*(?:\.\d+)?\s+[A-Z][A-Z0-9]*|(?<![\d.])0(?:\.0+)?\s+[A-Z][A-Z0-9]*|[+−-]?\d+(?:\.\d+)?%/g;
@@ -108,6 +108,8 @@ function formatBagSafe(tokens: TokenQty[] | null | undefined): string {
 export interface SheetRow { label: string; value: string }
 
 export interface LedgerLines {
+  /** Generated at the parts' step, for the breakdown sheet, where the rows above it add up to it exactly. */
+  sheetGenerated: string;
   /** Fees in the coins costs come out of, or trade profit before gas for a grid. */
   gross: string;
   feeLabel: string;
@@ -138,21 +140,20 @@ function joinParts(entries: { symbol: string; amount: number; places: number }[]
   }).join(' ');
 }
 
-function roundedCoin(m: BotMetrics, symbol: string): { gross: number; paid: number; move: number; profit: number; places: number } {
+function roundedCoin(m: BotMetrics, symbol: string): { gross: number; paid: number; move: number; profit: number; generated: number; places: number } {
   const generated = amountOf(m.generated, symbol);
   const paid = Math.abs(amountOf(m.feesPaid, symbol));
   const move = Math.abs(amountOf(m.moveLoss, symbol));
   const gross = amountOf(m.grossFees, symbol);
-  const anchor = generated !== 0 ? generated : Math.max(gross, paid, move, Math.abs(generated + paid));
-  const unit = standardUnit(anchor);
-  const places = unit >= 1 ? 0 : naturalPlaces(anchor);
+  const { unit, places } = placesOf([generated, gross, paid, move, generated + paid]);
+  const shown = roundAmt(generated, places);
   if (m.kind === 'grid' && paid !== 0) {
-    if (m.fillCount === 0) return { gross: 0, paid: -paid, move: 0, profit: 0, places };
-    const [profit, gas] = apportion([generated + paid, -paid], displayedValue(generated), unit);
-    return { gross: 0, paid: gas, move: 0, profit, places };
+    if (m.fillCount === 0) return { gross: 0, paid: -paid, move: 0, profit: 0, generated: shown, places };
+    const [profit, gas] = apportion([generated + paid, -paid], generated, unit);
+    return { gross: 0, paid: gas, move: 0, profit, generated: shown, places };
   }
-  const [g, p, mv] = apportion([gross, -paid, -move], displayedValue(generated), unit);
-  return { gross: g, paid: p, move: mv, profit: 0, places };
+  const [g, p, mv] = apportion([gross, -paid, -move], generated, unit);
+  return { gross: g, paid: p, move: mv, profit: 0, generated: shown, places };
 }
 
 function coinList(symbols: string[]): string {
@@ -203,6 +204,7 @@ export function ledgerLines(m: BotMetrics): LedgerLines | null {
     paid: gasLine,
     move: noFills ? '' : row((coin) => coin.move),
     generated: noFills && !generated.length ? zeroLine : formatTokenLine(generated),
+    sheetGenerated: noFills && !generated.length ? zeroLine : joinParts(generated.map((t) => ({ symbol: t.symbol, amount: rounded.get(t.symbol)?.generated ?? t.amount, places: costSymbols.includes(t.symbol) ? rounded.get(t.symbol)!.places : -1 }))),
     untouched: noFills ? '' : untouched,
   };
 }
@@ -215,10 +217,14 @@ export function isLedgerLabel(label: string): boolean {
     || label === 'Generated';
 }
 
-function placesOf(amount: number): { unit: number; places: number } {
-  const anchor = amount !== 0 ? amount : 1;
-  const unit = standardUnit(amount !== 0 ? amount : anchor);
-  return { unit, places: unit >= 1 ? 0 : naturalPlaces(anchor) };
+/**
+ * One step for all of a coin's breakdown rows: the finest any of its nonzero parts needs. The compact step of a big
+ * Generated (100 PLS at 12.3k) would turn 254 PLS of gas into 300, and hide it altogether at 2.5M.
+ */
+function placesOf(amounts: number[]): { unit: number; places: number } {
+  const smallest = Math.min(...amounts.filter((a) => a !== 0).map(Math.abs));
+  const places = naturalPlaces(Number.isFinite(smallest) ? smallest : 1);
+  return { unit: 10 ** -places, places };
 }
 
 /** Itemized per-coin rows from botMetrics, rounded so each coin's parts equal its Generated. */
@@ -233,27 +239,26 @@ function metricsBreakdown(m: BotMetrics, details: boolean): SheetRow[] {
     if (basis.note) rows.push({ label: 'Note', value: basis.note });
     return rows;
   }
-  const costEntries = Object.entries(by).filter(([, c]) => c.gasSwap !== 0 || c.rangeMoveLoss !== 0 || c.taxes !== 0 || c.bridge !== 0);
+  const costEntries = Object.entries(by).filter(([, c]) => c.gasSwap !== 0 || c.taxes !== 0 || c.bridge !== 0);
   if (!costEntries.length) {
     const rows: SheetRow[] = [];
     if (!details && generatedText) rows.push({ label: 'Generated', value: generatedText });
     return rows;
   }
   const rounded = new Map(costEntries.map(([symbol, coin]) => {
-    const { unit, places } = placesOf(coin.generated);
-    const specs: { key: 'earned' | 'gas' | 'move' | 'tax' | 'bridge'; raw: number }[] = [
+    const { unit, places } = placesOf([coin.generated, coin.earned, coin.gasSwap, coin.taxes, coin.bridge]);
+    const specs: { key: 'earned' | 'gas' | 'tax' | 'bridge'; raw: number }[] = [
       { key: 'earned', raw: coin.earned },
     ];
     if (coin.gasSwap !== 0) specs.push({ key: 'gas', raw: -Math.abs(coin.gasSwap) });
-    if (coin.rangeMoveLoss !== 0) specs.push({ key: 'move', raw: -Math.abs(coin.rangeMoveLoss) });
     if (coin.taxes !== 0) specs.push({ key: 'tax', raw: -Math.abs(coin.taxes) });
     if (coin.bridge !== 0) specs.push({ key: 'bridge', raw: -Math.abs(coin.bridge) });
-    const values = apportion(specs.map((s) => s.raw), displayedValue(coin.generated), unit);
-    const parts = { earned: 0, gas: 0, move: 0, tax: 0, bridge: 0, places };
+    const values = apportion(specs.map((s) => s.raw), coin.generated, unit);
+    const parts = { earned: 0, gas: 0, tax: 0, bridge: 0, generated: roundAmt(coin.generated, places), places };
     specs.forEach((s, i) => { parts[s.key] = values[i]; });
     return [symbol, parts] as const;
   }));
-  const line = (key: 'earned' | 'gas' | 'move' | 'tax' | 'bridge') => joinParts(
+  const line = (key: 'earned' | 'gas' | 'tax' | 'bridge') => joinParts(
     [...rounded.entries()].map(([symbol, parts]) => ({ symbol, amount: parts[key], places: parts.places })),
   );
   const symbols = [...rounded.keys()];
@@ -265,15 +270,14 @@ function metricsBreakdown(m: BotMetrics, details: boolean): SheetRow[] {
   const rows: SheetRow[] = [];
   const earned = line('earned');
   const gas = line('gas');
-  const move = line('move');
   const tax = line('tax');
   const bridge = line('bridge');
   if (earned) rows.push({ label: feeLabel, value: earned });
   if (gas) rows.push({ label: 'Gas + swap fees', value: gas });
-  if (move) rows.push({ label: 'Range-move loss', value: move });
   if (tax) rows.push({ label: 'Taxes', value: tax });
   if (bridge) rows.push({ label: 'Bridge', value: bridge });
-  if (!details && generatedText) rows.push({ label: 'Generated', value: generatedText });
+  // the coins with parts above print their Generated at the parts' step, so the rows visibly add up
+  if (!details && generatedText) rows.push({ label: 'Generated', value: joinParts(m.generated.map((t) => ({ symbol: t.symbol, amount: rounded.get(t.symbol)?.generated ?? t.amount, places: rounded.get(t.symbol)?.places ?? -1 }))) });
   if (details && rows.length) rows.push({ label: 'Adds', value: 'These add up to the Generated above.' });
   const free = Object.keys(by).filter((symbol) => !symbols.includes(symbol) && (by[symbol].generated !== 0 || by[symbol].earned !== 0));
   if (free.length === 1) rows.push({ label: 'Note', value: `${free[0]} has no costs taken out.` });
@@ -309,7 +313,7 @@ export function sheetRows(m: BotMetrics, pair: { base: string; quote: string }, 
   if (ledger?.gross) add(ledger.feeLabel, ledger.gross, !details);
   if (ledger?.paid) add('Gas + swap fees', ledger.paid, !details);
   if (ledger?.move) add('Range-move loss', ledger.move, !details);
-  if (ledger?.generated && !details) add('Generated', ledger.generated, true);
+  if (ledger?.sheetGenerated && !details) add('Generated', ledger.sheetGenerated, true);
   if (details && rows.length > beforeParts) {
     rows.push({ label: 'Adds', value: 'These add up to the Generated above.' });
   }

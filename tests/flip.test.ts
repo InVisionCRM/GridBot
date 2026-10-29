@@ -391,10 +391,11 @@ describe('flipped trend bot: long the token, flat in PLS', () => {
     const hexHeld = t.position!.qty ?? t.position!.pls ?? t.position!.amount;
     expect(hexHeld).toBeGreaterThan(650); // ≈ 100k PLS / 146.7 PLS per HEX ≈ 680 HEX
     expect(hexHeld).toBeLessThan(700);
-    // Crash HEX/PLS below the stop → exit back to PLS
+    // Crash HEX/PLS below the stop → exit back to PLS. A > 20% jump in one poll is held until CandleStore.CONFIRM
+    // polls confirm it (HEX~ follows HEX), so the stop fires on the confirmed price.
     const q2 = QH * 1.3;
     chain.setPrice(q2, 'HEX');
-    await bot.tickAll();
+    for (let i = 0; i < CandleStore.CONFIRM; i++) await bot.tickAll();
     t = bot.status().trends.find((x) => x.id === id)!;
     expect(t.position).toBeNull();
     expect(t.cash).toBeGreaterThan(50_000);

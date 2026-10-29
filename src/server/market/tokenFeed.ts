@@ -17,7 +17,8 @@ import { readCall } from '../dex/types';
 import { fetchJson } from '../fetchJson';
 import { holderApiBase, readHolderConcentration, type HolderChain } from './holderRead';
 import { readOwnerPowers } from './ownerRead';
-import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
+import { ExecError, LiveExecutor, gasOf, parseAmountOut, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
+import { fromUnits } from '../../live/swapMath';
 import type { DexConfig } from '../../live/chains';
 import type { SafetyLimits } from '../../live/limits';
 import type { SharedNonce, TxGate } from '../bot/txGate';
@@ -27,7 +28,7 @@ import type { Emit } from '../bot/activity';
 import type { Hub } from '../chains/hub';
 import type { GeckoSource } from './gecko';
 import { PoolSniper, type LogSource, type SniperChain } from './sniper';
-import { TokenTrader, type Position, type TraderState } from '../bot/tokenTrader';
+import { SwapPending, TokenTrader, type Position, type TraderState } from '../bot/tokenTrader';
 import { PlayRejectLog } from '../bot/playRejects';
 import { quoteTradeImpact } from './tradeImpact';
 
@@ -110,7 +111,7 @@ export function createTokenTrader(o: {
   };
   const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
-    signerReady: (id) => !!o.hub.rt(id).signer,
+    liveChains: () => o.hub.runtimes().filter((rt) => rt.tradable).map((rt) => ({ id: rt.cfg.id, name: rt.cfg.name, signer: !!rt.signer })),
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flags.v3LpLockCheck(), flags.lpUnlockCheck(), {
       cacheEnabled: flags.v3LpLockCacheEnabled(), cacheTtlMs: flags.v3LpLockCacheTtlMs(), callBudget: flags.v3LpLockCallBudget(),
@@ -173,7 +174,7 @@ export function createTokenTrader(o: {
     rejects: o.dataDir ? new PlayRejectLog(o.dataDir) : undefined,
     live: {
       buy: async (pool, spend, limits) => {
-        const draft = await draftOf(o.hub, pool);
+        const draft = await draftOf(o.hub, pool, 'buy');
         // A Stop all that lands while this buy waits in the chain's queue, or between the quote and the send, stops it
         // (sells keep running: they are exits).
         const { q, fill } = await liveSwap(o.hub.rt(pool.chainId), o.hub.draftQuoter(draft), swapOpts(o, pool.chainId, trader.status().options.sniper.mevRpc), 'buy', spend, limits, sendChecks(trader).buy(pool.chainId));
@@ -182,9 +183,19 @@ export function createTokenTrader(o: {
       },
       sell: async (pos, tokens, limits) => {
         const pool = positionPool(pos);
-        const draft = await draftOf(o.hub, pool);
+        const draft = await draftOf(o.hub, pool, 'sell');
         const { q, fill } = await liveSwap(o.hub.rt(pos.chainId), o.hub.draftQuoter(draft), swapOpts(o, pos.chainId, trader.status().options.sniper.mevRpc), 'sell', tokens, limits, sendChecks(trader).sell());
         return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash, gasUsed: fill.swapGasUsed, gasPriceWei: fill.swapGasPriceWei, gasNative: fill.gasNative };
+      },
+      recover: async (chainId, hash, tokenOut, decimalsOut) => {
+        const rt = o.hub.rt(chainId);
+        const r = await rt.reader.getTransactionReceipt(hash);
+        if (!r) return null;
+        const gasNative = fromUnits(gasOf(r), 18);
+        if (r.status !== 1) return { ok: false, amountOut: 0, gasNative };
+        if (!rt.signer) throw new Error('no signing key');
+        const out = parseAmountOut(r, await rt.signer.getAddress(), tokenOut, rt.cfg.wrappedNative.address);
+        return { ok: true, amountOut: out != null ? fromUnits(out, decimalsOut) : null, gasNative };
       },
     },
   });
@@ -231,8 +242,14 @@ export async function liveSwap(
     if (q.block) throw new Error(q.block);
     if (!q.balanceOk) throw new Error(q.balanceNote ?? 'balance');
     if (q.priceImpact > limits.maxPriceImpact) throw new Error(`price impact ${(q.priceImpact * 100).toFixed(2)}% is over the cap`);
-    const fill = await ex.execute(q, { canSend, onSent: () => undefined });
-    return { q, fill };
+    try {
+      const fill = await ex.execute(q, { canSend, onSent: () => undefined });
+      return { q, fill };
+    } catch (e) {
+      // sent but not confirmed in time: hand the hash to the trader, which settles it later (never dropped)
+      if (e instanceof ExecError && e.opts.pending && e.opts.swapTxHash) throw new SwapPending(e.opts.swapTxHash, q.tokenOut, q.decimalsOut, q.amountInHuman, e.opts.gasNative ?? 0);
+      throw e;
+    }
   });
 }
 
@@ -245,10 +262,15 @@ function positionPool(p: Position): FreshPool {
   };
 }
 
-async function draftOf(hub: Hub, pool: FreshPool) {
+/**
+ * The market to quote and swap through. A buy needs the safety check to allow live trading. A sell (an exit) does not:
+ * a coin whose sell tax rose past the live cap is the one an exit wants out of, and a sell that would really revert
+ * fails at its own quote or on-chain.
+ */
+async function draftOf(hub: Hub, pool: FreshPool, side: 'buy' | 'sell') {
   const r = await hub.inspect({ chainId: pool.chainId, address: pool.token, quote: pool.spend, pool: pool.pool });
   if (!r.draft) throw new Error(r.safety?.reasons?.[0] ?? 'no pool to trade');
-  if (!r.safety?.liveAllowed) throw new Error(r.safety?.reasons?.join(' ') || 'safety check does not allow live trading');
+  if (side === 'buy' && !r.safety?.liveAllowed) throw new Error(r.safety?.reasons?.join(' ') || 'safety check does not allow live trading');
   return r.draft;
 }
 

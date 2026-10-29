@@ -170,6 +170,11 @@ export interface Position {
    * before the sell failed (the wallet balance is then only an upper bound).
    */
   reconcileBase?: { bal: number; tokens: number } | null;
+  /**
+   * Live only: a sell part was sent but its receipt had not come when the executor stopped waiting. It is settled by
+   * hash (recover) before this position decides or sends anything again; its tokens are not assumed sold until then.
+   */
+  pendingSell?: PendingSell | null;
   /** When the position became blocked on reconcile and why (lasting warning; cleared when reconciled). Saved. */
   blockedSince?: number | null;
   blockedWhy?: string | null;
@@ -211,6 +216,8 @@ export interface GenLedger {
   mode: 'paper' | 'live';
   chainId: number; coin: string; symbol: string;
   proceeds: number; cost: number; fees: number; taxes: number; gasNative: number; closed: number;
+  /** Buys and landed sell parts booked here (all-time; the trade log is trimmed). Set at load for older files (migrateCounts). */
+  fills: number;
   /** Set on an entry split from a pre-mode entry whose mode was inferred, not recorded (see migrateLedgerModes) */
   modeInferred?: boolean;
   /** Sells whose coins received are not known (a reported-failed send that landed); not in proceeds or cost */
@@ -223,7 +230,8 @@ const genKey = (mode: TradeMode, chainId: number, coin: string) => `${mode}:${ch
  * One fill. `usd`/`pnlUsd` are dollars (kept for the API); `spendSym`, `amount` (spend coin bought with / received) and
  * `pnl` (spend coin) are the same fill in the coin it spends, for the crypto-units screens. Older lines have only dollars.
  */
-export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null; spendSym?: string; amount?: number; pnl?: number | null }
+/** `mode`: paper or live (rows written before it was recorded have none). */
+export interface TradeLog { t: number; side: 'buy' | 'sell'; mode?: TradeMode; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null; spendSym?: string; amount?: number; pnl?: number | null }
 export interface FeedItem { t: number; chainId: number; pool: string; label: string; verdict: 'bought' | 'skipped'; why: string }
 
 export interface TraderState {
@@ -267,6 +275,10 @@ export interface TraderState {
    * Entries keyed `chainId:address` without a mode come from before the paper/live split: migrated on load.
    */
   generated?: Record<string, GenLedger>;
+  /** Live buys sent whose receipt had not come when the executor stopped waiting: settled by hash on later ticks. */
+  inflight?: InflightBuy[];
+  /** When each mode's first buy happened: age and the estimates (the trade log is trimmed). Set at load for older files. */
+  startedAt?: Partial<Record<TradeMode, number>>;
 }
 
 export type OffMode = 'exits' | 'full';
@@ -276,6 +288,24 @@ const MODE_LOG_MAX = 50;
 
 export interface LiveFill { tokens: number; spent: number; spentUsd: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
 export interface LiveSell { quoteOut: number; tokensIn: number; price: number; impact: number; tx?: string; gasUsed?: number; gasPriceWei?: number; /** Approve + swap + L1, native units. Absent when there is no receipt. */ gasNative?: number }
+
+/**
+ * A live swap that was sent but whose receipt had not come when the executor stopped waiting (the broker throws this
+ * instead of the executor's 'not confirmed yet'). The trader keeps the hash and settles it later; it is never dropped.
+ */
+export class SwapPending extends Error {
+  constructor(readonly hash: string, readonly tokenOut: string, readonly decimalsOut: number, readonly amountIn: number, readonly gasNative: number) {
+    super(`swap ${hash} sent; waiting for its receipt`);
+  }
+}
+/** A settled swap by hash: null = not mined yet. ok false = reverted (its gas still paid). amountOut null = mined but unreadable. */
+export interface Recovered { ok: boolean; amountOut: number | null; gasNative: number }
+export interface InflightBuy {
+  hash: string; chainId: number; tokenOut: string; decimalsOut: number; spend: number; sentAt: number;
+  pool: FreshPool; source: 'scan' | 'snipe'; buyTax: number; sellTax: number; impact: number; why: string;
+  warn: string | null; note: string | null;
+}
+export interface PendingSell { hash: string; tokenOut: string; decimalsOut: number; tokens: number; sentAt: number; first: boolean }
 
 const genOf = (p: Position): PositionGen => p.gen ?? (p.gen = { feeBooked: 0, costSold: 0, proceeds: 0, fees: 0, taxes: 0, gasNative: 0 });
 /** Gas a failed send still paid (ExecError opts), else 0 */
@@ -364,8 +394,11 @@ export class TokenTrader {
     live?: {
       buy(pool: FreshPool, spend: number, limits: SafetyLimits): Promise<LiveFill>;
       sell(p: Position, tokens: number, limits: SafetyLimits): Promise<LiveSell>;
+      /** A swap sent earlier, by hash (SwapPending): null = not mined yet */
+      recover(chainId: number, hash: string, tokenOut: string, decimalsOut: number): Promise<Recovered | null>;
     };
-    signerReady?: (chainId: number) => boolean;
+    /** The chains this app can trade on, and whether each has a signing key (a live turn-on checks the ones it trades). */
+    liveChains?: () => { id: number; name: string; signer: boolean }[];
     sniper?: PoolSniper;
     /**
      * The wallet's on-chain balance of a live position's token (human units), for reconciling after a partial,
@@ -400,6 +433,7 @@ export class TokenTrader {
     this.spillRejects();
     this.migrateEntries();
     this.migrateLedgerModes();
+    this.migrateCounts();
     this.migrateOffMode(loaded);
   }
 
@@ -422,7 +456,7 @@ export class TokenTrader {
     const fields = ['proceeds', 'cost', 'fees', 'taxes', 'gasNative'] as const;
     const into = (mode: TradeMode, src: GenLedger, add: Record<(typeof fields)[number], number>, closed: number, inferred: boolean) => {
       const k = genKey(mode, src.chainId, src.coin);
-      const t = g[k] ?? (g[k] = { mode, chainId: src.chainId, coin: src.coin.toLowerCase(), symbol: src.symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0 });
+      const t = g[k] ?? (g[k] = { mode, chainId: src.chainId, coin: src.coin.toLowerCase(), symbol: src.symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0, fills: 0 });
       for (const f of fields) t[f] += add[f];
       t.closed += closed;
       if (inferred) t.modeInferred = true;
@@ -459,6 +493,31 @@ export class TokenTrader {
     }
     this.save();
     this.say(`Token trader: Generated now keeps paper and live apart; ${old.length} older entr${old.length === 1 ? 'y' : 'ies'} split (${lines.join('; ')})`);
+  }
+
+  /**
+   * Files from before the start time and fill count were kept: both are set once, from what the screens showed (the
+   * oldest row the trade log still has, and its rows per chain and spend coin), and kept from then on. Before this the
+   * log carried no mode, so its rows count for the mode the trader is in now; the other mode starts at its oldest open
+   * position.
+   */
+  private migrateCounts() {
+    const s = this.state, now = s.options.mode === 'live' ? 'live' : 'paper';
+    let changed = false;
+    if (!s.startedAt) {
+      s.startedAt = {};
+      for (const m of ['paper', 'live'] as const) {
+        const ts = [...s.positions.filter((p) => p.mode === m).map((p) => p.openedAt), ...(m === now ? s.trades.map((r) => r.t) : [])].filter((t) => t > 0);
+        if (ts.length) s.startedAt[m] = Math.min(...ts);
+      }
+      changed = true;
+    }
+    for (const l of Object.values(s.generated ?? {})) {
+      if (typeof l.fills === 'number') continue;
+      l.fills = l.mode === now ? s.trades.filter((r) => r.chainId === l.chainId && r.spendSym === l.symbol).length : 0;
+      changed = true;
+    }
+    if (changed) this.save();
   }
 
   /** Older state files kept rejects next to passed plays. Move them out so the hot file stays small. */
@@ -551,6 +610,7 @@ export class TokenTrader {
     }
     const pend = this.pendingBuy;
     if (pend && pend.amount > 0) out.push({ chainId: pend.chainId, address: pend.address, native: native(pend.address), amount: pend.amount, source: 'token-trader' });
+    for (const b of this.state.inflight ?? []) out.push({ chainId: b.chainId, address: b.pool.spend, native: native(b.pool.spend), amount: b.spend, source: 'token-trader' });
     return out;
   }
 
@@ -602,7 +662,7 @@ export class TokenTrader {
   private ledger(mode: TradeMode, chainId: number, coin: string, symbol: string): GenLedger {
     const g = this.state.generated ?? (this.state.generated = {});
     const k = genKey(mode, chainId, coin);
-    return g[k] ?? (g[k] = { mode, chainId, coin: coin.toLowerCase(), symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0 });
+    return g[k] ?? (g[k] = { mode, chainId, coin: coin.toLowerCase(), symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0, fills: 0 });
   }
   private spendSymbol(p: Pick<Position, 'label' | 'spend'>) { return p.label.split('/')[1] ?? p.spend; }
   private view(coin: { chainId: number; coin: string; symbol: string }, x: Omit<GenLedger, 'chainId' | 'coin' | 'symbol'>): Generated {
@@ -612,7 +672,7 @@ export class TokenTrader {
       coin: { chainId: coin.chainId, address: coin.coin, symbol: coin.symbol, native: gasInAmount },
       amount: x.proceeds - x.cost - (gasInAmount ? x.gasNative : 0),
       proceeds: x.proceeds, cost: x.cost, fees: x.fees, taxes: x.taxes,
-      gasNative: x.gasNative, gasSymbol: info?.nativeSymbol ?? null, gasInAmount, closed: x.closed, basis: 'closed',
+      gasNative: x.gasNative, gasSymbol: info?.nativeSymbol ?? null, gasInAmount, closed: x.closed, fills: x.fills, basis: 'closed',
       mode: x.mode, ...(x.modeInferred ? { modeInferred: true } : {}), ...(x.unpriced ? { unpriced: x.unpriced } : {}),
     };
   }
@@ -624,7 +684,7 @@ export class TokenTrader {
   private posGenerated(p: Position): Generated {
     const g = p.gen ?? { feeBooked: 0, costSold: 0, proceeds: 0, fees: 0, taxes: 0, gasNative: 0 };
     return this.view({ chainId: p.chainId, coin: p.spend, symbol: this.spendSymbol(p) }, {
-      mode: p.mode, proceeds: g.proceeds, cost: g.costSold + g.feeBooked, fees: g.fees + g.feeBooked, taxes: g.taxes, gasNative: g.gasNative, closed: 0, unpriced: g.unpriced,
+      mode: p.mode, proceeds: g.proceeds, cost: g.costSold + g.feeBooked, fees: g.fees + g.feeBooked, taxes: g.taxes, gasNative: g.gasNative, closed: 0, fills: 0, unpriced: g.unpriced,
     });
   }
   /** A buy: its pool fee (paid in the spend coin) and its gas are booked now; the rest of what it spent is cost when sold */
@@ -632,7 +692,7 @@ export class TokenTrader {
     const g = genOf(p), l = this.ledger(p.mode, p.chainId, p.spend, this.spendSymbol(p));
     const fee = p.spent * (p.feeBps / 10_000);
     g.feeBooked = fee; g.gasNative += gasNative;
-    l.cost += fee; l.fees += fee; l.gasNative += gasNative;
+    l.cost += fee; l.fees += fee; l.gasNative += gasNative; l.fills++;
   }
   /**
    * A sell of `sold` tokens that brought `quote` spend coins (actual: after fee, tax and impact). Live: called once per
@@ -646,7 +706,7 @@ export class TokenTrader {
     const gross = quote / ((1 - f) * (1 - t));
     const fee = gross * (1 - t) * f, tax = gross * t;
     g.costSold += basis; g.proceeds += quote; g.fees += fee; g.taxes += tax; g.gasNative += gasNative;
-    l.cost += basis; l.proceeds += quote; l.fees += fee; l.taxes += tax; l.gasNative += gasNative; if (countClose) l.closed++;
+    l.cost += basis; l.proceeds += quote; l.fees += fee; l.taxes += tax; l.gasNative += gasNative; l.fills++; if (countClose) l.closed++;
   }
   /** Tokens left the wallet without a known fill (see reconcile): counted, not priced */
   private bookUnpriced(p: Position) {
@@ -694,7 +754,9 @@ export class TokenTrader {
     const o = this.state.options;
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('Live trading is not wired on this server.');
-      if (this.d.signerReady && o.chains.length && o.chains.some((id) => !this.d.signerReady!(id))) throw new Error('Live needs a signing key on every chain you turned on.');
+      // every chain it would trade, "every chain" (no list) included
+      const keyless = (this.d.liveChains?.() ?? []).filter((c) => this.wantChain(c.id) && !c.signer).map((c) => c.name);
+      if (keyless.length) throw new Error(`Live needs a signing key on every chain it trades; there is none on ${keyless.join(', ')}. Pick only chains with a key, or add one.`);
     }
     this.state.on = true;
     this.state.pendingChoice = null;
@@ -788,6 +850,7 @@ export class TokenTrader {
     try {
       // cleared first: a sell that stopped partway sets it inside exits() and must stay visible
       this.lastError = null;
+      if (this.state.inflight?.length) await this.settleInflight();
       await this.exits();
     } catch (e) {
       this.lastError = (e as Error).message;
@@ -818,7 +881,10 @@ export class TokenTrader {
     }
   }
 
-  private openUsd() { return this.state.positions.reduce((s, p) => s + p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0), 0); }
+  private openUsd() {
+    const held = this.state.positions.reduce((s, p) => s + p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0), 0);
+    return held + (this.state.inflight ?? []).reduce((s, b) => s + b.spend * b.pool.usdPerSpend, 0);
+  }
 
   private pnl(p: Position) {
     const model = this.model(p);
@@ -1040,7 +1106,8 @@ export class TokenTrader {
       this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why });
       this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: signalOf(pool.source), source: pool.dex, reason: why, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol });
     };
-    if (this.state.positions.some((p) => p.pool.toLowerCase() === pool.pool.toLowerCase() && p.chainId === pool.chainId)) return;
+    const same = (x: { pool: string; chainId: number }) => x.pool.toLowerCase() === pool.pool.toLowerCase() && x.chainId === pool.chainId;
+    if (this.state.positions.some(same) || (this.state.inflight ?? []).some((b) => same(b.pool))) return;
     // Checked again after the safety check's awaits: a Stop all that landed meanwhile wins.
     if (!this.canBuy(pool.chainId)) { skip('new buys are stopped'); return; }
     if (pool.dynamicFee) {
@@ -1067,26 +1134,48 @@ export class TokenTrader {
       if (!again.ok) { skip(again.reason ?? 'price impact'); return; }
       if (impact != null) recordedImpact = impact;
     }
-    let tokens = sized.tokens, spent = sized.spend, spentUsd = sized.usd;
-    let txEntry: string | null = null, gasUsed: number | null = null, gasPrice: number | null = null, gasNative: number | null = null;
-    if (o.mode === 'live') {
-      if (!this.d.live) throw new Error('live broker missing');
-      // #59: reserve the spend before the send so other bots can't use it; released on success or failure.
-      // #76: gas a failed send still paid is booked once (catch), a filled buy's gas once (bookBuy below).
-      this.pendingBuy = { chainId: pool.chainId, address: pool.spend, amount: sized.spend };
-      try {
-        const fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
-        tokens = fill.tokens; spent = fill.spent; spentUsd = fill.spentUsd;
-        txEntry = fill.tx ?? null;
-        if (fill.gasUsed != null && fill.gasPriceWei != null) { gasUsed = fill.gasUsed; gasPrice = fill.gasPriceWei; }
-        if (typeof fill.gasNative === 'number' && Number.isFinite(fill.gasNative)) gasNative = fill.gasNative;
-      } catch (e) {
-        this.bookGas(o.mode, pool.chainId, pool.spend, pool.spendSymbol, gasOfError(e));
-        throw e;
-      } finally {
-        this.pendingBuy = null;
-      }
+    const ctx = { pool, source, buyTax, sellTax, impact: recordedImpact, why: sized.why, warn, note };
+    if (o.mode !== 'live') {
+      this.opened(ctx, 'paper', { tokens: sized.tokens, spent: sized.spend, spentUsd: sized.usd, tx: null, gasUsed: null, gasPrice: null, gasNative: null });
+      return;
     }
+    if (!this.d.live) throw new Error('live broker missing');
+    // #59: reserve the spend before the send so other bots can't use it; released on success or failure.
+    // #76: gas a failed send still paid is booked once (catch), a filled buy's gas once (bookBuy).
+    this.pendingBuy = { chainId: pool.chainId, address: pool.spend, amount: sized.spend };
+    let fill: LiveFill;
+    try {
+      fill = await this.d.live.buy({ ...pool }, sized.spend, this.limits());
+    } catch (e) {
+      if (e instanceof SwapPending) {
+        // sent, receipt not in yet: kept by hash (and its spend stays reserved) until a later tick settles it
+        this.bookGas('live', pool.chainId, pool.spend, pool.spendSymbol, e.gasNative);
+        (this.state.inflight ??= []).push({ ...ctx, hash: e.hash, chainId: pool.chainId, tokenOut: e.tokenOut, decimalsOut: e.decimalsOut, spend: e.amountIn, sentAt: this.now() });
+        this.save();
+        this.say(`${label}: buy ${e.hash} sent; its receipt has not come yet, so it is settled by hash on the next ticks`, 'warn', { mode: 'live' });
+        return;
+      }
+      this.bookGas(o.mode, pool.chainId, pool.spend, pool.spendSymbol, gasOfError(e));
+      throw e;
+    } finally {
+      this.pendingBuy = null;
+    }
+    this.opened(ctx, 'live', {
+      tokens: fill.tokens, spent: fill.spent, spentUsd: fill.spentUsd, tx: fill.tx ?? null,
+      gasUsed: fill.gasUsed != null && fill.gasPriceWei != null ? fill.gasUsed : null,
+      gasPrice: fill.gasUsed != null && fill.gasPriceWei != null ? fill.gasPriceWei : null,
+      gasNative: typeof fill.gasNative === 'number' && Number.isFinite(fill.gasNative) ? fill.gasNative : null,
+    });
+  }
+
+  /** A buy that filled (at once, or settled later by hash): the position, its booking, the trade log and the play. */
+  private opened(
+    c: { pool: FreshPool; source: 'scan' | 'snipe'; buyTax: number; sellTax: number; impact: number; why: string; warn: string | null; note: string | null },
+    mode: TradeMode,
+    f: { tokens: number; spent: number; spentUsd: number; tx: string | null; gasUsed: number | null; gasPrice: number | null; gasNative: number | null },
+  ) {
+    const { pool, source, buyTax, sellTax } = c;
+    const { tokens, spent, spentUsd } = f;
     // One formula for paper and live: what was spent over what arrived (fee, impact, slippage and buy tax in).
     // A fill that reports no tokens (shouldn't happen) still gets booked, at the mid, never dropped.
     const eff = effectiveEntry(spent, tokens);
@@ -1095,21 +1184,51 @@ export class TokenTrader {
     const price = pool.price;
     const pos: Position = {
       id: `tt-${this.now().toString(36)}-${pool.pool.slice(2, 6)}`, chainId: pool.chainId, pool: pool.pool, dex: pool.dex,
-      label: `${pool.tokenSymbol}/${pool.spendSymbol}`, token: pool.token, spend: pool.spend, mode: o.mode,
+      label: `${pool.tokenSymbol}/${pool.spendSymbol}`, token: pool.token, spend: pool.spend, mode,
       entryPrice: entry, entryMid: pool.price, entryBasis: 'effective', price, peak: price, tokens, entryTokens: tokens, spent, spentUsd, openedAt: this.now(),
       entryVolume: pool.volumeUsd, volume: pool.volumeUsd, entryLiq: pool.liquidityUsd, liq: pool.liquidityUsd,
       entrySellTax: sellTax, sellTax, sellSimOk: true, feeBps: pool.feeBps, ...(pool.dynamicFee ? { dynamicFee: true } : {}), quoteReserve: pool.quoteReserve,
       tokenReserve: pool.tokenReserve, usdPerSpend: pool.usdPerSpend, buyTax, tp1Done: false, tp2Done: false, source, exitPlan: 'hold',
     };
     this.state.positions.push(pos);
-    this.bookBuy(pos, gasNative ?? 0);
-    const extra = [warn, note].filter((s): s is string => !!s).join('; ');
-    const why = extra ? `buy ${sized.why}; ${extra}` : `buy ${sized.why}`;
-    this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
+    (this.state.startedAt ??= {})[mode] ??= this.now();
+    this.bookBuy(pos, f.gasNative ?? 0);
+    const extra = [c.warn, c.note].filter((s): s is string => !!s).join('; ');
+    const why = extra ? `buy ${c.why}; ${extra}` : `buy ${c.why}`;
+    this.state.trades.unshift({ t: this.now(), side: 'buy', mode, chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
-    this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode: o.mode } : { mode: o.mode });
-    this.rememberEntry(pos, pool, recordedImpact, txEntry, gasUsed, gasPrice, gasNative);
+    this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode } : { mode });
+    this.rememberEntry(pos, pool, c.impact, f.tx, f.gasUsed, f.gasPrice, f.gasNative);
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
+  }
+
+  /**
+   * Live buys sent earlier whose receipt had not come: filled ones open their position (from the receipt's token
+   * amount), reverted ones book their gas, unmined ones wait. A mined buy whose token amount can't be read stays with
+   * an error naming its hash (never guessed).
+   */
+  private async settleInflight() {
+    const live = this.d.live;
+    if (!live || !this.state.inflight?.length) return;
+    const wait: InflightBuy[] = [];
+    for (const b of this.state.inflight) {
+      // a failed read is "not known yet": it waits (an RPC error never blocks the exits that follow)
+      const r = await live.recover(b.chainId, b.hash, b.tokenOut, b.decimalsOut).catch(() => null);
+      if (!r) { wait.push(b); continue; }
+      const label = `${b.pool.tokenSymbol}/${b.pool.spendSymbol}`;
+      if (!r.ok) {
+        this.bookGas('live', b.chainId, b.pool.spend, b.pool.spendSymbol, r.gasNative);
+        this.say(`${label}: buy ${b.hash} reverted; only its gas was spent`, 'warn', { mode: 'live' });
+        continue;
+      }
+      if (r.amountOut == null) {
+        wait.push(b);
+        this.lastError = `${label}: buy ${b.hash} mined but the tokens it bought could not be read from its receipt; check it on the explorer`;
+        continue;
+      }
+      this.opened(b, 'live', { tokens: r.amountOut, spent: b.spend, spentUsd: b.spend * b.pool.usdPerSpend, tx: b.hash, gasUsed: null, gasPrice: null, gasNative: r.gasNative });
+    }
+    this.state.inflight = wait;
   }
 
   private async consider(pool: FreshPool, source: 'scan' | 'snipe') {
@@ -1161,7 +1280,8 @@ export class TokenTrader {
         this.say(`skipped ${label}: ${a.reason}`, 'warn');
         continue;
       }
-      await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn, a.note);
+      // one buy that fails (a send error, no key on its chain) is recorded; the other pools still get their turn
+      try { await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn, a.note); } catch (e) { this.lastError = `${label}: ${(e as Error).message}`; }
     }
   }
 
@@ -1195,7 +1315,7 @@ export class TokenTrader {
       if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: thinWhy }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: thinWhy, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `${sn.maxPerHour} snipes an hour already`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       const before = this.state.positions.length;
-      await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');
+      try { await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe'); } catch (e) { this.lastError = `${pool.tokenSymbol}/${pool.spendSymbol}: ${(e as Error).message}`; }
       if (this.state.positions.length > before) { this.state.snipesAt.push(this.now()); room--; }
     }
   }
@@ -1208,6 +1328,41 @@ export class TokenTrader {
       tp1Done: p.tp1Done, tp2Done: p.tp2Done, remainingFrac: p.entryTokens > 0 ? p.tokens / p.entryTokens : 0,
       exitFee: p.feeBps / 10_000, exitTax: p.entrySellTax,
     };
+  }
+
+  /**
+   * A sell part sent earlier (pendingSell), by hash. true = settled (landed: tokens and proceeds booked; reverted: gas
+   * booked; mined but unreadable: reconcile reads the wallet); false = not mined yet, so this position waits.
+   */
+  private async settleSell(p: Position): Promise<boolean> {
+    const ps = p.pendingSell!;
+    if (!this.d.live) return false;
+    // a failed read is "not known yet": this position waits; the others still run their exits
+    const r = await this.d.live.recover(p.chainId, ps.hash, ps.tokenOut, ps.decimalsOut).catch(() => null);
+    if (!r) { p.exitPlan = `sell ${ps.hash} waiting for its receipt`; return false; }
+    p.pendingSell = null;
+    if (!r.ok) {
+      this.bookGas(p.mode, p.chainId, p.spend, this.spendSymbol(p), r.gasNative, p);
+      this.say(`${p.label}: sell ${ps.hash} reverted; only its gas was spent`, 'warn', { mode: p.mode });
+      return true;
+    }
+    if (r.amountOut == null) {
+      // it landed but what it brought can't be read: the wallet says what left (booked unpriced, never guessed)
+      this.bookGas(p.mode, p.chainId, p.spend, this.spendSymbol(p), r.gasNative, p);
+      p.reconcile = true;
+      return true;
+    }
+    p.tokens = Math.max(0, p.tokens - ps.tokens);
+    this.bookSell(p, ps.tokens, r.amountOut, r.gasNative, ps.first);
+    if (p.tpPending) p.tpPending.sold += ps.tokens;
+    const usd = r.amountOut * p.usdPerSpend;
+    const share = p.entryTokens > 0 ? ps.tokens / p.entryTokens : 0;
+    const why = `sell ${ps.hash} settled`;
+    this.state.trades.unshift({ t: this.now(), side: 'sell', mode: p.mode, chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - p.spentUsd * share, spendSym: p.label.split('/').pop(), amount: r.amountOut, pnl: r.amountOut - p.spent * share });
+    if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
+    this.say(`sold ${p.label}: ${why}`, 'success', { mode: p.mode });
+    this.noteSell(p, { quote: r.amountOut, sold: ps.tokens, price: p.price, impact: null, txs: [ps.hash], flat: !(p.tokens > p.entryTokens * 1e-8), gas: null });
+    return true;
   }
 
   /**
@@ -1261,6 +1416,11 @@ export class TokenTrader {
       }
       // the peak follows the price even while the position is blocked on reconcile (its trailing stop stays right)
       if (p.price > p.peak) p.peak = p.price;
+      if (p.mode === 'live' && p.pendingSell) {
+        // a sell part sent earlier: settle it by hash before deciding or sending anything else
+        if (!(await this.settleSell(p))) { left.push(p); continue; }
+        if (!p.reconcile && !(p.tokens > p.entryTokens * 1e-8)) continue;
+      }
       if (p.mode === 'live' && p.reconcile) {
         // the last split sell stopped partway: take the wallet's balance before deciding anything
         if (!(await this.reconcile(p))) { p.exitPlan = this.blocked(p) ?? p.exitPlan; left.push(p); continue; }
@@ -1281,7 +1441,7 @@ export class TokenTrader {
       const target = pend ? pend.target : p.entryTokens * d.frac;
       const qty = Math.min(p.tokens, pend ? Math.max(0, pend.target - pend.sold) : p.entryTokens * d.frac);
       const parts = splitSell(qty, Math.max(p.tokenReserve, 1e-12), p.feeBps, this.state.options.maxImpact);
-      let quote = 0, sold = 0, stopped: string | null = null;
+      let quote = 0, sold = 0, stopped: string | null = null, pending = false;
       let impactW = 0, impactN = 0, impactGap = false;
       const exitTxs: string[] = [];
       let gasNative = 0, gasUsed = 0, gasPrice: number | null = null, gasLegs = 0, gasMixed = false, gasGap = !(p.mode === 'live' && this.d.live);
@@ -1299,6 +1459,14 @@ export class TokenTrader {
           try {
             s = await this.d.live.sell(p, part, this.limits());
           } catch (e) {
+            if (e instanceof SwapPending) {
+              // sent, receipt not in yet: its tokens are not assumed sold; the next ticks settle it by hash first
+              this.bookGas(p.mode, p.chainId, p.spend, this.spendSymbol(p), e.gasNative, p);
+              p.pendingSell = { hash: e.hash, tokenOut: e.tokenOut, decimalsOut: e.decimalsOut, tokens: part, sentAt: this.now(), first: sold === 0 };
+              this.say(`${p.label}: sell ${e.hash} sent; its receipt has not come yet, so it is settled by hash before this position sells again`, 'warn', { mode: p.mode });
+              pending = true;
+              break;
+            }
             // #76: gas a failed send still paid, once. Its tokens are not booked here: reconcile reads the wallet.
             this.bookGas(p.mode, p.chainId, p.spend, this.spendSymbol(p), gasOfError(e), p);
             stopped = (e as Error).message;
@@ -1339,13 +1507,13 @@ export class TokenTrader {
         const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
         const costCoin = p.spent * (p.entryTokens > 0 ? sold / p.entryTokens : 0); // the same cost in the spend coin (log only)
         const why = stopped ? `${d.why} (partial: ${num(sold)} of ${num(qty)})` : d.why;
-        this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost, spendSym: p.label.split('/').pop(), amount: quote, pnl: quote - costCoin });
+        this.state.trades.unshift({ t: this.now(), side: 'sell', mode: p.mode, chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost, spendSym: p.label.split('/').pop(), amount: quote, pnl: quote - costCoin });
         this.say(`sold ${p.label}: ${why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
       }
       if (tp && (sold > 0 || pend || stopped)) {
         // Done only when the whole tranche went out with nothing interrupting it; a stop partway leaves the rest pending.
         const total = (pend?.sold ?? 0) + sold;
-        if (!stopped && parts.length) {
+        if (!stopped && !pending && parts.length) {
           if (tp === 1) p.tp1Done = true; else p.tp2Done = true;
           p.tpPending = null;
         } else p.tpPending = { tp, target, sold: total };

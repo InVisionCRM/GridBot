@@ -16,7 +16,7 @@ import { JsonStore, MemoryStore } from '../src/server/bot/store';
 import {
   Friends, GLOBAL_FAILS_PER_MIN, LOCK_AFTER, LOCK_MAX_MS, LOCK_MS, LoginGate, STRIKE_RESET_MS, type FriendsFile, type LoginGateFile,
 } from '../src/server/friends/accounts';
-import { DEVICE_COOKIE, hashPassword, HOST_ID, signDevice, signSession } from '../src/server/friends/auth';
+import { DEVICE_COOKIE, hashPassword, HOST_ID, readDevice, readSession, signDevice, signSession } from '../src/server/friends/auth';
 import { createGateway } from '../src/server/friends/gateway';
 import { OwnerLogin } from '../src/server/friends/owner';
 import { loginGateStore } from '../src/server/friends/host';
@@ -33,6 +33,16 @@ beforeAll(async () => { ownerHash = await hashPassword(PASS); });
 const tmpFile = () => join(mkdtempSync(join(tmpdir(), 'gate-')), 'login-limits.json');
 function clock(t0 = 1_793_129_093_757) { const c = { t: t0, now: () => c.t }; return c; }
 function lockOut(g: LoginGate, login = 'owner') { for (let i = 0; i < LOCK_AFTER; i++) g.fail(login); }
+/** A time near now whose signature (from `sign`) ends in 'A': its last 2 bits are unused, so 'B'-'D' decode the same. */
+function endingInA(sign: (t: number) => string): number {
+  for (let t = Date.now() - 1000; ; t--) if (sign(t).endsWith('A')) return t;
+}
+/** Flip one bit in the middle of a token's signature (a real change to the decoded bytes). */
+const flipMid = (token: string) => {
+  const dot = token.lastIndexOf('.'), sig = Buffer.from(token.slice(dot + 1), 'base64url');
+  sig[16] ^= 1;
+  return `${token.slice(0, dot + 1)}${sig.toString('base64url')}`;
+};
 
 describe('LoginGate: persisted counters', () => {
   it('a lock survives a restart; the file has no names, passwords or cookies', () => {
@@ -316,14 +326,26 @@ describe('gateway: forwarded headers cannot fake a trusted source', () => {
     const otherKey = signDevice(subKey(randomBytes(32), 'session'), Date.now(), 1);
     const friendSession = signSession(sessionKey, { f: 'some-friend-id', s: 1, e: Date.now() + 1e6 });
     for (const cookie of [
-      `${DEVICE_COOKIE}=${genuine.replace(/\.([A-Za-z0-9_-]+)$/, (_, sig: string) => `.${sig[0] === 'A' ? 'B' : 'A'}${sig.slice(1)}`)}`, // tampered signature (first character; the last can be unused base64 bits)
+      `${DEVICE_COOKIE}=${genuine.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'))}`, // tampered signature
       `${DEVICE_COOKIE}=${otherKey}`,                                             // another server's key
       `${DEVICE_COOKIE}=d2.1.${Date.now()}.`,                                     // no signature
       `${DEVICE_COOKIE}=${signDevice(sessionKey, Date.now(), 0)}`,                // genuine, but for another password
       `gb_session=${friendSession}`,                                              // a friend's session
+      `${DEVICE_COOKIE}=${flipMid(genuine)}`,                                     // one signature bit flipped
     ]) {
       const r = await post(port, { host: PUBLIC, 'x-forwarded-for': '100.70.1.2', 'tailscale-user-login': 'friend@example.com', cookie });
       expect(r.text).toMatch(/Too many wrong passwords/);
+    }
+  });
+
+  it('flake fix: a genuine device cookie whose last character was changed (same bytes once decoded) is not a known device', async () => {
+    // The case above failed ~1 run in 16: when the genuine signature ended in 'A' its "tampered" copy ended in 'B',
+    // which base64url-decodes to the same 32 bytes, so the server took it as the owner's device and logged in (303).
+    const { port } = await lockedGateway();
+    const genuine = signDevice(sessionKey, endingInA((t) => signDevice(sessionKey, t, 1)), 1);
+    for (const end of ['B', 'C', 'D']) {
+      const r = await post(port, { host: PUBLIC, 'x-forwarded-for': '100.70.1.2', 'tailscale-user-login': 'friend@example.com', cookie: `${DEVICE_COOKIE}=${genuine.slice(0, -1)}${end}` });
+      expect(r.text, end).toMatch(/Too many wrong passwords/);
     }
   });
 });
@@ -394,5 +416,23 @@ describe('#62 review: FriendsHost wiring', () => {
     host.stop();
     const again = new LoginGate(Date.now, loginGateStore(file));
     expect(again.lockedFor('owner')).toBeGreaterThan(0);
+  });
+});
+
+describe('flake fix: signatures must be the exact base64url we wrote', () => {
+  it('a device cookie with a non-canonical last character is rejected; the genuine one still reads', () => {
+    const t = endingInA((at) => signDevice(sessionKey, at, 1)), genuine = signDevice(sessionKey, t, 1), now = t + 1000;
+    expect(readDevice(sessionKey, genuine, now, 1)).toBe(t);
+    for (const end of ['B', 'C', 'D']) expect(readDevice(sessionKey, `${genuine.slice(0, -1)}${end}`, now, 1), end).toBeNull();
+    expect(readDevice(sessionKey, flipMid(genuine), now, 1)).toBeNull();
+  });
+
+  it('an owner session cookie with a non-canonical last character is rejected; the genuine one still reads', () => {
+    const now = Date.now();
+    const e = endingInA((at) => signSession(sessionKey, { f: HOST_ID, s: 2, e: at + 1e7, role: 'host' })) + 1e7;
+    const genuine = signSession(sessionKey, { f: HOST_ID, s: 2, e, role: 'host' });
+    expect(readSession(sessionKey, genuine, now)).toEqual({ f: HOST_ID, s: 2, e, role: 'host' });
+    for (const end of ['B', 'C', 'D']) expect(readSession(sessionKey, `${genuine.slice(0, -1)}${end}`, now), end).toBeNull();
+    expect(readSession(sessionKey, flipMid(genuine), now)).toBeNull();
   });
 });

@@ -20,7 +20,7 @@ import type { Logger } from './logger';
 import type { Store } from './store';
 import type { SharedNonce, TxGate } from './txGate';
 import type { Emit } from './activity';
-import { pushCapped } from '../../market/stats';
+import { downsampleByTime, pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, shouldRecenter, type RecenterState } from '../../live/recenter';
 import { noKey } from '../words';
@@ -54,6 +54,8 @@ export interface InFlight {
   swapTxHash?: string;
   /** Base units per native coin when the swap was sent (gas on a receipt reconciled after a restart). Absent on old records. */
   basePerNative?: number;
+  /** The least the swap could deliver (the quote's minimum): booked, flagged, when a mined swap's output log can't be read. Absent on old records. */
+  minOutHuman?: number;
 }
 
 export interface BotState {
@@ -87,7 +89,8 @@ export interface BotState {
   /** Profit waiting to be sent (send mode), in the spend coin */
   payoutPending: number;
   /** A transfer that was sent and isn't settled yet: never resend while this is set */
-  payoutInFlight: { hash: string; amount: number; to: string; at: number } | null;
+  /** nonce: absent on records from before it was kept. stuck: said once that it has no receipt (see TxFate). */
+  payoutInFlight: { hash: string; amount: number; to: string; at: number; nonce?: number; stuck?: boolean } | null;
   payouts: Payout[];
   /**
    * Live unwind in progress. The bot stays out of new entries and sells what it holds through the normal
@@ -135,6 +138,8 @@ export interface EngineDeps {
 export interface TickCtx {
   /** This market's price from the poll's price batch */
   price?: number;
+  /** The poll held this market's price back as an outlier (not confirmed yet): this tick only settles a swap in flight */
+  held?: boolean;
   /** One wallet read per key per poll (cleared after a trade on the chain) */
   wallet?: <T>(key: string, read: () => Promise<T>) => Promise<T>;
 }
@@ -451,7 +456,15 @@ export class GridEngine {
 
   /** Coins this bot's own fills still hold (quote-side inventory is not an on-chain position). */
   private held() { return replay(this.modeTrades()).plsHeld; }
-  private flat() { return !this.state.inFlight && this.state.queue.length === 0 && this.held() <= 1e-8; }
+  /**
+   * Below this the bot holds only rounding: sells go out in exact token units (15 significant digits), so a float lot
+   * of tens of millions sells a hair less than booked. A millionth of its biggest fill (at least 1e-8).
+   */
+  private dust() {
+    const big = this.modeTrades().reduce((m, t) => (t.failed ? m : Math.max(m, t.plsAmount)), 0);
+    return Math.max(1e-8, big * 1e-6);
+  }
+  private flat() { return !this.state.inFlight && this.state.queue.length === 0 && this.held() <= this.dust(); }
 
   /**
    * End the bot. Paper (and a live grid with nothing held and nothing in flight) leaves the active list now,
@@ -469,7 +482,7 @@ export class GridEngine {
       return false;
     }
     if (this.state.closing) return false;
-    const liveWork = this.state.inFlight != null || this.held() > 1e-8;
+    const liveWork = this.state.inFlight != null || this.held() > this.dust();
     if (!liveWork || this.executor instanceof UnavailableExecutor) {
       this.noteClose(why);
       if (this.executor instanceof UnavailableExecutor && liveWork) {
@@ -501,7 +514,7 @@ export class GridEngine {
 
   /** Sell each held lot (and any coins not on a level) through the normal executor. Idempotent. */
   private queueUnwindSells() {
-    if (this.state.inFlight || this.held() <= 1e-8) return;
+    if (this.state.inFlight || this.held() <= this.dust()) return;
     const price = this.state.lastPrice ?? 0;
     const queued = new Set(this.state.queue.map((q) => q.intervalIndex));
     for (const iv of this.state.intervals) {
@@ -515,7 +528,7 @@ export class GridEngine {
     }
     const onLevels = this.state.intervals.reduce((a, iv) => a + (iv.status === 'holding' ? iv.plsAmount : 0), 0);
     const free = this.held() - onLevels;
-    if (free > 1e-8 && !queued.has(-1)) {
+    if (free > this.dust() && !queued.has(-1)) {
       this.state.queue.push({
         id: `${CLOSE_JOB}free-${this.state.id}-${this.now().toString(36)}`,
         intervalIndex: -1, side: 'sell', triggerPrice: price, levelPrice: price,
@@ -592,7 +605,7 @@ export class GridEngine {
       econ, spacingWarn: econWarning(econ),
       recenter: { enabled: true, aboveSince: null, lastAt: now, count: r.count + 1 },
     };
-    this.seedUpper(price);
+    this.seedUpper(price, true);
     this.save();
     const msg = `Grid ${this.label}: price stayed above the range for ${RECENTER_AFTER_MS / 3600_000}h, so the range moved up to ${next.lowerPrice.toPrecision(5)}–${next.upperPrice.toPrecision(5)} (±${(band * 100).toFixed(0)}%, ${next.gridCount} levels)`;
     this.tag('info', msg);
@@ -603,7 +616,7 @@ export class GridEngine {
    * Coins for the levels at or above the price (seedIntervals): first coins this grid already holds that no level
    * owns (a live restart), then one start-up buy queued for the rest.
    */
-  private seedUpper(price: number) {
+  private seedUpper(price: number, recenter = false) {
     const pos = replay(this.modeTrades());
     const owned = this.state.intervals.reduce((a, i) => a + (i.status === 'holding' ? i.plsAmount : 0), 0);
     const free = Math.max(0, pos.plsHeld - owned);
@@ -611,7 +624,7 @@ export class GridEngine {
     const { intervals, job } = seedIntervals(this.state.intervals, price, { pls: free, cost: free * avg }, this.now());
     const fromHeld = intervals.filter((iv, i) => iv.status === 'holding' && this.state.intervals[i].status !== 'holding').length;
     this.state.intervals = intervals;
-    if (job) this.state.queue.push(job);
+    if (job) this.state.queue.push(recenter ? { ...job, recenter: true } : job);
     if (fromHeld || job) {
       const sym = this.def?.quote.symbol ?? this.state.stable;
       this.tag('info', `Levels above the price: ${fromHeld} use ${this.baseSym} the grid already holds${job ? `; buying ${this.baseSym} for ${job.seed!.length} with ${job.amount.toPrecision(5)} ${sym}` : ''}`);
@@ -648,7 +661,21 @@ export class GridEngine {
     if (s.payoutInFlight) {
       const f = s.payoutInFlight;
       const r = await this.executor.transferStatus(f.hash);
-      if (!r) return;
+      if (!r) {
+        const fate = await this.executor.txFate(f.nonce, f.at, this.now());
+        if (fate === 'dropped') {
+          // never ran: the profit is still in payoutPending, so it goes out again with the next payout
+          s.payoutInFlight = null;
+          this.ev('info', `Grid ${this.label}: profit transfer ${f.hash} was dropped by the network (never ran); it is sent again`, { level: 'warn' });
+          this.save();
+        } else if ((fate === 'used' || fate === 'stuck') && !f.stuck) {
+          f.stuck = true;
+          this.save();
+          const why = fate === 'used' ? 'its nonce was used by another transaction from this wallet (sped up or cancelled in a wallet app?)' : 'it is still not mined after an hour; speed it up or cancel it in your wallet app';
+          this.ev('info', `Grid ${this.label}: profit transfer ${f.hash} has no receipt: ${why}. Trading goes on; no other payout is sent until it settles`, { level: 'error', notify: true });
+        }
+        return;
+      }
       s.payoutInFlight = null;
       s.payouts.push({ at: this.now(), amount: r.ok ? f.amount : 0, to: f.to, txHash: f.hash, gasQuote: r.gasPls * price, ok: r.ok, paper: s.mode === 'paper' });
       const sym = this.def?.quote.symbol ?? s.stable;
@@ -671,8 +698,8 @@ export class GridEngine {
     if (s.payoutPending < this.payoutMin) return;
     const to = s.profits.to, amount = s.payoutPending;
     const send = async () => {
-      const hash = await this.executor.sendTransfer(to, amount);
-      s.payoutInFlight = { hash, amount, to, at: this.now() };
+      const { hash, nonce } = await this.executor.sendTransfer(to, amount);
+      s.payoutInFlight = { hash, amount, to, at: this.now(), nonce };
       this.save();
       this.tag('info', `sent profit transfer ${hash}: ${amount} → ${to}`);
     };
@@ -730,6 +757,8 @@ export class GridEngine {
     this.ticking = true;
     try {
       if (this.state.inFlight && !this.draining) await this.reconcile();
+      // an unconfirmed outlier price is neither traded on nor republished as the spot (reading it again would get it too)
+      if (ctx.held) return;
       // The poll's price batch already read this market's price (MultiBot.tickAll); reading it again per grid doubled
       // the RPC calls. A grid ticked on its own (or after a trade on its chain this poll) reads its own.
       const price = ctx.price != null && ctx.price > 0 && !this.state.inFlight ? ctx.price : await this.executor.getPrice();
@@ -900,7 +929,7 @@ export class GridEngine {
       plsAmount, stableAmount, price: execPrice, gasPls, gasQuote, txHash: f.txHash, approvalTxHash: f.approvalTxHash,
       timestamp: this.now(), realizedPnlQuote: realized, paper: this.state.mode === 'paper',
       triggerPrice: job.triggerPrice, levelPrice: job.levelPrice, ...(cash ? { closeSale: true } : {}), quotedPrice: f.quotedPrice, execPrice, slippagePct,
-      fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.side === 'sell' && job.manual ? { closeOut: true } : {}), ...(job.seed ? { seed: job.seed } : {}),
+      fromReceipt: f.fromReceipt, feeQuote, lotCost, roundTripNet, ...(job.side === 'sell' && job.manual ? { closeOut: true } : {}), ...(job.seed ? { seed: job.seed } : {}), ...(job.recenter ? { recenter: true } : {}),
       ...(f.taxPct ? { taxPct: f.taxPct } : {}), ...(f.outSource ? { outSource: f.outSource } : {}), ...(f.expectedOut != null ? { expectedOut: f.expectedOut } : {}),
       ...(f.gasUnknown ? { gasUnknown: true, note: GAS_UNKNOWN_NOTE } : {}),
       ...(this.def ? { dex: this.def.pool.dex, feeBps: this.def.pool.feeBps, ...(this.def.pool.feeTier != null ? { feeTier: this.def.pool.feeTier } : {}) } : {}),
@@ -968,7 +997,7 @@ export class GridEngine {
         }
       }
 
-      this.state.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative };
+      this.state.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative, minOutHuman: q.minOutHuman };
       this.save();
       try {
         const f = await this.executor.execute(q, {
@@ -1049,14 +1078,23 @@ export class GridEngine {
       }
       return;
     }
+    // mined OK but what arrived can't be read: the swap's guaranteed minimum is booked (flagged); an old record without
+    // it stops the bot naming the hash, keeping the record (never guessed, never booked as a revert)
+    const out = r.ok ? r.amountOutHuman ?? f.minOutHuman ?? null : null;
+    if (r.ok && out == null) {
+      this.state.status = 'stopped';
+      this.state.halt = systemHalt('error', `swap ${f.swapTxHash} mined, but what it brought could not be read from its receipt; stopped. Check the tx on the explorer.`, this.now());
+      this.save();
+      return;
+    }
     this.state.inFlight = null;
     this.state.queue = this.state.queue.filter((q) => q.id !== job.id);
     if (r.gasUnknown) this.tag('warn', `swap ${f.swapTxHash}: gas ${r.gasNative.toPrecision(4)} ${this.chainCfg?.nativeSymbol ?? 'native'} not booked — ${GAS_UNKNOWN_NOTE}`);
-    if (r.ok && r.amountOutHuman > 0) {
+    if (r.ok && out != null) {
       this.recordFill(job, {
         ...this.fillArgs(job, {
           txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman,
-          amountOutHuman: r.amountOutHuman, gasPls: r.gasPls, fromReceipt: true,
+          amountOutHuman: out, gasPls: r.gasPls, fromReceipt: r.amountOutHuman != null,
         }, f.price),
         gasUnknown: r.gasUnknown,
       });
@@ -1090,6 +1128,8 @@ export class GridEngine {
       price: this.state.lastPrice, priceAt: this.state.lastPriceAt, balances: this.balances, walletBalances: this.walletBalances,
       intervals: this.state.intervals, quotePerBuy: this.state.quotePerBuy, usdPerBuy: this.state.quotePerBuy, queue: this.state.queue, inFlight: this.state.inFlight,
       trades: trades.slice(-100).reverse().map(legacyTradeNames),
+      /** every trade row of this mode (the list above is the newest 100) */
+      tradeCount: trades.length,
       // gasUsd / costUsd: deprecated aliases (quote coin) for older API readers
       pnl: { realized: t.realized, unrealized: t.unrealized, gasQuote: t.gasQuote, plsHeld: t.pos.plsHeld, costQuote: t.pos.costQuote, gasUsd: t.gasQuote, costUsd: t.pos.costQuote },
       profits: this.state.profits,
@@ -1102,13 +1142,14 @@ export class GridEngine {
         };
       })(),
       stats: roundTripStats(trades),
-      moveCount: trades.filter((t) => !t.failed && !t.manual).length,
+      // fills, without a re-center's own seed buy: the re-center is one move (recenter.count, added by the desk)
+      moveCount: trades.filter((t) => !t.failed && !t.manual && !t.recenter).length,
       lastMoveAt: trades.reduce((m, t) => (!t.failed && !t.manual ? Math.max(m, t.timestamp || 0) : m), 0) || null,
       econ: this.state.econ ?? null,
       lastError: this.lastError,
       spacing,
       spacingWarn: this.state.spacingWarn,
-      equityHist: (this.state.equity ?? []).slice(-600),
+      equityHist: downsampleByTime(this.state.equity ?? [], 600), // the whole life, not the newest 10 hours
       startedAt: this.state.startedAt ?? trades[0]?.timestamp ?? null,
       startPrice: this.state.startPrice ?? trades[0]?.price ?? null,
       recenter: this.state.recenter ?? null,

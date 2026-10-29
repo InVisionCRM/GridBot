@@ -6,7 +6,7 @@ import { bucketItems, emptyQuery, nextSort, type DeskQuery, type DeskSort, deskI
 import type { AnyObj, Nav } from './model';
 
 const TYPES: [DeskQuery['type'], string][] = [['all', 'All'], ['grid', 'Grid'], ['trend', 'Trend'], ['lp', 'Liquidity'], ['trader', 'Token trader'], ['paper', 'Paper']];
-const STATUSES: [DeskQuery['status'], string][] = [['all', 'Any status'], ['running', 'Running'], ['paused', 'Paused'], ['stopped', 'Stopped'], ['out', 'Out of range']];
+const STATUSES: [DeskQuery['status'], string][] = [['all', 'Any status'], ['running', 'Running'], ['paused', 'Paused'], ['out', 'Out of range']];
 const MODES: [DeskQuery['mode'], string][] = [['all', 'Live + paper'], ['live', 'Live'], ['paper', 'Paper']];
 const SORTS: [DeskSort, string][] = [
   ['name', 'Name'], ['value', 'Value'], ['generated', 'Generated'], ['pnl', 'P&L'], ['pnlPct', 'P&L %'], ['fees', 'Fees earned'], ['age', 'Age'], ['apr', 'Est. APR'], ['moves', 'Moves'],

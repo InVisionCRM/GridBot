@@ -29,7 +29,11 @@ export type DetailHide = 'Made at event prices' | 'Total P&L' | 'Price change' |
  * The per-coin lines of metrics.breakdownByCoin, in that coin's units: earned, then each non-zero cost with a minus,
  * then "= Generated" (the headline above, not printed twice). A coin with no cost is one row saying so.
  */
-export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'breakdownBasis'> | null | undefined, moves?: number | null): DetailRow[] {
+/**
+ * `waiting`: an open LP's fees waiting in the position, per coin. A coin whose fees earned are exactly what is waiting
+ * (nothing collected yet) points to the position card instead of printing the same figure again.
+ */
+export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'breakdownBasis'> | null | undefined, waiting?: Record<string, number>): DetailRow[] {
   const by = m?.breakdownByCoin, basis = m?.breakdownBasis;
   if (!by || !basis) return [];
   const earnedLabel = basis.earned === 'lpFees' ? 'Fees earned' : 'Trade profit before costs';
@@ -40,7 +44,6 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
   for (const [sym, c] of Object.entries(by)) {
     const costs: [string, number, string][] = ([
       ['Gas + swap fees', c.gasSwap, `Gas for every transaction and the pool fees / swap cost, charged in ${sym}.`],
-      ['Range moves', c.rangeMoveLoss, `What the range moves locked in, in ${sym}${moves ? ` (${moves} range move${moves === 1 ? '' : 's'})` : ''}.`],
       ['Token taxes', c.taxes, `Fee-on-transfer tax taken on the fills, in ${sym}.`],
       ['Bridge', c.bridge, `Cross-chain move costs, in ${sym}.`],
     ] as [string, number, string][]).filter(([, v]) => v !== 0);
@@ -48,7 +51,9 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
       rows.push([`${earnedLabel}, ${sym}`, c.earned === 0 ? <>none yet</> : <>all of it is Generated (no cost is charged in {sym})</>, `${earnedTip} Nothing is charged in ${sym}, so it is all Generated.`]);
       continue;
     }
-    rows.push([`${earnedLabel}, ${sym}`, <>{qty(c.earned, sym, 6)}</>, earnedTip]);
+    const w = waiting?.[sym];
+    const allWaiting = w != null && w !== 0 && Math.abs(c.earned - w) <= 1e-9 * Math.max(Math.abs(c.earned), Math.abs(w));
+    rows.push([`${earnedLabel}, ${sym}`, allWaiting ? <>same as Fees waiting (position card)</> : <>{qty(c.earned, sym, 6)}</>, earnedTip]);
     for (const [k, v, t] of costs) rows.push([`− ${k}, ${sym}`, <>{qty(-v, sym, 6)}</>, t]);
     rows.push([`= Generated, ${sym}`, 'the headline above', `${earnedLabel} − ${costs.map(([k]) => k.toLowerCase()).join(' − ')}, in ${sym}.`]);
   }
@@ -62,6 +67,15 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
  */
 export type ValueChangeRow = [string, number | null | undefined, string];
 
+/** An open liquidity position's fees waiting, per coin (base and quote symbols); undefined for anything else */
+function waitingOf(b: AnyObj, quoteSym: string): Record<string, number> | undefined {
+  if (b.kind !== 'lp' || !b.position || !b.owed || typeof b.base !== 'string') return undefined;
+  const out: Record<string, number> = {};
+  if (typeof b.owed.base === 'number') out[b.base] = b.owed.base;
+  if (typeof b.owed.quote === 'number') out[quoteSym] = b.owed.quote;
+  return out;
+}
+
 export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { b: AnyObj; breakdown?: DetailRow[]; changes?: readonly ValueChangeRow[]; hide?: readonly DetailHide[]; note?: string }) {
   const m = metricsOf(b);
   if (!m) return null;
@@ -70,22 +84,29 @@ export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { 
   const plain = (v: number | null | undefined) => (v == null ? '—' : qty(v, sym, 5, false));
   const no = new Set<string>(hide);
   const raw: [string, string, string][] = [
-    ['Made at event prices', signed(q.made), `Fees / round-trip profit minus gas, swap fees, taxes and range-move losses, each in ${sym} at the time it happened. Generated is the same counted in coins, valued at today's price.`],
+    ['Made at event prices', signed(q.made), `Fees / round-trip profit minus gas, swap fees and taxes, each in ${sym} at the time it happened. Generated is the same counted in coins, valued at today's price.`],
     ['Total P&L', signed(q.totalPnl), m.calc],
     ['Price change', signed(q.priceChange), `Total P&L − Generated (in ${sym} at today's price): what the coins' own price did (impermanent loss and the inventory's market move).`],
+    ...(m.kind === 'lp' && q.rebalanceLoss ? [['Range moves (in Price change)', signed(-q.rebalanceLoss), `The coin mix the ${num(b.reranges) ?? 0} range move${num(b.reranges) === 1 ? '' : 's'} locked in, in ${sym} at each move's price: the position had sold the coin that rose and bought the one that fell. Part of Price change, not taken out of Generated.`] as [string, string, string]] : []),
     ...changes.map(([k, v, t]): [string, string, string] => [k, signed(v), t]),
     ['Open positions', signed(q.unrealized), 'Coins bought and not sold yet / the position\'s price side, at today\'s price minus what they cost. Not in Generated until they sell.'],
   ];
-  // Made at event prices is the headline's number when everything was generated in the quote coin (prices don't matter then)
+  // Made at event prices is the headline's number when everything was generated in the quote coin (prices don't matter
+  // then); with nothing generated yet it says nothing and is left out
   const gen = m.generated, onlyQuote = gen && Object.entries(gen).every(([k, u]) => k === sym || u === 0);
+  const genZero = !!gen && Object.values(gen).every((u) => u === 0);
   if (q.made != null && onlyQuote && Math.abs(q.made - (gen![sym] ?? 0)) <= 1e-9 * Math.max(1, Math.abs(q.made))) raw[0][1] = 'same as Generated';
   else if (raw[0][1] !== '—' && echoes(unitsText(gen, 9), raw[0][1])) raw[0][1] = 'same as Generated';
-  // a row printing what a hidden row (shown elsewhere on the screen) prints is left out; rows printing the same
-  // value as each other are merged into one row with both names (a real dash is not a value)
-  const hidden = new Set(raw.filter(([k]) => no.has(k)).map(([, v]) => v));
+  if (genZero) raw.shift();
+  // a row printing what a hidden row (shown elsewhere on the screen) prints says "same as <it>" instead of the figure
+  // (never deleted: Total P&L keeps its % of capital in); rows printing the same as each other are merged into one row
+  // with both names (a real dash is not a value)
+  const hiddenBy = new Map(raw.filter(([k, v]) => no.has(k) && v !== '—').map(([k, v]) => [v, k] as const));
   const rows: [string, string, string][] = [];
-  for (const [k, v, t] of raw) {
-    if (no.has(k) || (v !== '—' && hidden.has(v))) continue;
+  for (const [k, figure, t] of raw) {
+    if (no.has(k)) continue;
+    const h = figure !== '—' ? hiddenBy.get(figure) : undefined;
+    const v = h ? `same as ${h}` : figure;
     const same = v !== '—' ? rows.find((r) => r[1] === v) : undefined;
     if (same) { same[0] = `${same[0]} = ${k}`; same[2] = `${same[2]}\n${k}: ${t}`; continue; }
     rows.push([k, v, t]);
@@ -102,7 +123,7 @@ export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { 
     <details className="more money-details" data-testid="money-details">
       <summary>Details <span className="muted small">{note ?? 'made at event prices, total P&L, price change'}</span></summary>
       <table className="stat-table"><tbody>
-        {[...coinBreakdownRows(m, num(b.reranges)), ...(breakdown ?? [])].map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
+        {[...coinBreakdownRows(m, waitingOf(b, sym)), ...(breakdown ?? [])].map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
         {[...rows, ...(value ? [value] : [])].map(([k, v, t]) => <tr key={k} title={t}><th>{k}</th><td className="mono">{v}</td></tr>)}
       </tbody></table>
     </details>

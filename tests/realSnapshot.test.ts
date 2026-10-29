@@ -33,33 +33,37 @@ function lpClosedStatus(state: LpState): Obj {
   const out = { ...FX.lpClosedLegacy.status, ...state, kind: 'lp', pnl: null, value: null };
   return { ...out, metrics: lpMetrics(out, NOW) };
 }
-const lpLive = (): Obj => { const b = { ...clone(FX.lpLive) }; return { ...b, metrics: lpMetrics(b, NOW) }; };
+/** The live LP as the server sends it now: the snapshot's pnl came from the old pnl() (net also took out the move loss). */
+const lpLive = (): Obj => {
+  const b = { ...clone(FX.lpLive) };
+  const p = b.pnl, net = p.fees - p.gas - p.swapCost;
+  b.pnl = { ...p, net, price: p.equity - b.startValue - net };
+  return { ...b, metrics: lpMetrics(b, NOW) };
+};
 
-describe('real snapshot: LP costs include range-move losses (#1)', () => {
-  it('Fees paid = gas + swaps + range-move loss, so fees earned − fees paid = what it made', () => {
+describe('real snapshot: LP Generated is units earned; range-move losses are reported beside it, not taken out', () => {
+  it('Fees paid = gas + swaps, so fees earned − fees paid = what it made', () => {
     const b = lpLive(), k = b.usdPerQuote, t = b.totals;
     const f = botFacts(b, NOW);
-    expect(f.feesPaidUsd!).toBeCloseTo((t.gas + t.swapCost + t.moveLoss) * k, 6);
-    // 0.002633 ETH gas + swaps, 0.022473 ETH lost to the 3 moves (actuals)
-    expect(f.feesPaidUsd! / k).toBeCloseTo(0.002633 + 0.022473, 5);
+    expect(f.feesPaidUsd!).toBeCloseTo((t.gas + t.swapCost) * k, 6);
+    expect(f.feesPaidUsd! / k).toBeCloseTo(0.002633, 5); // gas + swaps (actuals)
     expect(f.feesEarnedUsd! - f.feesPaidUsd!).toBeCloseTo(b.metrics.dollarsMadeUsd, 6);
-    expect(b.metrics.dollarsMadeUsd / k).toBeCloseTo(0.028842, 6); // actual net generated, ETH
+    expect(b.metrics.dollarsMadeUsd / k).toBeCloseTo(0.028842 + 0.022473, 5); // fees − gas − swaps, ETH
+    expect(b.metrics.realizedRebalanceLossUsd / k).toBeCloseTo(0.022473, 5); // the 3 moves, reported on their own
   });
-  it('generated per coin = fees − gas − swaps − move loss; ≈ actual net at today\'s price', () => {
+  it('generated per coin = fees − gas − swaps', () => {
     const b = lpLive(), m = b.metrics;
     const gen = m.generated!;
     expect(gen.USDC).toBeCloseTo(b.pnl.feeCoins.base, 6);
-    expect(gen.ETH).toBeCloseTo(b.pnl.feeCoins.quote - b.totals.gas - b.totals.swapCost - b.totals.moveLoss, 9);
-    // fees valued at today's mid vs when collected: within 0.5% of the actual $67.52
-    expect(Math.abs(m.generatedUsd! - 67.52) / 67.52).toBeLessThan(0.005);
+    expect(gen.ETH).toBeCloseTo(b.pnl.feeCoins.quote - b.totals.gas - b.totals.swapCost, 9);
   });
-  it('the LP page has one Costs tile that includes the moves, and no separate "Lost to range moves" tile', () => {
+  it('the LP page has no "Lost to range moves" tile; the loss is a Details info row, not a cost line', () => {
     const src = readFileSync(new URL('../src/ui/LpDetail.tsx', import.meta.url), 'utf8');
     expect(src).not.toContain('>Lost to range moves<');
-    // the costs, range moves included, are the per-coin lines of metrics.breakdownByCoin in Details (MoneyDetails)
     expect(src).toMatch(/metrics\.breakdownByCoin/);
     const md = readFileSync(new URL('../src/ui/MoneyDetails.tsx', import.meta.url), 'utf8');
-    expect(md).toMatch(/'Range moves', c\.rangeMoveLoss/);
+    expect(md).toContain("'Range moves (in Price change)'");
+    expect(md).not.toMatch(/rangeMoveLoss/);
   });
 });
 
@@ -70,10 +74,12 @@ describe('real snapshot: closed Robinhood ETH/USDG LP move loss is rebuilt at lo
     expect(saved.totals.moveLoss).toBe(0);
     // what the app showed (+89.51 = fees − gas, no move loss) …
     expect(saved.totals.fees - saved.totals.gas).toBeCloseTo(89.51, 2);
-    // … and what botMetrics now gives for that payload even when no server rebuilt it (an older build): −16.31 (#43 regression guard)
-    expect(lpClosedStatus(clone(saved)).metrics.generated.USDG).toBeCloseTo(-16.31, 2);
+    // … which is Generated again under the units rule; the rebuilt move loss is reported beside it even when no server rebuilt it
+    const m = lpClosedStatus(clone(saved)).metrics;
+    expect(m.generated.USDG).toBeCloseTo(89.51, 2);
+    expect(m.realizedRebalanceLossUsd).toBeCloseTo(105.82, 2);
   });
-  it('load rebuilds ≈105.8 USDG lost to moves, so it generated ≈ −16.31 USDG (actual)', () => {
+  it('load rebuilds ≈105.8 USDG lost to moves, reported beside its +89.51 USDG Generated (fees − gas)', () => {
     const before = clone(saved);
     const up = upgradeLp(clone(saved));
     expect(saved).toEqual(before); // never edits the saved object
@@ -81,15 +87,15 @@ describe('real snapshot: closed Robinhood ETH/USDG LP move loss is rebuilt at lo
     expect(up.totals.moveLoss).toBeCloseTo(105.82, 2);
     expect(up.totals.moveLossBackfill).toMatchObject({ price: saved.lastPrice });
     const m = lpClosedStatus(up).metrics;
-    expect(m.generated!.USDG).toBeCloseTo(-16.31, 2);
+    expect(m.generated!.USDG).toBeCloseTo(89.51, 2);
     expect(m.generated!.ETH).toBe(0);
     expect(m.realizedRebalanceLossUsd!).toBeCloseTo(105.82, 2);
-    expect(m.dollarsMadeUsd!).toBeCloseTo(-16.31, 2);
+    expect(m.dollarsMadeUsd!).toBeCloseTo(89.51, 2);
     // Total P&L = idle coins at the exit price − gas − start ≈ −53.2 USDG; price change = the rest. (The actuals' −141.51
     // price effect was taken against the app's uncorrected +89.51 net: −141.51 + 105.82 ≈ −35.7, the gap being the exit
     // price vs the last value point.)
     expect(m.totalPnlUsd!).toBeCloseTo(0.8717608375797146 * 2332.745368296711 + 117.28207 - 0.8165948 - 2203.2534147, 3);
-    expect(m.priceChangeUsd!).toBeCloseTo(-36.88, 1);
+    expect(m.priceChangeUsd!).toBeCloseTo(-36.88 - 105.82, 1); // the move loss now sits in Price change
     expect(m.generatedUsd! + m.priceChangeUsd!).toBeCloseTo(m.totalPnlUsd!, 9);
   });
   it('is idempotent and leaves bots it cannot rebuild exactly alone', () => {

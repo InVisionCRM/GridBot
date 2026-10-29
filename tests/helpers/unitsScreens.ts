@@ -96,7 +96,7 @@ export const HOLDINGS: Obj = (() => {
     { coin: coin(1, 'ETH', 0.4, 2341.0064), dust: false, bots: [] },
   ];
   const by = (id: number) => wallet.filter((w) => w.coin.chainId === id).reduce((a, w) => a + w.coin.usd, 0);
-  const chains = S.chains.map((c: Obj) => ({ chainId: c.id, name: c.name, short: c.short, color: c.color, address: null, usd: by(c.id), walletUsd: by(c.id), botsUsd: 0, lpUsd: 0, feesUsd: 0 }));
+  const chains = S.chains.map((c: Obj) => ({ chainId: c.id, name: c.name, short: c.short, color: c.color, address: null, usd: by(c.id), walletUsd: by(c.id), freeUsd: by(c.id), botsUsd: 0, lpUsd: 0, feesUsd: 0 }));
   const net = wallet.reduce((a, w) => a + w.coin.usd, 0);
   return { address: null, at: AS_OF, hasSigner: true, netWorthUsd: net, netWorthExDustUsd: net, walletUsd: net, chains, wallet, positions: [], fees: [], bots: [], errors: [] };
 })();

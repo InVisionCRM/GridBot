@@ -6,7 +6,7 @@ import { Chart } from './Chart';
 import { ValueOverTime } from './ValueOverTime';
 import { StatTable } from './StatTable';
 import { MoneyDetails, type DetailRow } from './MoneyDetails';
-import { ago, bagFixed, cls, dur, num, pct, px, qty, sameShown } from './fmt';
+import { ago, bagFixed, cls, dur, num, pct, px, qty } from './fmt';
 import { LP_BAND } from '../market/lp';
 import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
@@ -186,11 +186,17 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
  * print the same as that coin's Generated in the headline (no cost taken in that coin yet), the page says so: the
  * figure is on the screen once already (Kyle).
  */
+/**
+ * The fees waiting in one coin. It reads "all of Generated" only when the two amounts are the same number, never when two
+ * roundings happen to print alike (0.000188 waiting next to 0.000167 Generated printed as one).
+ */
 function waitingText(owed: number | null | undefined, sym: string, gen: Record<string, number> | null | undefined): string {
-  const small = owed != null && owed !== 0 && num(owed, 4) === '0';
-  const txt = `${small ? Number(owed.toPrecision(3)) : num(owed, 4)} ${sym}`;
+  if (owed == null) return `— ${sym}`;
+  // 5 significant digits, as Generated prints: a 4-decimal rounding (0.0113) read as Generated's 0.011276
+  const txt = qty(owed, sym, 5, false);
   const g = gen?.[sym];
-  return g != null && owed != null && sameShown(qty(g, sym, 5), txt) ? `${sym}: all of Generated` : txt;
+  const same = g != null && owed !== 0 && Math.abs(owed - g) <= 1e-9 * Math.max(Math.abs(owed), Math.abs(g));
+  return same ? `${sym}: all of Generated` : txt;
 }
 
 function openedText(b: AnyObj, pos: AnyObj): string {
@@ -319,7 +325,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi">
           <span><L tip={m?.calc ?? 'Generated'}>Generated</L></span>
           <div className="kpi-v coins2">{m?.generated ? <>{Object.entries(m.generated).map(([sym, u]) => <b key={sym} className={cls(u)}>{qty(u, sym, 5)}</b>)}</> : '—'}</div>
-          <span className="sub">fees − gas − swap fees − range-move losses, per coin</span>
+          <span className="sub">fees − gas − swap fees, per coin</span>
         </div>
         <div className="kpi">
           <span><L tip="The coins in the position right now (they change as the price moves inside the range), and its share of the liquidity trading at today's price, which is its share of every trade's fee. Out of range the share is 0.">Liquidity provided</L></span>
