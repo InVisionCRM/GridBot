@@ -173,7 +173,7 @@ export function createTokenTrader(o: {
     rejects: o.dataDir ? new PlayRejectLog(o.dataDir) : undefined,
     live: {
       buy: async (pool, spend, limits) => {
-        const draft = await draftOf(o.hub, pool);
+        const draft = await draftOf(o.hub, pool, 'buy');
         // A Stop all that lands while this buy waits in the chain's queue, or between the quote and the send, stops it
         // (sells keep running: they are exits).
         const { q, fill } = await liveSwap(o.hub.rt(pool.chainId), o.hub.draftQuoter(draft), swapOpts(o, pool.chainId, trader.status().options.sniper.mevRpc), 'buy', spend, limits, sendChecks(trader).buy(pool.chainId));
@@ -182,7 +182,7 @@ export function createTokenTrader(o: {
       },
       sell: async (pos, tokens, limits) => {
         const pool = positionPool(pos);
-        const draft = await draftOf(o.hub, pool);
+        const draft = await draftOf(o.hub, pool, 'sell');
         const { q, fill } = await liveSwap(o.hub.rt(pos.chainId), o.hub.draftQuoter(draft), swapOpts(o, pos.chainId, trader.status().options.sniper.mevRpc), 'sell', tokens, limits, sendChecks(trader).sell());
         return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash, gasUsed: fill.swapGasUsed, gasPriceWei: fill.swapGasPriceWei, gasNative: fill.gasNative };
       },
@@ -245,10 +245,15 @@ function positionPool(p: Position): FreshPool {
   };
 }
 
-async function draftOf(hub: Hub, pool: FreshPool) {
+/**
+ * The market to quote and swap through. A buy needs the safety check to allow live trading. A sell (an exit) does not:
+ * a coin whose sell tax rose past the live cap is the one an exit wants out of, and a sell that would really revert
+ * fails at its own quote or on-chain.
+ */
+async function draftOf(hub: Hub, pool: FreshPool, side: 'buy' | 'sell') {
   const r = await hub.inspect({ chainId: pool.chainId, address: pool.token, quote: pool.spend, pool: pool.pool });
   if (!r.draft) throw new Error(r.safety?.reasons?.[0] ?? 'no pool to trade');
-  if (!r.safety?.liveAllowed) throw new Error(r.safety?.reasons?.join(' ') || 'safety check does not allow live trading');
+  if (side === 'buy' && !r.safety?.liveAllowed) throw new Error(r.safety?.reasons?.join(' ') || 'safety check does not allow live trading');
   return r.draft;
 }
 
