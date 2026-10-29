@@ -17,15 +17,15 @@ const R = JSON.parse(readFileSync(new URL('./fixtures/real-status-2026-10-27.jso
 const AS_OF: number = R.grids[0].metrics.asOf;
 
 describe("estimates: Generated ÷ age in days × the window, nothing under a day", () => {
-  it('live LP lp-mvnm73sx-hghe at 2.49 days: 365d = 9,260.18 USDC + 0.25342 ETH', () => {
+  it('live LP lp-mvnm73sx-hghe at 2.49 days: 365d = 9,260.18 USDC + 3.5441 ETH', () => {
     const l = R.lps.find((x: Obj) => x.id === 'lp-mvnm73sx-hghe');
     const m = lpMetrics(l, AS_OF);
     const days = (AS_OF - l.startedAt) / DAY_MS; // running: its history ends now (historyEnd)
     expect(days).toBeCloseTo(2.4927, 4);
     expect(m.generated!.USDC).toBeCloseTo(63.239573, 6);
-    expect(m.generated!.ETH).toBeCloseTo(0.00173066, 8);
+    expect(m.generated!.ETH).toBeCloseTo(0.02420354, 8); // fees − gas − swap fees (range-move loss not taken out)
     expect(m.generatedRate.d365!.USDC).toBeCloseTo(9260.18, 2);
-    expect(m.generatedRate.d365!.ETH).toBeCloseTo(0.25342, 5);
+    expect(m.generatedRate.d365!.ETH).toBeCloseTo(3.54413, 5);
     for (const [k, w] of [['d1', 1], ['d7', 7], ['d30', 30], ['d365', 365]] as const) {
       for (const sym of ['USDC', 'ETH']) expect(m.generatedRate[k]![sym]).toBeCloseTo((m.generated![sym] / days) * w, 9);
       expect(m.generatedRate.needs[k]).toBeNull();
@@ -56,7 +56,7 @@ describe("estimates: Generated ÷ age in days × the window, nothing under a day
     expect(young).not.toMatch(/of history/);
     const l = R.lps.find((x: Obj) => x.id === 'lp-mvnm73sx-hghe');
     const old = renderToStaticMarkup(createElement(StatTable, { b: { ...l, metrics: lpMetrics(l, AS_OF) }, s: { chains: [] } }));
-    expect(old).toMatch(/Est\. 365d<\/th><td class="mono">\+9,260 USDC · \+0\.253 ETH</); // unitsText: whole units from 1,000
+    expect(old).toMatch(/Est\. 365d<\/th><td class="mono">\+9,260 USDC · \+3\.54 ETH</); // unitsText: whole units from 1,000
     expect(old).not.toMatch(/shows after a day/);
     expect(old).not.toMatch(/Est\. 30d/); // Kyle: day, 7d and 365d on screen; d30 stays in the API
     expect(lpMetrics(l, AS_OF).generatedRate.d30).not.toBeNull();

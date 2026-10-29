@@ -20,7 +20,8 @@
  *  - Preset A and Preset B are the optional named setups (see lpPolicy). Neither is selected here
  *    as a preference. They are replayed so the same path shows what those waits do.
  *  - "Stay put" is ±1% with auto-move off.
- *  - The first number on each row is net quote: fees − gas − swap cost − realized rebalancing loss.
+ *  - The first number on each row is net quote: fees − gas − swap cost. The move loss (the coin-mix change locked in
+ *    at each move) is its own column and is not taken out.
  *    That is the dollars the bot made. A comparison with holding the coins is not in this report.
  *
  * An external harness (not in this repo) cross-checks the real candle tapes. This file does not

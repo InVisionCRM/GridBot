@@ -918,7 +918,8 @@ export class LpEngine {
   /**
    * Where the money stands (null until the first reading), in the quote coin:
    *  feeCoins / fees = fees collected + waiting, per coin and their worth (collected: valued then; waiting: today)
-   *  net = fees − gas − swap costs − lost to moves: what it earned after costs, the same measure as the replay
+   *  net = fees − gas − swap costs: what it earned, the same measure as the replay. moveLoss (the coin mix the range
+   *    moves locked in) is reported beside it, not taken out: like the coins' own price change, it is in `price`
    *  equity = the bot's coins (position + fees waiting + idle) at today's price + fees sent out − gas paid
    *  price = equity − start value − net: what the coins' own price did
    */
@@ -928,7 +929,7 @@ export class LpEngine {
     const t = this.state.totals;
     const equity = vw.value + t.sent - t.gas;
     const fees = t.fees + vw.owed.base * vw.v.price + vw.owed.quote;
-    const net = fees - t.gas - t.swapCost - t.moveLoss;
+    const net = fees - t.gas - t.swapCost;
     return {
       equity, feeCoins: { base: t.feeCoins.base + vw.owed.base, quote: t.feeCoins.quote + vw.owed.quote }, fees,
       gas: t.gas, swapCost: t.swapCost, moveLoss: t.moveLoss, net, price: equity - start - net,

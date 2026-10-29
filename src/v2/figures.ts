@@ -239,27 +239,26 @@ function metricsBreakdown(m: BotMetrics, details: boolean): SheetRow[] {
     if (basis.note) rows.push({ label: 'Note', value: basis.note });
     return rows;
   }
-  const costEntries = Object.entries(by).filter(([, c]) => c.gasSwap !== 0 || c.rangeMoveLoss !== 0 || c.taxes !== 0 || c.bridge !== 0);
+  const costEntries = Object.entries(by).filter(([, c]) => c.gasSwap !== 0 || c.taxes !== 0 || c.bridge !== 0);
   if (!costEntries.length) {
     const rows: SheetRow[] = [];
     if (!details && generatedText) rows.push({ label: 'Generated', value: generatedText });
     return rows;
   }
   const rounded = new Map(costEntries.map(([symbol, coin]) => {
-    const { unit, places } = placesOf([coin.generated, coin.earned, coin.gasSwap, coin.rangeMoveLoss, coin.taxes, coin.bridge]);
-    const specs: { key: 'earned' | 'gas' | 'move' | 'tax' | 'bridge'; raw: number }[] = [
+    const { unit, places } = placesOf([coin.generated, coin.earned, coin.gasSwap, coin.taxes, coin.bridge]);
+    const specs: { key: 'earned' | 'gas' | 'tax' | 'bridge'; raw: number }[] = [
       { key: 'earned', raw: coin.earned },
     ];
     if (coin.gasSwap !== 0) specs.push({ key: 'gas', raw: -Math.abs(coin.gasSwap) });
-    if (coin.rangeMoveLoss !== 0) specs.push({ key: 'move', raw: -Math.abs(coin.rangeMoveLoss) });
     if (coin.taxes !== 0) specs.push({ key: 'tax', raw: -Math.abs(coin.taxes) });
     if (coin.bridge !== 0) specs.push({ key: 'bridge', raw: -Math.abs(coin.bridge) });
     const values = apportion(specs.map((s) => s.raw), coin.generated, unit);
-    const parts = { earned: 0, gas: 0, move: 0, tax: 0, bridge: 0, generated: roundAmt(coin.generated, places), places };
+    const parts = { earned: 0, gas: 0, tax: 0, bridge: 0, generated: roundAmt(coin.generated, places), places };
     specs.forEach((s, i) => { parts[s.key] = values[i]; });
     return [symbol, parts] as const;
   }));
-  const line = (key: 'earned' | 'gas' | 'move' | 'tax' | 'bridge') => joinParts(
+  const line = (key: 'earned' | 'gas' | 'tax' | 'bridge') => joinParts(
     [...rounded.entries()].map(([symbol, parts]) => ({ symbol, amount: parts[key], places: parts.places })),
   );
   const symbols = [...rounded.keys()];
@@ -271,12 +270,10 @@ function metricsBreakdown(m: BotMetrics, details: boolean): SheetRow[] {
   const rows: SheetRow[] = [];
   const earned = line('earned');
   const gas = line('gas');
-  const move = line('move');
   const tax = line('tax');
   const bridge = line('bridge');
   if (earned) rows.push({ label: feeLabel, value: earned });
   if (gas) rows.push({ label: 'Gas + swap fees', value: gas });
-  if (move) rows.push({ label: 'Range-move loss', value: move });
   if (tax) rows.push({ label: 'Taxes', value: tax });
   if (bridge) rows.push({ label: 'Bridge', value: bridge });
   // the coins with parts above print their Generated at the parts' step, so the rows visibly add up

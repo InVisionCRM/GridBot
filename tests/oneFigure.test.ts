@@ -391,16 +391,16 @@ describe('grid stop sale: out of Generated, a value-change row in the collapsed 
 
 describe('live LP fixture: Generated straight from botMetrics (lp-mvnm73sx-hghe at 2.4927 d)', () => {
   const lp = REAL.lps.find((x: Obj) => x.id === 'lp-mvnm73sx-hghe');
-  it('Generated = 63.2396 USDC + 0.00173066 ETH, age 2.4927 d', () => {
+  it('Generated = 63.2396 USDC + 0.0242035 ETH (fees − gas − swap fees), age 2.4927 d', () => {
     expect(lp.metrics.generated.USDC).toBeCloseTo(63.2396, 4);
-    expect(lp.metrics.generated.ETH).toBeCloseTo(0.00173066, 8);
+    expect(lp.metrics.generated.ETH).toBeCloseTo(0.02420354, 8);
     expect(lp.metrics.ageSec / 86_400).toBeCloseTo(2.4927, 4);
   });
   it('the page headline shows it, and the pace card reads the same server rates', () => {
     const text = visibleText(lpPage(lp.id, REAL), 'desktop');
-    expect(text).toMatch(/Generated i \+63\.24 USDC \+0\.0017307 ETH/);
-    expect(text).toMatch(/Est\. a day \+25\.37 USDC · \+0\.000694 ETH/);
-    expect(text).toMatch(/Est\. 365 days \+9,260 USDC · \+0\.253 ETH/);
+    expect(text).toMatch(/Generated i \+63\.24 USDC \+0\.024204 ETH/);
+    expect(text).toMatch(/Est\. a day \+25\.37 USDC · \+0\.00971 ETH/);
+    expect(text).toMatch(/Est\. 365 days \+9,260 USDC · \+3\.54 ETH/);
   });
 });
 

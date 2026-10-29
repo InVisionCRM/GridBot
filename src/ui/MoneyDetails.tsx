@@ -33,7 +33,7 @@ export type DetailHide = 'Made at event prices' | 'Total P&L' | 'Price change' |
  * `waiting`: an open LP's fees waiting in the position, per coin. A coin whose fees earned are exactly what is waiting
  * (nothing collected yet) points to the position card instead of printing the same figure again.
  */
-export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'breakdownBasis'> | null | undefined, moves?: number | null, waiting?: Record<string, number>): DetailRow[] {
+export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'breakdownBasis'> | null | undefined, waiting?: Record<string, number>): DetailRow[] {
   const by = m?.breakdownByCoin, basis = m?.breakdownBasis;
   if (!by || !basis) return [];
   const earnedLabel = basis.earned === 'lpFees' ? 'Fees earned' : 'Trade profit before costs';
@@ -44,7 +44,6 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
   for (const [sym, c] of Object.entries(by)) {
     const costs: [string, number, string][] = ([
       ['Gas + swap fees', c.gasSwap, `Gas for every transaction and the pool fees / swap cost, charged in ${sym}.`],
-      ['Range moves', c.rangeMoveLoss, `What the range moves locked in, in ${sym}${moves ? ` (${moves} range move${moves === 1 ? '' : 's'})` : ''}.`],
       ['Token taxes', c.taxes, `Fee-on-transfer tax taken on the fills, in ${sym}.`],
       ['Bridge', c.bridge, `Cross-chain move costs, in ${sym}.`],
     ] as [string, number, string][]).filter(([, v]) => v !== 0);
@@ -85,9 +84,10 @@ export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { 
   const plain = (v: number | null | undefined) => (v == null ? '—' : qty(v, sym, 5, false));
   const no = new Set<string>(hide);
   const raw: [string, string, string][] = [
-    ['Made at event prices', signed(q.made), `Fees / round-trip profit minus gas, swap fees, taxes and range-move losses, each in ${sym} at the time it happened. Generated is the same counted in coins, valued at today's price.`],
+    ['Made at event prices', signed(q.made), `Fees / round-trip profit minus gas, swap fees and taxes, each in ${sym} at the time it happened. Generated is the same counted in coins, valued at today's price.`],
     ['Total P&L', signed(q.totalPnl), m.calc],
     ['Price change', signed(q.priceChange), `Total P&L − Generated (in ${sym} at today's price): what the coins' own price did (impermanent loss and the inventory's market move).`],
+    ...(m.kind === 'lp' && q.rebalanceLoss ? [['Range moves (in Price change)', signed(-q.rebalanceLoss), `The coin mix the ${num(b.reranges) ?? 0} range move${num(b.reranges) === 1 ? '' : 's'} locked in, in ${sym} at each move's price: the position had sold the coin that rose and bought the one that fell. Part of Price change, not taken out of Generated.`] as [string, string, string]] : []),
     ...changes.map(([k, v, t]): [string, string, string] => [k, signed(v), t]),
     ['Open positions', signed(q.unrealized), 'Coins bought and not sold yet / the position\'s price side, at today\'s price minus what they cost. Not in Generated until they sell.'],
   ];
@@ -123,7 +123,7 @@ export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { 
     <details className="more money-details" data-testid="money-details">
       <summary>Details <span className="muted small">{note ?? 'made at event prices, total P&L, price change'}</span></summary>
       <table className="stat-table"><tbody>
-        {[...coinBreakdownRows(m, num(b.reranges), waitingOf(b, sym)), ...(breakdown ?? [])].map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
+        {[...coinBreakdownRows(m, waitingOf(b, sym)), ...(breakdown ?? [])].map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
         {[...rows, ...(value ? [value] : [])].map(([k, v, t]) => <tr key={k} title={t}><th>{k}</th><td className="mono">{v}</td></tr>)}
       </tbody></table>
     </details>

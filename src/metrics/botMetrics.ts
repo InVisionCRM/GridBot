@@ -4,8 +4,8 @@
  *
  * HEADLINE (HEADLINE below): units GENERATED per token, net of the costs charged in that token.
  *  - LP: fees collected (Collect events) + fees owed (the position manager's collect() quote = tokensOwed + feeGrowth),
- *    per coin, minus gas (in the native coin's side), swap fees (in the coin swapped in) and range-move losses (in the
- *    coin the rebalance swap sells), each at the price of its event.
+ *    per coin, minus gas (in the native coin's side) and swap fees (in the coin swapped in), each at the price of its
+ *    event. Range-move losses (the coin mix a move locks in) are reported beside it, not taken out: they are in Price change.
  *  - Grid / trend / token trader: realized round-trip profit (pool fees, gas and token taxes already netted) in the
  *    coin the bot accrues it in. Open lots are not in it; they are Unrealized.
  *  generatedUsd = Σ units × today's mid price. Rates, the 24h/7d/365d estimates and APR scale it linearly.
@@ -36,9 +36,11 @@ export const HEADLINE: Headline = 'generated';
 
 /**
  * One coin's line of the breakdown, in that coin's units (never dollars): what the bot made before costs, the costs
- * charged in that coin, and Generated. earned − gasSwap − rangeMoveLoss − taxes − bridge = generated, exactly.
+ * charged in that coin, and Generated. earned − gasSwap − taxes − bridge = generated, exactly. A liquidity bot's
+ * range-move loss (the coin mix a move locks in) is not a cost here: Generated is units earned, and that loss is shown
+ * on its own (`quote.rebalanceLoss`), like the coins' own price change.
  */
-export interface CoinBreakdown { earned: number; gasSwap: number; rangeMoveLoss: number; taxes: number; bridge: number; generated: number }
+export interface CoinBreakdown { earned: number; gasSwap: number; taxes: number; bridge: number; generated: number }
 /**
  * What `earned` is. lpFees: LP fees collected + still owed. tradeProfit: closed round trips' profit before gas, pool
  * fees and token taxes (Generated + those costs). `itemized` false: a part of the costs is not known here (a token
@@ -103,7 +105,7 @@ export interface BotMetrics {
   bridgeCosts: { events: number; units: Record<string, number>; usdAtEvents: number } | null;
   /** Funds of this bot reserved for a cross-chain move that hasn't landed (one "In transit" holdings line). Null = none. */
   inTransitUsd: number | null;
-  /** Per coin, in token units: earned − gasSwap − rangeMoveLoss − taxes − bridge = generated (= `generated`). Null with no Generated. */
+  /** Per coin, in token units: earned − gasSwap − taxes − bridge = generated (= `generated`). Null with no Generated. */
   breakdownByCoin: Record<string, CoinBreakdown> | null;
   breakdownBasis: BreakdownBasis | null;
   /** Invested in the quote coin (= quote.capitalIn) and where it came from. */
@@ -202,7 +204,7 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
 
 const RATES = 'The day, 7d and 365d estimates are Generated ÷ age in days × 1, 7 or 365, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; all of them show after a day.';
 const GENERATED_CALC: Record<MetricsKind, string> = {
-  lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin), swap fees (in the coin swapped in) and range-move losses (in the coin the move sold, locked in at each move).',
+  lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin) and swap fees (in the coin swapped in). The coin mix a range move locks in is not a cost here: it is shown on its own, inside Price change.',
   grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown under Open positions. A close / stop cash-out sale is not a round trip; its result is in Price change.',
   trend: 'Generated = profit from closed trades after pool fees and gas, in the quote coin. An open trade is under Open positions.',
   token: 'Generated = profit from closed sells, per coin the trades spend (WETH, PLS, …). Open positions are not in it.',
@@ -256,8 +258,8 @@ function breakdownOf(generated: Record<string, number> | null, parts: Core['part
   const out: Record<string, CoinBreakdown> = {};
   for (const sym of new Set([...Object.keys(generated), ...Object.keys(parts ?? {}), ...Object.keys(bridge?.units ?? {})])) {
     const p = parts?.[sym], br = bridge?.units[sym] ?? 0;
-    const gasSwap = p?.gasSwap ?? 0, rangeMoveLoss = p?.rangeMoveLoss ?? 0, taxes = p?.taxes ?? 0;
-    out[sym] = { earned: p?.earned ?? (generated[sym] ?? 0) + gasSwap + rangeMoveLoss + taxes + br, gasSwap, rangeMoveLoss, taxes, bridge: br, generated: generated[sym] ?? 0 };
+    const gasSwap = p?.gasSwap ?? 0, taxes = p?.taxes ?? 0;
+    out[sym] = { earned: p?.earned ?? (generated[sym] ?? 0) + gasSwap + taxes + br, gasSwap, taxes, bridge: br, generated: generated[sym] ?? 0 };
   }
   return out;
 }
@@ -349,10 +351,10 @@ const STATUS_TRADES = 100;
 function tradeParts(sym: string, gen: number | null, rt: RoundTripCosts | null, fromStatusLog: boolean, trades?: unknown): Pick<Core, 'parts' | 'basis'> {
   if (gen == null) return { parts: null, basis: null };
   const cut = fromStatusLog && Array.isArray(trades) && trades.length >= STATUS_TRADES;
-  if (!rt) return { parts: { [sym]: { earned: gen, gasSwap: 0, rangeMoveLoss: 0, taxes: 0 } }, basis: { earned: 'tradeProfit', itemized: false, note: 'No trade log here: the costs are inside the trade profit.' } };
+  if (!rt) return { parts: { [sym]: { earned: gen, gasSwap: 0, taxes: 0 } }, basis: { earned: 'tradeProfit', itemized: false, note: 'No trade log here: the costs are inside the trade profit.' } };
   const gasSwap = rt.gas + rt.poolFees;
   return {
-    parts: { [sym]: { earned: gen + gasSwap + rt.taxes, gasSwap, rangeMoveLoss: 0, taxes: rt.taxes } },
+    parts: { [sym]: { earned: gen + gasSwap + rt.taxes, gasSwap, taxes: rt.taxes } },
     basis: {
       earned: 'tradeProfit', itemized: rt.unmatched === 0 && !cut,
       note: `Closed round trips' profit before gas, pool fees and token taxes, in ${sym}; gas is charged in the chain's coin and booked in ${sym} at each fill's price, as the ledger deducts it.${rt.unmatched || cut ? ' Some buys are not in the log here, so part of their costs stays inside the profit.' : ''}`,
@@ -428,9 +430,9 @@ const coinsOf = (c: unknown): Coins | null => {
 };
 
 /**
- * LP units: fee coins minus each cost in the coin it was paid in (totals.gasCoins / swapCoins / moveCoins, booked at
+ * LP units: fee coins minus gas and swap fees, each in the coin it was paid in (totals.gasCoins / swapCoins, booked at
  * each event's price). State saved before that bookkeeping existed has only the quote-valued total; that part is
- * charged to the quote coin.
+ * charged to the quote coin. The range-move loss is not taken out (see CoinBreakdown).
  */
 export function lpGenerated(b: Obj): { generated: Record<string, number> | null; px: Record<string, number | null>; parts?: Core['parts']; basis?: BreakdownBasis } {
   const baseSym = String(unitOf(b.base) ?? keySymbols(b.market)?.base ?? 'base'), quoteSym = String(unitOf(b.quote) ?? keySymbols(b.market)?.quote ?? 'quote');
@@ -444,12 +446,12 @@ export function lpGenerated(b: Obj): { generated: Record<string, number> | null;
     const got = coinsOf(c);
     return got ?? { base: 0, quote: num(total) ?? 0 };
   };
-  const g = cost(t.gasCoins, t.gas), sw = cost(t.swapCoins, t.swapCost), mv = cost(t.moveCoins, t.moveLoss);
-  const side = (k: keyof Coins) => ({ earned: fees[k], gasSwap: g[k] + sw[k], rangeMoveLoss: mv[k], taxes: 0 });
+  const g = cost(t.gasCoins, t.gas), sw = cost(t.swapCoins, t.swapCost);
+  const side = (k: keyof Coins) => ({ earned: fees[k], gasSwap: g[k] + sw[k], taxes: 0 });
   const parts = { [baseSym]: side('base'), [quoteSym]: side('quote') };
   return {
-    // the same arithmetic as each line of the breakdown: earned − (gas + swap fees) − range-move loss
-    generated: Object.fromEntries(Object.entries(parts).map(([s, p]) => [s, p.earned - p.gasSwap - p.rangeMoveLoss])),
+    // the same arithmetic as each line of the breakdown: earned − (gas + swap fees)
+    generated: Object.fromEntries(Object.entries(parts).map(([s, p]) => [s, p.earned - p.gasSwap])),
     px, parts,
     basis: { earned: 'lpFees', itemized: true, note: 'Fees collected + still owed, per coin; costs in the coin they were paid in (an older state without per-coin costs: all in the quote coin).' },
   };
@@ -457,8 +459,7 @@ export function lpGenerated(b: Obj): { generated: Record<string, number> | null;
 
 /**
  * A closed LP from a server that never rebuilt its zeroed range-move loss (saved before the rebuild, or an older build):
- * the same rebuild the engine runs at load (lpMoveLoss.ts), so its Generated is net of the moves either way (#43: the
- * Robinhood ETH/USDG LP is −16.31 USDG, not +89.51).
+ * the same rebuild the engine runs at load (lpMoveLoss.ts), so the range-move loss it shows is there either way.
  */
 function withMoveLoss(b: Obj): Obj {
   if (b?.status !== 'closed' || !b.totals) return b;
@@ -479,7 +480,7 @@ function closedLpPnl(b: Obj): Obj | null {
   if (!idle || price == null || start == null) return null;
   const fees = num(t.fees) ?? 0, gas = num(t.gas) ?? 0, swapCost = num(t.swapCost) ?? 0, moveLoss = num(t.moveLoss) ?? 0, sent = num(t.sent) ?? 0;
   const value = idle.base * price + idle.quote;
-  const net = fees - gas - swapCost - moveLoss, equity = value + sent - gas;
+  const net = fees - gas - swapCost, equity = value + sent - gas;
   return { equity, value, fees, gas, swapCost, moveLoss, net, price: equity - start - net, feeCoins: t.feeCoins };
 }
 

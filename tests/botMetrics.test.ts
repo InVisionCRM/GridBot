@@ -37,7 +37,7 @@ const totals = {
 function lpPnl(v: number, start: number, t: typeof totals) { // LpEngine.pnl()
   const equity = v + t.sent - t.gas;
   const fees = t.fees + owed.base * ETH + owed.quote;
-  const net = fees - t.gas - t.swapCost - t.moveLoss;
+  const net = fees - t.gas - t.swapCost; // the range-move loss is reported, not taken out
   return { equity, fees, gas: t.gas, swapCost: t.swapCost, moveLoss: t.moveLoss, net, price: equity - start - net,
     feeCoins: { base: t.feeCoins.base + owed.base, quote: t.feeCoins.quote + owed.quote } };
 }
@@ -84,23 +84,22 @@ const all = [lpLive, lpPaper, grid, trend, token].map(attach);
 const m = (id: string) => all.find((b) => b.id === id)!.metrics as BotMetrics;
 
 describe('generated: units per token, net of the costs charged in that token', () => {
-  it('liquidity (on-chain): fees collected + owed per coin − gas (ETH) − swap fees − range-move losses', () => {
+  it('liquidity (on-chain): fees collected + owed per coin − gas (ETH) − swap fees; range-move losses reported beside it', () => {
     const x = m('lp-eth');
     expect(x.headline).toBe('generated');
     expect(HEADLINE).toBe('generated');
-    expect(x.generated!.ETH).toBeCloseTo(0.027861957 - 0.000712 - 0.0023232936 - moveLoss.base, 9);
-    expect(moveLoss.base).toBeCloseTo(0.018566, 5); // receipts: 0.0185661 ETH
-    expect(x.generated!.ETH).toBeCloseTo(0.00626, 5);
-    expect(x.generated!.USDC).toBeCloseTo(64.648435 - 2.2100189 - 20.98, 6);
-    expect(x.generated!.USDC).toBeCloseTo(41.46, 2); // receipts: 41.455 USDC (exit losses here are rounded to cents)
+    expect(x.generated!.ETH).toBeCloseTo(0.027861957 - 0.000712 - 0.0023232936, 9);
+    expect(x.generated!.ETH).toBeCloseTo(0.024827, 5);
+    expect(x.generated!.USDC).toBeCloseTo(64.648435 - 2.2100189, 6);
+    expect(x.generated!.USDC).toBeCloseTo(62.44, 2);
     expect(x.generatedUsd).toBeCloseTo(x.generated!.ETH * ETH + x.generated!.USDC, 9);
-    expect(x.generatedUsd).toBeCloseTo(56.13, 2);
     // the event-priced dollars agree within the ETH price drift between events and now
-    expect(x.dollarsMadeUsd).toBeCloseTo(129.6 - 1.67 - 7.61 - 64.1, 1);
+    expect(x.dollarsMadeUsd).toBeCloseTo(129.6 - 1.67 - 7.61, 1);
     expect(Math.abs(x.dollarsMadeUsd! - x.generatedUsd!)).toBeLessThan(0.5);
     expect(x.feesUncollectedUsd).toBeCloseTo(37.62, 1);
     expect(x.feesEarnedUsd).toBeCloseTo(129.6, 1);
-    expect(x.realizedRebalanceLossUsd).toBeCloseTo(64.1, 6);
+    expect(x.realizedRebalanceLossUsd).toBeCloseTo(64.1, 6); // receipts: 0.0185661 ETH + 20.98 USDC, reported on its own
+    expect(moveLoss.base).toBeCloseTo(0.018566, 5);
     expect(x.tokenTaxesUsd).toBeNull();
     expect(x.moveCount).toBe(4);
     expect(x.range).toEqual({ lower: 2307.72, upper: 2356.69, current: ETH, inRange: true });
@@ -108,7 +107,7 @@ describe('generated: units per token, net of the costs charged in that token', (
   it('liquidity state from before per-coin bookkeeping charges the costs to the quote coin', () => {
     const x = m('lp-paper');
     expect(x.generated!.ETH).toBeCloseTo(0.027861957, 9);
-    expect(x.generated!.USDC).toBeCloseTo(64.648435 - 1.67 - 7.61 - 64.1, 6);
+    expect(x.generated!.USDC).toBeCloseTo(64.648435 - 1.67 - 7.61, 6);
   });
   it('grid: round-trip profit in the coin it spends (PLS), not the one it stacks', () => {
     const x = m('grid-hex');
@@ -135,8 +134,8 @@ describe('Total P&L = Generated + Price change (both sides recomputed from raw i
     // independent: value now − gas paid from the wallet − capital in
     const totalRaw = (position.base + owed.base) * ETH + position.quote + owed.quote - 1.67 - capital;
     // independent: the generated coins valued now, from the event amounts
-    const ethUnits = collected.base + owed.base - gasEth - swapFee.base - moveLoss.base;
-    const usdcUnits = collected.quote + owed.quote - swapFee.quote - moveLoss.quote;
+    const ethUnits = collected.base + owed.base - gasEth - swapFee.base;
+    const usdcUnits = collected.quote + owed.quote - swapFee.quote;
     const genRaw = ethUnits * ETH + usdcUnits;
     expect(x.totalPnlUsd).toBeCloseTo(totalRaw, 6);
     expect(x.generatedUsd).toBeCloseTo(genRaw, 6);

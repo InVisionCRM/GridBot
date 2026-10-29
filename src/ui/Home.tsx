@@ -15,7 +15,7 @@ import { bookUsd, coveredLabel, equitySpan, portfolioSeries, seriesChange, type 
 import type { AnyObj, Nav } from './model';
 import { SafetyChecking } from './SafetyChecking';
 
-const GEN_CALC = 'Generated: what your live bots made, net of costs, per coin (liquidity fees after gas, swap fees and range-move losses; grid and trend round-trip profit after fees and gas). Paper bots are shown under it, never added in. Price moves on coins held are not in it; they are in P&L (live bots, per quote coin).';
+const GEN_CALC = 'Generated: what your live bots made, net of costs, per coin (liquidity fees after gas and swap fees; grid and trend round-trip profit after fees and gas). Paper bots are shown under it, never added in. Price moves on coins held are not in it; they are in P&L (live bots, per quote coin).';
 const FEES_TODAY_CALC = 'Fees your live liquidity bots earned since local midnight (collected + still in the position), per quote coin, worked out on the server. Paper bots and pool fees grid/trend trades paid are shown under it, never added in.';
 
 const RANGES: DeskRange[] = ['1H', '1D', '1W', '1M', 'ALL'];

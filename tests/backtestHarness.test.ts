@@ -394,9 +394,9 @@ describe('app state', () => {
     expect(live.actual!.feeBase).toBeCloseTo(63.2396, 4);
     expect(live.actual!.feeQuote).toBeCloseTo(0.026837, 6);
     expect(live.actual!.fees).toBeCloseTo(0.053948, 5);
-    const net = recordedQuoteNet(live)!;
-    expect(Math.abs(net - 0.028842) / 0.028842).toBeLessThan(0.01);
-    expect(recordedPerDay(live)!).toBeCloseTo(0.01157087, 5);
+    const net = recordedQuoteNet(live)!; // fees − gas − swap fees (Generated): the 0.022473 range-move loss is not taken out
+    expect(Math.abs(net - 0.051315) / 0.051315).toBeLessThan(0.01);
+    expect(recordedPerDay(live)!).toBeCloseTo(0.051315 / 2.4927, 4);
     expect(pairLabel(live.config)).toBe('ethereum:USDC/ETH');
   });
 
@@ -411,9 +411,9 @@ describe('app state', () => {
     expect(cal.error!.recorded).toBe(3);
     const run = runBot(cal.config, data);
     const note = (label: string) => run.modelNotes.find((n) => n.label === label)!.value;
-    const net = note('Fees collected') - note('Gas') - note('Swap cost') - note('Move loss');
+    const net = note('Fees collected') - note('Gas') - note('Swap cost');
     const recorded = recordedQuoteNet(live)!;
-    expect(Math.abs(recorded - 0.028842) / 0.028842).toBeLessThan(0.01);
+    expect(Math.abs(recorded - 0.051315) / 0.051315).toBeLessThan(0.01);
     expect(run.rates).toHaveLength(1);
     expect(run.rates[0].symbol).toBe('ETH');
     expect(cal.netError).not.toBeNull();

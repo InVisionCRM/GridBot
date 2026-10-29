@@ -123,16 +123,34 @@ describe('replayLp: moving the range (the live bot\'s rule)', () => {
     expect(stay.moves).toBe(0);
     // staying is back to its opening coins (plus fees): nothing lost; moving sold on the way up and bought back higher
     expect(stay.moveLoss).toBe(0);
+    expect(stay.openLoss).toBeCloseTo(0, 6); // back where it opened: the mix came back
     expect(move.moveLoss).toBeGreaterThan(1); // real money on $1,000
-    expect(move.net).toBeCloseTo(move.fees - move.gas - move.swapCost - move.moveLoss, 9);
-    expect(move.net).toBeLessThan(stay.net);
+    // mix loss is shown, not subtracted: earned is fees less gas and swap fees
+    expect(move.net).toBeCloseTo(move.fees - move.gas - move.swapCost, 9);
   });
 
-  it('pays gas and swap costs on every open', () => {
+  it('the price leaving a narrow range and staying out: the range left open shows the same mix loss a move books', () => {
+    // up 3% and it stays there to the end of the window: the ±1% range that stays ends all in the quote coin
+    const ticks = [...repeat(T, 100), ...repeat(T + 300, 100)];
+    const move = replayLp(minutes(ticks), POOL, { ...BASE, bandPct: 0.01, rerange: true });
+    const stay = replayLp(minutes(ticks), POOL, { ...BASE, bandPct: 0.01, rerange: false });
+    expect(move.moves).toBe(1);
+    expect(move.moveLoss).toBeGreaterThan(10);
+    // the same loss, at the same price, whether a move locked it in or the window ended with the range open
+    expect(stay.openLoss).toBeCloseTo(move.moveLoss, 6);
+    expect(move.openLoss).toBeCloseTo(0, 6); // the moved range re-opened around the last price
+    for (const r of [move, stay]) expect(r.net).toBeCloseTo(r.fees - r.gas - r.swapCost, 9);
+  });
+
+  it('pays gas and swap costs on every open; earned in units is each coin\'s fees less the swap fees paid in it, gas out of the quote coin', () => {
     const r = replayLp(minutes(away), POOL, { ...BASE, bandPct: 0.05, rerange: true, gasOpen: 0.5, gasMove: 0.25 });
     expect(r.moves).toBe(1);
     expect(r.gas).toBeCloseTo(0.75, 9);
     expect(r.swapCost).toBeGreaterThan(1000 * 0.4 * 1e-4); // the opening swap of about half the capital, at least its pool fee
+    // the opening swap buys the base coin with quote, so its fee is paid in quote
+    expect(r.swapCoins.quote).toBeGreaterThan(0);
+    expect(r.earnedCoins.base).toBeCloseTo(r.feeCoins.base - r.swapCoins.base, 12);
+    expect(r.earnedCoins.quote).toBeCloseTo(r.feeCoins.quote - r.swapCoins.quote - r.gas, 9);
   });
 
   it('refuses inputs it cannot replay', () => {

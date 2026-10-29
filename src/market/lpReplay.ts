@@ -15,11 +15,12 @@
  *  - Swaps pay the pool fee and a price impact worked out from the minute's active liquidity (inside one tick range,
  *    so a thin pool's impact is understated); a gap under LP_MIN_SWAP_SHARE of the value isn't swapped.
  *  - Fees are counted in the coin they were paid in (and their worth in the quote coin when earned).
- *  - Lost to moves: a position sells the coin that rises and buys the one that falls. A move takes it out at that mix and
- *    opens again, which makes the difference to the coins it went in with final (valued at the move's price). A range
- *    that stays keeps it open, and gets it back if the price returns, so it is not counted for a range still open.
- *  - Earned after costs = fees − gas − what the swaps cost − lost to moves, in the quote coin. The coins' own price move
- *    is left out: it happens to the coins whether or not they sit in a pool.
+ *  - Earned = fees − gas − what the swaps cost, in units: each coin's fees less the swap fees paid in that coin, and gas
+ *    (converted to the quote coin) out of the quote coin. `net` is the same in the quote coin, to rank rows by.
+ *  - Mix loss (shown, not subtracted): a position sells the coin that rises and buys the one that falls, so it holds a
+ *    different mix than it went in with. `moveLoss` is that difference at each move (at the move's price), `openLoss`
+ *    the same for the range still open at the end (at the last price). Like the coins' own price move, it is left out
+ *    of what was earned.
  *
  * The timing of a move decides a lot: in a 12-day check a move a minute later put the next range 29 ticks lower and
  * changed that setup's result by $15. So one replay is one path.
@@ -123,14 +124,20 @@ export interface ReplayResult {
   feeCoins: Coins; fees: number;
   /** Gas paid and what the swaps cost (pool fee + impact), quote */
   gas: number; swapCost: number;
+  /** What the swaps cost, in the coin that went into each swap */
+  swapCoins: Coins;
+  /** Earned in units: fees less the swap fees paid in each coin, and gas out of the quote coin */
+  earnedCoins: Coins;
   moves: number;
   /** Times a due move was held back by the price-impact cap (each stretch out of range counts once) */
   blocked: number;
   /** Share of the minutes with trades that the price spent inside the range */
   inRange: number;
-  /** What moves locked in (see above), quote */
+  /** Mix loss at the moves (see above), quote. Not subtracted from what was earned. */
   moveLoss: number;
-  /** Earned after costs: fees − gas − swap costs − lost to moves, quote */
+  /** Mix loss of the position still open at the end, at the last price, quote. Not subtracted from what was earned. */
+  openLoss: number;
+  /** Earned: fees − gas − swap costs, quote */
   net: number;
   /** Times waiting fees were collected and added back without moving the range. 0 when compounding is off. */
   compounds: number;
@@ -187,12 +194,16 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     const p = price(tick), per = held(1e18, tl, tu, tick), value = val(have, p);
     const share = (per.base * p) / (per.base * p + per.quote), gap = share * value - have.base * p;
     const tax = gap > 0 ? (o.buyTax ?? 0) : (o.sellTax ?? 0);
-    if (Math.abs(gap) <= value * LP_MIN_SWAP_SHARE) return { gap: 0, cost: 0, impact: 0, share, value, taxCost: 0 };
+    if (Math.abs(gap) <= value * LP_MIN_SWAP_SHARE) return { gap: 0, cost: 0, impact: 0, share, value, taxCost: 0, costCoins: { base: 0, quote: 0 } };
     const imp = gap > 0 ? impact(gap, false, tick, liq) : impact(-gap / p, true, tick, liq);
     const taxCost = Math.abs(gap) * tax;
-    return { gap, cost: Math.abs(gap) * (pool.swapFee + imp / 2) + taxCost, impact: imp, share, value, taxCost };
+    const cost = Math.abs(gap) * (pool.swapFee + imp / 2) + taxCost;
+    // paid in the coin going in: quote when buying the base coin, the base coin when selling it
+    const costCoins = gap > 0 ? { base: 0, quote: cost } : { base: cost / p, quote: 0 };
+    return { gap, cost, impact: imp, share, value, taxCost, costCoins };
   };
 
+  const swapCoins: Coins = { base: 0, quote: 0 };
   let gas = 0, swapCost = 0, taxCost = 0, fees = 0, moves = 0, blocked = 0, inTime = 0, moveLoss = 0;
   /** In-range time of the open position. Reset on each open. Wall-clock age is not the cost-check denominator. */
   let earningMs = 0;
@@ -211,6 +222,7 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     const k = after / s.value;
     const coins = s.gap !== 0 ? { base: (s.share * after) / p, quote: (1 - s.share) * after } : { base: have.base * k, quote: have.quote * k };
     swapCost += s.cost;
+    swapCoins.base += s.costCoins.base; swapCoins.quote += s.costCoins.quote;
     taxCost += s.taxCost;
     gas += gasQuote;
     const r = rawOfCoins(coins, pool);
@@ -339,10 +351,13 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
 
   const lastRow = rows[rows.length - 1];
   const endHeld = held(pos.L, pos.tl, pos.tu, lastRow.c);
+  const pEnd = price(lastRow.c);
+  const openLoss = val(putIn, pEnd) - val(endHeld, pEnd);
   return {
     bandPct: o.bandPct, rerange: o.rerange, days: (lastRow.t - first.t) / DAY_S,
-    feeCoins, fees, gas, swapCost, moves, blocked, inRange: inTime / (rows.length - 1), moveLoss,
-    net: fees - gas - swapCost - moveLoss, compounds, taxCost,
+    feeCoins, fees, gas, swapCost, swapCoins, moves, blocked, inRange: inTime / (rows.length - 1), moveLoss, openLoss,
+    earnedCoins: { base: feeCoins.base - swapCoins.base, quote: feeCoins.quote - swapCoins.quote - gas },
+    net: fees - gas - swapCost, compounds, taxCost,
     startCoins, endCoins: { base: endHeld.base + idle.base + owed.base, quote: endHeld.quote + idle.quote + owed.quote },
     priceStart: price(first.c), priceEnd: price(lastRow.c),
   };

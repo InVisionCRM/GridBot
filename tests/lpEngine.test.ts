@@ -213,7 +213,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     await expect(lp.move()).rejects.toThrow(/Resume it first/);
   });
 
-  it('fees per coin; a move locks in what the range did to the coin mix ("lost to moves"); earned after costs adds it up', async () => {
+  it('fees per coin; a move locks in what the range did to the coin mix ("lost to moves", reported beside what it earned); earned = fees − gas − swap fees', async () => {
     const { lp, m, pool } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
     await lp.tick();
@@ -237,7 +237,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s2.reranges).toBe(1);
     // the range sold PLS on the way up; taken out at that mix, it's worth less than the coins it went in with
     expect(p2.moveLoss).toBeGreaterThan(0);
-    expect(p2.net).toBeCloseTo(p2.fees - p2.gas - p2.swapCost - p2.moveLoss, 9);
+    expect(p2.net).toBeCloseTo(p2.fees - p2.gas - p2.swapCost, 9); // the move loss is reported, not taken out
     // the fees collected at the move are counted per coin
     expect(s2.totals.feeCoins.base).toBeGreaterThan(0);
     expect(s2.totals.feeCoins.quote).toBeGreaterThan(0);
