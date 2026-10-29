@@ -98,6 +98,8 @@ export interface LpStep {
     basePerNative?: number;
   };
   tries: number;
+  /** Reads of this stage's mined receipt whose expected events were not readable yet (the node had not indexed them) */
+  unread?: number;
   /** close: after taking the position out, sell the base coin back to the quote coin ("close to cash") */
   toCash?: boolean;
   /** close to cash: even the smallest piece of the sale was over the price-impact cap; the next try is not before this */
@@ -223,6 +225,8 @@ export interface LpHold {
 
 /** A tx stage that keeps reverting stops the bot after this many tries. */
 const MAX_TRIES = 3;
+/** A mined receipt still missing its events after this many reads stops the bot (its hash is kept, never re-sent). */
+const UNREADABLE_READS = 10;
 /** Fee samples for "fees earned today": every 5 minutes, 600 kept (~2 days), the last 26h sent with status. */
 const FEE_HIST_MS = 5 * 60_000;
 const FEE_HIST_CAP = 600;
@@ -318,7 +322,8 @@ export function backfillMoveLoss(s: LpState): LpState {
 }
 
 /** Logs of `name` from the position manager in a receipt. */
-function events(r: ReceiptLike, npm: string, name: 'IncreaseLiquidity' | 'DecreaseLiquidity' | 'Collect') {
+type NpmEvent = 'IncreaseLiquidity' | 'DecreaseLiquidity' | 'Collect';
+function events(r: ReceiptLike, npm: string, name: NpmEvent) {
   const topic = V3_NPM.getEvent(name)!.topicHash;
   return r.logs.filter((l: LogLike) => sameAddr(l.address, npm) && l.topics[0] === topic).map((l) => V3_NPM.parseLog({ topics: [...l.topics], data: l.data })!);
 }
@@ -1026,12 +1031,26 @@ export class LpEngine {
     this.noteOnce(`set aside ${drop.quote.toPrecision(4)} ${this.quoteSym} + ${drop.base.toPrecision(4)} ${this.baseSym}: more than ${(DEFAULT_MAX_POOL_SHARE * 100).toFixed(0)}% of the pool's active liquidity`);
   }
 
-  /** A sent tx stage: null = not mined yet; otherwise the receipt (reverted ones are counted and retried up to MAX_TRIES). */
-  private async settled(s: LpStep, v: PoolView): Promise<ReceiptLike | null> {
-    const r = await this.hub.rt(this.chainId).reader.getTransactionReceipt(s.hash!);
+  /**
+   * A sent tx stage: null = not mined yet, or mined without the position manager events `need` readable yet (the hash
+   * is kept, so the stage is never sent again); otherwise the receipt, with gas booked once. Reverted ones are counted
+   * and retried up to MAX_TRIES.
+   */
+  private async settled(s: LpStep, v: PoolView, need?: { pool: LpPool; events: NpmEvent[] }): Promise<ReceiptLike | null> {
+    const hash = s.hash!;
+    const r = await this.hub.rt(this.chainId).reader.getTransactionReceipt(hash);
     if (!r) return null;
+    if (r.status === 1 && need && !need.events.every((n) => events(r, need.pool.npm, n).length)) {
+      s.unread = (s.unread ?? 0) + 1;
+      if (s.unread < UNREADABLE_READS) return null;
+      const msg = `${s.action} ${s.stage} ${hash} was mined but its receipt has no ${need.events.join('/')} event after ${s.unread} reads; stopped. Nothing is sent again: check the tx on the explorer`;
+      this.state.halt = systemHalt('error', msg, this.now());
+      this.state.status = 'stopped';
+      this.save();
+      throw new Error(msg);
+    }
     this.addGas(await this.receiptGas(r, v), v);
-    s.hash = undefined; s.sentAt = undefined;
+    s.hash = undefined; s.sentAt = undefined; s.unread = undefined;
     if (r.status === 1) return r;
     s.tries++;
     if (s.tries >= MAX_TRIES) {
@@ -1070,10 +1089,9 @@ export class LpEngine {
       return this.exited(s, fees, coins, v);
     }
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['DecreaseLiquidity', 'Collect'] });
       if (!r) return;
       const dec = events(r, pool.npm, 'DecreaseLiquidity')[0], col = events(r, pool.npm, 'Collect')[0];
-      if (!dec || !col) throw new Error(`exit ${r.logs.length ? 'receipt has no DecreaseLiquidity/Collect' : 'receipt has no logs'}`);
       const got = pool.coinsFromRaw(col.args.amount0 as bigint, col.args.amount1 as bigint, v);
       const principal = pool.coinsFromRaw(dec.args.amount0 as bigint, dec.args.amount1 as bigint, v);
       const fees = { base: got.base - principal.base, quote: got.quote - principal.quote };
@@ -1308,10 +1326,9 @@ export class LpEngine {
       return this.minted(s, `paper-${this.now().toString(36)}`, BigInt(Math.floor(L)), used, v, pool, { g0: v.global0.toString(), g1: v.global1.toString(), inRange, owed0: '0', owed1: '0' });
     }
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['IncreaseLiquidity'] });
       if (!r) return;
       const inc = events(r, pool.npm, 'IncreaseLiquidity')[0];
-      if (!inc) throw new Error('mint receipt has no IncreaseLiquidity');
       return this.minted(s, (inc.args.tokenId as bigint).toString(), inc.args.liquidity as bigint, pool.coinsFromRaw(inc.args.amount0 as bigint, inc.args.amount1 as bigint, v), v, pool);
     }
     const ex = this.executor as LiveExecutor, me = await ex.address();
@@ -1388,10 +1405,9 @@ export class LpEngine {
       return this.sent(fees, v.price, to);
     }
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['Collect'] });
       if (!r) return;
       const col = events(r, pool.npm, 'Collect')[0];
-      if (!col) throw new Error('collect receipt has no Collect');
       return this.sent(pool.coinsFromRaw(col.args.amount0 as bigint, col.args.amount1 as bigint, v), v.price, to);
     }
     await this.send(s, { to: pool.npm, data: collectData({ tokenId: BigInt(p.id), to, nativeOther: this.nativeOther(pool) }), value: 0n });
@@ -1401,10 +1417,9 @@ export class LpEngine {
     const p = this.state.position!;
     if (this.state.mode === 'paper') return this.compoundPaper(pool, v, p);
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['Collect'] });
       if (!r) return;
       const col = events(r, pool.npm, 'Collect')[0];
-      if (!col) throw new Error('collect receipt has no Collect');
       const fees = pool.coinsFromRaw(col.args.amount0 as bigint, col.args.amount1 as bigint, v);
       this.addIdle(fees);
       this.addFees(fees, v.price);
@@ -1439,10 +1454,9 @@ export class LpEngine {
   private async increase(pool: LpPool, v: PoolView, s: LpStep) {
     const p = this.state.position!;
     if (s.hash) {
-      const r = await this.settled(s, v);
+      const r = await this.settled(s, v, { pool, events: ['IncreaseLiquidity'] });
       if (!r) return;
       const inc = events(r, pool.npm, 'IncreaseLiquidity')[0];
-      if (!inc) throw new Error('increase receipt has no IncreaseLiquidity');
       const used = pool.coinsFromRaw(inc.args.amount0 as bigint, inc.args.amount1 as bigint, v);
       p.liquidity = (BigInt(p.liquidity) + (inc.args.liquidity as bigint)).toString();
       this.state.idle = { base: Math.max(0, this.state.idle.base - used.base), quote: Math.max(0, this.state.idle.quote - used.quote) };

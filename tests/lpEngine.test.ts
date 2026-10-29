@@ -755,6 +755,46 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(e.state.idle.base).toBeLessThan(1000); // part sold, the rest went on gas
   });
 
+  it('a mined mint whose receipt has no readable events yet is never sent again: it settles when they appear, gas booked once', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    expect(w.sent).toHaveLength(1);
+    const mint = w.sent[0];
+    expect(mint.to).toBe(NPM);
+    const gas0 = e.state.totals.gas;
+    w.ok(mint.hash, []); // mined, status 1, but the node has not indexed its logs yet
+    await e.tick(); await e.tick();
+    expect(w.sent).toHaveLength(1);
+    expect(e.status().step).toMatchObject({ stage: 'mint', hash: mint.hash });
+    expect(e.state.totals.gas).toBe(gas0);
+    w.ok(mint.hash, [w.ev('IncreaseLiquidity', [777n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    expect(e.status().position).toMatchObject({ id: '777' });
+    expect(e.status().step).toBeNull();
+    expect(w.sent).toHaveLength(1);
+    expect(e.state.totals.gas).toBeGreaterThan(gas0);
+  });
+
+  it('a mined step whose events never become readable stops the bot and names the hash; nothing is sent again', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    const mint = w.sent[0];
+    w.ok(mint.hash, []);
+    for (let i = 0; i < 12; i++) await e.tick();
+    expect(e.status().status).toBe('stopped');
+    expect(e.lastError).toContain(mint.hash);
+    expect(e.status().step).toMatchObject({ stage: 'mint', hash: mint.hash });
+    expect(w.sent).toHaveLength(1);
+  });
+
   it('a step that keeps reverting stops the bot after 3 tries (nothing lost)', async () => {
     const w = live();
     const e = w.make();
