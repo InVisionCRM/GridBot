@@ -47,8 +47,16 @@ describe('Home net worth chip is live only', () => {
   it('paper bots losing paper money do not move the chip under a live wallet', () => {
     const h = hero(PRICED);
     expect(text(h)).toContain('2 ETH');
-    expect(h).toMatch(/class="chip/);
+    // no live history: no chip and no flat chart, a note instead
+    expect(h).not.toMatch(/class="chip/);
+    expect(text(h)).toContain('The chart fills in as the bots build history.');
     expect(text(h)).not.toMatch(/−[\d.]+ ETH/);
+  });
+  it('a live bot with an hour of history: the chip is the bots\' change and names the span it covers', () => {
+    const live = { ...S, grids: S.grids.map((g: Obj) => (g.id === 'g-mvpdla8b-fmkg' ? { ...g, mode: 'live' } : g)) };
+    const h = /<section class="card hero-card"[\s\S]*?<\/section>/.exec(render(createElement(Home, { s: live, nav: noop, holdings: PRICED as never, act: noop })))![0];
+    expect(h).toMatch(/class="chip neg/);
+    expect(text(h)).toMatch(/−[\d.]+ ETH bots · last 1\.0h/);
   });
   it('no priced net worth: a dash and no chip', () => {
     const h = hero(UNPRICED);

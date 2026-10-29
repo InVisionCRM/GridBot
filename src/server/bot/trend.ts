@@ -18,7 +18,7 @@ import {
   computeIndicators, costGate, expectedMovePct, htfAllows, openRisk, positionSize, priceExit, signalAt, trail,
   validateTrendConfig, warmup, DEFAULT_TREND, type DrawnLine, type ExitReason, type RiskState, type TrendConfig,
 } from '../../market/strategy';
-import { tradeStats, pushCapped, drawdown } from '../../market/stats';
+import { tradeStats, pushCapped, drawdown, downsampleByTime } from '../../market/stats';
 import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type ChainReader, type Executor, type Fill, type MarketSnapshot, type Quote, type TxSender } from './chain';
 import type { Emit } from './activity';
 import { isHalt, requestHalt, resolveHalt, startOverride, StartStopped, systemHalt, type Halt, type StartOverride } from './audit';
@@ -824,7 +824,7 @@ export class TrendEngine {
       stats: { ...tradeStats(closed), maxDrawdown: drawdown(s.equity).max, timeInMarket: s.startedAt ? inMarketMs / Math.max(1, this.now() - s.startedAt) : 0 },
       moveCount: trades.filter((t) => !t.failed).length,
       lastMoveAt: trades.reduce((m, t) => (!t.failed ? Math.max(m, t.timestamp || 0) : m), 0) || null,
-      equityHist: s.equity.slice(-600),
+      equityHist: downsampleByTime(s.equity, 600), // the whole life, not the newest 10 hours
       blocked: s.blocked, startedAt: s.startedAt, startPrice: s.startPrice, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, lastError: this.lastError,
     };
   }

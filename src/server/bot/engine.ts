@@ -20,7 +20,7 @@ import type { Logger } from './logger';
 import type { Store } from './store';
 import type { SharedNonce, TxGate } from './txGate';
 import type { Emit } from './activity';
-import { pushCapped } from '../../market/stats';
+import { downsampleByTime, pushCapped } from '../../market/stats';
 import { checkGasReserve, gasReserve, reserveCfg } from '../../live/gasReserve';
 import { RECENTER_AFTER_MS, shouldRecenter, type RecenterState } from '../../live/recenter';
 import { noKey } from '../words';
@@ -1149,7 +1149,7 @@ export class GridEngine {
       lastError: this.lastError,
       spacing,
       spacingWarn: this.state.spacingWarn,
-      equityHist: (this.state.equity ?? []).slice(-600),
+      equityHist: downsampleByTime(this.state.equity ?? [], 600), // the whole life, not the newest 10 hours
       startedAt: this.state.startedAt ?? trades[0]?.timestamp ?? null,
       startPrice: this.state.startPrice ?? trades[0]?.price ?? null,
       recenter: this.state.recenter ?? null,

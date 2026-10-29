@@ -39,6 +39,23 @@ export function drawdown(points: [number, number][]) {
   return { max, curve };
 }
 
+/**
+ * At most `n` points over the whole span, evenly by time: for each of n evenly spaced times from the first point to the
+ * last, the last point at or before it (no point twice). A short history comes back whole.
+ */
+export function downsampleByTime(points: readonly [number, number][], n: number): [number, number][] {
+  if (points.length <= n) return points.slice();
+  const t0 = points[0][0], t1 = points[points.length - 1][0];
+  const out: [number, number][] = [];
+  let j = 0;
+  for (let k = 0; k < n; k++) {
+    const target = k === n - 1 ? t1 : t0 + ((t1 - t0) * k) / (n - 1);
+    while (j + 1 < points.length && points[j + 1][0] <= target) j++;
+    if (out[out.length - 1] !== points[j]) out.push(points[j]);
+  }
+  return out;
+}
+
 /** Append a point; when over cap, thin the older half (every other point) so long histories stay bounded. */
 export function pushCapped<T>(arr: T[], p: T, cap = 3000): T[] {
   arr.push(p);

@@ -1,7 +1,7 @@
 /** Home: net worth, the book chart, a joined strip, the bots, then the two cards that used to live only under More. */
 import { useEffect, useMemo, useState } from 'react';
 import { http } from './api';
-import { bestLiveBot, BotRow, feesTodayOf, generatedByMode, generatedParts, listBots, pnlUnits, sharedUnits, todaySeries, totalGeneratedUsd, useRowActions } from './botRow';
+import { bestLiveBot, BotRow, feesTodayOf, generatedByMode, generatedParts, listBots, pnlUnits, sharedUnits, totalGeneratedUsd, useRowActions } from './botRow';
 import { metricsOf, unitsText } from './deskStats';
 import { AreaChart, Donut, Meter, Sparkline } from './charts';
 import { chainOf, chains, useChainFilter } from './chains';
@@ -11,7 +11,7 @@ import { coinNum, holdingsByToken, inEth, useEthUsd } from './units';
 import { useCount } from './motion';
 import type { Opportunity } from '../market/scan';
 import { isSafe, tryIt, useOpportunities, wayOf } from './Opportunities';
-import { bookUsd, equitySpan, portfolioSeries, seriesChange, type DeskRange } from './series';
+import { bookUsd, coveredLabel, equitySpan, portfolioSeries, seriesChange, type DeskRange } from './series';
 import type { AnyObj, Nav } from './model';
 import { SafetyChecking } from './SafetyChecking';
 
@@ -76,17 +76,10 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
   const paperDesk = holdings?.hasSigner === false;
   const tokens = useMemo(() => (holdings?.hasSigner ? holdingsByToken(holdings, chain).slice(0, 6) : paperDesk ? botsByToken(bots) : []), [holdings, chain, bots, paperDesk]);
   const seriesBots = useMemo(() => (paperDesk ? bots : bots.filter((b) => b.mode === 'live')), [bots, paperDesk]);
-  const series = useMemo(() => {
-    const hist = portfolioSeries(seriesBots, range);
-    if (hist.length > 2 && hist.some((p) => p !== hist[0])) return hist;
-    if (range === '1H' || range === '1D') {
-      const day = todaySeries(seriesBots, paperDesk);
-      if (day.length > 1 && day.some((p) => p !== 0)) return day;
-    }
-    return hist;
-  }, [seriesBots, range, paperDesk]);
+  const series = useMemo(() => portfolioSeries(seriesBots, range), [seriesBots, range]);
   const chg = seriesChange(series);
   const span = equitySpan(seriesBots);
+  const hasHistory = series.length > 2 && series.some((p) => p !== series[0]);
   const month = useMemo(() => portfolioSeries(seriesBots, '1M'), [seriesBots]);
   // Live and paper are never mixed: the headline is live bots only, in units per coin; paper is a separate small line
   const gen = generatedByMode(bots);
@@ -145,8 +138,11 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
               <p className="home-sub">
                 {holdings == null && 'Reading…'}
                 {paperDesk && 'Paper'}
-                {shownWorth != null && (
-                  <span className={`chip ${cls(chg.delta)}`}>{inEth(chg.delta, ethUsd, true, 3)} {chg.pct == null ? '' : pct(chg.pct, 2, true)}</span>
+                {shownWorth != null && hasHistory && (
+                  // the chart and chip follow the bots' value, not the wallet's (named so, with the span they really cover)
+                  <span className={`chip ${cls(chg.delta)}`} title={`How much your ${paperDesk ? 'paper' : 'live'} bots' value changed over this range. The wallet's own moves are not in it.`}>
+                    {inEth(chg.delta, ethUsd, true, 3)} <small>{paperDesk ? 'paper bots' : 'bots'} · {coveredLabel(range, span)}</small>
+                  </span>
                 )}
               </p>
               {tokens.length > 0 && (
@@ -161,7 +157,7 @@ export function Home({ s, nav, holdings, act }: { s: AnyObj; nav: Nav; holdings:
               ))}
             </div>
           </div>
-          <AreaChart points={series} />
+          {hasHistory ? <AreaChart points={series} /> : <p className="muted small">The chart fills in as the bots build history.</p>}
         </section>
         <section className="card alloc-card" aria-label="Allocation">
           <p className="home-k">Allocation</p>

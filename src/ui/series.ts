@@ -1,5 +1,6 @@
 /** Portfolio series built only from bot equity history and fills. No invented prices. */
 import type { AnyObj } from './model';
+import { runLength } from './runRate';
 
 export type DeskRange = '1H' | '1D' | '1W' | '1M' | 'ALL';
 
@@ -83,11 +84,16 @@ export function portfolioSeries(bots: AnyObj[], range: DeskRange, now = Date.now
   return downsample(pts, 64);
 }
 
-export function seriesChange(pts: number[]): { delta: number; pct: number | null } {
-  if (pts.length < 2) return { delta: 0, pct: null };
-  const a = pts[0];
-  const b = pts[pts.length - 1];
-  return { delta: b - a, pct: a !== 0 ? (b - a) / Math.abs(a) : null };
+/** Change over the series. The series starts at 0 (a P&L change), so there is no base to give a % of. */
+export function seriesChange(pts: number[]): { delta: number } {
+  if (pts.length < 2) return { delta: 0 };
+  return { delta: pts[pts.length - 1] - pts[0] };
+}
+
+/** What a range's chip says it covers: the range, or the span the history really has when that is shorter. */
+export function coveredLabel(range: DeskRange, spanMs: number): string {
+  const win = WIN[range];
+  return win != null && spanMs >= win ? range : spanMs > 0 ? `last ${runLength(spanMs)}` : range;
 }
 
 /** How long equity history actually covers. */

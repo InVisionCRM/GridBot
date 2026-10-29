@@ -78,27 +78,6 @@ export function fillsToday(b: AnyObj, from = startOfDay()): number | null {
   return ((b.trades ?? []) as AnyObj[]).filter((t) => !t.failed && t.timestamp >= from).length;
 }
 
-/** Closed-trade profit since local midnight, as a running total in dollars. */
-export function todaySeries(bots: AnyObj[], includePaper: boolean): number[] {
-  const from = startOfDay();
-  const ev: { t: number; usd: number }[] = [];
-  for (const b of bots) {
-    if (!includePaper && b.mode === 'paper') continue;
-    const k = b.usdPerQuote as number | null;
-    if (!(typeof k === 'number' && k > 0)) continue;
-    for (const tr of (b.trades ?? []) as AnyObj[]) {
-      if (tr.failed || tr.side === 'buy' || !(tr.timestamp >= from)) continue;
-      const pnl = tr.roundTripNet ?? tr.realizedPnlQuote;
-      if (typeof pnl === 'number' && Number.isFinite(pnl)) ev.push({ t: tr.timestamp, usd: pnl * k });
-    }
-  }
-  ev.sort((a, c) => a.t - c.t);
-  const pts = [0];
-  let acc = 0;
-  for (const e of ev) { acc += e.usd; pts.push(acc); }
-  return pts;
-}
-
 /** Home's "Fees earned today", from the server's `feesToday` (status payload), limited to the bots on screen. */
 export interface FeesTodayView {
   liveEarnedUsd: number; paperEarnedUsd: number; livePaidUsd: number; liveSeries: number[];
