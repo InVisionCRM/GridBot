@@ -321,6 +321,8 @@ export class TrendEngine {
     this.state.closing = false;
     this.state.archivedAt = null;
     this.state.halt = null;
+    // nothing queued before the stop runs now: its price and ATR are from a candle that closed while it was stopped
+    if (!this.state.inFlight) this.state.queue = [];
     if (override !== undefined) this.state.startOverride = override;
     this.closeNote = null;
     this.save();
@@ -451,6 +453,7 @@ export class TrendEngine {
 
   private enqueue(j: Omit<TrendJob, 'id' | 'createdAt'>) {
     if (this.state.queue.some((q) => q.side === j.side)) return;
+    if (j.side === 'buy' && (this.state.status !== 'running' || this.state.closing)) return; // no entry once stopped or closing
     const job: TrendJob = { ...j, id: `${this.state.id}-${this.now().toString(36)}-${j.side}`, createdAt: this.now() };
     this.state.queue.push(job);
     const amt = j.side === 'buy' ? `${j.amount.toPrecision(5)} ${this.quoteSym}` : `${j.amount.toPrecision(6)} ${this.baseSym}`;
@@ -600,6 +603,8 @@ export class TrendEngine {
     const risk = openRisk(price, atrV, c);
     const size = Math.min(s.cash, positionSize(s.cash, s.cash, risk.entry, risk.stop, c));
     const m = await (this.d.market ? this.d.market(s.quote) : this.hub.quoter(s.quote).market());
+    // a Stop, Close or archive that landed during the read: no entry from this candle
+    if (this.state.status !== 'running' || this.state.closing || this.state.archivedAt) return;
     // Real per-market costs: the pool's LP fee, chain gas units, base-converted gas price and any L2 L1-data fee.
     const model: CostModel = {
       feeBps: m.feeBps ?? this.def?.pool.feeBps ?? FEE_BPS, pool: { quoteReserve: m.quoteReserve, plsReserve: m.plsReserve }, gasPricePls: m.gasPricePls,

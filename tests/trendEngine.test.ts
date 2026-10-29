@@ -54,6 +54,24 @@ describe('TrendEngine', () => {
     expect(s.bot.status().trends[0].trades).toHaveLength(1);
   });
 
+  it('a Stop that lands while an entry candle is evaluated queues no buy, and Resume starts with an empty queue (a036)', async () => {
+    const s = setup();
+    const id = await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: CFG, capital: 100 });
+    await s.bot.tickAll();
+    const eng = (s.bot as unknown as { trend: (id: string) => { d: { market?: (k: string) => Promise<unknown> }; hub: { quoter: (k: string) => { market: () => Promise<unknown> } } } }).trend(id);
+    eng.d.market = async (k) => { s.bot.stopTrend(id); return eng.hub.quoter(k).market(); }; // Stop lands during the read
+    s.closeBar(T0, { o: P, h: 1.1 * P, l: P, c: 1.1 * P });
+    setMid(s.chain, 1.1 * P);
+    await s.bot.tickAll();
+    expect(s.bot.status().trends[0]).toMatchObject({ status: 'stopped', queue: [] });
+    eng.d.market = undefined;
+    s.clock.ms += 12 * 3600_000;
+    setMid(s.chain, 0.8 * P);
+    await s.bot.resumeTrend(id);
+    await s.bot.tickAll();
+    expect(s.bot.status().trends[0].trades).toHaveLength(0); // no stale buy from a candle hours old
+  });
+
   it('ATR stop exits on the poll price; realized PnL includes fees and gas; cooldown applies', async () => {
     const s = setup();
     await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: { ...CFG, cooldownBars: 3 }, capital: 100 });
