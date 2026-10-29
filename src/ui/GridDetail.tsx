@@ -266,11 +266,11 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <span className="tag">Grid</span>
           {g.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
           <DexTag name={g.dexName} feeBps={g.feeBps} feeTier={g.feeTier} />
-          <span className={`st ${closing ? 'closing' : g.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{g.inFlight ? ' · swap in flight' : ''}</span>
+          <span className={`st ${closing ? 'closing' : g.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Paused'}{g.inFlight ? ' · swap in flight' : ''}</span>
         </div>
         <div className="detail-actions">
           {running
-            ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
+            ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`grids/${g.id}/stop`, 'POST', undefined, 'row-stop'))}>Pause</button>
             : g.config && <button type="button" className="btn primary" disabled={busy || g.available === false} onClick={() => act(() => chk.run(g.mode === 'live', () => botApi(`grids/${g.id}/resume`, 'POST')))}>Resume</button>}
           <button type="button" className="btn danger" disabled={busy || closing || g.available === false} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
           <button type="button" className="btn danger" disabled={busy || running || !!g.inFlight} title={running ? 'Stop it first' : ''} onClick={remove}>Remove</button>

@@ -72,11 +72,11 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <span className="tag">Trend</span>
           {t.mode === 'live' ? <span className="tag live">Live</span> : <span className="tag">Paper</span>}
           <DexTag name={t.dexName} feeBps={t.feeBps} feeTier={t.feeTier} />
-          <span className={`st ${closing ? 'closing' : t.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Stopped'}{t.inFlight ? ' · swap in flight' : ''}</span>
+          <span className={`st ${closing ? 'closing' : t.status}`}>{closing ? 'Closing…' : running ? 'Running' : 'Paused'}{t.inFlight ? ' · swap in flight' : ''}</span>
         </div>
         <div className="detail-actions">
           {running
-            ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/stop`, 'POST', undefined, 'row-stop'))}>Stop</button>
+            ? <button type="button" className="btn" disabled={busy} onClick={() => act(() => botApi(`trends/${t.id}/stop`, 'POST', undefined, 'row-stop'))}>Pause</button>
             : <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => chk.run(t.mode === 'live', () => botApi(`trends/${t.id}/resume`, 'POST')))}>Resume</button>}
           <button type="button" className="btn" disabled={busy || !pos || !running || closing} onClick={closePos}>Sell now</button>
           <button type="button" className="btn danger" disabled={busy || closing} onClick={doClose}>{closing ? 'Closing…' : 'Close'}</button>
