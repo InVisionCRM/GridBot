@@ -128,7 +128,10 @@ export interface ChainWallet {
 
 function migrate(raw: unknown, net: LiveNetwork): MultiState {
   const empty = (): MultiState => ({ version: 4, defaults: { ...DEFAULT_LIMITS }, grids: [], trends: [], lps: [], alerts: [], portfolio: { live: [], paper: [] } });
-  if (!raw || typeof raw !== 'object') return empty();
+  if (raw == null) return empty(); // no state file yet
+  // Anything this build does not know stops the start: an empty state saved over it would erase every bot.
+  const unknown = (what: string) => new Error(`State file not loaded: ${what}. Nothing was changed; run a build that knows this file, or move it aside to start with no bots.`);
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw unknown(`it is not an object (${Array.isArray(raw) ? 'array' : typeof raw})`);
   const o = raw as Record<string, unknown>;
   if ((o.version === 2 || o.version === 3 || o.version === 4) && Array.isArray(o.grids)) {
     return {
@@ -150,7 +153,7 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
     const id = g.id || 'g1';
     return { ...empty(), defaults: { ...DEFAULT_LIMITS, ...(g.limits ?? {}) }, grids: [{ ...freshState(net, id), ...g, id, version: 1 }] };
   }
-  return empty();
+  throw unknown(`version ${JSON.stringify(o.version ?? null)}${Array.isArray(o.grids) ? '' : ' without a grids list'}`);
 }
 
 /**
