@@ -459,8 +459,9 @@ export class LpEngine {
     this.state.status = 'stopped';
     this.state.closing = false;
     this.state.halt = halt;
-    // A close that has not been sent yet is dropped. A tx already broadcast is still settled.
-    if (this.state.step?.action === 'close' && !this.state.step.hash && !this.state.step.swap) this.state.step = null;
+    // A close that has not been sent yet is dropped. A tx already broadcast is still settled. While a tick runs it may be
+    // sending that close right now: the tick drops it at its end only if nothing went out (the hash is never lost).
+    if (!this.ticking && this.state.step?.action === 'close' && !this.state.step.hash && !this.state.step.swap) this.state.step = null;
     this.save();
     const note = typeof why === 'string' ? `paused — ${why}` : `stopped — ${halt.detail}`;
     this.ev('stopped', `Liquidity ${this.label} ${note}${this.state.position ? '; the position stays open' : ''}`, { level: 'warn', notify: true, data: { halt } });
@@ -645,6 +646,9 @@ export class LpEngine {
   async setProfits(p: ProfitMode) {
     const next = checkProfitMode(p);
     if (next.mode === 'send' && this.signer && sameAddr(await this.signer.getAddress(), next.to)) throw new Error('That is the bot\'s own wallet: fees already stay there when reinvested.');
+    // a fee send in flight is settled under the mode it was sent with: no switch until the step is done
+    const busy = this.busyReason();
+    if (busy) throw new Error(busy);
     this.state.profits = next;
     this.save();
   }
@@ -692,6 +696,9 @@ export class LpEngine {
         this.state.step = null;
         this.markArchived();
       }
+      // a stop that landed during this tick: a close that never went out is dropped now (one sent keeps its hash)
+      const st = this.state.step;
+      if (this.state.status !== 'running' && st?.action === 'close' && !st.hash && !st.swap) this.state.step = null;
       await this.measure(pool, v);
       this.save();
       this.lastError = null;

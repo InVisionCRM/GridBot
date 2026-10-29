@@ -575,6 +575,66 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(s.totals.feeCoins.quote).toBeCloseTo(0.01, 9);
   });
 
+  it('Pause during a close whose exit is being sent: the exit is kept by hash and settles; the position is not left behind (a039)', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    const ex = (w.make() as unknown as { executor: { sendTx: (r: { to: string; data: string; value: bigint }) => Promise<string> } }).executor;
+    (e as unknown as { executor: unknown }).executor = ex;
+    w.approve();
+    await e.tick();
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    e.close();
+    const send = ex.sendTx;
+    ex.sendTx = async (r) => { const h = await send(r); e.stop('Pause pressed'); return h; }; // Pause lands while the exit is sent
+    await e.tick();
+    expect(w.sent).toHaveLength(2);
+    expect(e.status().step).toMatchObject({ action: 'close', stage: 'exit', hash: w.sent[1].hash });
+    w.ok(w.sent[1].hash, [w.ev('DecreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n]), w.ev('Collect', [5n, '0x0000000000000000000000000000000000000000', 1010n * 10n ** 18n, 4n * 10n ** 16n])]);
+    await e.tick();
+    expect(e.status().position).toBeNull();
+    expect(e.status().totals.fees).toBeGreaterThan(0);
+  });
+
+  it('Pause during a close that has not gone out yet drops it (nothing sent); Resume does not close (a039)', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    e.close();
+    e.stop('Pause pressed');
+    expect(e.status().step).toBeNull();
+    e.resume();
+    await e.tick();
+    expect(w.sent).toHaveLength(1);
+    expect(e.status().position).toMatchObject({ id: '5' });
+  });
+
+  it('Profits can not be switched while a fee send is in flight; the sent fees are booked (a031)', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, profits: { mode: 'send', to: '0x00000000000000000000000000000000000beef1' } });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    e.state.step = { action: 'send', stage: 'collect', tries: 0 };
+    await e.tick();
+    const col = w.sent.at(-1)!;
+    expect(e.status().step).toMatchObject({ action: 'send', hash: col.hash });
+    await expect(e.setProfits({ mode: 'reinvest' })).rejects.toThrow(/busy/);
+    w.ok(col.hash, [w.ev('Collect', [5n, '0x00000000000000000000000000000000000beef1', 0n, 30n * 10n ** 18n])]);
+    await e.tick();
+    expect(e.status().step).toBeNull();
+    expect(e.status().totals.sent).toBeGreaterThan(29);
+  });
+
   it('a pricey native base (like ETH/USDG): the native side goes in, keeping only gas for the open (bug: 2% of the USDG amount was kept back as ETH)', async () => {
     // 1000 DAI at 2400 DAI per PLS: about half (≈0.21 PLS) is bought for the position; the wallet already had 0.46 PLS for gas.
     const w = live({ price: 2400, balances: { pls: 0.46 + 0.2083, stable: 500 } });
