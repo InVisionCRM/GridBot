@@ -72,6 +72,41 @@ describe('TrendEngine', () => {
     expect(s.bot.status().trends[0].trades).toHaveLength(0); // no stale buy from a candle hours old
   });
 
+  it('an outage is not candles: hours with no poll add no bars, so max hold counts real bars only (b001)', async () => {
+    const s = setup();
+    const id = await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: { ...CFG, maxHoldBars: 3 }, capital: 100 });
+    await s.bot.tickAll();
+    s.closeBar(T0, { o: P, h: 1.1 * P, l: P, c: 1.1 * P });
+    setMid(s.chain, 1.1 * P);
+    await s.bot.tickAll();
+    expect(s.bot.status().trends.find((x) => x.id === id)!.position).not.toBeNull();
+    s.closeBar(T0 + 6 * H, { o: 1.1 * P, h: 1.1 * P, l: 1.1 * P, c: 1.1 * P }); // 5 hours of nothing, then one real bar
+    await s.bot.tickAll();
+    const t = s.bot.status().trends.find((x) => x.id === id)!;
+    expect(t.position).not.toBeNull();
+    expect(t.position!.bars).toBe(2); // the hour the app did poll (T0+H) and the new bar; not the 5 hours of nothing
+  });
+
+  it('several candles at once: an exit cross on an earlier one is not lost (b004)', async () => {
+    const s = setup();
+    const id = await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: CFG, capital: 100 });
+    await s.bot.tickAll();
+    s.closeBar(T0, { o: P, h: 1.1 * P, l: P, c: 1.1 * P });
+    setMid(s.chain, 1.1 * P);
+    await s.bot.tickAll();
+    expect(s.bot.status().trends.find((x) => x.id === id)!.position).not.toBeNull();
+    // two bars land together: the first crosses down, the second stays below (no new cross on it)
+    s.candles.merge('DAI', '1h', [
+      { t: T0 + H, v: 0, o: 1.1 * P, h: 1.1 * P, l: 0.95 * P, c: 0.95 * P },
+      { t: T0 + 2 * H, v: 0, o: 0.95 * P, h: 0.95 * P, l: 0.94 * P, c: 0.94 * P },
+    ], 'gecko', T0 + 3 * H + 10);
+    s.clock.ms = (T0 + 3 * H + 10) * 1000;
+    await s.bot.tickAll(); // the poll price stays at 1.1 P: only the candle signal can exit
+    const t = s.bot.status().trends.find((x) => x.id === id)!;
+    expect(t.position).toBeNull();
+    expect(t.trades[0]).toMatchObject({ side: 'sell', reason: 'signal' }); // newest first
+  });
+
   it('ATR stop exits on the poll price; realized PnL includes fees and gas; cooldown applies', async () => {
     const s = setup();
     await s.bot.addTrend({ mode: 'paper', quote: 'DAI', tf: '1h', cfg: { ...CFG, cooldownBars: 3 }, capital: 100 });

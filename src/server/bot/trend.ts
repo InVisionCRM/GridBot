@@ -12,7 +12,7 @@ import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { Hub } from '../chains/hub';
 import { legacyTradeNames, roundTripCosts, upgradeQuoteNames, type LiveTrade } from '../../live/ledger';
 import { FEE_BPS } from '../../live/economics';
-import { TF_SEC, bucketStart, closedOnly, fillGaps, isTF, type Candle, type TF } from '../../market/candles';
+import { TF_SEC, bucketStart, closedOnly, isTF, type Candle, type TF } from '../../market/candles';
 import { DEFAULT_COSTS, type CostModel } from '../../market/costs';
 import {
   computeIndicators, costGate, expectedMovePct, htfAllows, openRisk, positionSize, priceExit, signalAt, trail,
@@ -544,9 +544,13 @@ export class TrendEngine {
     }
   }
 
+  /**
+   * Real closed candles only. Hours the app did not poll are not flat candles: filling them in counted an outage toward
+   * max hold and warm-up, and decayed ATR and the EMAs toward a made-up price.
+   */
   private series(tf: TF) {
     const nowSec = Math.floor(this.now() / 1000);
-    return fillGaps(closedOnly(this.d.candles(this.state.quote, tf), tf, nowSec), tf);
+    return closedOnly(this.d.candles(this.state.quote, tf), tf, nowSec);
   }
 
   private async evaluateCandles(price: number) {
@@ -573,9 +577,11 @@ export class TrendEngine {
         this.signal('stop_moved', last.t, `trail ${before.toPrecision(6)} → ${pos.risk.stop.toPrecision(6)}`);
         this.emit('stop_moved', `${s.name}: trailing stop ${before.toPrecision(6)} → ${pos.risk.stop.toPrecision(6)}`, { data: { stop: pos.risk.stop } });
       }
-      if (sig.exit) {
-        this.signal('exit', last.t, sig.note);
-        this.emit('signal', `${s.name}: EXIT signal — ${sig.note}`, { level: 'warn' });
+      // every new candle in order, as the backtest does: an exit cross on an earlier one is not lost
+      const ex = fresh.map((f) => signalAt(ind, k, k.findIndex((x) => x.t === f.t), c)).find((g) => g.exit);
+      if (ex) {
+        this.signal('exit', last.t, ex.note);
+        this.emit('signal', `${s.name}: EXIT signal — ${ex.note}`, { level: 'warn' });
         this.enqueue({ side: 'sell', reason: 'signal', amount: pos.pls, triggerPrice: price });
       } else if (c.maxHoldBars > 0 && pos.bars >= c.maxHoldBars) {
         this.signal('exit', last.t, `max hold ${c.maxHoldBars} bars`);
