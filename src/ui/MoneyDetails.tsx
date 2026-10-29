@@ -29,7 +29,11 @@ export type DetailHide = 'Made at event prices' | 'Total P&L' | 'Price change' |
  * The per-coin lines of metrics.breakdownByCoin, in that coin's units: earned, then each non-zero cost with a minus,
  * then "= Generated" (the headline above, not printed twice). A coin with no cost is one row saying so.
  */
-export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'breakdownBasis'> | null | undefined, moves?: number | null): DetailRow[] {
+/**
+ * `waiting`: an open LP's fees waiting in the position, per coin. A coin whose fees earned are exactly what is waiting
+ * (nothing collected yet) points to the position card instead of printing the same figure again.
+ */
+export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'breakdownBasis'> | null | undefined, moves?: number | null, waiting?: Record<string, number>): DetailRow[] {
   const by = m?.breakdownByCoin, basis = m?.breakdownBasis;
   if (!by || !basis) return [];
   const earnedLabel = basis.earned === 'lpFees' ? 'Fees earned' : 'Trade profit before costs';
@@ -48,7 +52,9 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
       rows.push([`${earnedLabel}, ${sym}`, c.earned === 0 ? <>none yet</> : <>all of it is Generated (no cost is charged in {sym})</>, `${earnedTip} Nothing is charged in ${sym}, so it is all Generated.`]);
       continue;
     }
-    rows.push([`${earnedLabel}, ${sym}`, <>{qty(c.earned, sym, 6)}</>, earnedTip]);
+    const w = waiting?.[sym];
+    const allWaiting = w != null && w !== 0 && Math.abs(c.earned - w) <= 1e-9 * Math.max(Math.abs(c.earned), Math.abs(w));
+    rows.push([`${earnedLabel}, ${sym}`, allWaiting ? <>same as Fees waiting (position card)</> : <>{qty(c.earned, sym, 6)}</>, earnedTip]);
     for (const [k, v, t] of costs) rows.push([`− ${k}, ${sym}`, <>{qty(-v, sym, 6)}</>, t]);
     rows.push([`= Generated, ${sym}`, 'the headline above', `${earnedLabel} − ${costs.map(([k]) => k.toLowerCase()).join(' − ')}, in ${sym}.`]);
   }
@@ -61,6 +67,15 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
  * same as one (a stopped grid's whole Total P&L can be its stop sale).
  */
 export type ValueChangeRow = [string, number | null | undefined, string];
+
+/** An open liquidity position's fees waiting, per coin (base and quote symbols); undefined for anything else */
+function waitingOf(b: AnyObj, quoteSym: string): Record<string, number> | undefined {
+  if (b.kind !== 'lp' || !b.position || !b.owed || typeof b.base !== 'string') return undefined;
+  const out: Record<string, number> = {};
+  if (typeof b.owed.base === 'number') out[b.base] = b.owed.base;
+  if (typeof b.owed.quote === 'number') out[quoteSym] = b.owed.quote;
+  return out;
+}
 
 export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { b: AnyObj; breakdown?: DetailRow[]; changes?: readonly ValueChangeRow[]; hide?: readonly DetailHide[]; note?: string }) {
   const m = metricsOf(b);
@@ -108,7 +123,7 @@ export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { 
     <details className="more money-details" data-testid="money-details">
       <summary>Details <span className="muted small">{note ?? 'made at event prices, total P&L, price change'}</span></summary>
       <table className="stat-table"><tbody>
-        {[...coinBreakdownRows(m, num(b.reranges)), ...(breakdown ?? [])].map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
+        {[...coinBreakdownRows(m, num(b.reranges), waitingOf(b, sym)), ...(breakdown ?? [])].map(([k, v, t]) => <tr key={k} title={t} className="breakdown"><th>{k}</th><td className="mono">{v}</td></tr>)}
         {[...rows, ...(value ? [value] : [])].map(([k, v, t]) => <tr key={k} title={t}><th>{k}</th><td className="mono">{v}</td></tr>)}
       </tbody></table>
     </details>
