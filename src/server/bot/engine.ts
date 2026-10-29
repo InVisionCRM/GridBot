@@ -454,7 +454,15 @@ export class GridEngine {
 
   /** Coins this bot's own fills still hold (quote-side inventory is not an on-chain position). */
   private held() { return replay(this.modeTrades()).plsHeld; }
-  private flat() { return !this.state.inFlight && this.state.queue.length === 0 && this.held() <= 1e-8; }
+  /**
+   * Below this the bot holds only rounding: sells go out in exact token units (15 significant digits), so a float lot
+   * of tens of millions sells a hair less than booked. A millionth of its biggest fill (at least 1e-8).
+   */
+  private dust() {
+    const big = this.modeTrades().reduce((m, t) => (t.failed ? m : Math.max(m, t.plsAmount)), 0);
+    return Math.max(1e-8, big * 1e-6);
+  }
+  private flat() { return !this.state.inFlight && this.state.queue.length === 0 && this.held() <= this.dust(); }
 
   /**
    * End the bot. Paper (and a live grid with nothing held and nothing in flight) leaves the active list now,
@@ -472,7 +480,7 @@ export class GridEngine {
       return false;
     }
     if (this.state.closing) return false;
-    const liveWork = this.state.inFlight != null || this.held() > 1e-8;
+    const liveWork = this.state.inFlight != null || this.held() > this.dust();
     if (!liveWork || this.executor instanceof UnavailableExecutor) {
       this.noteClose(why);
       if (this.executor instanceof UnavailableExecutor && liveWork) {
@@ -504,7 +512,7 @@ export class GridEngine {
 
   /** Sell each held lot (and any coins not on a level) through the normal executor. Idempotent. */
   private queueUnwindSells() {
-    if (this.state.inFlight || this.held() <= 1e-8) return;
+    if (this.state.inFlight || this.held() <= this.dust()) return;
     const price = this.state.lastPrice ?? 0;
     const queued = new Set(this.state.queue.map((q) => q.intervalIndex));
     for (const iv of this.state.intervals) {
@@ -518,7 +526,7 @@ export class GridEngine {
     }
     const onLevels = this.state.intervals.reduce((a, iv) => a + (iv.status === 'holding' ? iv.plsAmount : 0), 0);
     const free = this.held() - onLevels;
-    if (free > 1e-8 && !queued.has(-1)) {
+    if (free > this.dust() && !queued.has(-1)) {
       this.state.queue.push({
         id: `${CLOSE_JOB}free-${this.state.id}-${this.now().toString(36)}`,
         intervalIndex: -1, side: 'sell', triggerPrice: price, levelPrice: price,
