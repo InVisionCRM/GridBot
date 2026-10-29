@@ -1,5 +1,8 @@
 /**
- * Swap history of V3 pools for the liquidity replay (market/lpReplay): each pool's Swap events folded into minutes,
+ * Trade history of pools for the liquidity and grid replays: each pool's trades folded into minutes. A V3 pool's Swap
+ * events carry the tick and the fees (market/lpReplay); a V2 pool's Sync events carry both reserves after every trade,
+ * whose ratio is the price, kept on the same tick scale (fractional) with no fees (the grid replay needs the price only).
+ * The history is
  * kept for up to MAX_DAYS days in data/pool-history/<chainId>-<pool>.json and topped up when a replay is asked for.
  * The first read covers the window asked for (the page asks for 7 days first); a longer window, when someone picks it,
  * is read backwards a day at a time from where the history starts, saved as it goes, so a long read survives a restart.
@@ -13,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path';
 import { addSwaps, type PoolMinute, type PoolSwap } from '../../market/lpReplay';
 import { QUERY_TOO_WIDE } from '../chains/fallback';
-import { PCS_V3_SWAP_TOPIC, V3_SWAP_TOPIC, type LogReader } from '../market/onchain';
+import { PCS_V3_SWAP_TOPIC, SYNC_TOPIC, V3_SWAP_TOPIC, type LogReader } from '../market/onchain';
 
 /** The replay windows, in days; the page opens on DEFAULT_DAYS and reads a longer one only when it is picked */
 export const REPLAY_DAYS = [1, 7, 30, 365] as const;
@@ -34,8 +37,8 @@ const RATE_LIMITED = /\b429\b|rate.?limit|too many requests/i;
 
 export interface HistoryOpts { now?: () => number; gapMs?: number; sleep?: (ms: number) => Promise<void> }
 
-/** One pool to keep: where, its fee tier (hundredths of a bip), the LPs' share of fees, the chain's largest log request. */
-export interface PoolRef { chainId: number; pool: string; feeTier: number; lpShare: number; logChunk: number }
+/** One pool to keep: where, its kind, its fee tier (hundredths of a bip), the LPs' share of fees, the chain's largest log request. */
+export interface PoolRef { chainId: number; pool: string; kind: 'v2' | 'v3'; feeTier: number; lpShare: number; logChunk: number }
 
 export interface SyncState {
   syncing: boolean;
@@ -52,7 +55,7 @@ export interface SyncState {
 
 type Row = [number, number, number, number, number, number, number, number];
 /** version 2 adds where the history starts (fromBlock / fromT); a version 1 file is read again from scratch */
-interface PoolFile { version: 2; chainId: number; pool: string; feeTier: number; lpShare: number; fromBlock: number | null; fromT: number; toBlock: number; lastTick: number | null; rows: Row[]; ready: boolean }
+interface PoolFile { version: 2; chainId: number; pool: string; kind: 'v2' | 'v3'; feeTier: number; lpShare: number; fromBlock: number | null; fromT: number; toBlock: number; lastTick: number | null; rows: Row[]; ready: boolean }
 
 const toRow = (m: PoolMinute): Row => [m.t, m.lo, m.hi, m.c, m.f0, m.f1, m.liq, m.n];
 const fromRow = (r: Row): PoolMinute => ({ t: r[0], lo: r[1], hi: r[2], c: r[3], f0: r[4], f1: r[5], liq: r[6], n: r[7] });
@@ -62,6 +65,16 @@ const signed = (x: bigint) => (x >= 1n << 255n ? x - (1n << 256n) : x);
 /** A V3 Swap event's data: amount0, amount1 (int256), sqrtPriceX96, liquidity, tick (PancakeSwap adds two more words). */
 export function decodeSwap(data: string, t: number): PoolSwap {
   return { t, a0: Number(signed(word(data, 0))), a1: Number(signed(word(data, 1))), liq: Number(word(data, 3)), tick: Number(signed(word(data, 4))) };
+}
+
+/**
+ * A V2 Sync event's data: reserve0, reserve1 (uint112) after a trade. The price (raw token1 per raw token0) on the V3
+ * tick scale, fractional; no amounts or liquidity, so no fees. Null for an empty side (a pool being drained or seeded).
+ */
+export function decodeSync(data: string, t: number): PoolSwap | null {
+  const r0 = Number(word(data, 0)), r1 = Number(word(data, 1));
+  if (!(r0 > 0 && r1 > 0)) return null;
+  return { t, a0: 0, a1: 0, liq: 0, tick: Math.log(r1 / r0) / Math.log(1.0001) };
 }
 
 export class PoolHistory {
@@ -104,7 +117,7 @@ export class PoolHistory {
     if (!this.file || !existsSync(this.file)) return;
     const f = JSON.parse(readFileSync(this.file, 'utf8')) as PoolFile;
     // a different fee tier or LP share would make the saved fees wrong, and a version 1 file doesn't say where it starts: start over
-    if (f.version !== 2 || f.feeTier !== this.ref.feeTier || f.lpShare !== this.ref.lpShare) return;
+    if (f.version !== 2 || f.kind !== this.ref.kind || f.feeTier !== this.ref.feeTier || f.lpShare !== this.ref.lpShare) return;
     this.minutes = f.rows.map(fromRow);
     this.toBlock = f.toBlock;
     this.fromBlock = f.fromBlock;
@@ -116,7 +129,7 @@ export class PoolHistory {
 
   private save() {
     if (!this.file || this.toBlock == null || this.state.from == null) return;
-    const f: PoolFile = { version: 2, chainId: this.ref.chainId, pool: this.ref.pool, feeTier: this.ref.feeTier, lpShare: this.ref.lpShare, fromBlock: this.fromBlock, fromT: this.state.from, toBlock: this.toBlock, lastTick: this.lastTick, rows: this.minutes.map(toRow), ready: this.state.ready };
+    const f: PoolFile = { version: 2, chainId: this.ref.chainId, pool: this.ref.pool, kind: this.ref.kind, feeTier: this.ref.feeTier, lpShare: this.ref.lpShare, fromBlock: this.fromBlock, fromT: this.state.from, toBlock: this.toBlock, lastTick: this.lastTick, rows: this.minutes.map(toRow), ready: this.state.ready };
     const tmp = `${this.file}.tmp`;
     writeFileSync(tmp, JSON.stringify(f));
     renameSync(tmp, this.file);
@@ -214,7 +227,7 @@ export class PoolHistory {
       const end = Math.min(to, from + this.span - 1);
       let logs: Awaited<ReturnType<LogReader['getLogs']>>;
       try {
-        logs = await this.ask(() => this.reader.getLogs({ address: this.ref.pool, topics: [[V3_SWAP_TOPIC, PCS_V3_SWAP_TOPIC]], fromBlock: from, toBlock: end }));
+        logs = await this.ask(() => this.reader.getLogs({ address: this.ref.pool, topics: [this.ref.kind === 'v3' ? [V3_SWAP_TOPIC, PCS_V3_SWAP_TOPIC] : [SYNC_TOPIC]], fromBlock: from, toBlock: end }));
       } catch (e) {
         const msg = String((e as Error)?.message ?? e);
         if (end === from || RATE_LIMITED.test(msg) || !QUERY_TOO_WIDE.test(msg)) throw e;
@@ -226,7 +239,11 @@ export class PoolHistory {
       const ts = (bn: number) => (e.n === a.n ? a.t : a.t + ((bn - a.n) * (e.t - a.t)) / (e.n - a.n));
       const swaps = [...logs]
         .sort((x, y) => x.blockNumber - y.blockNumber || (x.index ?? x.logIndex ?? 0) - (y.index ?? y.logIndex ?? 0))
-        .map((l) => decodeSwap(l.data, ts(l.blockNumber)));
+        .flatMap((l) => {
+          if (this.ref.kind === 'v3') return [decodeSwap(l.data, ts(l.blockNumber))];
+          const sync = decodeSync(l.data, ts(l.blockNumber));
+          return sync ? [sync] : [];
+        });
       lastTick = addSwaps(into, swaps, { feeTier: this.ref.feeTier, lpShare: this.ref.lpShare, lastTick });
       this.state.done += end - from + 1;
       // next span: about TARGET_LOGS swaps at this request's rate, growing at most 4× at a time, under a refused span
@@ -275,7 +292,7 @@ export class PoolHistories {
   get(ref: PoolRef): PoolHistory {
     const key = `${ref.chainId}-${ref.pool.toLowerCase()}`;
     let h = this.pools.get(key);
-    if (!h || h.ref.feeTier !== ref.feeTier || h.ref.lpShare !== ref.lpShare) {
+    if (!h || h.ref.kind !== ref.kind || h.ref.feeTier !== ref.feeTier || h.ref.lpShare !== ref.lpShare) {
       h = new PoolHistory(ref, this.dir ? join(this.dir, `${key}.json`) : null, this.reader(ref.chainId), this.o);
       this.pools.set(key, h);
     }

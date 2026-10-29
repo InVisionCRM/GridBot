@@ -10,36 +10,19 @@ import { gasInBase, LP_GAS } from '../../market/lp';
 import { positionFor, replayTable, type ReplayRow } from '../../market/lpReplay';
 import type { Hub } from '../chains/hub';
 import { LpPool } from './lpPool';
-import { lpShareOf } from './lpShare';
-import { DEFAULT_DAYS, REPLAY_DAYS, type PoolHistories, type ReplayDays, type SyncState } from './poolHistory';
+import { DEFAULT_DAYS, REPLAY_DAYS, type ReplayDays } from './poolHistory';
+import { REFRESH_MS, type ReplayPools, type WaitAnswer } from '../replay/pools';
 
 export const REPLAY_BANDS = [0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2];
 /** Replay size when none is given: this many US dollars of the quote coin */
 export const REPLAY_USD = 1000;
-const REFRESH_MS = 60_000;
-/** After a failed sync, the next request waits this long before trying again (the page asks every few seconds) */
-const RETRY_MS = 30_000;
-const SHARE_TTL_MS = 10 * 60_000;
-const DAY_S = 86_400;
 
 export type ReplayAnswer =
-  | { state: 'syncing'; days: ReplayDays; done: number; total: number }
-  | { state: 'error'; error: string }
+  | WaitAnswer
   | {
     state: 'ready'; days: ReplayDays; from: number; to: number; swaps: number; capital: number; base: string; quote: string;
     feeTier: number; lpShare: number; gasOpen: number; gasMove: number; maxImpact: number; rows: ReplayRow[];
   };
-
-/**
- * While a pool's history is read: a window it doesn't cover yet shows the read's progress; a top-up of a window already
- * read answers from it (the new swaps count on the next ask). Before, every visit a minute after the last read showed
- * the first-read progress screen for the 2–3 s the top-up took (HEX/PLS, 2026-10-26: "syncing 0 of 15 blocks").
- */
-export function syncAnswer(s: SyncState, covered: boolean, days: ReplayDays): Extract<ReplayAnswer, { state: 'syncing' | 'error' }> | null {
-  if (s.error && !s.syncing) return { state: 'error', error: s.error };
-  if (!covered) return { state: 'syncing', days, done: s.done, total: s.total };
-  return null;
-}
 
 /** The window asked for: one of REPLAY_DAYS, DEFAULT_DAYS when none is given. */
 export function replayDays(v: unknown): ReplayDays {
@@ -50,18 +33,9 @@ export function replayDays(v: unknown): ReplayDays {
 }
 
 export class LpReplay {
-  private shares = new Map<string, { v: number; at: number }>();
   /** The last answer per market and window, kept while the history and the inputs are the same and REFRESH_MS has not passed */
   private answers = new Map<string, { key: string; at: number; answer: ReplayAnswer }>();
-  constructor(private readonly hub: Hub, private readonly histories: PoolHistories, private readonly approval: 'exact' | 'max', private readonly now: () => number = Date.now) {}
-
-  private async lpShare(key: string): Promise<number> {
-    const c = this.shares.get(key);
-    if (c && this.now() - c.at < SHARE_TTL_MS) return c.v;
-    const v = await lpShareOf(this.hub, this.hub.def(key));
-    this.shares.set(key, { v, at: this.now() });
-    return v;
-  }
+  constructor(private readonly hub: Hub, private readonly pools: ReplayPools, private readonly approval: 'exact' | 'max', private readonly now: () => number = Date.now) {}
 
   async replay(q: { market: string; capital?: number; maxImpact?: number; days?: ReplayDays }): Promise<ReplayAnswer> {
     const days = q.days ?? DEFAULT_DAYS;
@@ -70,24 +44,14 @@ export class LpReplay {
     const dex = rt.cfg.dexes.find((x) => x.id === def.pool.dex);
     if (!dex) throw new Error(`unknown DEX ${def.pool.dex}`);
     const pool = new LpPool(rt.reader, def, dex, rt.cfg.wrappedNative.address);
-    const lpShare = await this.lpShare(q.market);
-    const h = this.histories.get({ chainId: def.chainId, pool: def.pool.address, feeTier: pool.fee, lpShare, logChunk: rt.cfg.logChunk });
+    const { h, lpShare } = await this.pools.history(q.market);
+    const w = this.pools.window(h, days, `${def.base.symbol}/${def.quote.symbol}`);
+    if (!('rows' in w)) return w;
+    const rows = w.rows, last = rows[rows.length - 1];
 
-    const s = h.state;
-    const covered = h.covers(days);
-    // a window not read yet starts its read now; a read one is topped up once a minute; a failed read waits RETRY_MS
-    if (!s.syncing && (s.error ? s.at == null || this.now() - s.at > RETRY_MS : !covered || s.at == null || this.now() - s.at > REFRESH_MS)) {
-      h.sync(days).catch(() => { /* kept in h.state.error */ });
-    }
-    const waiting = syncAnswer(s, covered, days);
-    if (waiting) return waiting;
-
-    const all = h.minutes, last = all[all.length - 1];
-    const slot = `${q.market}|${days}`, key = `${q.capital ?? ''}|${q.maxImpact ?? ''}|${all.length}|${last?.t ?? ''}|${last?.n ?? ''}`;
+    const slot = `${q.market}|${days}`, key = `${q.capital ?? ''}|${q.maxImpact ?? ''}|${rows.length}|${last.t}|${last.n}`;
     const kept = this.answers.get(slot);
     if (kept && kept.key === key && this.now() - kept.at < REFRESH_MS) return kept.answer;
-    const rows = last ? all.filter((m) => m.t > last.t - days * DAY_S) : [];
-    if (rows.length < 2) throw new Error(`${def.base.symbol}/${def.quote.symbol}: no trades in the pool over the last ${days === 1 ? 'day' : `${days} days`}`);
 
     const v = await pool.view();
     const snap = await this.hub.quoter(q.market).market();

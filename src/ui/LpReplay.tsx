@@ -4,80 +4,23 @@
  * money: its coins and its share of the pool. It opens on 7 days; a longer window is read from the chain only when it is
  * picked. Click a row to use its settings.
  */
-import { useEffect, useState } from 'react';
 import type { ReplayRow } from '../market/lpReplay';
-import { http } from './api';
 import { L, Tip } from './Tip';
 import { cls, num, pct, qty, time } from './fmt';
 import { Usd } from './money';
+import { ReplayFrame, youngNote, type Days } from './ReplayWindow';
 
-type Days = 1 | 7 | 30 | 365;
-const WINDOWS: { days: Days; label: string }[] = [{ days: 1, label: '24h' }, { days: 7, label: '7d' }, { days: 30, label: '30d' }, { days: 365, label: '365d' }];
-const windowWords = (d: Days) => (d === 1 ? 'the last 24 hours' : d === 365 ? 'the last year' : `the last ${d} days`);
-
-type Answer =
-  | { state: 'syncing'; days: Days; done: number; total: number }
-  | { state: 'error'; error: string }
-  | { state: 'ready'; days: Days; from: number; to: number; swaps: number; capital: number; base: string; quote: string; gasMove: number; maxImpact: number; rows: ReplayRow[] };
-type Ready = Extract<Answer, { state: 'ready' }>;
-
-/** Re-asks while the server reads the pool's history; waits for typing to stop before asking for a new amount. */
-function useReplay(pair: string, capital: number, maxImpact: number | null, days: Days, nonce: number) {
-  const [a, setA] = useState<Answer | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true, next: ReturnType<typeof setTimeout> | null = null;
-    const ask = async () => {
-      const q = new URLSearchParams({ market: pair, days: String(days) });
-      if (capital > 0) q.set('capital', String(capital));
-      if (maxImpact != null) q.set('maxImpact', String(maxImpact));
-      try {
-        const r = await http<Answer>(`/api/lp/replay?${q}`);
-        if (!alive) return;
-        setA(r); setErr(null);
-        if (r.state === 'syncing') next = setTimeout(ask, 3000);
-      } catch (e) { if (alive) { setA(null); setErr((e as Error).message); } }
-    };
-    const first = setTimeout(ask, 500);
-    return () => { alive = false; clearTimeout(first); if (next) clearTimeout(next); };
-  }, [pair, capital, maxImpact, days, nonce]);
-  return { a, err };
-}
+type Ready = { days: Days; from: number; to: number; swaps: number; capital: number; base: string; quote: string; gasMove: number; maxImpact: number; rows: ReplayRow[] };
 
 export function LpReplay({ pair, capital, maxImpact, band, rerange, usdPer, onPick }: {
   pair: string; capital: number; maxImpact: number | null; band: number; rerange: boolean; usdPer: number | null; onPick: (band: number, rerange: boolean) => void;
 }) {
-  const [nonce, setNonce] = useState(0);
-  const [days, setDays] = useState<Days>(7);
-  const { a, err } = useReplay(pair, capital, maxImpact, days, nonce);
-  const retry = <button type="button" className="btn small-btn" onClick={() => setNonce((n) => n + 1)}>Try again</button>;
-  // an answer for the window picked before this one is not shown under the new one's title
-  const shown = a && a.state !== 'error' && a.days !== days ? null : a;
-
+  const params: Record<string, string> = { market: pair };
+  if (capital > 0) params.capital = String(capital);
+  if (maxImpact != null) params.maxImpact = String(maxImpact);
   return (
-    <div className="replay">
-      <div className="replay-head">
-        <h3>What it would have earned over {windowWords(days)}</h3>
-        <div className="seg" role="radiogroup" aria-label="Replay window">
-          {WINDOWS.map((w) => <button key={w.days} type="button" role="radio" aria-checked={days === w.days} className={days === w.days ? 'on' : ''} onClick={() => setDays(w.days)}>{w.label}</button>)}
-        </div>
-      </div>
-      {err && <div className="banner error"><span className="grow">{err}</span>{retry}</div>}
-      {shown?.state === 'error' && <div className="banner error"><span className="grow">Couldn't read the pool's trades: {shown.error}</span>{retry}</div>}
-      {(!shown && !err) && <p className="muted small">Looking up the pool's trades…</p>}
-      {shown?.state === 'syncing' && (
-        <div className="replay-sync">
-          <p className="small">Reading {windowWords(days)} of this pool's trades from the chain{shown.total ? `: ${Math.floor((100 * shown.done) / shown.total)}%` : '…'}</p>
-          <div className="replay-bar"><span style={{ width: `${shown.total ? (100 * shown.done) / shown.total : 0}%` }} /></div>
-          <p className="muted small">
-            {days <= 7
-              ? 'The first time takes a few minutes on a busy pool (Robinhood\'s ETH/USDG has about 200,000 trades a day). After that only the new trades are read.'
-              : `Each day before the ones already read is fetched from the chain, newest first. ${days === 365 ? 'A year can take an hour or more on a busy pool' : 'A month can take several minutes on a busy pool'} (a public RPC answers a few requests a second). It keeps reading if you leave this page or pick another window, and what it has read is kept.`}
-          </p>
-        </div>
-      )}
-      {shown?.state === 'ready' && <Ready a={shown} band={band} rerange={rerange} usdPer={usdPer} onPick={onPick} />}
-    </div>
+    <ReplayFrame<Ready> title={(w) => `What it would have earned over ${w}`} path="/api/lp/replay" params={params}
+      ready={(a) => <Ready a={a} band={band} rerange={rerange} usdPer={usdPer} onPick={onPick} />} />
   );
 }
 
@@ -100,7 +43,7 @@ export function Ready({ a, band, rerange, usdPer, onPick }: { a: Ready; band: nu
     <>
       <p className="muted small">
         {num(a.swaps, 0)} real trades from {time(a.from * 1000)} to {time(a.to * 1000)}, replayed with {qty(a.capital, q, 4, false)} and the bot's own rules.
-        {a.from > a.to - a.days * 86_400 + 86_400 ? ` The pool's trades only start on ${time(a.from * 1000)}, so this covers ${num(days, 1)} days, not ${a.days}. ` : ' '}
+        {youngNote(a)}{' '}
         Earned is the fees in each coin, less the swap fees paid in that coin and gas: coins, not prices. What the coins'
         price did is left out, and so is the change in the coin mix the position holds (shown on its own). Tap a row to use it.
       </p>

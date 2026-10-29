@@ -2,9 +2,9 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { decodeSwap, DEFAULT_DAYS as KEEP_DAYS, MAX_DAYS, PoolHistories, type PoolRef } from '../src/server/lp/poolHistory';
-import { V3_SWAP_TOPIC, type LogReader } from '../src/server/market/onchain';
-import { syncAnswer } from '../src/server/lp/replay';
+import { decodeSwap, decodeSync, DEFAULT_DAYS as KEEP_DAYS, MAX_DAYS, PoolHistories, type PoolRef } from '../src/server/lp/poolHistory';
+import { SYNC_TOPIC, V3_SWAP_TOPIC, type LogReader } from '../src/server/market/onchain';
+import { syncAnswer } from '../src/server/replay/pools';
 
 const POOL = '0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca';
 const T0 = 1_790_000_000;
@@ -31,7 +31,7 @@ function chain(o: { days: number; every: number; cap: number }) {
   return { reader, calls, latest, grow: (blocks: number) => { head += blocks; } };
 }
 
-const REF: PoolRef = { chainId: 4663, pool: POOL, feeTier: 100, lpShare: 0.75, logChunk: 20_000 };
+const REF: PoolRef = { chainId: 4663, pool: POOL, kind: 'v3', feeTier: 100, lpShare: 0.75, logChunk: 20_000 };
 /** No waiting in tests */
 const fast = (now: () => number) => ({ now, gapMs: 0, sleep: async () => {} });
 
@@ -233,5 +233,39 @@ describe('replay window', () => {
     expect(syncAnswer(s, false, 30)).toEqual({ state: 'syncing', days: 30, done: 10, total: 100 });
     expect(syncAnswer(s, true, 7)).toBeNull();
     expect(syncAnswer({ ...s, syncing: false, error: 'boom' }, true, 7)).toEqual({ state: 'error', error: 'boom' });
+  });
+});
+
+describe('a V2 pool: the price from each Sync\'s reserves', () => {
+  it('decodes reserves to the price on the tick scale (fractional), and skips an empty side', () => {
+    const d = '0x' + hex(4n * 10n ** 18n) + hex(10n ** 18n); // 4 token0 : 1 token1 → raw token1 per token0 = 0.25
+    const s = decodeSync(d, 7)!;
+    expect(1.0001 ** s.tick).toBeCloseTo(0.25, 12);
+    expect(s).toMatchObject({ t: 7, a0: 0, a1: 0, liq: 0 });
+    expect(decodeSync('0x' + hex(0n) + hex(5n), 7)).toBeNull();
+  });
+  it('reads Sync events into minutes (low, high and close per minute), no fees', async () => {
+    // reserve1 grows by 1/1000 each Sync: the price rises by 0.1 % a trade, one trade every 20 s
+    const syncAt = (n: number) => ({ blockNumber: n, index: 0, topics: [SYNC_TOPIC], data: '0x' + hex(10n ** 21n) + hex(10n ** 21n + BigInt(n) * 10n ** 18n) });
+    const latest = DAY;
+    const seen: string[][] = [];
+    const reader: LogReader = {
+      getBlockNumber: async () => latest,
+      getBlock: async (n: number) => ({ timestamp: T0 + n }),
+      getLogs: async (f) => {
+        seen.push(f.topics[0] as string[]);
+        const first = Math.ceil(f.fromBlock / 20) * 20;
+        return Array.from({ length: first <= f.toBlock ? Math.floor((f.toBlock - first) / 20) + 1 : 0 }, (_, i) => syncAt(first + i * 20));
+      },
+    };
+    const h = new PoolHistories(null, () => reader, fast(() => (T0 + latest) * 1000)).get({ ...REF, kind: 'v2', feeTier: 2900, lpShare: 1 });
+    await h.sync(1);
+    expect(seen.every((t) => t.length === 1 && t[0] === SYNC_TOPIC)).toBe(true);
+    const m = h.minutes[10];
+    expect(m.n).toBe(3);
+    const lastBlock = m.t - T0 + 40; // the minute's third Sync
+    expect(1.0001 ** m.c).toBeCloseTo((1000 + lastBlock) / 1000, 9);
+    expect(m.hi).toBe(m.c); // rising: the close is the high
+    expect([m.f0, m.f1, m.liq]).toEqual([0, 0, 0]);
   });
 });

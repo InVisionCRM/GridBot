@@ -238,7 +238,7 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
   const governed = o.range !== undefined || o.compound !== undefined;
   const pol = governed ? rangePolicy(o.range) : null;
   const comp = governed ? compoundPolicy(o.compound) : null;
-  const bars = governed && pol!.atrMult > 0 ? rowsToOhlc(rows, pool) : null;
+  const bars = governed && pol!.atrMult > 0 ? minuteBars(rows, pool) : null;
   const atrSeries = bars ? atr(bars, pol!.atrPeriod) : null;
   const bandAt = (i: number, px: number) => (pol && pol.atrMult > 0 ? effectiveBand(o.bandPct, atrSeries?.[i] ?? null, px, pol.atrMult) : o.bandPct);
 
@@ -363,14 +363,17 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
   };
 }
 
-/** Minute highs and lows as prices, so Wilder ATR can size a range. Open is the previous close. */
-function rowsToOhlc(rows: PoolMinute[], pool: PoolSides): { o: number; h: number; l: number; c: number }[] {
+/**
+ * The minutes as 1-minute bars in the quote coin per base coin (the ATR that sizes a range, and the grid replay's
+ * price path). Open is the previous minute's close; volume is not kept (0).
+ */
+export function minuteBars(rows: PoolMinute[], pool: PoolSides): { t: number; o: number; h: number; l: number; c: number; v: number }[] {
   let prev = priceAt(rows[0].c, pool);
   return rows.map((m) => {
     const hi = priceAt(m.hi, pool), lo = priceAt(m.lo, pool), c = priceAt(m.c, pool);
     const o = prev;
     prev = c;
-    return { o, h: Math.max(o, hi, lo, c), l: Math.min(o, hi, lo, c), c };
+    return { t: m.t, o, h: Math.max(o, hi, lo, c), l: Math.min(o, hi, lo, c), c, v: 0 };
   });
 }
 

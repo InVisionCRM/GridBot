@@ -55,7 +55,7 @@ export interface BtResult {
   equity: { t: number; v: number }[];
   trades: BtTrade[];
   notes: string[];
-  /** Set when markOpen leaves the last position unsold. Absent on a normal run. */
+  /** Coins still held at the end, what they cost and the last price: a trend run with markOpen, and every grid run (its open lots, null when it holds none). */
   open?: { pls: number; cost: number; price: number } | null;
 }
 
@@ -262,8 +262,10 @@ export function runGridBacktest(k: Candle[], g: GridBtConfig, tf: TF, costs: Cos
     if (held > 0) inPos++;
     eq.push({ t: bar.t, v: cash + held * bar.c });
   }
+  const held = iv.reduce((a, x) => a + x.pls, 0);
   return {
     kind: 'grid', tf, metrics: metrics(eq, trades, tf, g.capital, inPos, 0, spent, { trade: per, impact: simBuy(per, p0, costs).impactPct, pool: costs.pool?.quoteReserve ?? null }), equity: eq, trades,
+    open: held > 0 ? { pls: held, cost: iv.reduce((a, x) => a + x.cost, 0), price: k[k.length - 1].c } : null,
     notes: [
       'Grid fills assumed exactly at level prices (live fills happen at the polled price past the level).',
       'Candle path assumed o→l→h→c for up candles, o→h→l→c for down candles.',
