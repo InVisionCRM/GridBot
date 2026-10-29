@@ -374,7 +374,17 @@ function rowsToOhlc(rows: PoolMinute[], pool: PoolSides): { o: number; h: number
   });
 }
 
-/** Each range with moves on and off, over all of `rows`. */
-export function replayTable(rows: PoolMinute[], pool: ReplayPool, base: Omit<ReplayOpts, 'bandPct' | 'rerange'>, bands: number[]): ReplayResult[] {
-  return bands.flatMap((bandPct) => [true, false].map((rerange) => replayLp(rows, pool, { ...base, bandPct, rerange })));
+/**
+ * Each range with moves on and off, over all of `rows`, one replay at a time with the event loop let through between
+ * them: a year of a busy pool's minutes takes about 2.5 s for 14 replays, which in one go would hold up the live bots.
+ */
+export async function replayTable(rows: PoolMinute[], pool: ReplayPool, base: Omit<ReplayOpts, 'bandPct' | 'rerange'>, bands: number[]): Promise<ReplayResult[]> {
+  const out: ReplayResult[] = [];
+  for (const bandPct of bands) {
+    for (const rerange of [true, false]) {
+      out.push(replayLp(rows, pool, { ...base, bandPct, rerange }));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+  return out;
 }

@@ -298,6 +298,8 @@ tr.pickable.selected:hover td { background: var(--sel); }
 .replay-sum .k { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .replay-sum b { font-family: var(--mono); font-weight: 500; font-size: 1rem; }
 .replay-sum small { color: var(--muted); font-size: 0.76rem; }
+.replay-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.replay-head h3 { margin: 0; }
 .replay-sync { display: flex; flex-direction: column; gap: 6px; }
 .replay-bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
 .replay-bar span { display: block; height: 100%; background: var(--profit); transition: width 0.6s ease; }

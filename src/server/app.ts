@@ -32,6 +32,8 @@ import { holdingsSnapshot } from './holdings/read';
 import { requestStore, type HaltOrigin } from './bot/audit';
 import type { LpCompoundPolicy, LpRangePolicy } from '../market/lpPolicy';
 import { redact } from './bot/logger';
+import { replayDays } from './lp/replay';
+import type { ReplayDays } from './lp/poolHistory';
 import { deskChanged, deskDelta, deskFromStatus } from './v2Desk';
 
 export interface AppOpts {
@@ -54,7 +56,7 @@ export interface AppOpts {
   /** A chart was opened: the candle sync keeps every timeframe of that market for a while (server only) */
   viewCandles?: (pair: string) => void;
   /** Liquidity replay over a pool's real trades (server only: reads the chain) */
-  lpReplay?: (q: { market: string; capital?: number; maxImpact?: number }) => Promise<unknown>;
+  lpReplay?: (q: { market: string; capital?: number; maxImpact?: number; days: ReplayDays }) => Promise<unknown>;
   /** Tools → Convert: a chain's holdings into one coin (server only: reads the explorer, signs swaps) */
   convert?: Converter;
   /** Same-chain swap quotes. Builds calldata in live mode and never broadcasts it. */
@@ -369,7 +371,7 @@ export function createApp(o: AppOpts) {
     const capital = num(req.query.capital), maxImpact = num(req.query.maxImpact);
     if (capital != null && !(capital > 0)) throw new Error('capital must be > 0');
     if (maxImpact != null && !(maxImpact > 0 && maxImpact < 1)) throw new Error('maxImpact must be between 0 and 1');
-    return o.lpReplay({ market: String(req.query.market ?? ''), capital: capital ?? undefined, maxImpact: maxImpact ?? undefined });
+    return o.lpReplay({ market: String(req.query.market ?? ''), capital: capital ?? undefined, maxImpact: maxImpact ?? undefined, days: replayDays(req.query.days) });
   }));
 
   // ── Convert: a chain's holdings into one coin ─────────────────────────
