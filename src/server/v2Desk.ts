@@ -10,7 +10,7 @@ import type { DeskDelta, DeskSnapshot } from '../v2/metrics';
 export function deskFromStatus(status: Record<string, unknown>, events: ActivityEvent[] = []): DeskSnapshot {
   const mapped: DeskEvent[] = events
     .filter((e) => e.type === 'filled' || e.type === 'range' || e.type === 'queued')
-    .map((e) => ({ t: e.t, type: e.type, kind: e.kind, msg: e.msg, botId: e.botId, level: e.level }));
+    .map((e) => ({ id: e.id, t: e.t, type: e.type, kind: e.kind, msg: e.msg, botId: e.botId, level: e.level }));
   const asOf = typeof status.spotsAt === 'number' ? status.spotsAt : Date.now();
   return adaptStatus(status, mapped, asOf, 'live');
 }

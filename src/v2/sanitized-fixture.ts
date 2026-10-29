@@ -44,7 +44,7 @@ export const sanitizedStatus = {
 };
 
 export const sanitizedActivity = [
-  { t: 1_700_000_000_000 - 60_000, type: 'filled', kind: 'grid', level: 'success', botId: 'grid-paper', msg: 'Grid AAA/USDC: SOLD 4 AAA — RT net +1.2 USDC' },
-  { t: 1_700_000_000_000 - 3_600_000, type: 'range', kind: 'lp', level: 'warn', botId: 'lp-live', msg: 'Liquidity USDC/ETH·ETH: price is outside the range; moving the range to the price' },
-  { t: 1_700_000_000_000 - 3_000_000, type: 'error', kind: 'lp', level: 'error', botId: 'lp-live', msg: 'skip me 0xabcdeffedcba0123456789abcdef0123456789ab' },
+  { id: 1, t: 1_700_000_000_000 - 60_000, type: 'filled', kind: 'grid', level: 'success', botId: 'grid-paper', msg: 'Grid AAA/USDC: SOLD 4 AAA — RT net +1.2 USDC' },
+  { id: 2, t: 1_700_000_000_000 - 3_600_000, type: 'range', kind: 'lp', level: 'warn', botId: 'lp-live', msg: 'Liquidity USDC/ETH·ETH: price is outside the range; moving the range to the price' },
+  { id: 3, t: 1_700_000_000_000 - 3_000_000, type: 'error', kind: 'lp', level: 'error', botId: 'lp-live', msg: 'skip me 0xabcdeffedcba0123456789abcdef0123456789ab' },
 ];

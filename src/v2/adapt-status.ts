@@ -30,6 +30,8 @@ function stripSecrets(text: string): string {
 }
 
 export interface ActivityEvent {
+  /** The activity bus's own id: unique and the same on every read, so a row keeps its id while the ring moves. */
+  id: number;
   t?: number;
   type?: string;
   kind?: string;
@@ -378,7 +380,7 @@ function activityOf(events: ActivityEvent[], names: Map<string, { pair: string; 
     const kind = e.type === 'range' ? 'recenter' : e.type === 'filled' && /fee/i.test(text) ? 'fee' : 'fill';
     const tone = e.level === 'success' ? 'up' : e.level === 'warn' || e.level === 'error' ? 'down' : 'flat';
     items.push({
-      id: `a${t}-${items.length}`,
+      id: `a${e.id}`,
       t,
       botId: str(e.botId),
       pair: named?.pair ?? '',
