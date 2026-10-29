@@ -9,6 +9,8 @@ export interface LiveTrade {
   intervalIndex: number;
   /** Start-up buy: the levels above the start price it bought coins for (split between them) */
   seed?: number[];
+  /** The seed buy of a range re-center: part of that re-center, which counts as one move */
+  recenter?: boolean;
   stable: string;
   /** PLS amount bought or sold (human units) */
   plsAmount: number;

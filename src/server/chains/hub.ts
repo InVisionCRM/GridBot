@@ -60,6 +60,9 @@ export class SafetyIncomplete extends Error {
 /** One safety re-check's claim on writing the stored report. `cancelled`: its caller gave up (timed out). */
 export interface CheckTicket { cancelled: boolean }
 
+/** Prices for dollar values are read again when older than this (holdings, gas conversion, the USD oracle). */
+export const PRICE_TTL_MS = 60_000;
+
 export class Hub {
   /** Safety re-checks get increasing numbers; per market, the number of the last one that wrote the stored report. */
   private checkSeq = 0;
@@ -189,7 +192,16 @@ export class Hub {
   // ── USD / native oracle ───────────────────────────────────────────────
   setSpot(key: string, p: number) { if (p > 0 && Number.isFinite(p)) { this.spots[key] = p; this.spotAt[key] = this.now(); } }
 
-  async ensureSpot(key: string, maxAgeMs = 120_000): Promise<number> {
+  /**
+   * The pool's mid price: the spot (a sell-side quote, after the pool fee, which trading needs) with the fee taken back
+   * out. Dollar values and gas conversion use it, so a coin on a 1% pool is not marked 1% low.
+   */
+  midSpot(key: string): number | null {
+    const s = this.spots[key];
+    return s > 0 ? s / (1 - this.def(key).pool.feeBps / 10_000) : null;
+  }
+
+  async ensureSpot(key: string, maxAgeMs = PRICE_TTL_MS): Promise<number> {
     const p = this.spots[key];
     if (p > 0 && this.now() - (this.spotAt[key] ?? 0) < maxAgeMs) return p;
     const v = await this.quoter(key).getPrice();
@@ -216,7 +228,7 @@ export class Hub {
 
   nativeUsd(chainId: number): number | null {
     const k = this.usdRefKey(chainId);
-    return k && this.spots[k] > 0 ? this.spots[k] : null;
+    return k ? this.midSpot(k) : null;
   }
 
   /** USD per token from cached spots (sync; null when no route is priced yet). */
@@ -226,8 +238,8 @@ export class Hub {
     if (c && sameAddr(c.wrappedNative.address, addr)) return this.nativeUsd(chainId);
     if (depth > 2) return null;
     for (const m of this.byChain(chainId)) {
-      const s = this.spots[m.key];
-      if (!(s > 0)) continue;
+      const s = this.midSpot(m.key);
+      if (s == null) continue;
       if (sameAddr(m.base.address, addr) && !sameAddr(m.quote.address, addr)) {
         const q = this.tokenUsd(chainId, m.quote.address, depth + 1);
         if (q != null) return s * q;
@@ -246,14 +258,15 @@ export class Hub {
     return this.tokenUsd(d.chainId, d.quote.address) ?? (d.quoteKind === 'stable' ? 1 : null);
   }
   baseUsd(key: string): number | null {
-    const k = this.usdPerQuote(key), s = this.spots[key];
-    return k != null && s > 0 ? s * k : null;
+    const k = this.usdPerQuote(key), s = this.midSpot(key);
+    return k != null && s != null ? s * k : null;
   }
 
   async nativeUsdAsync(chainId: number): Promise<number | null> {
     const k = this.usdRefKey(chainId);
     if (!k) return null;
-    try { return await this.ensureSpot(k); } catch { return this.nativeUsd(chainId); }
+    await this.ensureSpot(k).catch(() => 0);
+    return this.nativeUsd(chainId);
   }
 
   /** Base units per 1 native coin (gas conversion). 1 when the base is the native coin. */
@@ -264,8 +277,9 @@ export class Hub {
     if (sameAddr(d.base.address, rt.cfg.wrappedNative.address)) return 1;
     // Quote is the native coin (flipped HEX/PLS, custom/WPLS): base per native = 1 / spot, exact, no USD route needed.
     if (d.quote.native || sameAddr(d.quote.address, rt.cfg.wrappedNative.address)) {
-      const s = await this.ensureSpot(key);
-      if (s > 0) return 1 / s;
+      await this.ensureSpot(key);
+      const m = this.midSpot(key);
+      if (m != null) return 1 / m;
     }
     const [nat] = await Promise.all([this.nativeUsdAsync(d.chainId), this.ensureSpot(key).catch(() => 0)]);
     if (!sameAddr(d.quote.address, rt.cfg.wrappedNative.address) && !this.isStable(d.chainId, d.quote.address)) {
@@ -273,7 +287,8 @@ export class Hub {
     }
     const b = this.baseUsd(key);
     if (nat && b) return nat / b;
-    if (sameAddr(d.quote.address, rt.cfg.wrappedNative.address) && this.spots[key] > 0) return 1 / this.spots[key];
+    const m = this.midSpot(key);
+    if (sameAddr(d.quote.address, rt.cfg.wrappedNative.address) && m != null) return 1 / m;
     throw new Error(`No native price route for ${this.label(key)}`);
   }
 

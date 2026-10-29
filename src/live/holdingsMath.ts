@@ -261,7 +261,10 @@ export interface ChainRollup {
   color: string;
   address: string | null;
   usd: number;
+  /** Every coin in the wallet on this chain, bots' share included: the same meaning as the snapshot's walletUsd. */
   walletUsd: number;
+  /** Wallet coins no live bot has claimed (walletUsd − botsUsd), like the snapshot's freeUsd. */
+  freeUsd: number;
   botsUsd: number;
   lpUsd: number;
   feesUsd: number;
@@ -434,7 +437,7 @@ export function assemblePortfolio(p: {
     const bUsd = Math.min(claim, wUsd);
     const lUsd = positions.filter((r) => on(r.chainId)).reduce((s, r) => addNum(s, r.usd), 0);
     const fUsd = fees.filter((r) => on(r.chainId)).reduce((s, r) => addNum(s, r.usd), 0);
-    return { chainId: c.id, name: c.name, short: c.short, color: c.color, address: c.address, usd: wUsd + lUsd + fUsd, walletUsd: wUsd - bUsd, botsUsd: bUsd, lpUsd: lUsd, feesUsd: fUsd };
+    return { chainId: c.id, name: c.name, short: c.short, color: c.color, address: c.address, usd: wUsd + lUsd + fUsd, walletUsd: wUsd, freeUsd: wUsd - bUsd, botsUsd: bUsd, lpUsd: lUsd, feesUsd: fUsd };
   }).sort((a, b) => b.usd - a.usd);
 
   return {

@@ -412,7 +412,7 @@ const holdingsSnap = {
   address: '0x1234567890abcdef1234567890abcdef12345678', at: NOW - 60_000, hasSigner: true,
   netWorthUsd: 61_234.5, netWorthExDustUsd: 61_200, unpriced: 0, walletUsd: 40_000, freeUsd: 38_000, botsUsd: 2_000, lpUsd: 21_000, feesUsd: 34.5,
   overdrawn: false,
-  chains: [{ chainId: 4663, name: 'Robinhood Chain', short: 'HOOD', color: '#ccff00', address: null, usd: 61_000, walletUsd: 40_000, botsUsd: 2_000, lpUsd: 21_000, feesUsd: 34.5 }],
+  chains: [{ chainId: 4663, name: 'Robinhood Chain', short: 'HOOD', color: '#ccff00', address: null, usd: 61_000, walletUsd: 40_000, freeUsd: 38_000, botsUsd: 2_000, lpUsd: 21_000, feesUsd: 34.5 }],
   wallet: [
     { coin: coin(4663, 'USDG', 34_000, 1), dust: false, bots: [{ bot: ref('g-eth', 'grid', 'ETH grid'), amount: 1_200 }] },
     { coin: coin(4663, 'ETH', 2.5, 2_348.87, null), dust: false, bots: [] },
