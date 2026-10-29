@@ -40,7 +40,7 @@ import { ERC20, V3_NPM } from '../dex/abis';
 import { readCall, sameAddr } from '../dex/types';
 import { LpPool, type Coins, type PoolView } from '../lp/lpPool';
 import { collectAllData, collectData, exitData, increaseTx, mintTx } from '../lp/npmCalls';
-import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type Quote, type ReceiptLike, type TxSender } from './chain';
+import { ExecError, LiveExecutor, PaperExecutor, UnavailableExecutor, type Executor, type LogLike, type Quote, type ReceiptLike, type RecoverResult, type TxSender } from './chain';
 import { checkProfitMode, GAS_UNKNOWN_NOTE, type Mode, type ProfitMode } from './engine';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../../live/payout';
 import type { Emit } from './activity';
@@ -96,6 +96,8 @@ export interface LpStep {
     hash: string; tokenOut: string; decimalsOut: number; side: 'buy' | 'sell'; amountIn: number; price: number;
     /** Base per native coin from the quote at send time (gas in base units on settle). Old saves omit it: read again. */
     basePerNative?: number;
+    /** The least the swap could deliver: booked when a mined swap's output log can't be read. Old saves omit it. */
+    minOut?: number;
   };
   tries: number;
   /** Reads of this stage's mined receipt whose expected events were not readable yet (the node had not indexed them) */
@@ -1165,13 +1167,29 @@ export class LpEngine {
     }
   }
 
+  /**
+   * What a recovered swap brought: null when it reverted. Mined OK but its output log unreadable: the swap's guaranteed
+   * minimum (a record from before it was saved stops the bot naming the hash; the record is kept, never guessed).
+   */
+  private recoveredOut(sw: NonNullable<LpStep['swap']>, r: RecoverResult): number | null {
+    if (!r.ok) return null;
+    const out = r.amountOutHuman ?? sw.minOut ?? null;
+    if (out != null) return out;
+    const msg = `swap ${sw.hash} mined, but what it brought could not be read from its receipt; stopped. Check the tx on the explorer.`;
+    this.state.halt = systemHalt('error', msg, this.now());
+    this.state.status = 'stopped';
+    this.save();
+    throw new Error(msg);
+  }
+
   /** Swap the idle coins to the range's mix at today's price. */
   private async swap(pool: LpPool, v: PoolView, s: LpStep) {
     if (s.swap) {
       const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut, s.swap.basePerNative);
       if (!r) return;
+      const out = this.recoveredOut(s.swap, r);
       this.bookRecoveredGas(s.swap.hash, r, v);
-      if (r.ok) this.applySwap(s.swap.side, s.swap.amountIn, r.amountOutHuman, v.price);
+      if (out != null) this.applySwap(s.swap.side, s.swap.amountIn, out, v.price);
       s.swap = undefined;
       s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
       return;
@@ -1215,7 +1233,7 @@ export class LpEngine {
         const o = e instanceof ExecError ? e.opts : {};
         if (o.gasPls) this.addGas(o.gasPls * v.price, v);
         if (o.aborted) return;
-        if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
+        if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side, amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative, minOut: q.minOutHuman }; return; }
         throw e;
       }
     }
@@ -1243,8 +1261,9 @@ export class LpEngine {
     if (s.swap) {
       const r = await this.executor.recover(s.swap.hash, s.swap.tokenOut, s.swap.decimalsOut, s.swap.basePerNative);
       if (!r) return;
+      const out = this.recoveredOut(s.swap, r);
       this.bookRecoveredGas(s.swap.hash, r, v);
-      if (r.ok) this.applySwap('sell', s.swap.amountIn, r.amountOutHuman, v.price);
+      if (out != null) this.applySwap('sell', s.swap.amountIn, out, v.price);
       s.swap = undefined;
       return;
     }
@@ -1281,7 +1300,7 @@ export class LpEngine {
       const o = e instanceof ExecError ? e.opts : {};
       if (o.gasPls) this.addGas(o.gasPls * v.price, v);
       if (o.aborted) return;
-      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative }; return; }
+      if (o.pending && o.swapTxHash) { s.swap = { hash: o.swapTxHash, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, side: 'sell', amountIn: q.amountInHuman, price: q.price, basePerNative: q.basePerNative, minOut: q.minOutHuman }; return; }
       throw e;
     }
   }

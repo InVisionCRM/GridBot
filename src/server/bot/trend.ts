@@ -67,6 +67,8 @@ export interface TrendInFlight {
   swapTxHash?: string;
   /** Base units per native coin when the swap was sent (gas on a receipt reconciled after a restart). Absent on old records. */
   basePerNative?: number;
+  /** The least the swap could deliver (the quote's minimum): booked, flagged, when a mined swap's output log can't be read. Absent on old records. */
+  minOutHuman?: number;
 }
 
 export interface TrendTrade extends LiveTrade {
@@ -665,7 +667,7 @@ export class TrendEngine {
       }
       if (q.priceImpact > s.limits.maxPriceImpact) return this.skip(job, `price impact ${(q.priceImpact * 100).toFixed(2)}% > cap ${(s.limits.maxPriceImpact * 100).toFixed(2)}%`);
       if (!q.balanceOk) return this.skip(job, `insufficient balance (${q.balanceNote})`);
-      s.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative };
+      s.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative, minOutHuman: q.minOutHuman };
       this.save();
       try {
         const f = await this.executor.execute(q, {
@@ -761,10 +763,19 @@ export class TrendEngine {
       if (this.now() / 1000 > f.deadline + 300) { drop(); this.skip(job, `swap ${f.swapTxHash} never mined before its deadline`); this.save(); }
       return;
     }
+    // mined OK but what arrived can't be read: the guaranteed minimum is booked (flagged); an old record without it
+    // stops the bot naming the hash, keeping the record
+    const out = r.ok ? r.amountOutHuman ?? f.minOutHuman ?? null : null;
+    if (r.ok && out == null) {
+      this.state.status = 'stopped';
+      this.state.halt = systemHalt('error', `swap ${f.swapTxHash} mined, but what it brought could not be read from its receipt; stopped. Check the tx on the explorer.`, this.now());
+      this.save();
+      return;
+    }
     drop();
     if (r.gasUnknown) this.log('warn', `swap ${f.swapTxHash}: gas ${r.gasNative.toPrecision(4)} native not booked — the base/native rate was not saved with the swap and could not be read after the restart`);
-    if (r.ok && r.amountOutHuman > 0) {
-      this.recordFill(job, { txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman, amountOutHuman: r.amountOutHuman, gasPls: r.gasPls, fromReceipt: true }, f.price);
+    if (r.ok && out != null) {
+      this.recordFill(job, { txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman, amountOutHuman: out, gasPls: r.gasPls, fromReceipt: r.amountOutHuman != null }, f.price);
     } else {
       this.recordFailure(job, r.gasPls, f.price, f.swapTxHash, 'swap reverted (reconciled)');
       this.skip(job, 'swap reverted');

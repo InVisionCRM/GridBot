@@ -213,7 +213,8 @@ function shortErr(e: unknown): string {
 /** A swap settled by hash: gas in base units (gasPls) and in the chain's native coin (gasNative). */
 export interface RecoverResult {
   ok: boolean;
-  amountOutHuman: number;
+  /** What arrived, from the receipt's logs. null = mined OK but no transfer to the wallet could be read (never 0). */
+  amountOutHuman: number | null;
   gasPls: number;
   gasNative: number;
   /** No base-per-native rate was saved with the swap or readable now: gasPls is 0, not native gas booked 1:1. */
@@ -678,18 +679,29 @@ export class LiveExecutor implements Executor {
     }
   }
 
-  /** Wait for a receipt. ethers v6 throws on revert with the receipt attached; normalize that. */
-  private async waitFor(tx: SentTx): Promise<ReceiptLike> {
+  /**
+   * Wait for a receipt. ethers v6 throws on revert with the receipt attached; normalize that. A transaction replaced
+   * from the wallet (same nonce, sent by another app) is never taken as ours: only a re-priced copy (same call, more
+   * gas) is, under its new hash. A cancel or another call throws REPLACED, and the nonce counter is re-read.
+   */
+  private async waitFor(tx: SentTx): Promise<{ receipt: ReceiptLike; hash: string }> {
     try {
       const r = await tx.wait(1, this.opts.receiptTimeoutMs);
       if (!r) throw Object.assign(new Error('receipt timeout'), { code: 'TIMEOUT' });
-      return r;
+      return { receipt: r, hash: tx.hash };
     } catch (e) {
-      const rec = (e as { receipt?: ReceiptLike }).receipt;
-      if (rec) return rec;
+      const err = e as { code?: string; reason?: string; receipt?: ReceiptLike; replacement?: { hash?: string } };
+      if (err.code === 'TRANSACTION_REPLACED') {
+        if (err.reason === 'repriced' && err.receipt) return { receipt: err.receipt, hash: err.replacement?.hash ?? tx.hash };
+        this.resetNonce();
+        throw Object.assign(new Error(`transaction ${tx.hash} was ${err.reason ?? 'replaced'} by another one from this wallet, so it never ran`), { code: 'REPLACED' });
+      }
+      if (err.receipt) return { receipt: err.receipt, hash: tx.hash };
       throw e;
     }
   }
+  /** The next send re-reads the wallet's pending nonce from the chain (after a timeout, a drop or a replacement). */
+  private resetNonce() { if (this.opts.sharedNonce) this.opts.sharedNonce.invalidate(); else this.nonce = null; }
 
   async execute(q: Quote, hooks: ExecHooks): Promise<Fill> {
     let gasWei = 0n;
@@ -716,8 +728,8 @@ export class LiveExecutor implements Executor {
       approvalTxHash = tx.hash;
       hooks.onSent('approve', tx.hash);
       let r: ReceiptLike;
-      try { r = await this.waitFor(tx); } catch (e) {
-        if (this.opts.sharedNonce) this.opts.sharedNonce.invalidate(); else this.nonce = null;
+      try { r = (await this.waitFor(tx)).receipt; } catch (e) {
+        this.resetNonce();
         throw fail(`approve not confirmed: ${shortErr(e)}`, { retryable: true });
       }
       gasWei += gasOf(r);
@@ -746,8 +758,8 @@ export class LiveExecutor implements Executor {
         approvalTxHash = approvalTxHash ? `${approvalTxHash},${tx.hash}` : tx.hash;
         hooks.onSent('approve', tx.hash);
         let r: ReceiptLike;
-        try { r = await this.waitFor(tx); } catch (e) {
-          if (this.opts.sharedNonce) this.opts.sharedNonce.invalidate(); else this.nonce = null;
+        try { r = (await this.waitFor(tx)).receipt; } catch (e) {
+          this.resetNonce();
           throw fail(`Permit2 approve not confirmed: ${shortErr(e)}`, { retryable: true });
         }
         gasWei += gasOf(r);
@@ -772,8 +784,16 @@ export class LiveExecutor implements Executor {
     swapTxHash = tx.hash;
     hooks.onSent('swap', tx.hash);
     let r: ReceiptLike;
-    try { r = await this.waitFor(tx); } catch (e) {
-      // Unknown outcome: the tx may still be mined. Never resend; the engine reconciles by hash.
+    try {
+      const w = await this.waitFor(tx);
+      r = w.receipt;
+      if (w.hash !== tx.hash) { swapTxHash = w.hash; hooks.onSent('swap', w.hash); } // re-priced from the wallet: same swap
+    } catch (e) {
+      // replaced or cancelled from the wallet: it never ran (nothing was filled; the nonce is re-read)
+      if ((e as { code?: string }).code === 'REPLACED') throw fail(shortErr(e), { retryable: true });
+      // Unknown outcome: the tx may still be mined. Never resend; the engine reconciles by hash. The nonce counter is
+      // re-read on the next send: a dropped tx then frees its nonce, a pending one is still counted.
+      this.resetNonce();
       throw fail(`swap not confirmed yet: ${shortErr(e)}`, { pending: true });
     }
     gasWei += gasOf(r) + q.l1FeeWei;
@@ -792,7 +812,7 @@ export class LiveExecutor implements Executor {
     }
     const outHuman = fromUnits(out, q.decimalsOut);
     return {
-      txHash: tx.hash, approvalTxHash, ...(permit2TxHash ? { permit2TxHash } : {}), amountInHuman: q.amountInHuman, amountOutHuman: outHuman,
+      txHash: swapTxHash, approvalTxHash, ...(permit2TxHash ? { permit2TxHash } : {}), amountInHuman: q.amountInHuman, amountOutHuman: outHuman,
       gasPls: fromUnits(gasWei, 18) * k, gasNative: fromUnits(gasWei, 18), fromReceipt: outSource !== 'minOut',
       outSource, expectedOutHuman: q.quotedOutHuman, shortfallPct: q.quotedOutHuman > 0 ? 1 - outHuman / q.quotedOutHuman : 0,
       taxPct: 1 - (1 - q.taxInPct) * (1 - q.taxOutPct),
@@ -810,7 +830,7 @@ export class LiveExecutor implements Executor {
     const unknown = k == null ? { gasUnknown: true as const } : {};
     if (r.status !== 1) return { ok: false, amountOutHuman: 0, gasPls, gasNative, ...unknown };
     const out = parseAmountOut(r, await this.address(), tokenOut, this.quoter.chain.wrappedNative.address);
-    return { ok: true, amountOutHuman: out != null ? fromUnits(out, decimalsOut) : 0, gasPls, gasNative, ...unknown };
+    return { ok: true, amountOutHuman: out != null && out > 0n ? fromUnits(out, decimalsOut) : null, gasPls, gasNative, ...unknown };
   }
 }
 

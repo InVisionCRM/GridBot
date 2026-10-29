@@ -54,6 +54,8 @@ export interface InFlight {
   swapTxHash?: string;
   /** Base units per native coin when the swap was sent (gas on a receipt reconciled after a restart). Absent on old records. */
   basePerNative?: number;
+  /** The least the swap could deliver (the quote's minimum): booked, flagged, when a mined swap's output log can't be read. Absent on old records. */
+  minOutHuman?: number;
 }
 
 export interface BotState {
@@ -968,7 +970,7 @@ export class GridEngine {
         }
       }
 
-      this.state.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative };
+      this.state.inFlight = { job, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, amountInHuman: q.amountInHuman, price: q.price, quotedOutHuman: q.quotedOutHuman, deadline: Number(q.call.deadline), basePerNative: q.basePerNative, minOutHuman: q.minOutHuman };
       this.save();
       try {
         const f = await this.executor.execute(q, {
@@ -1049,14 +1051,23 @@ export class GridEngine {
       }
       return;
     }
+    // mined OK but what arrived can't be read: the swap's guaranteed minimum is booked (flagged); an old record without
+    // it stops the bot naming the hash, keeping the record (never guessed, never booked as a revert)
+    const out = r.ok ? r.amountOutHuman ?? f.minOutHuman ?? null : null;
+    if (r.ok && out == null) {
+      this.state.status = 'stopped';
+      this.state.halt = systemHalt('error', `swap ${f.swapTxHash} mined, but what it brought could not be read from its receipt; stopped. Check the tx on the explorer.`, this.now());
+      this.save();
+      return;
+    }
     this.state.inFlight = null;
     this.state.queue = this.state.queue.filter((q) => q.id !== job.id);
     if (r.gasUnknown) this.tag('warn', `swap ${f.swapTxHash}: gas ${r.gasNative.toPrecision(4)} ${this.chainCfg?.nativeSymbol ?? 'native'} not booked — ${GAS_UNKNOWN_NOTE}`);
-    if (r.ok && r.amountOutHuman > 0) {
+    if (r.ok && out != null) {
       this.recordFill(job, {
         ...this.fillArgs(job, {
           txHash: f.swapTxHash, approvalTxHash: f.approvalTxHash, amountInHuman: f.amountInHuman,
-          amountOutHuman: r.amountOutHuman, gasPls: r.gasPls, fromReceipt: true,
+          amountOutHuman: out, gasPls: r.gasPls, fromReceipt: r.amountOutHuman != null,
         }, f.price),
         gasUnknown: r.gasUnknown,
       });

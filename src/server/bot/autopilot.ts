@@ -51,7 +51,11 @@ export interface AutoBot {
  * A swap being sent, or sent and not confirmed when the wait ended: its input is counted until it settles by its hash
  * (hash null: not sent yet). forOpen = a swap into a pool's coin for a new bot (a review follows when it lands).
  */
-export interface PendingSwap { hash: string | null; key: string; side: 'buy' | 'sell'; from: string; to: string; amountIn: number; tokenOut: string; decimalsOut: number; at: number; deadline: number; forOpen: boolean }
+export interface PendingSwap {
+  hash: string | null; key: string; side: 'buy' | 'sell'; from: string; to: string; amountIn: number; tokenOut: string; decimalsOut: number; at: number; deadline: number; forOpen: boolean;
+  /** The least the swap could deliver: booked when a mined swap's output log can't be read. Absent on old records. */
+  minOut?: number;
+}
 export interface Account {
   budget: Budget;
   /** Money not in a bot, per coin (symbol); the gas its swaps paid is taken out of the chain's own coin */
@@ -301,7 +305,7 @@ export class Autopilot {
     for (const h of hops) {
       if (a.killed) throw new Stopped(`${a.killed}: nothing is sent`);
       const { ex, q, toSym } = await this.quoteHop(a, h, sym, amt);
-      const p: PendingSwap = { hash: null, key: h.key, side: h.side, from: sym, to: toSym, amountIn: amt, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, at: this.now(), deadline: Number(q.call.deadline), forOpen };
+      const p: PendingSwap = { hash: null, key: h.key, side: h.side, from: sym, to: toSym, amountIn: amt, tokenOut: q.tokenOut, decimalsOut: q.decimalsOut, at: this.now(), deadline: Number(q.call.deadline), forOpen, minOut: q.minOutHuman };
       this.add(a, sym, -amt);
       a.pending.push(p);
       this.save();
@@ -343,10 +347,13 @@ export class Autopilot {
         if (this.now() / 1000 > p.deadline + PENDING_GRACE_S) { done(false); this.say(`swap ${p.hash.slice(0, 10)}… never mined before its deadline; the ${p.from} is back`, 'warn', c); }
         continue;
       }
+      // mined OK but its output unreadable: the guaranteed minimum; an old record without it stays (never guessed)
+      const out = r.ok ? r.amountOutHuman ?? p.minOut ?? null : null;
+      if (r.ok && out == null) { this.lastError = `swap ${p.hash} mined, but what it brought could not be read from its receipt; check it on the explorer`; continue; }
       this.gas(a, r.gasNative);
-      if (r.ok) { this.add(a, p.to, r.amountOutHuman); if (p.forOpen) this.state.reviewedAt = null; }
+      if (r.ok && out != null) { this.add(a, p.to, out); if (p.forOpen) this.state.reviewedAt = null; }
       done(r.ok);
-      this.say(r.ok ? `swap ${p.hash.slice(0, 10)}… landed: ${fmt(r.amountOutHuman)} ${p.to}` : `swap ${p.hash.slice(0, 10)}… reverted; the ${p.from} is back`, r.ok ? 'info' : 'warn', c);
+      this.say(r.ok ? `swap ${p.hash.slice(0, 10)}… landed: ${fmt(out ?? 0)} ${p.to}` : `swap ${p.hash.slice(0, 10)}… reverted; the ${p.from} is back`, r.ok ? 'info' : 'warn', c);
     }
   }
   /** Coins other than the budget's (back from a bot that spent them) are swapped back to it. */
