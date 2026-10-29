@@ -530,7 +530,7 @@ export function parseAmountOut(receipt: ReceiptLike, account: string, tokenOut: 
   return sum;
 }
 
-function gasOf(r: ReceiptLike | null | undefined): bigint {
+export function gasOf(r: ReceiptLike | null | undefined): bigint {
   return r ? r.gasUsed * (r.gasPrice ?? 0n) : 0n;
 }
 

@@ -17,7 +17,8 @@ import { readCall } from '../dex/types';
 import { fetchJson } from '../fetchJson';
 import { holderApiBase, readHolderConcentration, type HolderChain } from './holderRead';
 import { readOwnerPowers } from './ownerRead';
-import { LiveExecutor, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
+import { ExecError, LiveExecutor, gasOf, parseAmountOut, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
+import { fromUnits } from '../../live/swapMath';
 import type { DexConfig } from '../../live/chains';
 import type { SafetyLimits } from '../../live/limits';
 import type { SharedNonce, TxGate } from '../bot/txGate';
@@ -27,7 +28,7 @@ import type { Emit } from '../bot/activity';
 import type { Hub } from '../chains/hub';
 import type { GeckoSource } from './gecko';
 import { PoolSniper, type LogSource, type SniperChain } from './sniper';
-import { TokenTrader, type Position, type TraderState } from '../bot/tokenTrader';
+import { SwapPending, TokenTrader, type Position, type TraderState } from '../bot/tokenTrader';
 import { PlayRejectLog } from '../bot/playRejects';
 import { quoteTradeImpact } from './tradeImpact';
 
@@ -186,6 +187,16 @@ export function createTokenTrader(o: {
         const { q, fill } = await liveSwap(o.hub.rt(pos.chainId), o.hub.draftQuoter(draft), swapOpts(o, pos.chainId, trader.status().options.sniper.mevRpc), 'sell', tokens, limits, sendChecks(trader).sell());
         return { quoteOut: fill.amountOutHuman, tokensIn: fill.amountInHuman, price: fill.amountInHuman > 0 ? fill.amountOutHuman / fill.amountInHuman : pos.price, impact: q.priceImpact, tx: fill.txHash, gasUsed: fill.swapGasUsed, gasPriceWei: fill.swapGasPriceWei, gasNative: fill.gasNative };
       },
+      recover: async (chainId, hash, tokenOut, decimalsOut) => {
+        const rt = o.hub.rt(chainId);
+        const r = await rt.reader.getTransactionReceipt(hash);
+        if (!r) return null;
+        const gasNative = fromUnits(gasOf(r), 18);
+        if (r.status !== 1) return { ok: false, amountOut: 0, gasNative };
+        if (!rt.signer) throw new Error('no signing key');
+        const out = parseAmountOut(r, await rt.signer.getAddress(), tokenOut, rt.cfg.wrappedNative.address);
+        return { ok: true, amountOut: out != null ? fromUnits(out, decimalsOut) : null, gasNative };
+      },
     },
   });
   flags.v3LpLockCheck = () => trader.status().options.v3LpLockCheck === true;
@@ -231,8 +242,14 @@ export async function liveSwap(
     if (q.block) throw new Error(q.block);
     if (!q.balanceOk) throw new Error(q.balanceNote ?? 'balance');
     if (q.priceImpact > limits.maxPriceImpact) throw new Error(`price impact ${(q.priceImpact * 100).toFixed(2)}% is over the cap`);
-    const fill = await ex.execute(q, { canSend, onSent: () => undefined });
-    return { q, fill };
+    try {
+      const fill = await ex.execute(q, { canSend, onSent: () => undefined });
+      return { q, fill };
+    } catch (e) {
+      // sent but not confirmed in time: hand the hash to the trader, which settles it later (never dropped)
+      if (e instanceof ExecError && e.opts.pending && e.opts.swapTxHash) throw new SwapPending(e.opts.swapTxHash, q.tokenOut, q.decimalsOut, q.amountInHuman, e.opts.gasNative ?? 0);
+      throw e;
+    }
   });
 }
 
