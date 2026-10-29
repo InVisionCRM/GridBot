@@ -202,6 +202,8 @@ export class FundsError extends Error {}
 
 /** Profit a grid sent to its payout address (a transfer in flight is leaving the wallet): no longer the grid's */
 const sentProfit = (s: BotState) => s.payouts.filter((p) => p.ok && p.paper === (s.mode === 'paper')).reduce((a, p) => a + p.amount, 0) + (s.payoutInFlight?.amount ?? 0);
+/** A grid's quote coin not in a lot: its capital plus what it realized, less lots' cost and profit already paid out. */
+const gridFreeQuote = (s: BotState, t: ReturnType<typeof totals>) => Math.max(0, (s.config?.totalCapitalQuote ?? 0) + t.realized - t.pos.costQuote - sentProfit(s));
 
 /** Coins counted as in use besides the bots' own (the smart trader's money not in a bot): in allocations like a bot's */
 export interface Holding { chainId: number; token: { address: string; native?: boolean; symbol: string }; amount: number; id: string }
@@ -882,7 +884,7 @@ export class MultiBot {
       // a stopped live grid still owns its lots and free quote (it trades them on Resume); archiving releases them
       if (!d || s.mode !== 'live' || !s.config || s.archivedAt || (s.status === 'idle' && !s.inFlight)) continue;
       const t = totals(e.modeTrades(), s.lastPrice);
-      add(d, 'quote', s.id, 'grid', Math.max(0, s.config.totalCapitalQuote + t.realized - t.pos.costQuote - sentProfit(s)));
+      add(d, 'quote', s.id, 'grid', gridFreeQuote(s, t));
       add(d, 'base', s.id, 'grid', t.pos.plsHeld);
     }
     for (const e of this.trendEngines.values()) {
@@ -1268,26 +1270,34 @@ export class MultiBot {
 
   // ── Portfolio / analytics ──────────────────────────────────────────────
   /** One mode's bots: analytics never add paper and live together. */
-  private botRows(mode: Mode) {
+  /**
+   * One row per bot of `mode` for Analytics and the portfolio snapshots. Money comes from each bot's metrics (the same
+   * figures as its page): capital in, value now (what it holds), P&L (value + paid out − extra costs − capital), and
+   * `equity` = capital + P&L, the basis the snapshots compare. A bot with no price reading yet has moved nothing: its
+   * value is its capital and its P&L 0.
+   */
+  private botRows(mode: Mode, mOf: Map<string, BotMetrics | null>) {
     const rows: {
       id: string; kind: 'grid' | 'trend' | 'lp'; name: string; pair: string; chainId: number; mode: Mode; status: string; usdPerQuote: number | null;
-      capital: number; equity: number; realized: number; unrealized: number; fees: number; gas: number;
+      capital: number; value: number; equity: number; realized: number; unrealized: number; fees: number; gas: number;
       plsHeld: number; quoteFree: number; startedAt: number | null; equityHist: [number, number][];
       closed: { pnl: number; t: number; holdMs?: number }[]; trades: LiveTrade[]; inMarket: number;
     }[] = [];
+    const money = (id: string, capital: number) => {
+      const q = mOf.get(id)?.quote ?? null;
+      const cap = q?.capitalIn ?? capital, pnl = q?.totalPnl ?? 0;
+      return { capital: cap, value: q?.currentValue ?? cap, equity: cap + pnl, realized: q?.realized ?? 0, unrealized: q?.unrealized ?? 0, fees: q?.swapCost ?? 0, gas: q?.gas ?? 0 };
+    };
     for (const e of this.engines.values()) {
       const s = e.state;
       if (!s.config || s.mode !== mode) continue;
       const tr = e.modeTrades();
       const t = totals(tr, s.lastPrice);
-      const capital = s.config.totalCapitalQuote;
-      const eqHist = s.equity ?? [];
       rows.push({
         id: s.id, kind: 'grid', name: `Grid ${e.label}`, pair: s.stable, chainId: e.chainId, mode: s.mode, status: s.archivedAt ? 'closed' : s.status, usdPerQuote: this.usdPerQuote(s.stable),
-        capital, equity: capital + t.realized + t.unrealized, realized: t.realized, unrealized: t.unrealized,
-        fees: tr.reduce((a, x) => a + (x.feeQuote ?? 0), 0), gas: t.gasQuote,
-        plsHeld: t.pos.plsHeld, quoteFree: Math.max(0, capital + t.realized - t.pos.costQuote), startedAt: s.startedAt ?? tr[0]?.timestamp ?? null,
-        equityHist: eqHist,
+        ...money(s.id, s.config.totalCapitalQuote),
+        plsHeld: t.pos.plsHeld, quoteFree: gridFreeQuote(s, t), startedAt: s.startedAt ?? tr[0]?.timestamp ?? null,
+        equityHist: s.equity ?? [],
         closed: tr.filter((x) => x.side === 'sell' && !x.failed && x.roundTripNet != null).map((x) => ({ pnl: x.roundTripNet!, t: x.timestamp })),
         trades: tr,
         inMarket: t.pos.plsHeld > 0 ? 1 : 0,
@@ -1298,7 +1308,7 @@ export class MultiBot {
       if (!st.capital || st.mode !== mode) continue;
       rows.push({
         id: st.id, kind: 'trend', name: st.name, pair: st.quote, chainId: e.chainId, mode: st.mode, status: e.state.archivedAt ? 'closed' : st.status, usdPerQuote: this.usdPerQuote(st.quote),
-        capital: st.capital, equity: st.pnl.equity, realized: st.pnl.realized, unrealized: st.pnl.unrealized, fees: st.pnl.fees, gas: st.pnl.gas,
+        ...money(st.id, st.capital),
         plsHeld: st.position?.pls ?? 0, quoteFree: st.cash, startedAt: st.startedAt, equityHist: e.state.equity,
         closed: e.modeTrades().filter((x) => x.side === 'sell' && !x.failed).map((x) => ({ pnl: x.realizedPnlQuote, t: x.timestamp, holdMs: (x as TrendTrade).holdMs })),
         trades: e.modeTrades(), inMarket: st.stats.timeInMarket,
@@ -1309,13 +1319,16 @@ export class MultiBot {
       if (!s.config || !pnl || !vw || s.mode !== mode) continue;
       rows.push({
         id: s.id, kind: 'lp', name: `Liquidity ${e.label}`, pair: s.market, chainId: e.chainId, mode: s.mode, status: s.archivedAt ? 'closed' : s.status, usdPerQuote: this.usdPerQuote(s.market),
-        // earned after costs is the LP's "banked" side; the price side moves with the price like unsold coins
-        capital: e.startValue()!, equity: pnl.equity, realized: pnl.net, unrealized: pnl.price, fees: 0, gas: pnl.gas,
+        ...money(s.id, e.startValue()!),
         plsHeld: vw.coins.base + vw.owed.base + s.idle.base, quoteFree: vw.coins.quote + vw.owed.quote + s.idle.quote, startedAt: s.startedAt, equityHist: s.equity,
         closed: [], trades: [], inMarket: s.position ? 1 : 0,
       });
     }
     return rows;
+  }
+  /** Each bot's metrics, as on its page (src/metrics/botMetrics.ts) */
+  private metricsById(st = this.status()) {
+    return new Map([...st.grids, ...st.trends, ...st.lps].map((b) => [b.id, b.metrics as BotMetrics | null] as const));
   }
 
   private snapshotPortfolio() {
@@ -1323,7 +1336,7 @@ export class MultiBot {
     for (const mode of ['live', 'paper'] as const) {
       const p = this.multi.portfolio[mode];
       if (p.length && this.now() - p[p.length - 1][0] < 60_000) continue;
-      const rows = this.botRows(mode);
+      const rows = this.botRows(mode, this.metricsById());
       if (!rows.length) continue;
       const eq = rows.reduce((a, r) => a + (r.usdPerQuote ? r.equity * r.usdPerQuote : 0), 0);
       const re = rows.reduce((a, r) => a + (r.usdPerQuote ? r.realized * r.usdPerQuote : 0), 0);
@@ -1336,7 +1349,9 @@ export class MultiBot {
 
   /** Analytics for one mode: live is real money, paper is simulated; never added together. */
   overview(mode: Mode) {
-    const rows = this.botRows(mode);
+    const stNow = this.status();
+    const mOf = this.metricsById(stNow);
+    const rows = this.botRows(mode, mOf);
     const now = this.now();
     const day = new Date(now); day.setHours(0, 0, 0, 0);
     const periods = { today: day.getTime(), d7: now - 7 * 86_400_000, all: 0 };
@@ -1366,14 +1381,12 @@ export class MultiBot {
     // Portfolio curve at today's capital: capNow + PnL(t) (flows removed), so drawdown reflects trading only.
     const curve = ph.map(([t, v, , c]) => [t, capNow + (v - c)] as [number, number]);
     // Per-bot return comes from the same metrics as /api/bot/status (src/metrics/botMetrics.ts).
-    const stNow = this.status();
-    const mOf = new Map([...stNow.grids, ...stNow.trends, ...stNow.lps].map((b) => [b.id, b.metrics] as const));
     const bots = rows.map((r) => {
       const st = tradeStats(r.closed);
       const m = mOf.get(r.id) ?? null;
       return {
         id: r.id, kind: r.kind, name: r.name, pair: r.pair, chainId: r.chainId, mode: r.mode, status: r.status, usdPerQuote: r.usdPerQuote,
-        capital: r.capital, equity: r.equity, equityUsd: usd(r, r.equity), capitalUsd: usd(r, r.capital),
+        capital: r.capital, value: r.value, valueUsd: usd(r, r.value), equity: r.equity, equityUsd: usd(r, r.equity), capitalUsd: usd(r, r.capital),
         realized: r.realized, unrealized: r.unrealized, realizedUsd: usd(r, r.realized), unrealizedUsd: usd(r, r.unrealized),
         feesUsd: usd(r, r.fees), gasUsd: usd(r, r.gas), fees: r.fees, gas: r.gas,
         returnPct: m?.totalPnlPct ?? (r.capital ? r.equity / r.capital - 1 : 0),
@@ -1384,7 +1397,7 @@ export class MultiBot {
       };
     });
     const now_ = new Set(open.map((r) => r.id));
-    const sum = (k: 'equityUsd' | 'capitalUsd' | 'realizedUsd' | 'unrealizedUsd' | 'feesUsd' | 'gasUsd', held = false) => bots.filter((b) => !held || now_.has(b.id)).reduce((a, b) => a + b[k], 0);
+    const sum = (k: 'valueUsd' | 'equityUsd' | 'capitalUsd' | 'realizedUsd' | 'unrealizedUsd' | 'feesUsd' | 'gasUsd', held = false) => bots.filter((b) => !held || now_.has(b.id)).reduce((a, b) => a + b[k], 0);
     // Allocation by asset: base held (valued via the hub oracle) + free quote, labelled per chain.
     const alloc = new Map<string, { asset: string; chainId: number; usd: number; amount: number | null }>();
     const addA = (asset: string, chainId: number, v: number, amount: number | null) => {
@@ -1407,6 +1420,7 @@ export class MultiBot {
       return {
         chainId: rt.cfg.id, key: rt.cfg.key, name: rt.cfg.name, short: rt.cfg.short, color: rt.cfg.color, status: rt.cfg.status,
         bots: bs.length, running: bs.filter((b) => b.status === 'running').length,
+        valueUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.valueUsd, 0),
         equityUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.equityUsd, 0), capitalUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.capitalUsd, 0),
         realizedUsd: bs.reduce((a, b) => a + b.realizedUsd, 0), unrealizedUsd: bs.filter((b) => now_.has(b.id)).reduce((a, b) => a + b.unrealizedUsd, 0),
         gasUsd: bs.reduce((a, b) => a + b.gasUsd, 0),
@@ -1416,7 +1430,7 @@ export class MultiBot {
     }).filter((c) => c.bots > 0 || c.gasNative != null);
     return {
       t: now, mode,
-      totals: { equityUsd: sum('equityUsd', true), capitalUsd: sum('capitalUsd', true), realizedUsd: sum('realizedUsd'), unrealizedUsd: sum('unrealizedUsd', true), feesUsd: sum('feesUsd'), gasUsd: sum('gasUsd') },
+      totals: { valueUsd: sum('valueUsd', true), equityUsd: sum('equityUsd', true), capitalUsd: sum('capitalUsd', true), realizedUsd: sum('realizedUsd'), unrealizedUsd: sum('unrealizedUsd', true), feesUsd: sum('feesUsd'), gasUsd: sum('gasUsd') },
       periods: per,
       allocation: [...alloc.values()].filter((x) => x.usd > 0.005).sort((a, b) => b.usd - a.usd),
       chains,
