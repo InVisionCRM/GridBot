@@ -333,7 +333,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <div className="split wide-left">
         <div className="card">
-          <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} tf="1h" compact desk mid height={480} />
+          <Chart status={s} ticks={ticks} pairs={[b.market]} pair={b.market} only={b.id} tf="1h" compact desk mid height={480} />
           <p className="muted small">The amber lines are the position's range. It earns fees while the price is between them.</p>
           <StatTable b={b} s={s} hide={metricsOf(b)?.generatedRate.d1 ? LP_SHOWN_ELSEWHERE : LP_SHOWN_ELSEWHERE.filter((k) => k !== 'Age')} />
         </div>

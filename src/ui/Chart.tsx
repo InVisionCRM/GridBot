@@ -52,6 +52,19 @@ export interface ChartProps {
   onMove?: DrawCtl['onMove'];
   /** Show the pool's mid price (the sell quote with the pool fee taken back out). For LPs, whose range is in mid prices. */
   mid?: boolean;
+  /** A bot's own page: draw only this bot's levels and fills. The Charts tab leaves it unset and shows every bot on the pair. */
+  only?: string;
+}
+
+/** The bots whose levels, range and fills the chart draws: every bot on the pair, or one bot by id (`only`). */
+export function botsOnPair(s: AnyObj | null, pair: string, only?: string): { grids: AnyObj[]; trends: AnyObj[]; lps: AnyObj[] } {
+  if (!s) return { grids: [], trends: [], lps: [] };
+  const mine = (b: AnyObj) => !only || b.id === only;
+  return {
+    grids: ((s.grids ?? []) as AnyObj[]).filter((g) => g.stable === pair && g.config && mine(g)),
+    trends: ((s.trends ?? []) as AnyObj[]).filter((t) => t.quote === pair && mine(t)),
+    lps: ((s.lps ?? []) as AnyObj[]).filter((l) => l.market === pair && l.position && mine(l)),
+  };
 }
 
 /**
@@ -234,33 +247,17 @@ export function Chart(p: ChartProps) {
   }, [p.ticks]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // bot overlays: grid levels, fills, trend entries/exits, stop/TP (a backtest chart shows only the backtest's trades)
-  const botsHere = useMemo(() => {
-    const s = p.status;
-    if (!s || p.btTrades) return { grids: [] as AnyObj[], trends: [] as AnyObj[], lps: [] as AnyObj[] };
-    return {
-      grids: (s.grids ?? []).filter((g: AnyObj) => g.stable === pair && g.config), trends: (s.trends ?? []).filter((t: AnyObj) => t.quote === pair),
-      lps: (s.lps ?? []).filter((l: AnyObj) => l.market === pair && l.position),
-    };
-  }, [p.status, p.btTrades, pair]);
+  const botsHere = useMemo(() => (p.btTrades ? { grids: [] as AnyObj[], trends: [] as AnyObj[], lps: [] as AnyObj[] } : botsOnPair(p.status, pair, p.only)), [p.status, p.btTrades, pair, p.only]);
   const chartBots = useMemo((): ChartBot[] => {
     const s = p.status;
-    if (!s || p.btTrades) return [];
+    if (!s) return [];
     const chain = (id: number | undefined, fallback?: string) => chainOf(s, id ?? s.legacyChainId)?.short ?? fallback ?? '';
-    const out: ChartBot[] = [];
-    for (const g of (s.grids ?? []) as AnyObj[]) {
-      if (g.stable !== pair || !g.config) continue;
-      out.push({ id: g.id, name: String(g.label || `${g.base ?? ''}/${quoteSym(g) ?? ''}`), kind: 'Grid', chain: chain(g.chainId, g.chainShort) });
-    }
-    for (const t of (s.trends ?? []) as AnyObj[]) {
-      if (t.quote !== pair) continue;
-      out.push({ id: t.id, name: String(t.name || t.label || pair), kind: 'Trend', chain: chain(t.chainId, t.chainShort) });
-    }
-    for (const l of (s.lps ?? []) as AnyObj[]) {
-      if (l.market !== pair || !l.position) continue;
-      out.push({ id: l.id, name: String(l.label || pair), kind: 'Liquidity', chain: chain(l.chainId) });
-    }
-    return out;
-  }, [p.status, p.btTrades, pair]);
+    return [
+      ...botsHere.grids.map((g): ChartBot => ({ id: g.id, name: String(g.label || `${g.base ?? ''}/${quoteSym(g) ?? ''}`), kind: 'Grid', chain: chain(g.chainId, g.chainShort) })),
+      ...botsHere.trends.map((t): ChartBot => ({ id: t.id, name: String(t.name || t.label || pair), kind: 'Trend', chain: chain(t.chainId, t.chainShort) })),
+      ...botsHere.lps.map((l): ChartBot => ({ id: l.id, name: String(l.label || pair), kind: 'Liquidity', chain: chain(l.chainId) })),
+    ];
+  }, [p.status, botsHere, pair]);
   useEffect(() => {
     const c = cs.current;
     if (!c || !markers.current) return;
