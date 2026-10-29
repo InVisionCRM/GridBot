@@ -392,7 +392,8 @@ export class TokenTrader {
       /** A swap sent earlier, by hash (SwapPending): null = not mined yet */
       recover(chainId: number, hash: string, tokenOut: string, decimalsOut: number): Promise<Recovered | null>;
     };
-    signerReady?: (chainId: number) => boolean;
+    /** The chains this app can trade on, and whether each has a signing key (a live turn-on checks the ones it trades). */
+    liveChains?: () => { id: number; name: string; signer: boolean }[];
     sniper?: PoolSniper;
     /**
      * The wallet's on-chain balance of a live position's token (human units), for reconciling after a partial,
@@ -722,7 +723,9 @@ export class TokenTrader {
     const o = this.state.options;
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('Live trading is not wired on this server.');
-      if (this.d.signerReady && o.chains.length && o.chains.some((id) => !this.d.signerReady!(id))) throw new Error('Live needs a signing key on every chain you turned on.');
+      // every chain it would trade, "every chain" (no list) included
+      const keyless = (this.d.liveChains?.() ?? []).filter((c) => this.wantChain(c.id) && !c.signer).map((c) => c.name);
+      if (keyless.length) throw new Error(`Live needs a signing key on every chain it trades; there is none on ${keyless.join(', ')}. Pick only chains with a key, or add one.`);
     }
     this.state.on = true;
     this.state.pendingChoice = null;
@@ -1245,7 +1248,8 @@ export class TokenTrader {
         this.say(`skipped ${label}: ${a.reason}`, 'warn');
         continue;
       }
-      await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn, a.note);
+      // one buy that fails (a send error, no key on its chain) is recorded; the other pools still get their turn
+      try { await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn, a.note); } catch (e) { this.lastError = `${label}: ${(e as Error).message}`; }
     }
   }
 
@@ -1279,7 +1283,7 @@ export class TokenTrader {
       if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: thinWhy }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: thinWhy, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `${sn.maxPerHour} snipes an hour already`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       const before = this.state.positions.length;
-      await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe');
+      try { await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe'); } catch (e) { this.lastError = `${pool.tokenSymbol}/${pool.spendSymbol}: ${(e as Error).message}`; }
       if (this.state.positions.length > before) { this.state.snipesAt.push(this.now()); room--; }
     }
   }

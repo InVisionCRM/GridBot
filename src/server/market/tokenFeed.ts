@@ -111,7 +111,7 @@ export function createTokenTrader(o: {
   };
   const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
-    signerReady: (id) => !!o.hub.rt(id).signer,
+    liveChains: () => o.hub.runtimes().filter((rt) => rt.tradable).map((rt) => ({ id: rt.cfg.id, name: rt.cfg.name, signer: !!rt.signer })),
     discover: () => discover(o.hub, o.gecko),
     assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flags.v3LpLockCheck(), flags.lpUnlockCheck(), {
       cacheEnabled: flags.v3LpLockCacheEnabled(), cacheTtlMs: flags.v3LpLockCacheTtlMs(), callBudget: flags.v3LpLockCallBudget(),
