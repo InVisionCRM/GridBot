@@ -105,7 +105,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           {t.cfg.strategy === 'lines'
             ? <LinesEditor s={s} ticks={ticks} pair={t.quote} tf={t.tf} lines={t.cfg.lines} busy={busy} height={480}
                 onChange={(lines) => act(() => botApi(`trends/${t.id}/lines`, 'PUT', { lines }))} />
-            : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} tf={t.tf} compact desk height={480}
+            : <Chart status={s} ticks={ticks} pairs={[t.quote]} pair={t.quote} only={t.id} tf={t.tf} compact desk height={480}
                 emaFast={t.cfg.strategy.startsWith('ema') ? t.cfg.fast : undefined} emaSlow={t.cfg.strategy.startsWith('ema') ? t.cfg.slow : undefined} />}
           <p className="muted small">Arrows mark buys and sells. While holding, the chart shows the entry, stop-loss (or trailing stop) and take-profit lines.{t.cfg.strategy === 'lines' ? ' Line changes apply from the next closed candle.' : ''}</p>
           <StatTable b={t} s={s} hide={['Generated', 'Win rate']} />

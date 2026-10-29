@@ -287,7 +287,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       </div>
 
       <div className="card">
-        <Chart status={s} ticks={ticks} pairs={[g.stable]} pair={g.stable} compact desk height={480} />
+        <Chart status={s} ticks={ticks} pairs={[g.stable]} pair={g.stable} only={g.id} compact desk height={480} />
         {g.config && (
           <div className="detail-range" data-testid="range-line">
             <span className="k">Range</span>
