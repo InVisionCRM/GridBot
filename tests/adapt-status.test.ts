@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { adaptStatus } from '../src/v2/adapt-status';
+import { deskOf } from './helpers/deskOf';
 import { gridMetrics, lpMetrics, trendMetrics } from '../src/metrics/botMetrics';
 import { deskStatusPill, formatAmt, formatClockEt, formatPx, formatTokenLine, formatWhen, showsNoFills } from '../src/v2/format';
 import { HEADLINE_FLOOR_PX, headlinePx } from '../src/v2/tokens';
@@ -61,7 +62,7 @@ describe('adaptStatus', () => {
       },
       totals: { gas: 0, swapCost: 0, moveLoss: 0 },
     };
-    const qaDesk = adaptStatus({ spotsAt: AS_OF, lps: [qa] }, [], AS_OF);
+    const qaDesk = deskOf({ spotsAt: AS_OF, lps: [qa] }, [], AS_OF);
     const qaServer = lpMetrics(qa, AS_OF);
     expect(qaDesk.bots[0].metrics.generated.map((t) => t.amount)).toEqual(units(qaServer.generated).map((t) => t.amount));
     expect(formatTokenLine(qaDesk.bots[0].metrics.generated)).toBe('+63.24 USDC + 0.001731 ETH');
@@ -101,7 +102,7 @@ describe('adaptStatus', () => {
 
   it('dashes estimates until each window has enough history', () => {
     const now = 1_700_000_000_000;
-    const young = adaptStatus({
+    const young = deskOf({
       spotsAt: now,
       grids: [{
         id: 'young', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
@@ -124,7 +125,7 @@ describe('adaptStatus', () => {
     expect(m.est.d7).toBeNull();
     expect(m.est.d365).toBeNull();
 
-    const day = adaptStatus({
+    const day = deskOf({
       spotsAt: now,
       grids: [{
         id: 'day', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
@@ -151,7 +152,7 @@ describe('adaptStatus', () => {
     expect(d.est.d365).toBeNull();
     expect(d.aprPct).toBeNull();
 
-    const week = adaptStatus({
+    const week = deskOf({
       spotsAt: now,
       grids: [{
         id: 'week', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
@@ -165,7 +166,7 @@ describe('adaptStatus', () => {
     expect(week.bots[0].metrics.est.d7?.[0].amount).toBeCloseTo(3 * 7 / 8);
     expect(week.bots[0].metrics.est.d365?.[0].amount).toBeCloseTo(3 * 365 / 8);
 
-    const month = adaptStatus({
+    const month = deskOf({
       spotsAt: now,
       grids: [{
         id: 'month', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',
@@ -187,7 +188,7 @@ describe('adaptStatus', () => {
       pnl: { realized, unrealized: 0, gasUsd: 0 },
       stats: { roundTrips: 2, totalFees: 0 },
     });
-    const mixed = adaptStatus({ spotsAt: now, grids: [row('AAA', 1.006), row('BBB', 1.006)] }, [], now);
+    const mixed = deskOf({ spotsAt: now, grids: [row('AAA', 1.006), row('BBB', 1.006)] }, [], now);
     const cards = mixed.bots.map((b) => b.metrics.generatedUsd);
     const sum = (cards[0] ?? 0) + (cards[1] ?? 0);
     expect(cards).toEqual([
@@ -207,14 +208,14 @@ describe('adaptStatus', () => {
       stats: { roundTrips: trips, totalFees: 0 },
       trades: [{ side: 'sell', failed: false, timestamp: now - 30_000, realizedPnlUsd: 1 }],
     });
-    const minute = adaptStatus({ spotsAt: now, grids: [bot('baby', 60_000, 1)] }, [], now);
+    const minute = deskOf({ spotsAt: now, grids: [bot('baby', 60_000, 1)] }, [], now);
     expect(minute.bots[0].metrics.ageSec).toBeCloseTo(60);
     expect(minute.bots[0].metrics.aprPct).toBeNull();
     expect(minute.bots[0].metrics.est.d1).toBeNull();
     expect(minute.portfolio.generatedPerDayUsd).toBeNull();
 
     const oneRaw = bot('one', 2 * 86_400_000, 1);
-    const oneFill = adaptStatus({ spotsAt: now, grids: [oneRaw] }, [], now);
+    const oneFill = deskOf({ spotsAt: now, grids: [oneRaw] }, [], now);
     const oneServer = gridMetrics(oneRaw, now);
     expect(oneFill.bots[0].metrics.aprPct).toBe(oneServer.aprPct);
     expect(oneFill.bots[0].metrics.aprPct).not.toBeNull();
@@ -223,7 +224,7 @@ describe('adaptStatus', () => {
     expect(oneFill.bots[0].metrics.est.d365?.[0].amount).toBe(oneServer.generatedRate.d365?.USDC);
 
     const readyRaw = bot('two', 8 * 86_400_000, 2);
-    const ready = adaptStatus({ spotsAt: now, grids: [readyRaw] }, [], now);
+    const ready = deskOf({ spotsAt: now, grids: [readyRaw] }, [], now);
     expect(ready.bots[0].metrics.aprPct).toBe(gridMetrics(readyRaw, now).aprPct);
     expect(ready.bots[0].metrics.aprPct).not.toBeNull();
   });
@@ -234,7 +235,7 @@ describe('adaptStatus', () => {
     expect(eth?.chain).toBe('ETH');
     expect(eth?.price).toBeCloseTo(2000);
     const now = 1_700_000_000_000;
-    const pls = adaptStatus({
+    const pls = deskOf({
       spotsAt: now,
       grids: [{
         id: 'pls', mode: 'paper', status: 'stopped', label: 'PLS/DAI', base: 'PLS', quoteSym: 'DAI',
@@ -274,7 +275,7 @@ describe('adaptStatus', () => {
 
   it('maps a trend bot from botMetrics and names the chain', () => {
     const now = 1_700_000_000_000;
-    const desk = adaptStatus({
+    const desk = deskOf({
       spotsAt: now,
       chains: [{ id: 1, short: 'ETH', name: 'Ethereum', color: '#000' }],
       trends: [{
@@ -316,7 +317,7 @@ describe('adaptStatus', () => {
       stats: { roundTrips: 0 },
       ...extra,
     });
-    const two = adaptStatus({
+    const two = deskOf({
       spotsAt: now,
       chains: [{ id: 1, short: 'ETH', color: '#000' }],
       grids: [
@@ -399,7 +400,7 @@ describe('format', () => {
       startedAt: now - 86_400_000, config: { totalCapitalQuote: 100, lowerPrice: 1, upperPrice: 3 },
       pnl: { realized: 0, unrealized: 0, gasUsd: 0 }, stats: { roundTrips: 0, totalFees: 0 },
     });
-    const desk = adaptStatus({ spotsAt: now, grids: [grid('a', 'live', 'running'), grid('b', 'live', 'paused'), grid('c', 'paper', 'running'), grid('d', 'paper', 'running')] }, [], now);
+    const desk = deskOf({ spotsAt: now, grids: [grid('a', 'live', 'running'), grid('b', 'live', 'paused'), grid('c', 'paper', 'running'), grid('d', 'paper', 'running')] }, [], now);
     expect(desk.portfolio.botsRunning).toBe(1);
     expect(desk.portfolio.botsTotal).toBe(2);
   });

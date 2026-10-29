@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ReactElement } from 'react';
 import { adaptStatus } from '../src/v2/adapt-status';
+import { deskOf } from './helpers/deskOf';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
 import { BotView } from '../src/v2/bot-view';
 import { figureAtoms, isLedgerLabel, normFigure, repeatedFigures, sheetRows } from '../src/v2/figures';
@@ -208,7 +209,7 @@ describe('no money or token figure is repeated on a screen', () => {
       startedAt: now - 3 * 86_400_000, config: { totalCapitalQuote: 3.5 },
       pnl: { realized: 1, unrealized: 0, gasUsd: 0 }, stats: { roundTrips: 1, totalFees: 0 },
     };
-    const desk = adaptStatus({
+    const desk = deskOf({
       spotsAt: now,
       grids: [
         { ...shared, id: 'a', label: 'AAA/ETH' },
@@ -218,7 +219,7 @@ describe('no money or token figure is repeated on a screen', () => {
     const text = renderAt(<HomeView portfolio={desk.portfolio} bots={desk.bots} onOpen={() => {}} />, 390);
     expect(text.match(/3\.50 ETH/g)?.length).toBeGreaterThan(1);
     expect(text).not.toContain('All of the paper total');
-    const sole = adaptStatus({
+    const sole = deskOf({
       spotsAt: now,
       grids: [
         {
@@ -252,7 +253,7 @@ describe('no money or token figure is repeated on a screen', () => {
 
   it('a single live contributor shows its figure under the hero that sums it', () => {
     const now = 1_700_000_000_000;
-    const one = adaptStatus({
+    const one = deskOf({
       spotsAt: now,
       grids: [
         {

@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { ActivityTape } from '../src/v2/activity-tape';
 import { BotView } from '../src/v2/bot-view';
 import { adaptStatus } from '../src/v2/adapt-status';
+import { deskOf } from './helpers/deskOf';
 import { figureAtoms, generatedCardLine, ledgerLines, normFigure, sheetRows } from '../src/v2/figures';
 import { formatRangePx, formatTokenLine, tokenLineParts } from '../src/v2/format';
 import { sanitizedActivity, sanitizedStatus } from '../src/v2/sanitized-fixture';
@@ -231,7 +232,7 @@ describe('v2 copy stays in token units', () => {
 
   it('shows every generated coin on the card as a number', () => {
     const now = 1_700_000_000_000;
-    const desk = adaptStatus({
+    const desk = deskOf({
       spotsAt: now,
       lps: [
         {
@@ -281,7 +282,7 @@ describe('v2 copy stays in token units', () => {
         feeCoins: { base: baseAmt, quote: quoteAmt },
       },
     });
-    const desk = adaptStatus({ spotsAt: now, lps: [lp('one', 65.04, 0.01531), lp('two', 6, 0.01)] }, [], now);
+    const desk = deskOf({ spotsAt: now, lps: [lp('one', 65.04, 0.01531), lp('two', 6, 0.01)] }, [], now);
     const bot = desk.bots.find((b) => b.metrics.botId === 'one');
     const line = formatTokenLine(bot?.metrics.generated ?? []);
     expect(line).toBe('+65.04 USDG + 0.01531 ETH');
@@ -325,7 +326,7 @@ describe('v2 copy stays in token units', () => {
 
   it('shows legacy grid capital as quote-coin units, never USD', () => {
     const now = 1_700_000_000_000;
-    const desk = adaptStatus({
+    const desk = deskOf({
       spotsAt: now,
       grids: [{
         id: 'usd', mode: 'live', status: 'running', label: 'AAA/USDC', base: 'AAA', quoteSym: 'USDC',

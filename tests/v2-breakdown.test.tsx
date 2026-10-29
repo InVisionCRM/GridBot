@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { adaptStatus } from '../src/v2/adapt-status';
+import { deskOf } from './helpers/deskOf';
 import { sheetRows } from '../src/v2/figures';
 import { formatTokenLine } from '../src/v2/format';
 import { lpMetrics } from '../src/metrics/botMetrics';
@@ -21,7 +21,7 @@ describe('breakdown rows come from botMetrics', () => {
     const asOf = (status.grids as Obj[])[0] && ((status.grids as Obj[])[0].metrics as Obj)?.asOf;
     const now = typeof asOf === 'number' ? asOf : Date.parse('2026-10-27T21:00:00Z');
     const server = lpMetrics(lp, now);
-    const desk = adaptStatus({ spotsAt: now, lps: [lp] }, [], now);
+    const desk = deskOf({ spotsAt: now, lps: [lp] }, [], now);
     const bot = desk.bots[0];
     expect(bot.metrics.generated.map((t) => [t.symbol, t.amount])).toEqual(
       Object.entries(server.generated ?? {}).filter(([, n]) => Number.isFinite(n)),
@@ -59,7 +59,7 @@ describe('breakdown rows come from botMetrics', () => {
       stats: { roundTrips: 0, totalFees: 0 },
       trades: [], moveCount: 0,
     });
-    const desk = adaptStatus({ spotsAt: now, grids: [grid('pls', 'PLS'), grid('dai', 'DAI')] }, [], now);
+    const desk = deskOf({ spotsAt: now, grids: [grid('pls', 'PLS'), grid('dai', 'DAI')] }, [], now);
     for (const [id, sym] of [['pls', 'PLS'], ['dai', 'DAI']] as const) {
       const bot = desk.bots.find((b) => b.metrics.botId === id);
       expect(bot?.metrics.generated).toEqual([{ symbol: sym, amount: 0, usd: null }]);
@@ -91,7 +91,7 @@ describe('breakdown rows come from botMetrics', () => {
       },
       totals: { gas: 0, swapCost: 0, moveLoss: 0 },
     });
-    const desk = adaptStatus({
+    const desk = deskOf({
       spotsAt: now,
       lps: [lp('open', 0.001731, null), lp('archived', 5, now - DAY)],
     }, [], now);
@@ -123,7 +123,7 @@ describe('breakdown rows come from botMetrics', () => {
     };
     const server = lpMetrics(closed, now);
     expect(server.generatedRate.d7).toBeNull();
-    const desk = adaptStatus({ spotsAt: now, lps: [closed] }, [], now);
+    const desk = deskOf({ spotsAt: now, lps: [closed] }, [], now);
     const metrics = desk.bots[0].metrics;
     expect(metrics.est.d7).toBeNull();
     expect(metrics.est.d1).toBeNull();
@@ -139,7 +139,7 @@ describe('breakdown rows come from botMetrics', () => {
 
   it('closed cards show their own figures and never All paper or All live', () => {
     const now = 1_700_000_000_000;
-    const desk = adaptStatus({
+    const desk = deskOf({
       spotsAt: now,
       lps: [
         {
@@ -181,7 +181,7 @@ describe('breakdown rows come from botMetrics', () => {
       pnl: { feeCoins: { base: 1, quote: 0.001 }, fees: 1, gas: 0, swapCost: 0, moveLoss: 0, net: 1, price: 0, equity: 1 },
       totals: { gas: 0, swapCost: 0, moveLoss: 0 },
     });
-    const desk = adaptStatus({ spotsAt: now, lps: [lp('open', 'running'), lp('shut', 'closed')] }, [], now);
+    const desk = deskOf({ spotsAt: now, lps: [lp('open', 'running'), lp('shut', 'closed')] }, [], now);
     const page = (id: string) => textOf(renderToStaticMarkup(
       <BotView bot={desk.bots.find((b) => b.metrics.botId === id)!} activity={[]} prices={[]} onBack={() => {}} onActivity={() => {}} breakdown />,
     ));

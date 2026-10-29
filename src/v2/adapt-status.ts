@@ -3,7 +3,7 @@
  * Dollars are only emitted when usdPerQuote is present. Token units stay in the coin they were earned in.
  * Missing figures stay null. This file does not read the network or a wallet.
  */
-import { gridMetrics, lpMetrics, trendMetrics, type BotMetrics as ServerMetrics } from '../metrics/botMetrics';
+import type { BotMetrics as ServerMetrics } from '../metrics/botMetrics';
 import type { ActivityItem, BotDesk, BotMetrics, BotStatus, DeskSnapshot, PortfolioSnapshot, RangeBlock, TapePrice, TokenQty } from './metrics';
 
 type Rec = Record<string, unknown>;
@@ -61,21 +61,18 @@ function recordTokens(rows: Record<string, number> | null, keepZero = false): To
     .map(([symbol, amount]) => ({ symbol, amount, usd: null }));
 }
 
-/**
- * Always the botMetrics functions, never a metrics object already on the payload.
- * An old snapshot's attached metrics still has the pre-rebuild Generated.
- */
-function metricsOf(raw: Rec, kind: 'grid' | 'lp' | 'trend', asOf: number): ServerMetrics {
-  if (kind === 'grid') return gridMetrics(raw, asOf);
-  if (kind === 'lp') return lpMetrics(raw, asOf);
-  return trendMetrics(raw, asOf);
+/** The metrics status() attached to the bot (as of its own last price). They are computed there and nowhere else. */
+function metricsOf(raw: Rec): ServerMetrics {
+  const m = rec(raw.metrics);
+  if (!m) throw new Error(`Bot ${str(raw.id)} has no metrics on the status payload.`);
+  return m as unknown as ServerMetrics;
 }
 
 /**
  * Copy the screen fields off botMetrics. Per-coin fee, gas, and range-move rows are not on that
  * object, so those arrays stay empty and the sheet shows the Generated total with a note.
  */
-function viewOf(m: ServerMetrics, asOf: number): BotMetrics {
+function viewOf(m: ServerMetrics): BotMetrics {
   const pace = (rows: Record<string, number> | null) => (rows == null ? null : recordTokens(rows, true) ?? []);
   return {
     botId: m.botId,
@@ -113,7 +110,7 @@ function viewOf(m: ServerMetrics, asOf: number): BotMetrics {
     moveCount: m.moveCount,
     fillCount: m.fillCount,
     range: null,
-    asOf,
+    asOf: m.asOf,
     calc: screenCalc(m.calc),
     invested: coinInvested(m),
     breakdownByCoin: m.breakdownByCoin,
@@ -171,13 +168,13 @@ function shownRange(base: string, quote: string, lower: number | null, upper: nu
   return { lower: lo, upper: hi, current: cur, inRange: inRange ?? (cur >= lo && cur <= hi) };
 }
 
-function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
+function gridBot(status: Rec, g: Rec): BotDesk {
   const quote = str(g.quoteSym) || str(g.stable) || 'quote';
   const base = str(g.base) || 'base';
   const price = num(g.price);
   const chain = chainOf(status, g.chainId);
-  const server = metricsOf(g, 'grid', asOf);
-  const metrics = withRange(viewOf(server, asOf), base, quote, server.range);
+  const server = metricsOf(g);
+  const metrics = withRange(viewOf(server), base, quote, server.range);
   const k = rate(g.usdPerQuote);
   const trades = Array.isArray(g.trades) ? g.trades : [];
   let run = 0;
@@ -194,23 +191,23 @@ function gridBot(status: Rec, g: Rec, asOf: number): BotDesk {
   return desk(metrics, str(g.label) || `${base}/${quote}`, base, quote, chain, str(g.dexName), price, spark, num(g.feeBps), num(g.priceAt), !!g.archivedAt);
 }
 
-function trendBot(status: Rec, t: Rec, asOf: number): BotDesk {
+function trendBot(status: Rec, t: Rec): BotDesk {
   const quote = str(t.quoteSym) || str(t.quote) || 'quote';
   const base = str(t.base) || 'base';
   const price = num(t.price);
   const chain = chainOf(status, t.chainId);
-  const server = metricsOf(t, 'trend', asOf);
-  const metrics = viewOf(server, asOf);
+  const server = metricsOf(t);
+  const metrics = viewOf(server);
   return desk(metrics, str(t.label) || str(t.name) || `${base}/${quote}`, base, quote, chain, str(t.dexName), price, [], num(t.feeBps), num(t.priceAt), !!t.archivedAt);
 }
 
-function lpBot(status: Rec, lp: Rec, asOf: number): BotDesk {
+function lpBot(status: Rec, lp: Rec): BotDesk {
   const base = str(lp.base) || 'base';
   const quote = str(lp.quote) || 'quote';
   const price = num(lp.price);
   const chain = chainOf(status, lp.chainId);
-  const server = metricsOf(lp, 'lp', asOf);
-  const metrics = withRange(viewOf(server, asOf), base, quote, server.range);
+  const server = metricsOf(lp);
+  const metrics = withRange(viewOf(server), base, quote, server.range);
   return desk(metrics, str(lp.label) || `${base}/${quote}`, base, quote, chain, str(lp.dexName), price, [], num(lp.feeBps), num(lp.priceAt), !!lp.archivedAt);
 }
 
@@ -399,9 +396,9 @@ export function adaptStatus(status: Rec, events: ActivityEvent[] = [], asOf = nu
   const lps = (Array.isArray(status.lps) ? status.lps : []).map(rec).filter((g): g is Rec => !!g);
   const trends = (Array.isArray(status.trends) ? status.trends : []).map(rec).filter((g): g is Rec => !!g);
   const bots = [
-    ...grids.map((g) => gridBot(status, g, asOf)),
-    ...lps.map((lp) => lpBot(status, lp, asOf)),
-    ...trends.map((t) => trendBot(status, t, asOf)),
+    ...grids.map((g) => gridBot(status, g)),
+    ...lps.map((lp) => lpBot(status, lp)),
+    ...trends.map((t) => trendBot(status, t)),
   ];
   const rank = (b: BotDesk) => (b.metrics.status === 'running' ? 0 : 1) + (b.metrics.mode === 'live' ? 0 : 2);
   bots.sort((a, b) => rank(a) - rank(b) || Math.abs(b.metrics.generatedUsd ?? 0) - Math.abs(a.metrics.generatedUsd ?? 0));

@@ -4,7 +4,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { adaptStatus } from '../src/v2/adapt-status';
+import { deskOf } from './helpers/deskOf';
 import { ledgerLines, sheetRows } from '../src/v2/figures';
 import type { BotMetrics } from '../src/v2/metrics';
 
@@ -12,7 +12,7 @@ import type { BotMetrics } from '../src/v2/metrics';
 type Obj = Record<string, any>;
 const status = JSON.parse(readFileSync(new URL('./fixtures/real-status-2026-10-27.json', import.meta.url), 'utf8')) as Obj;
 const now = status.grids[0].metrics.asOf as number;
-const base = adaptStatus({ spotsAt: now, lps: [status.lps.find((r: Obj) => r.id === 'lp-mvnm73sx-hghe')] }, [], now).bots[0].metrics;
+const base = deskOf({ spotsAt: now, lps: [status.lps.find((r: Obj) => r.id === 'lp-mvnm73sx-hghe')] }, [], now).bots[0].metrics;
 const row = (rows: { label: string; value: string }[], label: string) => rows.find((r) => r.label === label)?.value;
 
 describe('breakdown step', () => {

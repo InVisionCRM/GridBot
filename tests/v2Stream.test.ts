@@ -7,6 +7,7 @@ import { Logger } from '../src/server/bot/logger';
 import { MultiBot, type MultiState } from '../src/server/bot/multi';
 import { MemoryStore } from '../src/server/bot/store';
 import { deskDelta, deskFromStatus } from '../src/server/v2Desk';
+import { withMetrics } from './helpers/deskOf';
 import { applyDelta } from '../src/v2/use-desk';
 import { MockChain, NET } from './helpers/mockChain';
 
@@ -71,7 +72,7 @@ const PAPER = { mode: 'paper' as const, stable: 'DAI', lowerPrice: 0.9e-5, upper
 describe('v2 desk stream', () => {
   it('does not copy wallet fields out of status', () => {
     const secret = `0x${'ab'.repeat(20)}`;
-    const desk = deskFromStatus({
+    const desk = deskFromStatus(withMetrics({
       spotsAt: 1_700_000_000_000,
       address: secret,
       walletBalances: { PLS: 9 },
@@ -85,7 +86,7 @@ describe('v2 desk stream', () => {
         pnl: { realized: 1, unrealized: 0, gasUsd: 0 },
         stats: { roundTrips: 2, totalFees: 0 },
       }],
-    }, [{ id: 1, t: 1_700_000_000_000, type: 'filled', level: 'success', msg: `fill ${secret}`, botId: 'g1' } as ActivityEvent]);
+    }, 1_700_000_000_000), [{ id: 1, t: 1_700_000_000_000, type: 'filled', level: 'success', msg: `fill ${secret}`, botId: 'g1' } as ActivityEvent]);
     const json = JSON.stringify(desk);
     expect(json).not.toContain(secret);
     expect(json).not.toContain('walletBalances');
@@ -103,8 +104,8 @@ describe('v2 desk stream', () => {
       stats: { roundTrips: 2, totalFees: 0 },
     });
     const now = 1_700_000_000_000;
-    const before = deskFromStatus({ spotsAt: now, grids: [row('a'), row('b')] });
-    const after = deskFromStatus({ spotsAt: now, grids: [row('b'), row('c')] });
+    const before = deskFromStatus(withMetrics({ spotsAt: now, grids: [row('a'), row('b')] }, now));
+    const after = deskFromStatus(withMetrics({ spotsAt: now, grids: [row('b'), row('c')] }, now));
     const delta = deskDelta(before, after);
     expect(delta.removedIds).toEqual(['a']);
     expect(delta.bots.map((b) => b.metrics.botId)).toEqual(['c']);

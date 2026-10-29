@@ -2,7 +2,9 @@
  * Small stand-in with the same shape as /api/bot/status.
  * Fake coins and no addresses. The owner snapshot stays outside the repo.
  */
-export const sanitizedStatus = {
+import { gridMetrics, lpMetrics } from '../metrics/botMetrics';
+
+const raw = {
   spotsAt: 1_700_000_000_000,
   chains: [
     { id: 1, short: 'ETH', color: '#8c9eff' },
@@ -41,6 +43,13 @@ export const sanitizedStatus = {
       pnl: null, config: { capital: 100 },
     },
   ],
+};
+
+/** With the metrics status() attaches to each bot, as of the snapshot time (the bots here have no price time). */
+export const sanitizedStatus = {
+  ...raw,
+  grids: raw.grids.map((g) => ({ ...g, kind: 'grid' as const, metrics: gridMetrics({ ...g, kind: 'grid' }, raw.spotsAt) })),
+  lps: raw.lps.map((lp) => ({ ...lp, metrics: lpMetrics(lp, raw.spotsAt) })),
 };
 
 export const sanitizedActivity = [
