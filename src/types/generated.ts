@@ -36,6 +36,8 @@ export interface Generated {
   gasInAmount: boolean;
   /** Closed sells counted. null = not counted (smart trader). */
   closed: number | null;
+  /** Buys and landed sell parts, all-time. null = not counted (smart trader). */
+  fills: number | null;
   /** Only closed positions are realized; open ones count only the costs they already paid */
   basis: 'closed';
   /**

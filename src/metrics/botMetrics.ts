@@ -574,10 +574,11 @@ export function tokenSpendTotals(t: Obj): Record<string, SpendTotals> | null {
  * in coins stays in dollars.
  */
 /** Token trader: the closed sells' result per spend coin; its log has no gas / fee split, so the costs stay inside. */
-function tokenParts(generated: Record<string, number>): Pick<Core, 'parts' | 'basis'> {
+/** Per spend coin from the ledger: what the trades made before costs, the pool fees and gas (when it comes off), the taxes. */
+function tokenParts(by: Record<string, { amount: number; fees: number; taxes: number; gas: number }>): Pick<Core, 'parts' | 'basis'> {
   return {
-    parts: Object.fromEntries(Object.entries(generated).map(([s, u]) => [s, { earned: u, gasSwap: 0, rangeMoveLoss: 0, taxes: 0 }])),
-    basis: { earned: 'tradeProfit', itemized: false, note: 'Closed sells\' result per coin spent; the log has no gas / swap-fee split, so they stay inside it.' },
+    parts: Object.fromEntries(Object.entries(by).map(([s, l]) => [s, { earned: l.amount + l.fees + l.taxes + l.gas, gasSwap: l.fees + l.gas, rangeMoveLoss: 0, taxes: l.taxes }])),
+    basis: { earned: 'tradeProfit', itemized: true, note: 'Closed sells less what was paid for them, before pool fees, sell taxes and (for the chain\'s own coin) gas.' },
   };
 }
 
@@ -593,20 +594,22 @@ export function tokenMetrics(t: Obj, now = Date.now()): BotMetrics {
   const trades = ((t.trades ?? []) as Obj[]).filter(ofMode);
   const positions = ((t.positions ?? []) as Obj[]).filter(ofMode);
   const ledger = ((t.generated ?? []) as Obj[]).filter(ofMode);
-  const firstT = trades.reduce((m, x) => (num(x.t) != null && (m == null || x.t < m) ? x.t : m), null as number | null);
+  // age and fills from the trader's own all-time records (the trade log is trimmed to its newest rows)
+  const fills = ledger.reduce((a, g) => a + (num(g.fills) ?? 0), 0);
   const base = {
-    kind: 'token' as const, id: String(t.id ?? 'token-trader'), mode, status: t.on ? 'running' : 'stopped', startedAt: firstT,
+    kind: 'token' as const, id: String(t.id ?? 'token-trader'), mode, status: t.on ? 'running' : 'stopped', startedAt: num(t.startedAt?.[mode]) ?? null,
     extraCost: 0, feesEarned: null, feesCollected: null, feesUncollected: null, gas: null, swapCost: null,
-    moveCount: trades.length, fillCount: trades.length, range: null, taxes: null,
+    moveCount: fills, fillCount: fills, range: null, taxes: null,
   };
   const rates = spendRates(trades, positions);
   // the ledger per spend coin: net generated, coins received from sells, coins paid for them, gas taken out of it
-  const by: Record<string, { amount: number; proceeds: number; cost: number; gas: number }> = {};
+  const by: Record<string, { amount: number; proceeds: number; cost: number; gas: number; fees: number; taxes: number }> = {};
   for (const g of ledger) {
     const sym = typeof g.coin?.symbol === 'string' ? g.coin.symbol : null;
     if (!sym) continue;
-    const r = (by[sym] ??= { amount: 0, proceeds: 0, cost: 0, gas: 0 });
+    const r = (by[sym] ??= { amount: 0, proceeds: 0, cost: 0, gas: 0, fees: 0, taxes: 0 });
     r.amount += num(g.amount) ?? 0; r.proceeds += num(g.proceeds) ?? 0; r.cost += num(g.cost) ?? 0;
+    r.fees += num(g.fees) ?? 0; r.taxes += num(g.taxes) ?? 0;
     if (g.gasInAmount) r.gas += num(g.gasNative) ?? 0;
   }
   // open positions per spend coin: the unsold part's cost and its result at today's price
@@ -627,18 +630,18 @@ export function tokenMetrics(t: Obj, now = Date.now()): BotMetrics {
   const generated = Object.fromEntries(syms.map((s) => [s, by[s]?.amount ?? 0]));
   const px = Object.fromEntries(syms.map((s) => [s, rates[s] ?? null]));
   if (syms.length === 1) {
-    const [s] = syms, l = by[s] ?? { amount: 0, proceeds: 0, cost: 0, gas: 0 }, o = open[s] ?? { cost: 0, pnl: 0 };
+    const [s] = syms, l = by[s] ?? { amount: 0, proceeds: 0, cost: 0, gas: 0, fees: 0, taxes: 0 }, o = open[s] ?? { cost: 0, pnl: 0 };
     // Total P&L = value now + coins received − gas − coins paid = open result + Generated
     return finish({
       ...base, capitalIn: l.cost + o.cost, currentValue: o.cost + o.pnl, paidOut: l.proceeds, extraCost: l.gas, gas: l.gas || null,
       realized: l.amount, unrealized: o.pnl, k: rates[s] ?? null, symbol: s, generated, px, dollarsMade: l.amount,
-      ...tokenParts(generated), capitalSource: 'token-buys', capitalCoins: { [s]: l.cost + o.cost },
+      ...tokenParts({ [s]: l }), capitalSource: 'token-buys', capitalCoins: { [s]: l.cost + o.cost },
       rebalanceLoss: trades.filter((x) => x.side === 'sell').reduce((a, x) => { const v = num(x.pnl) ?? (num(x.pnlUsd) ?? 0) / (rates[s] ?? 1); return v < 0 ? a - v : a; }, 0),
     }, now);
   }
   // several spend coins: the money figures stay in dollars inside (the page shows them as ETH); Generated per coin
   const dollars = tokenDollars(trades, positions);
-  return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated, px, ...tokenParts(generated) }, now);
+  return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated, px, ...tokenParts(by) }, now);
 }
 
 function tokenDollars(trades: Obj[], positions: Obj[]) {

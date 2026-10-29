@@ -596,7 +596,7 @@ export class Autopilot {
         // gas is already out of coins[B] when B is the chain's own coin
         amount: proceeds - a.budget.amount,
         proceeds, cost: a.budget.amount, fees: null, taxes: null,
-        gasNative: a.gasNative, gasSymbol: nativeSym, gasInAmount: native, closed: null, basis: 'closed',
+        gasNative: a.gasNative, gasSymbol: nativeSym, gasInAmount: native, closed: null, fills: null, basis: 'closed',
         // One mode per account: configure() changes the mode only while off with nothing held, and starts new accounts
         // (accounts: []), so an account's Generated never mixes paper and live.
         mode: this.state.mode,

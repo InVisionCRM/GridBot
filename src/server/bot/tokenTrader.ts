@@ -216,6 +216,8 @@ export interface GenLedger {
   mode: 'paper' | 'live';
   chainId: number; coin: string; symbol: string;
   proceeds: number; cost: number; fees: number; taxes: number; gasNative: number; closed: number;
+  /** Buys and landed sell parts booked here (all-time; the trade log is trimmed). Set at load for older files (migrateCounts). */
+  fills: number;
   /** Set on an entry split from a pre-mode entry whose mode was inferred, not recorded (see migrateLedgerModes) */
   modeInferred?: boolean;
   /** Sells whose coins received are not known (a reported-failed send that landed); not in proceeds or cost */
@@ -228,7 +230,8 @@ const genKey = (mode: TradeMode, chainId: number, coin: string) => `${mode}:${ch
  * One fill. `usd`/`pnlUsd` are dollars (kept for the API); `spendSym`, `amount` (spend coin bought with / received) and
  * `pnl` (spend coin) are the same fill in the coin it spends, for the crypto-units screens. Older lines have only dollars.
  */
-export interface TradeLog { t: number; side: 'buy' | 'sell'; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null; spendSym?: string; amount?: number; pnl?: number | null }
+/** `mode`: paper or live (rows written before it was recorded have none). */
+export interface TradeLog { t: number; side: 'buy' | 'sell'; mode?: TradeMode; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null; spendSym?: string; amount?: number; pnl?: number | null }
 export interface FeedItem { t: number; chainId: number; pool: string; label: string; verdict: 'bought' | 'skipped'; why: string }
 
 export interface TraderState {
@@ -274,6 +277,8 @@ export interface TraderState {
   generated?: Record<string, GenLedger>;
   /** Live buys sent whose receipt had not come when the executor stopped waiting: settled by hash on later ticks. */
   inflight?: InflightBuy[];
+  /** When each mode's first buy happened: age and the estimates (the trade log is trimmed). Set at load for older files. */
+  startedAt?: Partial<Record<TradeMode, number>>;
 }
 
 export type OffMode = 'exits' | 'full';
@@ -428,6 +433,7 @@ export class TokenTrader {
     this.spillRejects();
     this.migrateEntries();
     this.migrateLedgerModes();
+    this.migrateCounts();
     this.migrateOffMode(loaded);
   }
 
@@ -450,7 +456,7 @@ export class TokenTrader {
     const fields = ['proceeds', 'cost', 'fees', 'taxes', 'gasNative'] as const;
     const into = (mode: TradeMode, src: GenLedger, add: Record<(typeof fields)[number], number>, closed: number, inferred: boolean) => {
       const k = genKey(mode, src.chainId, src.coin);
-      const t = g[k] ?? (g[k] = { mode, chainId: src.chainId, coin: src.coin.toLowerCase(), symbol: src.symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0 });
+      const t = g[k] ?? (g[k] = { mode, chainId: src.chainId, coin: src.coin.toLowerCase(), symbol: src.symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0, fills: 0 });
       for (const f of fields) t[f] += add[f];
       t.closed += closed;
       if (inferred) t.modeInferred = true;
@@ -487,6 +493,31 @@ export class TokenTrader {
     }
     this.save();
     this.say(`Token trader: Generated now keeps paper and live apart; ${old.length} older entr${old.length === 1 ? 'y' : 'ies'} split (${lines.join('; ')})`);
+  }
+
+  /**
+   * Files from before the start time and fill count were kept: both are set once, from what the screens showed (the
+   * oldest row the trade log still has, and its rows per chain and spend coin), and kept from then on. Before this the
+   * log carried no mode, so its rows count for the mode the trader is in now; the other mode starts at its oldest open
+   * position.
+   */
+  private migrateCounts() {
+    const s = this.state, now = s.options.mode === 'live' ? 'live' : 'paper';
+    let changed = false;
+    if (!s.startedAt) {
+      s.startedAt = {};
+      for (const m of ['paper', 'live'] as const) {
+        const ts = [...s.positions.filter((p) => p.mode === m).map((p) => p.openedAt), ...(m === now ? s.trades.map((r) => r.t) : [])].filter((t) => t > 0);
+        if (ts.length) s.startedAt[m] = Math.min(...ts);
+      }
+      changed = true;
+    }
+    for (const l of Object.values(s.generated ?? {})) {
+      if (typeof l.fills === 'number') continue;
+      l.fills = l.mode === now ? s.trades.filter((r) => r.chainId === l.chainId && r.spendSym === l.symbol).length : 0;
+      changed = true;
+    }
+    if (changed) this.save();
   }
 
   /** Older state files kept rejects next to passed plays. Move them out so the hot file stays small. */
@@ -631,7 +662,7 @@ export class TokenTrader {
   private ledger(mode: TradeMode, chainId: number, coin: string, symbol: string): GenLedger {
     const g = this.state.generated ?? (this.state.generated = {});
     const k = genKey(mode, chainId, coin);
-    return g[k] ?? (g[k] = { mode, chainId, coin: coin.toLowerCase(), symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0 });
+    return g[k] ?? (g[k] = { mode, chainId, coin: coin.toLowerCase(), symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0, fills: 0 });
   }
   private spendSymbol(p: Pick<Position, 'label' | 'spend'>) { return p.label.split('/')[1] ?? p.spend; }
   private view(coin: { chainId: number; coin: string; symbol: string }, x: Omit<GenLedger, 'chainId' | 'coin' | 'symbol'>): Generated {
@@ -641,7 +672,7 @@ export class TokenTrader {
       coin: { chainId: coin.chainId, address: coin.coin, symbol: coin.symbol, native: gasInAmount },
       amount: x.proceeds - x.cost - (gasInAmount ? x.gasNative : 0),
       proceeds: x.proceeds, cost: x.cost, fees: x.fees, taxes: x.taxes,
-      gasNative: x.gasNative, gasSymbol: info?.nativeSymbol ?? null, gasInAmount, closed: x.closed, basis: 'closed',
+      gasNative: x.gasNative, gasSymbol: info?.nativeSymbol ?? null, gasInAmount, closed: x.closed, fills: x.fills, basis: 'closed',
       mode: x.mode, ...(x.modeInferred ? { modeInferred: true } : {}), ...(x.unpriced ? { unpriced: x.unpriced } : {}),
     };
   }
@@ -653,7 +684,7 @@ export class TokenTrader {
   private posGenerated(p: Position): Generated {
     const g = p.gen ?? { feeBooked: 0, costSold: 0, proceeds: 0, fees: 0, taxes: 0, gasNative: 0 };
     return this.view({ chainId: p.chainId, coin: p.spend, symbol: this.spendSymbol(p) }, {
-      mode: p.mode, proceeds: g.proceeds, cost: g.costSold + g.feeBooked, fees: g.fees + g.feeBooked, taxes: g.taxes, gasNative: g.gasNative, closed: 0, unpriced: g.unpriced,
+      mode: p.mode, proceeds: g.proceeds, cost: g.costSold + g.feeBooked, fees: g.fees + g.feeBooked, taxes: g.taxes, gasNative: g.gasNative, closed: 0, fills: 0, unpriced: g.unpriced,
     });
   }
   /** A buy: its pool fee (paid in the spend coin) and its gas are booked now; the rest of what it spent is cost when sold */
@@ -661,7 +692,7 @@ export class TokenTrader {
     const g = genOf(p), l = this.ledger(p.mode, p.chainId, p.spend, this.spendSymbol(p));
     const fee = p.spent * (p.feeBps / 10_000);
     g.feeBooked = fee; g.gasNative += gasNative;
-    l.cost += fee; l.fees += fee; l.gasNative += gasNative;
+    l.cost += fee; l.fees += fee; l.gasNative += gasNative; l.fills++;
   }
   /**
    * A sell of `sold` tokens that brought `quote` spend coins (actual: after fee, tax and impact). Live: called once per
@@ -675,7 +706,7 @@ export class TokenTrader {
     const gross = quote / ((1 - f) * (1 - t));
     const fee = gross * (1 - t) * f, tax = gross * t;
     g.costSold += basis; g.proceeds += quote; g.fees += fee; g.taxes += tax; g.gasNative += gasNative;
-    l.cost += basis; l.proceeds += quote; l.fees += fee; l.taxes += tax; l.gasNative += gasNative; if (countClose) l.closed++;
+    l.cost += basis; l.proceeds += quote; l.fees += fee; l.taxes += tax; l.gasNative += gasNative; l.fills++; if (countClose) l.closed++;
   }
   /** Tokens left the wallet without a known fill (see reconcile): counted, not priced */
   private bookUnpriced(p: Position) {
@@ -1160,10 +1191,11 @@ export class TokenTrader {
       tokenReserve: pool.tokenReserve, usdPerSpend: pool.usdPerSpend, buyTax, tp1Done: false, tp2Done: false, source, exitPlan: 'hold',
     };
     this.state.positions.push(pos);
+    (this.state.startedAt ??= {})[mode] ??= this.now();
     this.bookBuy(pos, f.gasNative ?? 0);
     const extra = [c.warn, c.note].filter((s): s is string => !!s).join('; ');
     const why = extra ? `buy ${c.why}; ${extra}` : `buy ${c.why}`;
-    this.state.trades.unshift({ t: this.now(), side: 'buy', chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
+    this.state.trades.unshift({ t: this.now(), side: 'buy', mode, chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
     this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode } : { mode });
     this.rememberEntry(pos, pool, c.impact, f.tx, f.gasUsed, f.gasPrice, f.gasNative);
@@ -1326,7 +1358,7 @@ export class TokenTrader {
     const usd = r.amountOut * p.usdPerSpend;
     const share = p.entryTokens > 0 ? ps.tokens / p.entryTokens : 0;
     const why = `sell ${ps.hash} settled`;
-    this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - p.spentUsd * share, spendSym: p.label.split('/').pop(), amount: r.amountOut, pnl: r.amountOut - p.spent * share });
+    this.state.trades.unshift({ t: this.now(), side: 'sell', mode: p.mode, chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - p.spentUsd * share, spendSym: p.label.split('/').pop(), amount: r.amountOut, pnl: r.amountOut - p.spent * share });
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
     this.say(`sold ${p.label}: ${why}`, 'success', { mode: p.mode });
     this.noteSell(p, { quote: r.amountOut, sold: ps.tokens, price: p.price, impact: null, txs: [ps.hash], flat: !(p.tokens > p.entryTokens * 1e-8), gas: null });
@@ -1475,7 +1507,7 @@ export class TokenTrader {
         const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
         const costCoin = p.spent * (p.entryTokens > 0 ? sold / p.entryTokens : 0); // the same cost in the spend coin (log only)
         const why = stopped ? `${d.why} (partial: ${num(sold)} of ${num(qty)})` : d.why;
-        this.state.trades.unshift({ t: this.now(), side: 'sell', chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost, spendSym: p.label.split('/').pop(), amount: quote, pnl: quote - costCoin });
+        this.state.trades.unshift({ t: this.now(), side: 'sell', mode: p.mode, chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost, spendSym: p.label.split('/').pop(), amount: quote, pnl: quote - costCoin });
         this.say(`sold ${p.label}: ${why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
       }
       if (tp && (sold > 0 || pend || stopped)) {
