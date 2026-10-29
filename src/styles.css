@@ -1077,7 +1077,7 @@ label.wide input { min-width: 180px; }
 }
 .desk-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .desk-id .bot-title { font-size: 14px; font-weight: 500; }
-.desk-id .bot-meta { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.desk-id .bot-meta { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; row-gap: 0; }
 .desk-id .status-dot { margin-right: 0; }
 .desk-fills { font-family: var(--mono); font-size: 13px; color: var(--secondary); font-variant-numeric: tabular-nums; }
 .kind-tag { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--secondary); border: 1px solid var(--line-2); border-radius: 4px; padding: 2px 6px; justify-self: start; }
@@ -1260,8 +1260,10 @@ label.wide input { min-width: 180px; }
 .bot-menu-empty { margin: 8px; color: var(--muted); font-size: 13px; }
 .desk.desk-book { min-width: 0; overflow-x: auto; }
 .desk.desk-book .desk-head, .desk.desk-book .desk-row {
-  min-width: 980px;
-  grid-template-columns: minmax(180px, 1.6fr) 72px minmax(0, 0.7fr) 88px 84px minmax(0, 1.1fr) 88px 64px 84px 56px 72px 48px 36px;
+  min-width: 1170px; column-gap: 10px;
+  /* Generated keeps room for one coin per line ("+66,291 STONKD ·") and Range for its bar; it all fits a 1280px window,
+     and the table scrolls sideways below that */
+  grid-template-columns: minmax(160px, 1.6fr) 72px minmax(72px, 0.7fr) 88px 84px minmax(128px, 1.1fr) 88px 64px 84px 56px 72px 48px 36px;
 }
 .desk.desk-book .desk-head > *, .desk.desk-book .desk-row > * { min-width: 0; }
 .desk.desk-book .desk-spark .sparkline { width: 72px; height: 28px; }
@@ -1296,7 +1298,8 @@ label.wide input { min-width: 180px; }
 .desk-chev { color: var(--muted); width: 12px; }
 /* Generated (the headline): units per token, dollars under it */
 .desk-gen { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 0; }
-.desk-gen b { display: block; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-gen b { display: block; font-weight: 500; font-size: 13px; } /* a two-coin figure wraps, never cut */
+.desk-gen .coin-line { display: block; white-space: nowrap; }
 .desk-gen small { font-size: 11px; color: var(--muted); }
 .desk-pct, .desk-age, .desk-apr, .desk-moves, .desk-fees { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
 .desk-apr .desk-run { display: block; font-size: 10px; color: var(--muted); white-space: nowrap; }

@@ -357,7 +357,8 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           <span className="desk-val">{value == null ? '—' : qty(value, pair.quote, 5, false)}</span>
           {metrics && facts ? <>
             <span className="desk-gen" title={m?.calc ?? undefined}>
-              <b className={cls(gen.usd)}>{gen.text}</b>
+              {/* one coin per line: a two-coin figure never breaks inside an amount */}
+              <b className={cls(gen.usd)}>{gen.text.split(' · ').map((part, i, all) => <span key={i} className="coin-line">{part}{i < all.length - 1 ? ' ·' : ''}</span>)}</b>
             </span>
             <span className="desk-pnl" title={m?.calc ?? undefined}>
               <b className={cls(pnl.quote)}>{money}</b>
