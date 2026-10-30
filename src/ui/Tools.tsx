@@ -1,4 +1,7 @@
-/** Tools: charts, backtest, analytics, markets (custom tokens, pools), and converting a chain's coins to one. Alerts is its own screen. */
+/**
+ * Tools pages. Charts, Backtest and the Market list are one "Charts & tools" page with its own tabs (More's tile);
+ * History (analytics), Convert (from the Wallet), System and Friends are single pages with no tab bar.
+ */
 import { useEffect, useState } from 'react';
 import { http } from './api';
 import { Chart } from './Chart';
@@ -7,7 +10,7 @@ import { Analytics, MarketPanels } from './Analytics';
 import { Markets } from './Markets';
 import { lbl, marketsOf, useChainFilter } from './chains';
 import type { Ticks } from './useStream';
-import { TOOL_TABS, type AnyObj, type Nav, type View } from './model';
+import { TOOL_TABS, type AnyObj, type Nav, type ToolTab, type View } from './model';
 import { SystemTab, type useVersion } from './System';
 import { Convert } from './Convert';
 import { Friends } from './Friends';
@@ -33,6 +36,9 @@ function ChartTab({ s, ticks }: { s: AnyObj; ticks: Ticks | null }) {
   );
 }
 
+/** The tabs of the "Charts & tools" page */
+const CHART_TOOLS: ToolTab[] = ['chart', 'backtest', 'markets'];
+
 export function Tools({ s, view, ticks, nav, act, busy, ver }: {
   s: AnyObj; view: Extract<View, { v: 'tools' }>; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean;
   ver: ReturnType<typeof useVersion>;
@@ -40,9 +46,11 @@ export function Tools({ s, view, ticks, nav, act, busy, ver }: {
   const tab = view.tab;
   return (
     <main className="stack">
-      <nav className="tabs" aria-label="Tools">
-        {TOOL_TABS.filter(([k]) => !(k === 'friends' && s.copy)).map(([k, l]) => <button key={k} type="button" className={tab === k ? 'on' : ''} aria-current={tab === k} onClick={() => nav({ v: 'tools', tab: k })}>{l}</button>)}
-      </nav>
+      {CHART_TOOLS.includes(tab) && (
+        <nav className="tabs" aria-label="Charts and tools">
+          {TOOL_TABS.filter(([k]) => CHART_TOOLS.includes(k)).map(([k, l]) => <button key={k} type="button" className={tab === k ? 'on' : ''} aria-current={tab === k} onClick={() => nav({ v: 'tools', tab: k })}>{l}</button>)}
+        </nav>
+      )}
       {tab === 'chart' && <ChartTab s={s} ticks={ticks} />}
       {tab === 'backtest' && <Backtest status={s} prefill={view.btPrefill ?? null}
         onUse={(p) => nav(p.created ? { v: 'trend', id: p.created } : { v: 'new', kind: 'trend', trendPrefill: { pair: p.pair, tf: p.tf, cfg: p.cfg, capital: p.capital, nonce: Date.now() } })} />}

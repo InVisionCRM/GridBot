@@ -159,7 +159,7 @@ export default function App() {
         <ViewError key={`${view.v}:${'id' in view ? view.id : ''}:${'tab' in view ? view.tab : ''}:${view.v === 'holdings' ? view.focus ?? '' : ''}`} onHome={() => nav({ v: 'home' })}>
           {view.v === 'home' && <Desk s={s} nav={nav} act={act} busy={busy} holdings={holdings.data} events={events} />}
           {view.v === 'bots' && <Bots s={s} nav={nav} busy={busy} onStopAll={stopAll} />}
-          {view.v === 'more' && <More s={s} nav={nav} onGuide={() => setGuide(true)} onActivity={() => setDrawer(true)} />}
+          {view.v === 'more' && <More s={s} nav={nav} holdings={holdings.data} onGuide={() => setGuide(true)} />}
           {view.v === 'opps' && <Opportunities s={s} nav={nav} act={act} busy={busy} />}
           {view.v === 'auto' && <SmartTrader s={s} nav={nav} />}
           {view.v === 'holdings' && <Holdings s={s} snap={holdings.data} loading={holdings.loading} error={holdings.err} reload={holdings.reload} focus={view.focus} nav={nav} />}
