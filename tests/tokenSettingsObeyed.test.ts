@@ -251,3 +251,38 @@ describe("one position's failed price read doesn't stop the trader", () => {
     expect(t.status().lastError).toMatch(/^T3\/WETH: price read failed, last price kept/);
   });
 });
+
+describe("open positions' prices are read at once", () => {
+  it('every read starts before any finishes (one after another, 11 positions held discovery back for minutes)', async () => {
+    const NOW = 1_800_000_000_000;
+    const mk = (n: number): FreshPool => ({
+      chainId: 1, pool: '0x' + String(n).repeat(40).slice(0, 40), dex: 'uni-v3', kind: 'v3', token: '0x' + '11'.repeat(20), spend: '0x' + '22'.repeat(20),
+      tokenSymbol: `T${n}`, spendSymbol: 'WETH', liquidityUsd: 80_000, volumeUsd: 10_000, createdAt: NOW - 48 * 3600_000, source: 'trending',
+      quoteReserve: 40, tokenReserve: 1_000_000, feeBps: 30, price: 0.00004, usdPerSpend: 2_000,
+    });
+    const clean: GateInput = {
+      mode: 'paper', risk: 'any', honeypot: false, sellSimOk: true, paused: false, decimals: 18, buyTax: 0, sellTax: 0,
+      liquidityUsd: 80_000, minLiquidityUsd: 0, canPause: false, canBlacklist: false, proxy: false, lpUnlocked: null,
+      holderConcentration: null, recentLiqPull: false, liveAllowed: true,
+    };
+    let started = 0, release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => { release = r; });
+    let gated = false;
+    const batches = [[mk(3), mk(5), mk(7)]];
+    const t = new TokenTrader({
+      store: new MemoryStore<TraderState>(), now: () => NOW,
+      sniper: { tick: async (cursors: Record<string, number>) => ({ cursors, hits: [], notes: [] }) } as unknown as PoolSniper,
+      discover: async () => batches.shift() ?? [], assess: async () => clean, resolve: async () => null,
+      mark: async () => { if (gated) { started++; await gate; } return null; },
+    });
+    t.configure({ perTradeUsd: 100, totalUsd: 500, risk: 'any' });
+    t.turnOn();
+    await t.tick(); // buys 3 positions
+    gated = true;
+    const ticking = t.tick();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(started).toBe(3);
+    release();
+    await ticking;
+  });
+});

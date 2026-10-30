@@ -1473,15 +1473,21 @@ export class TokenTrader {
 
   private async exits() {
     const left: Position[] = [];
+    // Every position's price is read at once; the exits below still go one by one (2026-10-30: read one after another,
+    // 11 open positions took minutes on Robinhood and held back each discovery behind them)
+    const marks = new Map<string, Promise<{ m: Partial<Position> | null } | { e: unknown }>>();
+    if (this.d.mark) for (const p of this.state.positions) marks.set(p.id, this.d.mark(p).then((m) => ({ m }), (e: unknown) => ({ e })));
     for (const p of this.state.positions) {
       // Turned off completely while this loop was awaiting: leave the rest alone.
       if (!this.canSell()) { left.push(p); continue; }
-      if (this.d.mark) {
+      const read = marks.get(p.id);
+      if (read) {
         // One pool whose price can't be read keeps its last price; it doesn't stop the other exits and every buy (a
         // throw here failed the whole tick, and a failed exit pass skips entries: 2026-10-30, a thin V4 pool's quote
         // reverted on each tick and the trader bought nothing more)
-        let m: Partial<Position> | null = null;
-        try { m = await this.d.mark(p); } catch (e) { this.lastError = `${p.label}: price read failed, last price kept (${(e as Error).message.slice(0, 120)})`; }
+        const r = await read;
+        if ('e' in r) this.lastError = `${p.label}: price read failed, last price kept (${(r.e as Error).message.slice(0, 120)})`;
+        const m = 'm' in r ? r.m : null;
         if (m) {
           Object.assign(p, m);
           if (Object.prototype.hasOwnProperty.call(m, 'feeBps')) this.noteFeeReread(p.id);
