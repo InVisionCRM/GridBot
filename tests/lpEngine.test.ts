@@ -669,6 +669,23 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(value).toBeLessThanOrEqual(0.2084);
   });
 
+  it("a native base re-open leaves gas at the fee the node checks (gas limit × maxFeePerGas), not the expected gas price", async () => {
+    // 2026-10-30, ETH/USDG on Robinhood: the re-open's mint was refused with "insufficient funds" by 0.0000032 ETH. The
+    // keep was 2 × 480,000 gas × gasPrice 0.0207 gwei; the node wanted value + 563,506 gas × maxFeePerGas 0.040996 gwei
+    // (ethers signs 2 × base fee + tip). Same fees here; the wallet holds less of the native coin than the bot counts.
+    const w = live({ price: 2400, balances: { pls: 0.2, stable: 500 } });
+    w.m.getFeeData = async () => ({ gasPrice: 20_700_000n, maxFeePerGas: 40_996_000n });
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.05, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    await e.tick();
+    expect(e.lastError).toBeNull();
+    expect(w.sent).toHaveLength(1);
+    const left = 0.2e18 - Number(w.sent[0].value);
+    expect(left).toBeGreaterThanOrEqual(563_506 * 40_996_000);
+  });
+
   it('a live start with coins from the wallet checks the wallet holds them (after other live bots)', async () => {
     const w = live();
     w.m.native = 10n ** 18n * 1000n; // 1000 PLS in the wallet
