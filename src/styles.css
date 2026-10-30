@@ -1496,7 +1496,19 @@ body.dk-on { overflow: hidden; }
 .dk-chart-head b { font: 600 1rem var(--mono); }
 /* the banked chart is the card's floor: full width, edge to edge, fading out behind the big number */
 .dk-chart { position: absolute; left: 0; right: 0; bottom: 0; height: 76%; z-index: 0; -webkit-mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.22) 30%, #000 56%); mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.22) 30%, #000 56%); }
-.dk-chart canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
+.dk-chart canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+/* the scrub card: above the point it snapped to, kept inside the card */
+.dk-tip { position: absolute; z-index: 4; transform: translate(-50%, calc(-100% - 16px)); width: 260px; display: grid; gap: 2px; padding: 9px 12px; border-radius: 12px; background: #16181c; border: 1px solid rgba(92, 208, 141, 0.35); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); backdrop-filter: blur(8px); pointer-events: none; font-size: 0.78rem; animation: dk-tip-in 0.14s ease-out; }
+.dk-tip.left { transform: translate(calc(-100% - 18px), -50%); }
+.dk-tip.right { transform: translate(18px, -50%); }
+.dk-tip b { font-weight: 600; }
+.dk-tip > span:nth-child(3) { font: 600 0.84rem var(--mono); }
+.dk-tip em { font-style: normal; color: var(--text); font-family: var(--mono); }
+.dk-tip-when, .dk-tip-sub { color: var(--muted); font-size: 0.72rem; }
+.dk-tip-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dk-tip-tot { margin-top: 3px; padding-top: 5px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.72rem; }
+.dk-tip-tot b { color: var(--profit); font-family: var(--mono); }
+@keyframes dk-tip-in { from { opacity: 0; margin-top: 4px; } }
 .dk-empty-chart { position: absolute; inset: 0 0 30% 44%; display: grid; place-items: center; margin: 0; color: var(--muted); font-size: 0.82rem; pointer-events: none; }
 .dk-ranges { display: flex; gap: 4px; align-self: flex-end; background: rgba(14, 15, 17, 0.55); backdrop-filter: blur(6px); border-radius: 999px; padding: 2px; }
 .dk-ranges button { appearance: none; border: 0; background: none; color: var(--muted); font: 600 0.74rem var(--font); padding: 4px 11px; border-radius: 999px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
@@ -1638,6 +1650,6 @@ body.dk-on { overflow: hidden; }
   .dk-hero-sub { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .dk-pane, .dk-big.bump, .dk-stage-row.hit, .dk-live-dot { animation: none; }
+  .dk-pane, .dk-big.bump, .dk-stage-row.hit, .dk-live-dot, .dk-tip { animation: none; }
   .dk-sheet-wrap, .dk-px, .dk-bar i { transition: none; }
 }

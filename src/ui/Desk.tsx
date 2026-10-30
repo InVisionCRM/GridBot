@@ -274,7 +274,13 @@ function BankedChart({ curve, from, onPick }: { curve: { t: number; v: number; i
   const reduced = useReducedMotion();
   const data = useRef(curve);
   data.current = curve;
-  const hits = useRef<{ x: number; y: number; item: BankedItem }[]>([]);
+  // scrubbing: a mouse over the chart, or a finger pressed and dragged along it, snaps to the nearest profit
+  const wrap = useRef<HTMLDivElement>(null);
+  const scrub = useRef<number | null>(null), width = useRef(0), down = useRef<{ x: number; y: number } | null>(null), hide = useRef(0);
+  const [tip, setTip] = useState<{ i: number; x: number; y: number } | null>(null);
+  const tipNow = useRef(tip);
+  tipNow.current = tip;
+  useEffect(() => () => clearTimeout(hide.current), []);
   useEffect(() => {
     let raf = 0, last = 0;
     const draw = (ms: number) => {
@@ -303,18 +309,29 @@ function BankedChart({ curve, from, onPick }: { curve: { t: number; v: number; i
       g.save(); g.shadowColor = 'rgba(92,208,141,.55)'; g.shadowBlur = 14;
       g.strokeStyle = '#5CD08D'; g.lineWidth = 2.2; g.lineJoin = 'round'; g.stroke(path);
       g.restore();
-      hits.current = [];
+      width.current = w;
       for (const p of pts) {
         const x = X(p.t), y = Y(p.v), up = (p.item.usd ?? 0) >= 0;
         g.beginPath(); g.arc(x, y, 3.6, 0, Math.PI * 2); g.fillStyle = '#0E0F11'; g.fill();
         g.lineWidth = 2; g.strokeStyle = up ? '#5CD08D' : '#F2706B'; g.stroke();
-        hits.current.push({ x, y, item: p.item });
       }
+      let snap: { i: number; x: number; y: number } | null = null;
+      if (scrub.current != null && pts.length) {
+        let i = 0;
+        for (let k = 1; k < pts.length; k++) if (Math.abs(X(pts[k].t) - scrub.current) < Math.abs(X(pts[i].t) - scrub.current)) i = k;
+        snap = { i, x: X(pts[i].t), y: Y(pts[i].v) };
+        g.save(); g.strokeStyle = 'rgba(255,255,255,.28)'; g.setLineDash([3, 4]); g.lineWidth = 1;
+        g.beginPath(); g.moveTo(snap.x, 0); g.lineTo(snap.x, h); g.stroke(); g.restore();
+        g.beginPath(); g.arc(snap.x, snap.y, 9, 0, Math.PI * 2); g.fillStyle = 'rgba(92,208,141,.22)'; g.fill();
+        g.beginPath(); g.arc(snap.x, snap.y, 4.5, 0, Math.PI * 2); g.fillStyle = '#5CD08D'; g.fill();
+      }
+      const was = tipNow.current;
+      if ((snap?.i ?? -1) !== (was?.i ?? -1) || (snap && was && (Math.abs(snap.x - was.x) > 1 || Math.abs(snap.y - was.y) > 1))) setTip(snap);
       const pulse = reduced ? 0 : (ms / 900) % 1, hx = X(now), hy = Y(v);
       g.beginPath(); g.arc(hx, hy, 4 + pulse * 10, 0, Math.PI * 2); g.fillStyle = `rgba(92,208,141,${0.35 * (1 - pulse)})`; g.fill();
       g.beginPath(); g.arc(hx, hy, 4, 0, Math.PI * 2); g.fillStyle = '#5CD08D'; g.fill();
       const lastP = pts[pts.length - 1];
-      if (lastP) {
+      if (lastP && !snap) {
         const txt = amountsText(lastP.item.amounts, 3);
         g.font = '500 12px "DM Mono", monospace';
         const tw = g.measureText(txt).width + 16, lx = Math.min(w - tw - 4, Math.max(4, X(lastP.t) - tw / 2)), ly = Math.max(2, Y(lastP.v) - 30);
@@ -326,13 +343,51 @@ function BankedChart({ curve, from, onPick }: { curve: { t: number; v: number; i
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
   }, [from, reduced]);
-  const pick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const r = e.currentTarget.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
-    const hit = hits.current.find((p) => Math.hypot(p.x - x, p.y - y) < 12);
-    if (hit) onPick(hit.item);
+  const xOf = (e: React.PointerEvent<HTMLCanvasElement>) => e.clientX - e.currentTarget.getBoundingClientRect().left;
+  const onDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    clearTimeout(hide.current);
+    if (e.pointerType !== 'mouse') e.currentTarget.setPointerCapture(e.pointerId);
+    down.current = { x: e.clientX, y: e.clientY };
+    scrub.current = xOf(e);
   };
-  return <div className="dk-chart"><canvas ref={cv} onClick={pick} aria-label={`Profits banked: ${curve.length} in this range`} />{!curve.length && <p className="dk-empty-chart">No profit banked in this range yet. It draws as profits land.</p>}</div>;
+  const onMove = (e: React.PointerEvent<HTMLCanvasElement>) => { if (e.pointerType === 'mouse' || down.current) scrub.current = xOf(e); };
+  // a tap (or click) that didn't drag opens the profit it landed on; a finger's details linger a moment after a drag
+  const onUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const d = down.current, t = tipNow.current;
+    down.current = null;
+    if (d && t && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6 && Math.abs(xOf(e) - t.x) < 28 && curve[t.i]) onPick(curve[t.i].item);
+    if (e.pointerType !== 'mouse') hide.current = window.setTimeout(() => { scrub.current = null; }, 1600);
+  };
+  const onOut = (e: React.PointerEvent<HTMLCanvasElement>) => { if (e.pointerType === 'mouse') { scrub.current = null; down.current = null; } };
+  const at = tip && curve[tip.i];
+  // the card sits in the hero, over its text (the chart is under it): above the point when there's room, else beside it
+  const box = wrap.current, hero = box?.offsetParent as HTMLElement | null | undefined;
+  const top = box && tip ? box.offsetTop + tip.y : 0, x = box && tip ? box.offsetLeft + tip.x : 0;
+  const place = top >= TIP_ROOM ? 'above' : x > TIP_W + 30 ? 'left' : 'right';
+  const tipStyle = place === 'above'
+    ? { left: box ? box.offsetLeft + Math.min(Math.max(tip!.x, TIP_W / 2 + 8), width.current - TIP_W / 2 - 8) : 0, top }
+    : { left: x, top: Math.min(Math.max(top, TIP_ROOM / 2), (hero?.clientHeight ?? 0) - TIP_ROOM / 2) };
+  return (
+    <>
+      <div className="dk-chart" ref={wrap}>
+        <canvas ref={cv} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onOut} onPointerCancel={() => { scrub.current = null; down.current = null; }}
+          aria-label={`Profits banked: ${curve.length} in this range`} />
+        {!curve.length && <p className="dk-empty-chart">No profit banked in this range yet. It draws as profits land.</p>}
+      </div>
+      {at && tip && box && (
+        <div className={`dk-tip ${place}`} role="status" style={tipStyle}>
+          <span className="dk-tip-when">{new Date(at.t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} · {ago(at.t)}</span>
+          <b>{at.item.title}</b>
+          <span className={at.item.amounts.some((a) => a.amt < 0) ? 'neg' : 'pos'}>{amountsText(at.item.amounts, 5)}</span>
+          <span className="dk-tip-sub">{at.item.usd != null && <em>{usd(at.item.usd, true)} · </em>}{at.item.sub}</span>
+          <span className="dk-tip-tot">Banked by then <b>{usd(at.v, true)}</b></span>
+        </div>
+      )}
+    </>
+  );
 }
+/** The scrub card's width, and the height it needs above its point (card + gap) */
+const TIP_W = 260, TIP_ROOM = 136;
 
 // ── cards ────────────────────────────────────────────────────────────────
 function Card({ k, sym, title, sub, value, usdV, close, glow, onClick }: { k: string; sym: string; title: string; sub: string; value: string; usdV: number | null; close: number | null; glow?: boolean; onClick: () => void }) {
