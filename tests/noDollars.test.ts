@@ -22,7 +22,7 @@ import { Header } from '../src/ui/Header';
 import { Bots } from '../src/ui/Bots';
 import { Holdings } from '../src/ui/Holdings';
 import { MarketsTab, ModeAnalytics } from '../src/ui/Analytics';
-import { TokenTraderPanel } from '../src/ui/TokenTrader';
+import { TokenTraderPage } from '../src/ui/TokenTraderPage';
 import { LpDetail } from '../src/ui/LpDetail';
 import { GridDetail } from '../src/ui/GridDetail';
 import { TrendDetail } from '../src/ui/TrendDetail';
@@ -57,8 +57,8 @@ const screens: [string, () => string][] = [
   ['Analytics live', () => render(createElement(ModeAnalytics, { s: S, mode: 'live', seed: { ov: overview('live'), j: JOURNAL } }))],
   ['Analytics paper', () => render(createElement(ModeAnalytics, { s: S, mode: 'paper', seed: { ov: overview('paper'), j: JOURNAL } }))],
   ['Analytics market conditions', () => render(createElement(MarketsTab, { seed: PANELS }))],
-  ['Token trader', () => render(createElement(TokenTraderPanel, { s: S, seed: TRADER }))],
-  ['Token trader (old dollar-only log)', () => render(createElement(TokenTraderPanel, { s: S, seed: { ...TRADER, metrics: { ...TRADER.metrics, generated: { USD: 10.23 }, quote: { ...TRADER.metrics.quote, symbol: 'USD' } }, spendTotals: null } }))],
+  ['Token trader', () => render(createElement(TokenTraderPage, { s: S, nav: () => undefined, seed: TRADER, now: 1_800_000_000_000 }))],
+  ['Token trader (old dollar-only log)', () => render(createElement(TokenTraderPage, { s: S, nav: () => undefined, now: 1_800_000_000_000, seed: { ...TRADER, metrics: { ...TRADER.metrics, generated: { USD: 10.23 }, quote: { ...TRADER.metrics.quote, symbol: 'USD' } }, spendTotals: null } }))],
   ['Alerts (notification settings)', () => render(createElement(Alerts, { status: S, prefs: { ...DEFAULT_PREFS, enabled: true }, setPrefs: noop }))],
   ['Trend', () => render(createElement(TrendDetail, { s: S, id: TREND_ID, events: [], ticks: null, nav: noop, act, busy: false }))],
   ...S.lps.map((l: Obj) => [`LP ${l.id}`, () => render(createElement(LpDetail, { s: S, id: l.id, events: [], ticks: null, nav: noop, act, busy: false }))] as [string, () => string]),
@@ -95,7 +95,7 @@ describe('token trader in the coins it spends', () => {
     expect(TRADER.metrics.generated).toEqual({ WETH: 0.00437 });
     expect(TRADER.metrics.quote.symbol).toBe('WETH');
     expect(TRADER.spendTotals.WETH.bought).toBeCloseTo(0.05126, 12);
-    const html = render(createElement(TokenTraderPanel, { s: S, seed: TRADER }));
+    const html = render(createElement(TokenTraderPage, { s: S, nav: () => undefined, seed: TRADER, now: 1_800_000_000_000 }));
     expect(html).toMatch(/data-testid="tt-generated">\+0\.00437 WETH/);
   });
 });

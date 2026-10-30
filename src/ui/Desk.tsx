@@ -152,7 +152,7 @@ export function Desk({ s, nav, act, busy, holdings, events }: { s: AnyObj; nav: 
   const openBot = (botId: string) => setSheet({ kind: 'bot', botId });
   const flow = <FlowBoard open={open} banked={banked} narrow={narrow} onOpen={openBot} onMore={(title, items) => setSheet({ kind: 'list', title, items })} />;
   const ladder = <LadderBoard ladders={lads} perView={narrow ? 1 : 3} onOpen={openBot} />;
-  const funnelView = <FunnelBoard funnel={funnel} held={open.filter((o) => o.kind === 'token')} on={!!trader?.on} onOpen={openBot} onSetup={() => nav({ v: 'auto' })} />;
+  const funnelView = <FunnelBoard funnel={funnel} held={open.filter((o) => o.kind === 'token')} on={!!trader?.on} onOpen={openBot} onSetup={() => nav({ v: 'token' })} />;
   const payday = <Payday open={open} onOpen={openBot} />;
   const river = <River events={events} />;
   const boards: Record<Tab, ReactNode> = { flow, ladder, funnel: funnelView };

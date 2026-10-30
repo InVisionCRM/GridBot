@@ -10,7 +10,7 @@ import { ChainBadge, chainOf } from './chains';
 import { errMsg, botView, type AnyObj, type Nav } from './model';
 import { L } from './Tip';
 import { useOpportunities } from './Opportunities';
-import { TokenTraderPanel } from './TokenTrader';
+import { TraderSwitch } from './TokenTraderPage';
 import { haltText } from './haltText';
 
 type Risk = 'safe' | 'medium' | 'any';
@@ -40,14 +40,15 @@ export function SmartTrader({ s, nav }: { s: AnyObj; nav: Nav }) {
     setBusy(true); setMsg(null);
     try { const r = await fn(); if (r) setA(r); else await load(); } catch (e) { setMsg(errMsg(e)); } finally { setBusy(false); }
   };
-  if (err) return <main className="stack"><div className="banner error"><span className="grow">{err}</span></div></main>;
-  if (!a) return <main className="stack"><p className="muted">Loading…</p></main>;
+  if (err) return <main className="stack smart"><TraderSwitch at="auto" nav={nav} /><div className="banner error"><span className="grow">{err}</span></div></main>;
+  if (!a) return <main className="stack smart"><TraderSwitch at="auto" nav={nav} /><p className="muted">Loading…</p></main>;
   // An account with bots, swaps or coins other than its budget's still to settle stays on the page (and keeps new budgets out)
   const holding = a.accounts.some((x: AnyObj) => x.holds);
   const showAccounts = a.on || holding || a.accounts.some((x: AnyObj) => x.halted || x.killed);
 
   return (
     <main className="stack smart">
+      <TraderSwitch at="auto" nav={nav} />
       <section className="card smart-head">
         <div className="card-head">
           <h2>Smart trader</h2>
@@ -69,7 +70,6 @@ export function SmartTrader({ s, nav }: { s: AnyObj; nav: Nav }) {
       {(a.on || holding) && <OnControls a={a} busy={busy} run={run} />}
       {!a.on && !holding && <Setup s={s} a={a} busy={busy} run={run} />}
       <Decisions log={a.log} s={s} />
-      <TokenTraderPanel s={s} />
     </main>
   );
 }

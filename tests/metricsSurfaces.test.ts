@@ -29,7 +29,7 @@ describe('one headline per bot page', () => {
     });
   }
   it('the token trader page and the desk row also use the Details expander', () => {
-    expect(src('TokenTrader.tsx')).toMatch(/<MoneyDetails b=\{t\} \/>/);
+    expect(src('TokenTraderPage.tsx')).toMatch(/<MoneyDetails b=\{t\} \/>/);
     expect(src('botRow.tsx')).toMatch(/<MoneyDetails b=\{b\}/);
     expect(src('StatTable.tsx')).not.toMatch(/'Total P&L'|'Price change'/);
   });

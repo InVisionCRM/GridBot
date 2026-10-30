@@ -182,7 +182,7 @@ function RowMenu({ b, nav, pause, close }: { b: AnyObj; nav: Nav; pause: (b: Any
   }, [open]);
   const running = b.status === 'running';
   const trader = isTrader(b);
-  const openBot = () => { setOpen(false); trader ? nav({ v: 'auto' }) : nav(botView(b.kind, b.id)); };
+  const openBot = () => { setOpen(false); trader ? nav({ v: 'token' }) : nav(botView(b.kind, b.id)); };
   return (
     <div className="row-menu" ref={root}>
       <button type="button" className="menu-btn" aria-expanded={open} aria-label={`Actions for ${pairOf(b).title}`} onClick={() => setOpen((v) => !v)}><span /><span /><span /></button>
@@ -277,7 +277,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   const feesEarned = m?.quote.feesEarned ?? null;
   const facts = metrics ? botFacts(b) : null;
   const gen = generatedParts(b);
-  const go = () => (isTrader(b) ? nav({ v: 'auto' }) : expandable ? onToggle?.() : nav(botView(b.kind, b.id)));
+  const go = () => (isTrader(b) ? nav({ v: 'token' }) : expandable ? onToggle?.() : nav(botView(b.kind, b.id)));
   if (columns) {
     return (
       <div className={`bot-block${open ? ' open' : ''}`}>
