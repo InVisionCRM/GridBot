@@ -11,7 +11,7 @@ const page = (holdings: unknown) => renderToStaticMarkup(h(More, { s: S, nav: no
 
 describe('More', () => {
   it('eight tiles, in order', () => {
-    const labels = [...page(HOLDINGS).matchAll(/class="mo-label">([^<]*)</g)].map((m) => m[1]);
+    const labels = [...page(HOLDINGS).matchAll(/class="mo-label">([^<]*)</g)].map((m) => m[1].replace(/&amp;/g, '&'));
     expect(labels).toEqual(['Wallet', 'Auto traders', 'Opportunities', 'Alerts', 'History', 'System', 'Charts & tools', 'Settings']);
   });
   it('the Wallet tile is the wallet\'s dust-free total; with no key it says paper', () => {
