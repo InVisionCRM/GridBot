@@ -1475,7 +1475,10 @@ body.dk-on { overflow: hidden; }
 .dk-btn:focus-visible, .dk-cardi:focus-visible, .dk-tabs button:focus-visible, .dk-ladder:focus-visible { outline: 2px solid var(--hold); outline-offset: 2px; }
 
 /* hero */
-.dk-hero { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr); gap: 20px; background: linear-gradient(140deg, rgba(92, 208, 141, 0.07), transparent 45%), var(--surface); border: 1px solid var(--line); border-radius: 22px; padding: 18px 20px; }
+.dk-hero { position: relative; isolation: isolate; overflow: hidden; min-height: 222px; display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr); gap: 20px; background: linear-gradient(140deg, rgba(92, 208, 141, 0.07), transparent 45%), var(--surface); border: 1px solid var(--line); border-radius: 22px; padding: 18px 20px; }
+/* the text sits over the chart; only its controls take clicks, so the chart's points stay tappable */
+.dk-hero-l, .dk-hero-r { position: relative; z-index: 1; pointer-events: none; }
+.dk-hero-l button, .dk-hero-r button { pointer-events: auto; }
 .dk-hero-l { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .dk-hero-k { display: flex; align-items: center; gap: 10px; }
 .dk-mode { display: inline-flex; background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: 2px; }
@@ -1488,13 +1491,14 @@ body.dk-on { overflow: hidden; }
 .dk-units { display: flex; flex-wrap: wrap; gap: 4px 14px; font: 500 0.84rem var(--mono); }
 .dk-hero-sub { display: flex; gap: 14px; font-size: 0.8rem; color: var(--muted); }
 .dk-hero-actions { display: flex; gap: 8px; margin-top: auto; padding-top: 6px; }
-.dk-hero-r { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.dk-hero-r { display: flex; flex-direction: column; justify-content: space-between; gap: 6px; min-width: 0; }
 .dk-chart-head { display: flex; justify-content: space-between; align-items: baseline; }
 .dk-chart-head b { font: 600 1rem var(--mono); }
-.dk-chart { position: relative; height: 150px; }
+/* the banked chart is the card's floor: full width, edge to edge, fading out behind the big number */
+.dk-chart { position: absolute; left: 0; right: 0; bottom: 0; height: 76%; z-index: 0; -webkit-mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.22) 30%, #000 56%); mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.22) 30%, #000 56%); }
 .dk-chart canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
-.dk-empty-chart { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--muted); font-size: 0.82rem; pointer-events: none; }
-.dk-ranges { display: flex; gap: 4px; }
+.dk-empty-chart { position: absolute; inset: 0 0 30% 44%; display: grid; place-items: center; margin: 0; color: var(--muted); font-size: 0.82rem; pointer-events: none; }
+.dk-ranges { display: flex; gap: 4px; align-self: flex-end; background: rgba(14, 15, 17, 0.55); backdrop-filter: blur(6px); border-radius: 999px; padding: 2px; }
 .dk-ranges button { appearance: none; border: 0; background: none; color: var(--muted); font: 600 0.74rem var(--font); padding: 4px 11px; border-radius: 999px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .dk-ranges button.on { background: var(--surface-2); color: var(--text); }
 .dk-live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--profit); margin-right: 6px; animation: dk-ping 1.8s infinite; vertical-align: 1px; }
@@ -1616,12 +1620,16 @@ body.dk-on { overflow: hidden; }
 }
 @media (max-width: 860px) {
   .dk { gap: 10px; }
-  .dk-hero { grid-template-columns: 1fr; gap: 8px; padding: 14px; }
-  .dk-hero-actions { position: absolute; }
-  .dk-hero { position: relative; }
-  .dk-hero-actions { top: 12px; right: 12px; margin: 0; padding: 0; }
+  /* phone: number, buttons, then the chart full-bleed in the flow under its heading, the ranges last */
+  .dk-hero { grid-template-columns: 1fr; gap: 6px; padding: 14px; min-height: 0; }
+  .dk-hero-r { display: contents; }
+  .dk-hero-l { order: 1; }
+  .dk-chart-head { order: 2; position: relative; z-index: 1; margin-top: 4px; }
+  .dk-chart { order: 3; position: relative; height: 96px; margin: 0 -14px; -webkit-mask-image: none; mask-image: none; }
+  .dk-empty-chart { inset: 0; }
+  .dk-ranges { order: 4; align-self: stretch; justify-content: space-between; position: relative; z-index: 1; }
+  .dk-hero-actions { margin: 4px 0 0; padding: 0; }
   .dk-hero-actions .dk-btn { padding: 6px 12px; font-size: 0.76rem; }
-  .dk-chart { height: 96px; }
   .dk-main { grid-template-columns: 1fr; }
   .dk-tabs { gap: 2px; overflow-x: auto; }
   .dk-tabs button { padding: 6px 11px; font-size: 0.8rem; }

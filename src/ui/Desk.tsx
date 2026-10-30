@@ -6,7 +6,7 @@
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { http } from './api';
-import { generatedByMode, listBots, totalGeneratedUsd } from './botRow';
+import { allBots, generatedByMode, listBots, totalGeneratedUsd } from './botRow';
 import { useChainFilter } from './chains';
 import { ALMOST, amountsText, bankedCurve, bankedItems, funnelOf, ladders, openItems, type BankedItem, type Ladder, type Mode, type OpenItem } from './deskModel';
 import { ago, qty, usd } from './fmt';
@@ -104,8 +104,10 @@ function useFlip(ref: RefObject<HTMLElement | null>, dep: unknown) {
 export function Desk({ s, nav, act, busy, holdings, events }: { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean; holdings: HoldingsSnapshot | null; events: ActivityEvent[] }) {
   const { chain } = useChainFilter();
   const trader = useTrader();
+  // open bots fill the board; every bot (closed ones too) counts towards Generated and Banked
   const bots = useMemo(() => listBots(s, chain), [s, chain]);
-  const hasLive = bots.some((b) => b.mode === 'live') || trader?.options?.mode === 'live';
+  const ever = useMemo(() => allBots(s, chain), [s, chain]);
+  const hasLive = ever.some((b) => b.mode === 'live') || trader?.options?.mode === 'live';
   const [modePick, setMode] = useState<Mode | null>(null);
   const mode: Mode = modePick ?? (hasLive ? 'live' : 'paper');
   const [tab, setTab] = useState<Tab>('flow');
@@ -117,10 +119,10 @@ export function Desk({ s, nav, act, busy, holdings, events }: { s: AnyObj; nav: 
   useFill(root);
 
   const open = useMemo(() => openItems(bots, trader, mode), [bots, trader, mode]);
-  const banked = useMemo(() => bankedItems(bots, trader, mode), [bots, trader, mode]);
+  const banked = useMemo(() => bankedItems(ever, trader, mode), [ever, trader, mode]);
   const lads = useMemo(() => ladders(bots, mode), [bots, mode]);
   const funnel = useMemo(() => funnelOf(trader), [trader]);
-  const withTrader = useMemo(() => (trader?.metrics ? [...bots, { id: 'token-trader', kind: 'token', mode: trader.metrics.mode, metrics: trader.metrics }] : bots), [bots, trader]);
+  const withTrader = useMemo(() => (trader?.metrics ? [...ever, { id: 'token-trader', kind: 'token', mode: trader.metrics.mode, metrics: trader.metrics }] : ever), [ever, trader]);
   const genUsd = totalGeneratedUsd(withTrader, mode);
   const genUnits = generatedByMode(withTrader)[mode];
   const running = bots.filter((b) => (b.mode === 'live' ? 'live' : 'paper') === mode && b.status === 'running').length;
@@ -206,8 +208,10 @@ function Hero({ mode, setMode, genUsd, genUnits, running, banked, range, setRang
   const lastTop = useRef<string | null>(null);
   useEffect(() => { const k = banked[0]?.key ?? null; if (lastTop.current && k !== lastTop.current) setBump((n) => n + 1); lastTop.current = k; }, [banked]);
   const units = Object.entries(genUnits ?? {}).filter(([, v]) => v !== 0);
+  const today = banked.filter((b) => b.t >= now - 86_400_000).length;
   return (
     <section className="dk-hero" aria-label="Generated">
+      <BankedChart curve={curve} from={from} onPick={onBanked} />
       <div className="dk-hero-l">
         <div className="dk-hero-k">
           <span className="dk-k">Generated</span>
@@ -219,7 +223,7 @@ function Hero({ mode, setMode, genUsd, genUnits, running, banked, range, setRang
         </div>
         <div key={bump} className={`dk-big ${genUsd != null && genUsd < 0 ? 'neg' : 'pos'} ${bump ? 'bump' : ''}`} data-testid="dk-big">{shown == null ? '—' : usd(shown, true)}</div>
         <div className="dk-units" data-testid="dk-units">{units.length ? units.map(([sym, v]) => <span key={sym} className={v >= 0 ? 'pos' : 'neg'}>{qty(v, sym, 5)}</span>) : <span className="muted">nothing generated yet</span>}</div>
-        <div className="dk-hero-sub"><span>{running} running</span><span>{banked.filter((b) => b.t >= now - 86_400_000).length} profits banked today</span></div>
+        <div className="dk-hero-sub"><span>{running} running</span><span>{today === 1 ? '1 profit' : `${today} profits`} banked today</span></div>
         <div className="dk-hero-actions">
           <button type="button" className="dk-btn primary" onClick={onNew}>New bot</button>
           <button type="button" className="dk-btn" onClick={onWallet}>Wallet & funds</button>
@@ -228,9 +232,9 @@ function Hero({ mode, setMode, genUsd, genUnits, running, banked, range, setRang
       <div className="dk-hero-r">
         <div className="dk-chart-head">
           <span className="dk-k">Banked {range === 'ALL' ? 'so far' : `in ${range}`}</span>
-          <b className={inRange >= 0 ? 'pos' : 'neg'}>{usd(inRange, true)}</b>
+          {/* one profit in the range: its card carries the figure, the total would only repeat it */}
+          {curve.length === 1 ? <b className="muted">1 profit</b> : <b className={inRange >= 0 ? 'pos' : 'neg'}>{usd(inRange, true)}</b>}
         </div>
-        <BankedChart curve={curve} from={from} onPick={onBanked} />
         <div className="dk-ranges" role="radiogroup" aria-label="Chart range">
           {(['1H', '1D', '1W', '1M', 'ALL'] as Range[]).map((r) => <button key={r} type="button" role="radio" aria-checked={range === r} className={range === r ? 'on' : ''} onClick={() => setRange(r)}>{r === '1H' ? <><span className="dk-live-dot" />1H</> : r}</button>)}
         </div>
@@ -262,9 +266,8 @@ function BankedChart({ curve, from, onPick }: { curve: { t: number; v: number; i
       g.clearRect(0, 0, w, h);
       const pts = data.current, now = Date.now(), span = Math.max(1, now - from);
       const max = Math.max(...pts.map((p) => p.v), 0), min = Math.min(...pts.map((p) => p.v), 0), pad = (max - min) * 0.18 || 1;
-      const X = (t: number) => 8 + ((t - from) / span) * (w - 24), Y = (v: number) => h - 10 - ((v - min + pad * 0.3) / (max - min + pad * 1.3)) * (h - 22);
-      g.strokeStyle = 'rgba(255,255,255,.05)'; g.lineWidth = 1;
-      for (let i = 1; i < 4; i++) { g.beginPath(); g.moveTo(0, (h / 4) * i); g.lineTo(w, (h / 4) * i); g.stroke(); }
+      // edge to edge across the card (room on the right for the pulse at now), the curve in the lower part
+      const X = (t: number) => ((t - from) / span) * (w - 16), Y = (v: number) => h - 14 - ((v - min + pad * 0.3) / (max - min + pad * 1.3)) * (h - 40);
       const path = new Path2D();
       path.moveTo(X(from), Y(0));
       let v = 0;
@@ -272,10 +275,12 @@ function BankedChart({ curve, from, onPick }: { curve: { t: number; v: number; i
       path.lineTo(X(now), Y(v));
       const area = new Path2D(path);
       area.lineTo(X(now), h); area.lineTo(X(from), h); area.closePath();
-      const grad = g.createLinearGradient(0, 0, 0, h);
-      grad.addColorStop(0, 'rgba(92,208,141,.30)'); grad.addColorStop(1, 'rgba(92,208,141,0)');
+      const grad = g.createLinearGradient(0, Y(max), 0, h);
+      grad.addColorStop(0, 'rgba(92,208,141,.26)'); grad.addColorStop(1, 'rgba(92,208,141,0)');
       g.fillStyle = grad; g.fill(area);
+      g.save(); g.shadowColor = 'rgba(92,208,141,.55)'; g.shadowBlur = 14;
       g.strokeStyle = '#5CD08D'; g.lineWidth = 2.2; g.lineJoin = 'round'; g.stroke(path);
+      g.restore();
       hits.current = [];
       for (const p of pts) {
         const x = X(p.t), y = Y(p.v), up = (p.item.usd ?? 0) >= 0;

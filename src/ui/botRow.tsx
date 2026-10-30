@@ -12,12 +12,18 @@ import { botSpark } from './series';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
 
-export function listBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
+/** Every bot on the chain filter, the closed (archived) ones included: what they earned stays earned. */
+export function allBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
   return [
     ...s.grids.map((g: AnyObj) => ({ ...g, kind: 'grid' })),
     ...(s.trends ?? []).map((t: AnyObj) => ({ ...t, kind: 'trend' })),
     ...(s.lps ?? []).map((t: AnyObj) => ({ ...t, kind: t.kind ?? 'lp' })),
-  ].filter((b) => !b.archivedAt && (chain === 'all' || (b.chainId ?? s.legacyChainId) === chain));
+  ].filter((b) => chain === 'all' || (b.chainId ?? s.legacyChainId) === chain);
+}
+
+/** The bots still on the active list (closed ones are in Analytics) */
+export function listBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
+  return allBots(s, chain).filter((b) => !b.archivedAt);
 }
 
 export function startOfDay(now = Date.now()) {

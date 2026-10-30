@@ -1,5 +1,6 @@
 /**
- * The home (Desk.tsx): the headline is the live bots' Generated, a dollar figure with the coins under it; paper bots
+ * The home (Desk.tsx): the headline is the live bots' Generated (closed ones included: what they earned stays earned), a
+ * dollar figure with the coins under it; paper bots
  * never move it (they have their own Paper view). The board's three tabs, Next payday and the live river are on the one
  * screen; an empty board says what will appear there.
  */
@@ -13,7 +14,7 @@ vi.mock('../src/ui/motion', async (orig) => {
   return { ...m, useCount: (v: number | null) => v };
 });
 import { Desk } from '../src/ui/Desk';
-import { generatedByMode, listBots, totalGeneratedUsd } from '../src/ui/botRow';
+import { allBots, generatedByMode, listBots, totalGeneratedUsd } from '../src/ui/botRow';
 import { usd } from '../src/ui/fmt';
 import { gridMetrics, lpMetrics } from '../src/metrics/botMetrics';
 
@@ -32,12 +33,22 @@ const big = (html: string) => /data-testid="dk-big">([^<]*)</.exec(html)![1];
 
 describe('home headline', () => {
   it('is the live bots\' Generated: a dollar figure, with the coins under it', () => {
-    const bots = listBots(S, 'all');
+    const bots = allBots(S, 'all');
     const html = page(S);
     expect(big(html)).toBe(usd(totalGeneratedUsd(bots, 'live'), true));
     const units = text(/data-testid="dk-units">([\s\S]*?)<\/div>/.exec(html)![1]);
     for (const [sym, v] of Object.entries(generatedByMode(bots).live ?? {})) if (v !== 0) expect(units).toContain(sym); else expect(units).not.toContain(` ${sym}`);
     expect(html).toMatch(/role="radio" aria-checked="true" class="on">Live</);
+  });
+  it('closing a bot keeps what it generated in the headline and its fees in Banked', () => {
+    // lp-mvnm73sx-hghe (live USDC/ETH, running on 2026-10-27) closed a little later, as it did
+    const at = Date.now() - 10 * 3_600_000;
+    const closed = { ...S, lps: S.lps.map((l: Obj) => (l.id === 'lp-mvnm73sx-hghe' ? { ...l, status: 'closed', archivedAt: at } : l)) };
+    expect(listBots(closed, 'all').some((b) => b.id === 'lp-mvnm73sx-hghe')).toBe(false);
+    expect(big(page(closed))).toBe(big(page(S)));
+    expect(big(page(closed))).not.toBe(usd(0, true));
+    expect(text(page(closed))).toContain('Banked in 1D 1 profit');
+    expect(text(page(closed))).toContain('fees collected earlier');
   });
   it('paper bots earning a fortune do not move the live headline', () => {
     const rich = { ...S, grids: S.grids.map((g: Obj) => (g.mode === 'live' ? g : { ...g, metrics: { ...g.metrics, generated: { DAI: 1e9 }, generatedUsd: 1e9 } })) };
@@ -47,7 +58,7 @@ describe('home headline', () => {
     const paper = { ...S, grids: S.grids.map((g: Obj) => ({ ...g, mode: 'paper' })), lps: S.lps.map((l: Obj) => ({ ...l, mode: 'paper' })) };
     const html = page(paper);
     expect(html).toContain('class="dk-chip">Paper<');
-    expect(big(html)).toBe(usd(totalGeneratedUsd(listBots(paper, 'all'), 'paper'), true));
+    expect(big(html)).toBe(usd(totalGeneratedUsd(allBots(paper, 'all'), 'paper'), true));
   });
 });
 
