@@ -254,6 +254,16 @@ describe('DailyScanner: opportunities', () => {
     expect(sc.status()).toMatchObject({ running: false, nextAt: NOW + SCAN_EVERY_MS });
   });
 
+  it('a scan is due again when a chain the app trades has no result yet (a chain just added), not only after a day', async () => {
+    const { deps } = fakeDeps();
+    const sc = new DailyScanner({ ...deps, now: () => NOW });
+    expect(sc.isDue()).toBe(true); // never scanned
+    await sc.run();
+    expect(sc.isDue()).toBe(false); // fresh, every chain in it
+    const two = new DailyScanner({ ...deps, now: () => NOW, chains: () => [...deps.chains(), { ...deps.chains()[0], id: 8453, name: 'Base', slug: 'base' }] });
+    expect(two.isDue()).toBe(true); // Base has no result in the saved scan
+  });
+
   it(`reads up to ${SCAN_PAGES} pages of each DEX's busiest pools; a short page is the last`, async () => {
     const { deps, calls } = fakeDeps({ fullPages: true });
     await new DailyScanner(deps).run();

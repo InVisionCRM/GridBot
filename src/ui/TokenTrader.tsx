@@ -12,6 +12,7 @@ import { MoneyDetails } from './MoneyDetails';
 import { unitsText } from './deskStats';
 import { ENFORCED_LIQUIDITY_FLOOR_USD, shownMinLiquidityUsd } from '../market/liquidityFloor';
 import { coinNum, ethToUsd, inEth, usdToEth, useEthUsd } from './units';
+import { VENUES } from '../live/venues';
 
 /**
  * A limit the server keeps in dollars, typed and shown in ETH (units.tsx: which ETH price). Saved on blur as
@@ -146,6 +147,13 @@ export function TokenTraderPanel({ s, seed }: { s: AnyObj; seed?: AnyObj }) {
       </div>
       <p className="muted small">Wash and pool age off leaves the gate as it is. On, safe and medium enforce the minimum age above, skip a pool whose age is unknown, and skip volume over {SCAN_RULES.maxVolumeToLiquidity}× liquidity. A failed read skips those modes too. Snipes are brand-new pools, so they get only the volume check, never the age check.</p>
 
+      <div className="tt-row" style={{ marginTop: 10 }}>
+        <span className="k">Buy on</span>
+        {VENUES.filter((v) => chains.some((c) => c.id === v.chainId)).map((v) => (
+          <label key={v.id} className="check"><input type="checkbox" checked={o.venues?.[v.id] !== false} onChange={(e) => void save({ venues: { [v.id]: e.target.checked } })} /><span><ChainBadge c={chainOf(s, v.chainId)} testnet={false} /> {v.name}</span></label>
+        ))}
+        <span className="muted small">Launch venues on top of each chain's own DEXes. Launcher pools (Pons V2 Dex, Long.xyz, Bankr, Frontier) trade through the launcher's own hook, which takes a cut of each swap; the safety check measures that cut as a tax, so at Safe risk a taxed coin is skipped.</span>
+      </div>
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.enforceOwnerPowers} onChange={(e) => void save({ enforceOwnerPowers: e.target.checked })} /><span>Owner powers</span></label>
         <span className="muted small">Off leaves the gate as it is. On, safe and medium skip when a non-renounced owner can mint, blacklist, pause, or change tax or limits, or a live admin can upgrade the contract. A failed read skips those modes too.</span>

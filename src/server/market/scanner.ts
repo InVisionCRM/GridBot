@@ -161,10 +161,20 @@ export class DailyScanner {
     return [...fresh, ...old.filter((c) => !fresh.some((f) => f.chainId === c.chainId))];
   }
 
-  /** Check every 30 min; scan when the last one is a day old (or there is none). */
+  /**
+   * A scan is due when there is none, the last one is a day old, or a chain the app trades has no result in it (a chain
+   * just added waited up to a day, and the Smart trader said "not in the scan" for it meanwhile: 2026-10-30).
+   */
+  isDue(): boolean {
+    if (this.running) return false;
+    if (this.file.at == null || this.now() - this.file.at >= SCAN_EVERY_MS) return true;
+    return this.d.chains().some((c) => !this.file.chains.some((x) => x.chainId === c.id));
+  }
+
+  /** Check every 30 min; scan when isDue. */
   start(checkMs = 30 * 60_000) {
     if (this.timer) return;
-    const due = () => { if (!this.running && (this.file.at == null || this.now() - this.file.at >= SCAN_EVERY_MS)) void this.run().catch(() => undefined); };
+    const due = () => { if (this.isDue()) void this.run().catch(() => undefined); };
     due();
     this.timer = setInterval(due, checkMs);
   }

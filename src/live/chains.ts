@@ -12,6 +12,7 @@
  * tried in order before the defaults) and an optional per-chain signing key with the same suffix.
  */
 import { NETWORKS, type LiveNetwork } from './networks';
+import { venueHooks } from './venues';
 
 export type DexKind = 'v2' | 'v3' | 'v4';
 
@@ -242,8 +243,10 @@ export const CHAINS: ChainConfig[] = [
         stateView: '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b',
         permit2: '0x000000000022D473030F116dDEE9F6B43aC78BA3',
         v4StartBlock: 9070,
+        // The launcher hooks of venues.ts (PonsV2MemeHook, DopplerHookInitializer, FactoryHook), traced 2026-10-30
+        hookAllowlist: venueHooks(4663),
         source: 'https://developers.uniswap.org/docs/protocols/v4/deployments',
-        note: 'Singleton PoolManager. Swaps use Universal Router 2.1.2 and Permit2. The previous router 0x8876789976dEcBfCbBbe364623C63652db8C0904 accepts the same calldata. A non-zero hook is rejected unless it is listed in hookAllowlist; none are listed.',
+        note: 'Singleton PoolManager. Swaps use Universal Router 2.1.2 and Permit2. The previous router 0x8876789976dEcBfCbBbe364623C63652db8C0904 accepts the same calldata. A non-zero hook is rejected unless it is listed in hookAllowlist: only the three launcher hooks of venues.ts are.',
       },
     ],
     stack: 'arbitrum', gasUnits: { approve: 60_000, swap: 220_000 }, lowGasNative: 0.0005, blockTimeSec: 0.25, logChunk: 20_000,

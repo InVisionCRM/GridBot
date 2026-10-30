@@ -88,6 +88,8 @@ export interface FreshPool {
   /** Spend per token */
   price: number;
   usdPerSpend: number;
+  /** The launch venue it came from (venues.ts); each has an on/off switch (TraderOptions.venues) */
+  venue?: string;
 }
 
 /** Scan discovery. Snipes are not passed here: min age does not apply to them. */
@@ -98,7 +100,6 @@ export function filterFresh(pools: FreshPool[], o: { now: number; minAgeMs: numb
     const id = `${p.chainId}:${p.pool.toLowerCase()}`;
     if (seen.has(id)) { skipped.push({ pool: p.pool, why: 'already seen' }); continue; }
     seen.add(id);
-    if (p.kind === 'v4') { skipped.push({ pool: p.pool, why: "this app doesn't swap V4" }); continue; }
     if (!(p.price > 0) || !(p.quoteReserve > 0)) { skipped.push({ pool: p.pool, why: 'no price or depth' }); continue; }
     const minL = o.minLiquidityUsd ?? 0;
     if (p.liquidityUsd < minL) { skipped.push({ pool: p.pool, why: `liquidity ${usdAsEth(p.liquidityUsd)} is below ${usdAsEth(minL)}` }); continue; }
@@ -512,7 +513,7 @@ export function fromDexPair(row: {
 }
 
 /** A GeckoTerminal pool row with USD prices on both sides → a token/spend pool, or null. */
-export function fromTopPool(p: { address: string; name: string; dex: string; base: string; quote: string; liquidityUsd: number; volume24Usd: number; createdAt: number | null; basePriceUsd: number | null; quotePriceUsd: number | null }, chain: { id: number; spend: string[]; kind?: 'v2' | 'v3'; feeBps?: number }, source: FreshPool['source'] = 'new'): FreshPool | null {
+export function fromTopPool(p: { address: string; name: string; dex: string; base: string; quote: string; liquidityUsd: number; volume24Usd: number; createdAt: number | null; basePriceUsd: number | null; quotePriceUsd: number | null }, chain: { id: number; spend: string[]; kind?: 'v2' | 'v3' | 'v4'; feeBps?: number }, source: FreshPool['source'] = 'new'): FreshPool | null {
   const spendable = new Set(chain.spend.map((a) => a.toLowerCase()));
   const b = p.base.toLowerCase(), q = p.quote.toLowerCase();
   const bs = spendable.has(b), qs = spendable.has(q);

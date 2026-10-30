@@ -29,16 +29,15 @@ const pos = (o: Partial<ExitPos> = {}): ExitPos => ({
 
 describe('fresh-pool filter', () => {
   const now = 100 * 3600_000;
-  it('keeps a pool old enough or of unknown age, and skips a young one and V4', () => {
+  it('keeps a pool old enough or of unknown age (V4 included since the venues), and skips a young one', () => {
     const r = filterFresh([
       pool({ pool: '0x' + '01'.repeat(20), createdAt: now - 3600_000 }),
       pool({ pool: '0x' + '02'.repeat(20), createdAt: now - 48 * 3600_000 }),
       pool({ pool: '0x' + '03'.repeat(20), createdAt: null }),
       pool({ pool: '0x' + '04'.repeat(20), kind: 'v4', createdAt: now - 48 * 3600_000 }),
     ], { now, minAgeMs: 24 * 3600_000 });
-    expect(r.keep.map((p) => p.pool.slice(2, 4))).toEqual(['02', '03']);
+    expect(r.keep.map((p) => p.pool.slice(2, 4))).toEqual(['02', '03', '04']);
     expect(r.skipped.map((s) => s.why).join(' | ')).toMatch(/minimum 24h/);
-    expect(r.skipped.map((s) => s.why).join(' | ')).toMatch(/doesn't swap V4/);
   });
 
   it('drops a duplicate and a pool with no price', () => {

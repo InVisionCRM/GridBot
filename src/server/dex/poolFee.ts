@@ -8,7 +8,7 @@
  */
 import type { DexConfig } from '../../live/chains';
 import type { ChainReader } from '../bot/chain';
-import { V3_POOL } from './abis';
+import { V3_POOL, V4_STATE_VIEW } from './abis';
 import { readCall } from './types';
 
 /** uint24 fee (hundredths of a bip) → bps: 100 → 1, 500 → 5, 3000 → 30, 10000 → 100. */
@@ -23,10 +23,25 @@ export async function readV3FeeBps(reader: Pick<ChainReader, 'call'>, pool: stri
   return feeTierToBps(tier);
 }
 
-/** Fee for a pool on a known DEX: V2 = the DEX's fee; V3 = fee() read from the pool. null = unknown (don't trade it). */
-export async function poolFeeBps(reader: Pick<ChainReader, 'call'>, pool: string, dex: Pick<DexConfig, 'kind' | 'feeBps'> | null | undefined): Promise<number | null> {
+/**
+ * A V4 pool's LP fee now, in bps: StateView.getSlot0(poolId).lpFee (a dynamic-fee pool's current fee included). A hook
+ * that takes its own cut of a swap is not in this number; the safety simulation measures that cut as a tax.
+ * A pool StateView doesn't know (sqrtPrice 0) throws.
+ */
+export async function readV4FeeBps(reader: Pick<ChainReader, 'call'>, stateView: string, poolId: string): Promise<number> {
+  const [sqrtPrice, , , lpFee] = await readCall<[bigint, bigint, bigint, bigint]>(reader, stateView, V4_STATE_VIEW, 'getSlot0', [poolId]);
+  if (sqrtPrice === 0n) throw new Error(`V4 pool ${poolId} is not initialized`);
+  const tier = Number(lpFee);
+  if (!Number.isFinite(tier) || tier < 0 || tier >= 1_000_000) throw new Error(`V4 pool ${poolId}: lpFee ${lpFee} is out of range`);
+  return feeTierToBps(tier);
+}
+
+/** Fee for a pool on a known DEX: V2 = the DEX's fee; V3 = fee() read from the pool; V4 = StateView's lpFee. null = unknown (don't trade it). */
+export async function poolFeeBps(reader: Pick<ChainReader, 'call'>, pool: string, dex: Pick<DexConfig, 'kind' | 'feeBps' | 'stateView'> | null | undefined): Promise<number | null> {
   if (dex?.kind === 'v2') return dex.feeBps ?? null;
-  // V4 has no per-pool fee() and is not swapped by this path.
-  if (dex?.kind === 'v4') return null;
+  if (dex?.kind === 'v4') {
+    if (!dex.stateView) return null;
+    try { return await readV4FeeBps(reader, dex.stateView, pool); } catch { return null; }
+  }
   try { return await readV3FeeBps(reader, pool); } catch { return null; }
 }

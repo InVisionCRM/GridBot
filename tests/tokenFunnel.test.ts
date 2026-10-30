@@ -27,10 +27,10 @@ describe('token trader funnel', () => {
   it('counts what the scan found, and where each coin left or got bought', async () => {
     let now = T0;
     const young = pool({ createdAt: T0 - 60_000 }); // under the minimum age: a rule
-    const v4 = pool({ kind: 'v4' }); // a rule
+    const off = pool({ venue: 'bankr' }); // its venue is switched off: a rule
     const honeypot = pool(); // the safety check says no
     const good = pool(); // bought
-    const batches = [[young, v4, honeypot, good]];
+    const batches = [[young, off, honeypot, good]];
     const sniper = { tick: async (cursors: Record<string, number>) => ({ cursors, hits: [], notes: [] }) } as unknown as PoolSniper;
     const t = new TokenTrader({
       store: new MemoryStore<TraderState>(), now: () => now, sniper,
@@ -38,14 +38,14 @@ describe('token trader funnel', () => {
       assess: async (p) => (p === honeypot ? clean({ honeypot: true }) : clean()),
       resolve: async () => null,
     });
-    t.configure({ perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 24 * 3600, risk: 'safe' });
+    t.configure({ perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 24 * 3600, risk: 'safe', venues: { bankr: false } });
     t.turnOn();
     await t.tick();
     const s = t.status();
     expect(s.funnel).toMatchObject({ scouted: 4, rules: 2, checks: 1, buy: 0, bought: 1 });
     // each feed row says where it left
     const stageOf = (p: FreshPool) => s.feed.find((f) => f.pool === p.pool)?.stage;
-    expect([stageOf(young), stageOf(v4), stageOf(honeypot), stageOf(good)]).toEqual(['rules', 'rules', 'checks', 'buy']);
+    expect([stageOf(young), stageOf(off), stageOf(honeypot), stageOf(good)]).toEqual(['rules', 'rules', 'checks', 'buy']);
     expect(s.feed.find((f) => f.pool === good.pool)?.verdict).toBe('bought');
     // a new local day starts the counts again
     now = T0 + 24 * 3600_000;
