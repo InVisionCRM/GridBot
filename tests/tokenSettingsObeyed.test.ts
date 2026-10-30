@@ -203,3 +203,51 @@ describe('safety checks report as they finish', () => {
     expect(t.status().feed[0]).toMatchObject({ stage: 'buy', why: 'Total open is used up (≈ 0.2 ETH open of ≈ 0.2 ETH); buys start again as positions close' });
   });
 });
+
+describe('a V4 pool paired with native ETH can be priced', () => {
+  it('the price read quotes address(0) for the native side on V4, and the wrapped address on V3', async () => {
+    const { Quoter } = await import('../src/server/bot/chain');
+    const { NATIVE } = await import('../src/live/swapMath');
+    const WETH = CHAINS.find((c) => c.id === 4663)!.wrappedNative.address;
+    const TOKEN = '0x' + '77'.repeat(20);
+    const seen: string[][] = [];
+    const adapter = { quote: async (_p: unknown, i: string, o: string) => { seen.push([i, o]); return { amountOut: 10n ** 15n, impact: 0 }; } };
+    const def = (kind: 'v3' | 'v4') => ({
+      key: 'x', chainId: 4663, base: { address: TOKEN, symbol: 'TSI', decimals: 18 }, quote: { address: WETH, symbol: 'WETH', decimals: 18, native: true },
+      pool: { dex: kind === 'v4' ? 'uniswap-v4' : 'uniswap-v3', kind, address: '0xpool', feeBps: 30, feeTier: 3000 }, probe: 1,
+    }) as unknown as MarketDef;
+    const chain = CHAINS.find((c) => c.id === 4663)!;
+    await new Quoter({} as never, def('v4'), { chain, adapter: adapter as never }).getPrice();
+    await new Quoter({} as never, def('v3'), { chain, adapter: adapter as never }).getPrice();
+    expect(seen).toEqual([[TOKEN, NATIVE], [TOKEN, WETH]]);
+  });
+});
+
+describe("one position's failed price read doesn't stop the trader", () => {
+  it('the position keeps its price, and new pools are still looked at and bought', async () => {
+    const NOW = 1_800_000_000_000;
+    const mk = (n: number): FreshPool => ({
+      chainId: 1, pool: '0x' + String(n).repeat(40).slice(0, 40), dex: 'uni-v3', kind: 'v3', token: '0x' + '11'.repeat(20), spend: '0x' + '22'.repeat(20),
+      tokenSymbol: `T${n}`, spendSymbol: 'WETH', liquidityUsd: 80_000, volumeUsd: 10_000, createdAt: NOW - 48 * 3600_000, source: 'trending',
+      quoteReserve: 40, tokenReserve: 1_000_000, feeBps: 30, price: 0.00004, usdPerSpend: 2_000,
+    });
+    const clean: GateInput = {
+      mode: 'paper', risk: 'any', honeypot: false, sellSimOk: true, paused: false, decimals: 18, buyTax: 0, sellTax: 0,
+      liquidityUsd: 80_000, minLiquidityUsd: 0, canPause: false, canBlacklist: false, proxy: false, lpUnlocked: null,
+      holderConcentration: null, recentLiqPull: false, liveAllowed: true,
+    };
+    const batches = [[mk(3)], [mk(5)]];
+    const t = new TokenTrader({
+      store: new MemoryStore<TraderState>(), now: () => NOW,
+      sniper: { tick: async (cursors: Record<string, number>) => ({ cursors, hits: [], notes: [] }) } as unknown as PoolSniper,
+      discover: async () => batches.shift() ?? [], assess: async () => clean, resolve: async () => null,
+      mark: async () => { throw new Error('tokenOut is not in this V4 pool'); },
+    });
+    t.configure({ perTradeUsd: 100, totalUsd: 500, risk: 'any' });
+    t.turnOn();
+    await t.tick(); // buys T3
+    await t.tick(); // T3's price read throws; T5 is still bought
+    expect(t.status().positions.map((p) => p.label)).toEqual(['T3/WETH', 'T5/WETH']);
+    expect(t.status().lastError).toMatch(/^T3\/WETH: price read failed, last price kept/);
+  });
+});

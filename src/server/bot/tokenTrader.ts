@@ -1477,7 +1477,11 @@ export class TokenTrader {
       // Turned off completely while this loop was awaiting: leave the rest alone.
       if (!this.canSell()) { left.push(p); continue; }
       if (this.d.mark) {
-        const m = await this.d.mark(p);
+        // One pool whose price can't be read keeps its last price; it doesn't stop the other exits and every buy (a
+        // throw here failed the whole tick, and a failed exit pass skips entries: 2026-10-30, a thin V4 pool's quote
+        // reverted on each tick and the trader bought nothing more)
+        let m: Partial<Position> | null = null;
+        try { m = await this.d.mark(p); } catch (e) { this.lastError = `${p.label}: price read failed, last price kept (${(e as Error).message.slice(0, 120)})`; }
         if (m) {
           Object.assign(p, m);
           if (Object.prototype.hasOwnProperty.call(m, 'feeBps')) this.noteFeeReread(p.id);
