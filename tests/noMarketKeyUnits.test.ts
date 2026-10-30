@@ -15,7 +15,7 @@ vi.mock('../src/ui/motion', async (orig) => {
 });
 import { ShowUsdCtx } from '../src/ui/money';
 import { EthUsdCtx, ethUsdOf, holdingsByToken, inEth } from '../src/ui/units';
-import { Home } from '../src/ui/Home';
+import { Desk } from '../src/ui/Desk';
 import { Header } from '../src/ui/Header';
 import { Bots } from '../src/ui/Bots';
 import { Holdings } from '../src/ui/Holdings';
@@ -50,8 +50,8 @@ function keysIn(html: string): string[] {
 }
 
 const screens: [string, () => string][] = [
-  ['Home (wallet)', () => render(createElement(Home, { s: S, nav: noop, holdings: HOLDINGS as never, act }))],
-  ['Home (no wallet: bots only)', () => render(createElement(Home, { s: { ...S, hasSigner: false }, nav: noop, holdings: { hasSigner: false } as never, act }))],
+  ['Home (wallet)', () => render(createElement(Desk, { s: S, nav: noop, act, busy: false, holdings: HOLDINGS as never, events: [] }))],
+  ['Home (no wallet: bots only)', () => render(createElement(Desk, { s: { ...S, hasSigner: false }, nav: noop, act, busy: false, holdings: { hasSigner: false } as never, events: [] }))],
   ['Header', () => render(createElement(Header, { s: S, view: { v: 'home' }, nav: noop, chain: 'all', setChain: noop, connected: true, ver: null, holdings: HOLDINGS as never, onActivity: noop, onGuide: noop }))],
   ['Bots', () => render(createElement(Bots, { s: S, nav: noop, busy: false, onStopAll: noop }))],
   ['Holdings', () => render(createElement(Holdings, { s: S, snap: HOLDINGS as never, loading: false, error: null, reload: noop, nav: noop }))],

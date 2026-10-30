@@ -1,24 +1,25 @@
-/** Pro Desk palette for canvas charts (lightweight-charts needs literal colours; keep in sync with styles.css :root). */
+/** Terminal Mint palette for canvas charts (lightweight-charts needs literal colours; keep in sync with styles.css :root). */
 export const T = {
-  bg: '#0B0E11',
-  line: '#2B3139',
-  line2: '#3C434D',
-  text: '#EAECEF',
-  muted: '#848E9C',
-  profit: '#0ECB81',
-  loss: '#F6465D',
-  warn: '#F0B90B',
-  font: "'IBM Plex Mono', ui-monospace, monospace",
+  bg: '#0E0F11',
+  line: '#2A2E34',
+  line2: '#363B42',
+  text: '#ECEFF1',
+  muted: '#8A9199',
+  profit: '#5CD08D',
+  loss: '#F2706B',
+  warn: '#F5B841',
+  hold: '#5B8DEF',
+  font: "'DM Mono', ui-monospace, monospace",
 } as const;
 
 /** Indicator colours: muted, distinct from profit/loss so overlays never read as gains or losses. */
 export const IND = {
-  fast: '#B7BDC6',
-  slow: '#848E9C',
+  fast: '#B4BAC2',
+  slow: '#8A9199',
   band: '#5E6673',
-  rsi: '#B7BDC6',
-  macd: '#B7BDC6',
-  signal: '#F0B90B',
+  rsi: '#B4BAC2',
+  macd: '#B4BAC2',
+  signal: '#F5B841',
 } as const;
 
 export const alpha = (hex: string, a: number) => {

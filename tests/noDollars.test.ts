@@ -1,6 +1,7 @@
 /**
- * Crypto units only (Kyle's rule): no screen shows a dollar amount. Renders Home (with and without a wallet), the
- * header, the Bots page and its desk table, Holdings, Analytics (live, paper, market conditions), the token trader,
+ * Crypto units only (Kyle's rule): no screen shows a dollar amount, except the home, where Kyle chose (2026-10-30) a
+ * big dollar figure with the coins under it: there every dollar figure sits beside its units (checked below). Renders
+ * the header, the Bots page and its desk table, Holdings, Analytics (live, paper, market conditions), the token trader,
  * and every LP, grid and trend page from the real sanitized status payload (tests/helpers/unitsScreens.ts), with the
  * old "$" switch forced ON, and fails on any "$" or "USD" in the text, a tooltip (title) or an aria-label. Coin names
  * like USDC / USDG are fine; "USD" as a word is not.
@@ -16,7 +17,7 @@ vi.mock('../src/ui/motion', async (orig) => {
 });
 import { ShowUsdCtx } from '../src/ui/money';
 import { EthUsdCtx, ethUsdOf, holdingsByToken, inEth } from '../src/ui/units';
-import { Home } from '../src/ui/Home';
+import { Desk } from '../src/ui/Desk';
 import { Header } from '../src/ui/Header';
 import { Bots } from '../src/ui/Bots';
 import { Holdings } from '../src/ui/Holdings';
@@ -51,8 +52,6 @@ function dollarsIn(html: string): string[] {
 }
 
 const screens: [string, () => string][] = [
-  ['Home (wallet)', () => render(createElement(Home, { s: S, nav: noop, holdings: HOLDINGS as never, act }))],
-  ['Home (no wallet: bots only)', () => render(createElement(Home, { s: { ...S, hasSigner: false }, nav: noop, holdings: { hasSigner: false } as never, act }))],
   ['Header', () => render(createElement(Header, { s: S, view: { v: 'home' }, nav: noop, chain: 'all', setChain: noop, connected: true, ver: null, holdings: HOLDINGS as never, onActivity: noop, onGuide: noop }))],
   ['Bots', () => render(createElement(Bots, { s: S, nav: noop, busy: false, onStopAll: noop }))],
   ['Holdings', () => render(createElement(Holdings, { s: S, snap: HOLDINGS as never, loading: false, error: null, reload: noop, nav: noop }))],
@@ -84,16 +83,10 @@ describe('net worth in ETH', () => {
     expect(ethUsdOf({ chains: S.chains.filter((c: Obj) => c.id !== 1) }, null)).toBe(2341.179);
     expect(ethUsdOf({ chains: [{ id: 369, nativeSymbol: 'PLS', nativeUsd: 0.00001 }] }, null)).toBeNull();
   });
-  it('Home shows the dollar total ÷ that price, in ETH, and the per-token list; no price → a dash', () => {
-    const html = render(createElement(Home, { s: S, nav: noop, holdings: HOLDINGS as never, act }));
-    const want = (HOLDINGS.netWorthExDustUsd / ETH!).toLocaleString('en-US', { maximumFractionDigits: 4 });
-    expect(html.replace(/<[^>]+>/g, '')).toContain(`Net worth${want} ETH`);
+  it('the per-token list sums each coin across chains; no ETH price → a dash', () => {
     const tokens = holdingsByToken(HOLDINGS as never);
     expect(tokens.map((t) => t.sym)).toEqual(['ETH', 'USDG', 'PLS']); // ETH rows of both chains summed
     expect(tokens[0].amount).toBeCloseTo(1.65, 12);
-    expect(html).toContain('data-testid="home-networth-tokens"');
-    const none = render(createElement(Home, { s: S, nav: noop, holdings: HOLDINGS as never, act }), null);
-    expect(none).toMatch(/data-testid="home-networth"|home-num">—/);
     expect(inEth(100, null)).toBe('—');
   });
 });
@@ -107,3 +100,23 @@ describe('token trader in the coins it spends', () => {
     expect(html).toMatch(/data-testid="tt-generated">\+0\.00437 WETH/);
   });
 });
+
+describe('the home: every dollar figure sits beside its coins (Kyle 2026-10-30)', () => {
+  const home = (hasSigner: boolean) => render(createElement(Desk, { s: { ...S, hasSigner }, nav: noop, act, busy: false, holdings: hasSigner ? HOLDINGS as never : { hasSigner: false } as never, events: [] }));
+  for (const signer of [true, false]) {
+    it(signer ? 'with a wallet' : 'paper only', () => {
+      const html = home(signer);
+      // the big figure has the coins line right under it
+      const big = /data-testid="dk-big">([^<]*)</.exec(html)![1];
+      const units = /data-testid="dk-units">([\s\S]*?)<\/div>/.exec(html)![1].replace(/<[^>]+>/g, ' ');
+      if (big !== '—') expect(units).toMatch(/[\d.,]+ [A-Z]/);
+      // each card that shows dollars shows its coins too
+      for (const card of html.match(/<button type="button" class="dk-cardi[\s\S]*?<\/button>/g) ?? []) {
+        const cu = /class="dk-cu">([^<]*)</.exec(card)?.[1] ?? '';
+        const cv = /class="dk-cv[^"]*">([^<]*)</.exec(card)?.[1] ?? '';
+        if (cu) expect(cv).toMatch(/[\d.,]+ [A-Z]/);
+      }
+    });
+  }
+});
+

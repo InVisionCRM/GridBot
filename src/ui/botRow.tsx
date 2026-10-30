@@ -5,7 +5,6 @@ import { RangeBar, Sparkline } from './charts';
 import { chainOf, RefreshCtx } from './chains';
 import { botFacts, EST_HINT, metricsOf, unitsText } from './deskStats';
 import { isShortRun } from './runRate';
-import type { FeesToday } from '../metrics/feesToday';
 import { bagFixed, cls, dur, pctShown, px, qty } from './fmt';
 import { ChainMark, TokenMark } from './icons';
 import { botView, gridName, lpName, quoteSym, rangeState, type AnyObj, type Nav } from './model';
@@ -78,29 +77,6 @@ export function fillsToday(b: AnyObj, from = startOfDay()): number | null {
   return ((b.trades ?? []) as AnyObj[]).filter((t) => !t.failed && t.timestamp >= from).length;
 }
 
-/** Home's "Fees earned today", from the server's `feesToday` (status payload), limited to the bots on screen. */
-export interface FeesTodayView {
-  liveEarnedUsd: number; paperEarnedUsd: number; livePaidUsd: number; liveSeries: number[];
-  /** The same in coins, per quote coin (what Home shows: units only). */
-  liveEarned: Record<string, number>; paperEarned: Record<string, number>; livePaid: Record<string, number>;
-}
-export function feesTodayOf(s: AnyObj, bots: AnyObj[]): FeesTodayView {
-  const ft = s?.feesToday as FeesToday | undefined;
-  const liveEarned: Record<string, number> = {}, paperEarned: Record<string, number> = {}, livePaid: Record<string, number> = {};
-  if (!ft) return { liveEarnedUsd: 0, paperEarnedUsd: 0, livePaidUsd: 0, liveSeries: [0], liveEarned, paperEarned, livePaid };
-  const ids = new Set(bots.map((b) => String(b.id)));
-  const all = Object.keys(ft.byBot ?? {}).every((id) => ids.has(id));
-  let liveEarnedUsd = 0, paperEarnedUsd = 0, livePaidUsd = 0;
-  const add = (to: Record<string, number>, sym: string | null | undefined, v: number | undefined) => { if (sym && v) to[sym] = (to[sym] ?? 0) + v; };
-  // the live headline names every live bot's coin, so a day with no fees reads "0 USDG" and no live bots reads "—"
-  const name = (to: Record<string, number>, sym: string | null | undefined, v: number | undefined) => { if (sym) to[sym] = (to[sym] ?? 0) + (v ?? 0); };
-  for (const [id, r] of Object.entries(ft.byBot ?? {})) {
-    if (!ids.has(id)) continue;
-    if (r.mode === 'live') { liveEarnedUsd += r.earnedUsd; livePaidUsd += r.paidUsd; name(liveEarned, r.sym, r.earned); add(livePaid, r.sym, r.paid); }
-    else { paperEarnedUsd += r.earnedUsd; add(paperEarned, r.sym, r.earned); }
-  }
-  return { liveEarnedUsd, paperEarnedUsd, livePaidUsd, liveSeries: all ? ft.liveSeries : [0, liveEarnedUsd], liveEarned, paperEarned, livePaid };
-}
 
 /** Units per token added up over bots (null when none has any). */
 export function sumUnits(recs: (Record<string, number> | null | undefined)[]): Record<string, number> | null {
@@ -121,17 +97,6 @@ export function generatedByMode(bots: AnyObj[]): { live: Record<string, number> 
   };
 }
 
-/**
- * Summed units keeping only the coins two or more of the records count in: a coin one bot alone counts is that bot's
- * own figure, already on its row on the same screen (Kyle: each figure once, #73).
- */
-export function sharedUnits(recs: (Record<string, number> | null | undefined)[]): Record<string, number> | null {
-  const sum = sumUnits(recs);
-  if (!sum) return null;
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(sum)) if (recs.filter((r) => r && r[k] != null).length > 1) out[k] = v;
-  return Object.keys(out).length ? out : null;
-}
 
 /** Total P&L per quote coin over the bots of one mode (units; the server's metrics.quote.totalPnl). */
 export function pnlUnits(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): Record<string, number> | null {
@@ -141,11 +106,6 @@ export function pnlUnits(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): Recor
   }));
 }
 
-/** The live bot that generated the most (ranked by today's value; shown in units). Paper bots never compete. */
-export function bestLiveBot(bots: AnyObj[]): AnyObj | null {
-  const live = bots.filter((b) => b.mode === 'live' && metricsOf(b)?.generated);
-  return live.sort((a, b) => (generatedParts(b).usd ?? -Infinity) - (generatedParts(a).usd ?? -Infinity))[0] ?? null;
-}
 
 /** Σ generatedUsd over the bots of one mode (API / tests; the page shows units). Null when none has a dollar value. */
 export function totalGeneratedUsd(bots: AnyObj[], mode: 'live' | 'paper' = 'live'): number | null {

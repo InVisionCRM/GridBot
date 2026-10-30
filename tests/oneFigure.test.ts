@@ -43,7 +43,7 @@ import { Bots } from '../src/ui/Bots';
 import { GridDetail } from '../src/ui/GridDetail';
 import { HIDE_WORTH_ON } from '../src/ui/Header';
 import { Holdings } from '../src/ui/Holdings';
-import { Home } from '../src/ui/Home';
+import { Desk } from '../src/ui/Desk';
 import { LpDetail } from '../src/ui/LpDetail';
 import { ShowUsdCtx } from '../src/ui/money';
 import { StatTable } from '../src/ui/StatTable';
@@ -170,8 +170,8 @@ export function repeats(figs: Fig[]): string[] {
  * group headers), so a total that repeats a row fails. Two different bots that happen to share an amount (both put in
  * 1 ETH) are two figures, not one repeated.
  */
-export function listRepeats(html: string, view: View): string[] {
-  const text = visibleText(html, view, 'bot-block');
+export function listRepeats(html: string, view: View, rowClass = 'bot-block'): string[] {
+  const text = visibleText(html, view, rowClass);
   const outside: string[] = [], rowsTxt: string[] = [];
   let depth = 0, cur = '';
   for (const part of text.split(/(⟦\/?ROW⟧)/)) {
@@ -197,7 +197,14 @@ const pageProps = (sx: Obj, id: string) => ({ s: sx, id, events: [], ticks: null
 const lpPage = (id: string, sx: Obj = s) => render(h(LpDetail, pageProps(sx, id)));
 const gridPage = (id = grid.id, sx: Obj = s) => render(h(GridDetail, pageProps(sx, id)));
 const trendPage = (id = trend.id, sx: Obj = s) => render(h(TrendDetail, pageProps(sx, id)));
-const home = () => render(h(Home, { s, nav: noop, holdings: null, act: noop }));
+/**
+ * The home: each card is a row. Next payday is set aside: Kyle chose it beside Money flow (2026-10-30), and it lists the
+ * same open trades by how close they are to paying, so those figures appear in both by design.
+ */
+const deskHtml = (sx: Obj = s, holdings: Obj | null = null) => render(h(Desk, { s: sx, nav: noop, act: noop, busy: false, holdings: holdings as never, events: [] }));
+const withoutPayday = (html: string) => html.replace(/<section class="dk-card"><h3>Next payday[\s\S]*?<\/section>/, '');
+export const deskRepeats = (html: string, view: View) => listRepeats(withoutPayday(html), view, 'dk-cardi');
+const home = () => deskHtml();
 
 beforeAll(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
 afterAll(() => { vi.useRealTimers(); });
@@ -235,7 +242,11 @@ describe('each figure once per screen (Kyle, no exemptions)', () => {
         expect(repeats(figures(text))).toEqual([]);
       });
     }
-    it(`Home (${view})`, () => { expect(listRepeats(home(), view)).toEqual([]); });
+    it(`Home (${view})`, () => {
+      const html = home();
+      expect(html).toContain('Next payday'); // the panel set aside is really there
+      expect(deskRepeats(html, view)).toEqual([]);
+    });
     it(`Grid page, a run under a day, Details closed and opened (${view})`, () => {
       expect(repeats(figures(visibleText(gridPage(), view)))).toEqual([]);
       expect(repeats(figures(visibleText(opened(gridPage()), view)))).toEqual([]);
@@ -331,7 +342,8 @@ describe("no '$', no Realized/Unrealized labels, on every covered screen and sta
   it('Bots list, collapsed and each bot open; Home; grid, trend and LP pages closed and opened', () => {
     expect(hits(desk())).toEqual([]);
     for (const b of bots) expect(hits(row(b)), b.id).toEqual([]);
-    expect(hits(home())).toEqual([]);
+    // the home shows dollars beside its coins by Kyle's choice (2026-10-30; checked in noDollars.test.ts): no labels here
+    expect(hits(home()).filter((x) => /\bRealized\b|\bUnrealized\b/i.test(x))).toEqual([]);
     for (const html of [gridPage(), trendPage(), lpPage('lp-stonkd'), lpPage('lp-nvda')]) {
       expect(hits(html)).toEqual([]);
       expect(hits(opened(html))).toEqual([]);
@@ -570,13 +582,12 @@ describe('#88 fixes: grid page', () => {
   });
 });
 
-describe('#88 fixes: Home with one live bot shows its figure once', () => {
-  it('the headline points to the row instead of repeating it', () => {
+describe('#88 fixes: the home with one live bot shows its figures once', () => {
+  it('the headline is that bot\'s total; its cards show its open trades, not the total again', () => {
     const live = { ...s.lps[1], mode: 'live' };
     const sx = { ...s, lps: [s.lps[0], live] };
-    const html = render(h(Home, { s: sx, nav: noop, holdings: null, act: noop }));
-    expect(html).toMatch(/data-testid="home-generated-rows">on NVDA LP below</);
-    for (const view of ['desktop', 'phone'] as View[]) expect(listRepeats(html, view)).toEqual([]);
+    const html = deskHtml(sx);
+    for (const view of ['desktop', 'phone'] as View[]) expect(deskRepeats(html, view)).toEqual([]);
   });
 });
 
@@ -593,7 +604,7 @@ describe('each figure once on the real paper fixture too (every bot, every page,
   const rows = [...REAL.grids.map((g: Obj) => ({ ...g, kind: 'grid' })), ...REAL.trends.map((t: Obj) => ({ ...t, kind: 'trend' })), ...REAL.lps.map((l: Obj) => ({ ...l, kind: 'lp' }))];
   for (const view of ['desktop', 'phone'] as View[]) {
     it(`Home and the Bots list (${view})`, () => {
-      expect(listRepeats(render(h(Home, { s: REAL, nav: noop, holdings: REAL_HOLDINGS as never, act: noop })), view), 'home').toEqual([]);
+      expect(deskRepeats(deskHtml(REAL, REAL_HOLDINGS), view), 'home').toEqual([]);
       expect(listRepeats(render(h(Bots, { s: REAL, nav: noop, busy: false, onStopAll: noop } as never)), view), 'bots').toEqual([]);
     });
     for (const b of rows) {

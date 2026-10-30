@@ -7,7 +7,7 @@ import { botMetrics, DAY_MS, HEADLINE, type BotMetrics } from '../src/metrics/bo
 import { feesToday, localDayStart } from '../src/metrics/feesToday';
 import { botFacts } from '../src/ui/deskStats';
 import { bucketItems, deskItems, emptyQuery } from '../src/ui/deskTableModel';
-import { bestLiveBot, feesTodayOf, generatedByMode, generatedParts, pnlParts, pnlUnits, sumUnits, totalGeneratedUsd, totalPnlUsd } from '../src/ui/botRow';
+import { generatedByMode, generatedParts, pnlParts, pnlUnits, sumUnits, totalGeneratedUsd, totalPnlUsd } from '../src/ui/botRow';
 
 const now = Date.UTC(2026, 9, 27, 20, 27); // Oct 27 2026, 4:27 PM EDT
 type B = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -155,7 +155,7 @@ describe('Total P&L = Generated + Price change (both sides recomputed from raw i
 });
 
 describe('every surface shows the server figure', () => {
-  it('desk row, desk table, stat table, and Home agree with metrics for every kind', () => {
+  it('desk row, desk table, stat table, and the home headline agree with metrics for every kind', () => {
     const items = deskItems(all, () => 'X', now);
     for (const b of all) {
       const x = b.metrics as BotMetrics;
@@ -180,7 +180,7 @@ describe('every surface shows the server figure', () => {
       const row = items.find((i) => i.b.id === b.id);
       if (row) expect(row.facts.generatedUsd).toBe(x.generatedUsd);
     }
-    // Home: live and paper are never mixed (review #43 finding 1)
+    // the home headline: live and paper are never mixed (review #43 finding 1)
     const live = all.filter((b) => b.mode === 'live'), paper = all.filter((b) => b.mode !== 'live');
     expect(live.length).toBeGreaterThan(0);
     expect(paper.length).toBeGreaterThan(0);
@@ -192,11 +192,10 @@ describe('every surface shows the server figure', () => {
     expect(g.paper).toEqual(sumUnits(paper.map((b) => b.metrics.generated)));
     const pu = pnlUnits(all)!;
     for (const [sym, v] of Object.entries(pu)) expect(v).toBeCloseTo(live.filter((b) => b.metrics.quote.symbol === sym).reduce((a, b) => a + b.metrics.quote.totalPnl, 0), 9);
-    expect(bestLiveBot(all)?.mode).toBe('live');
-    // a paper bot that generated far more never becomes the live headline or Best bot
+    // a paper bot that generated far more never becomes the live headline
     const big = { ...paper[0], id: 'paper-huge', metrics: { ...paper[0].metrics, generated: { USDC: 1e9 }, generatedUsd: 1e9 } };
     expect(generatedByMode([...all, big]).live).toEqual(g.live);
-    expect(bestLiveBot([...all, big])?.id).not.toBe('paper-huge');
+    expect(totalGeneratedUsd([...all, big])).toBeCloseTo(totalGeneratedUsd(all)!, 9);
   });
   it('the desk table sorts by generated dollars', () => {
     const items = deskItems(all, () => 'X', now);
@@ -238,18 +237,6 @@ describe('fees today', () => {
     expect(ft.paperEarnedUsd).toBeCloseTo(lpPaper.pnl.fees - 50, 6);
     expect(ft.livePaidUsd).toBeCloseTo(1_000_000 * PLS, 9);
     expect(ft.paperPaidUsd).toBeCloseTo(0.4, 9);
-  });
-  it('Home reads it, limited to the bots on screen', () => {
-    expect(feesTodayOf({ feesToday: ft }, all).liveEarnedUsd).toBeCloseTo(ft.liveEarnedUsd, 9);
-    const onlyPaper = feesTodayOf({ feesToday: ft }, all.filter((b) => b.mode === 'paper'));
-    expect(onlyPaper.liveEarnedUsd).toBe(0);
-    expect(onlyPaper.paperEarnedUsd).toBeCloseTo(ft.paperEarnedUsd, 9);
-  });
-  it('in coins too (what Home shows): live LP fees per quote coin, paper apart', () => {
-    const v = feesTodayOf({ feesToday: ft }, all);
-    expect(v.liveEarned[lpLive.quote]).toBeCloseTo(lpLive.pnl.fees - 100, 6);
-    expect(v.paperEarned[lpPaper.quote]).toBeCloseTo(lpPaper.pnl.fees - 50, 6);
-    expect(Object.values(v.livePaid).reduce((a, x) => a + x, 0)).toBeGreaterThan(0);
   });
 });
 

@@ -8,7 +8,7 @@ import { preparePushWorker } from './ui/pushClient';
 import { botApi, http } from './ui/api';
 import { EthUsdCtx, ethUsdOf, inEth } from './ui/units';
 import { ChainFilterCtx, chainOf, RefreshCtx, rpcAlerts, type ChainFilter } from './ui/chains';
-import { Home } from './ui/Home';
+import { Desk } from './ui/Desk';
 import { Bots } from './ui/Bots';
 import { More } from './ui/More';
 import { NewBot } from './ui/NewBot';
@@ -157,7 +157,7 @@ export default function App() {
         {err && <div className="banner error" role="alert"><span className="grow">{err}</span><button type="button" className="btn ghost small-btn" onClick={() => setErr(null)}>Dismiss</button></div>}
 
         <ViewError key={`${view.v}:${'id' in view ? view.id : ''}:${'tab' in view ? view.tab : ''}:${view.v === 'holdings' ? view.focus ?? '' : ''}`} onHome={() => nav({ v: 'home' })}>
-          {view.v === 'home' && <Home s={s} nav={nav} holdings={holdings.data} act={act} />}
+          {view.v === 'home' && <Desk s={s} nav={nav} act={act} busy={busy} holdings={holdings.data} events={events} />}
           {view.v === 'bots' && <Bots s={s} nav={nav} busy={busy} onStopAll={stopAll} />}
           {view.v === 'more' && <More s={s} nav={nav} onGuide={() => setGuide(true)} onActivity={() => setDrawer(true)} />}
           {view.v === 'opps' && <Opportunities s={s} nav={nav} act={act} busy={busy} />}

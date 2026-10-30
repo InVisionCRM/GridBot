@@ -13,6 +13,7 @@
  */
 import { EXIT } from '../market/tokenTrader';
 import { quoteSym, type AnyObj } from './model';
+import { qty } from './fmt';
 
 export type Mode = 'live' | 'paper';
 export interface Amount { sym: string; amt: number }
@@ -32,6 +33,9 @@ export interface FunnelView {
   scouted: number; rules: number; checks: number; buy: number; bought: number;
   last: Partial<Record<'rules' | 'checks' | 'buy' | 'bought', { label: string; why: string; t: number }>>;
 }
+
+/** Coins as one line: "+0.0242 ETH · +63.24 USDC" (a dash for none) */
+export const amountsText = (a: Amount[], sig = 4) => (a.length ? a.map((x) => qty(x.amt, x.sym, sig)).join(' · ') : '—');
 
 /** Point at which an open item counts as almost there */
 export const ALMOST = 0.8;
