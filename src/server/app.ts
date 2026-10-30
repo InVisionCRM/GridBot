@@ -29,6 +29,8 @@ import { noKey } from './words';
 import { fetchJson } from './fetchJson';
 import { StatusFeed } from './statusFeed';
 import { holdingsSnapshot } from './holdings/read';
+import { isWorthRange, type WalletHistory } from './holdings/history';
+import type { Logos } from './holdings/logos';
 import { requestStore, type HaltOrigin } from './bot/audit';
 import type { LpCompoundPolicy, LpRangePolicy } from '../market/lpPolicy';
 import { redact } from './bot/logger';
@@ -79,6 +81,8 @@ export interface AppOpts {
   };
   /** This process is a friend's copy. Its requests are labeled as such even if a via header says otherwise. */
   copy?: boolean;
+  /** The Wallet drawer: its dollar value over time, and coin logos (server only) */
+  wallet?: { history: WalletHistory; logos: Logos };
 }
 
 function headerOne(v: string | string[] | undefined): string | null {
@@ -180,7 +184,25 @@ export function createApp(o: AppOpts) {
 
   // ── Meta / grids (unchanged API) ─────────────────────────────────────
   app.get('/api/health', (_req, res) => res.json({ ok: true, chainId: net.chainId, chains: bot.hub.runtimes().map((r) => r.cfg.id) }));
-  app.get('/api/holdings', wrap(async (req) => holdingsSnapshot(bot, fetchJson, req.query.refresh === '1')));
+  app.get('/api/holdings', wrap(async (req) => {
+    const s = await holdingsSnapshot(bot, fetchJson, req.query.refresh === '1');
+    o.wallet?.history.note(s);
+    return s;
+  }));
+  app.get('/api/holdings/history', wrap((req) => {
+    if (!o.wallet) throw new Error('wallet history is not available here');
+    const range = req.query.range ?? '1D', chain = req.query.chain ?? 'all';
+    if (!isWorthRange(range)) throw new Error(`range must be 1D, 1W, 1M or ALL, not ${String(range)}`);
+    if (chain !== 'all' && !/^\d+$/.test(String(chain))) throw new Error(`chain must be a chain id or all, not ${String(chain)}`);
+    return { range, points: o.wallet.history.series(range, chain === 'all' ? null : Number(chain)) };
+  }));
+  // A coin's logo (image bytes), or 204 when GeckoTerminal has none for it (the page keeps the app's own mark)
+  app.get('/api/logo/:chain/:address', wrap(async (req, res) => {
+    if (!o.wallet) throw new Error('logos are not available here');
+    const logo = await o.wallet.logos.get(Number(req.params.chain), String(req.params.address));
+    if (!logo) { res.status(204).set('Cache-Control', 'public, max-age=86400').end(); return; }
+    res.set('Cache-Control', 'public, max-age=604800').type(logo.type).send(logo.bytes);
+  }));
   app.get('/api/bot/meta', (_req, res) => res.json({
     maxGridCount: MAX_GRID_COUNT, densePresets: DENSE_PRESETS, feeBps: net.pulsex.feeBps, presets: listPresets(),
     strategies: STRATEGIES, trendDefaults: DEFAULT_TREND, timeframes: TFS, sweepAxes: SWEEP_AXES,

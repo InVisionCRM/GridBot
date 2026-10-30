@@ -1653,3 +1653,54 @@ body.dk-on { overflow: hidden; }
   .dk-pane, .dk-big.bump, .dk-stage-row.hit, .dk-live-dot, .dk-tip { animation: none; }
   .dk-sheet-wrap, .dk-px, .dk-bar i { transition: none; }
 }
+
+/* ── drawer handle (swipe down to close) ─────────────────────────────── */
+.dk-handle { align-self: stretch; display: flex; justify-content: center; padding: 4px 0 6px; margin: -4px 0 -6px; cursor: grab; touch-action: none; }
+
+/* ── Wallet (drawer + full page), Coinbase style ─────────────────────── */
+.wl { display: flex; flex-direction: column; gap: 10px; width: 100%; text-align: left; min-height: 0; }
+.wl-head { display: grid; gap: 2px; }
+.wl-big { font: 700 clamp(2rem, 6vw, 2.6rem)/1.05 var(--font); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.wl-chg { font: 600 0.86rem var(--mono); min-height: 1.2em; }
+.wl-chg em { font: 500 0.8rem var(--font); font-style: normal; color: var(--muted); margin-left: 4px; }
+.wl-chart { display: block; width: 100%; height: 132px; cursor: crosshair; touch-action: none; }
+.wl-chart.tall { height: 220px; }
+.wl-chart-empty { height: 132px; margin: 0; display: grid; place-items: center; text-align: center; color: var(--muted); font-size: 0.82rem; border: 1px dashed var(--line); border-radius: 14px; padding: 0 18px; }
+.wl-chart-empty.tall { height: 220px; }
+.wl-ranges { display: flex; justify-content: space-around; }
+.wl-ranges button, .wl-pills button { appearance: none; border: 0; background: none; color: var(--muted); font: 600 0.78rem var(--font); padding: 6px 14px; border-radius: 999px; cursor: pointer; }
+.wl-ranges button.on, .wl-pills button.on { background: var(--surface-2); color: var(--text); }
+.wl-pills { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.wl-pills button { border: 1px solid var(--line); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.wl-pills i { width: 8px; height: 8px; border-radius: 50%; }
+.wl-list { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+.wl-list h3 { margin: 14px 0 4px; font: 600 0.78rem var(--font); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.wl-row { appearance: none; border: 0; background: none; color: inherit; font: inherit; text-align: left; width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 9px 6px; border-radius: 14px; }
+button.wl-row { cursor: pointer; }
+button.wl-row:hover { background: var(--surface-2); }
+.wl-name, .wl-val { display: grid; gap: 1px; min-width: 0; }
+.wl-name b, .wl-val b { font-weight: 600; font-size: 0.95rem; }
+.wl-val { text-align: right; }
+.wl-val b { font-family: var(--mono); font-weight: 500; }
+.wl-name small, .wl-val small { color: var(--muted); font-size: 0.76rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wl-val small { font-family: var(--mono); }
+.wl-logo { position: relative; display: inline-block; flex: none; }
+.wl-logo-i { display: block; width: 100%; height: 100%; border-radius: 50%; overflow: hidden; background: var(--surface-2); }
+.wl-logo-i img, .wl-logo-i svg { display: block; width: 100%; height: 100%; object-fit: cover; }
+.wl-chain { position: absolute; right: -3px; bottom: -3px; width: 17px; height: 17px; border-radius: 50%; border: 2px solid #1A1C20; display: grid; place-items: center; font: 800 0.55rem/1 var(--font); color: #0E0F11; }
+.wl-pair { position: relative; width: 48px; height: 40px; flex: none; }
+.wl-pair > .wl-logo { position: absolute; }
+.wl-pair > .wl-logo:first-child { left: 0; top: 0; }
+.wl-pair > .wl-logo:last-child { right: 0; bottom: 0; box-shadow: 0 0 0 2px #1A1C20; border-radius: 50%; }
+.wl-actions { justify-content: stretch; }
+.wl-actions .dk-btn { flex: 1; }
+.wl-page { max-width: 760px; margin: 0 auto; padding: 18px 16px 90px; display: flex; flex-direction: column; gap: 12px; }
+.wl-page .wl-chain { border-color: var(--bg); }
+.wl-page-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.dk-sheet > .wl { flex: 1 1 auto; min-height: 0; }
+/* the wallet drawer is a card, not the full width; its chart a touch shorter so five rows fit a phone */
+.dk-sheet:has(> .wl-drawer) { width: min(620px, 100%); }
+.wl-drawer .wl-chart, .wl-drawer .wl-chart-empty { height: 112px; }
+.wl-val { max-width: 52%; justify-self: end; }
+.wl-val small { max-width: 100%; }
+.wl-page .fold.how { margin: 4px 0 0; }

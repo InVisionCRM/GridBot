@@ -37,7 +37,8 @@ import { gridMetrics, lpMetrics, trendMetrics } from '../src/metrics/botMetrics'
 import { BotRow } from '../src/ui/botRow';
 import { DeskTable } from '../src/ui/DeskTable';
 import { deskItems, sortItems } from '../src/ui/deskTableModel';
-import { pctShown, qty, qtyFixed, sameShown } from '../src/ui/fmt';
+import { pctShown, qty, qtyFixed, sameShown, usd as fmtUsd } from '../src/ui/fmt';
+import { walletModel } from '../src/ui/walletModel';
 import { readFileSync } from 'node:fs';
 import { Bots } from '../src/ui/Bots';
 import { GridDetail } from '../src/ui/GridDetail';
@@ -448,20 +449,17 @@ const sH = { ...s0, chains: [...s0.chains, { id: 369, key: 'pulse', name: 'Pulse
 const holdingsPage = (snap: unknown = holdingsSnap) =>
   opened(renderToStaticMarkup(h(Holdings, { s: sH, snap: snap as never, loading: false, error: null, reload: noop, nav: noop })));
 
-describe("Holdings: coin amounts per chain, no '$', no cross-coin total, each figure once (Kyle, #73)", () => {
-  it('shows each coin in its own units, stablecoins as "34,000 USDG"', () => {
+describe('Holdings (the Wallet page): dollars first with each coin under them (Kyle, 2026-10-30), each figure once', () => {
+  it('shows each coin in its own units under its dollars, stablecoins as "34,000 USDG"', () => {
     const text = visibleText(holdingsPage(), 'desktop');
-    for (const want of ['34,000 USDG', '2.5 ETH', '0.75 SPY', '1,234,570 PLS', '21.3 SPY · 16,950.2 USDG', '0.0102 SPY · 4.31 USDG', '1,200 USDG · 0.4 ETH']) expect(text).toContain(want);
-    // the chain names are section headings (labels, so not in the visible-figure text): read them from the page
-    expect(holdingsPage()).toMatch(/Robinhood Chain[\s\S]*PulseChain|PulseChain[\s\S]*Robinhood Chain/);
+    for (const want of ['34,000 USDG', '2.5 ETH', '0.75 SPY', '1,234,570 PLS', '21.3 SPY · 16,950.2 USDG', '0.0102 SPY · 4.31 USDG']) expect(text).toContain(want);
   });
-  it("no '$' anywhere (text, tooltips, labels), and no total: not the net worth, a chain's, the fees' or the grids'", () => {
-    for (const html of [holdingsPage(), renderToStaticMarkup(h(Holdings, { s: sH, snap: holdingsSnap as never, loading: false, error: null, reload: noop, nav: noop }))]) {
-      expect(hits(html)).toEqual([]);
-      const text = visibleText(html, 'desktop');
-      for (const usd of ['61,234', '61,200', '61,000', '40,000', '33,379', '2,139', '12.18', '34.5']) expect(text, usd).not.toContain(usd);
-      expect(text).not.toMatch(/\b\d+(\.\d+)?K\b/); // full amounts, not "34K"
-    }
+  it('the headline is the server\'s dust-free total (what the value history records); every row with a price shows its dollars', () => {
+    const html = holdingsPage();
+    expect(/class="wl-big">([^<]*)</.exec(html)![1]).toBe(fmtUsd(holdingsSnap.netWorthExDustUsd));
+    const m = walletModel(holdingsSnap as never, 'all', false);
+    for (const r of [...m.assets, ...m.pools, ...m.fees]) if (r.usd != null) expect(html).toContain(`<b>${fmtUsd(r.usd)}</b>`);
+    expect(walletModel(holdingsSnap as never, 4663, false).total).toBe(61_000);
   });
   for (const view of ['desktop', 'phone'] as View[]) {
     it(`each figure once (${view}), folds opened`, () => {
@@ -471,10 +469,10 @@ describe("Holdings: coin amounts per chain, no '$', no cross-coin total, each fi
   it("the header's net-worth button is hidden on Holdings", () => {
     expect(HIDE_WORTH_ON.has('holdings')).toBe(true);
   });
-  it('paper mode (no wallet): still no dollar figure', () => {
+  it('paper mode (no wallet): no figures, and it says why', () => {
     const paper = { ...holdingsSnap, hasSigner: false, address: null, wallet: [], positions: [], fees: [], bots: [], chains: [] };
     expect(hits(holdingsPage(paper))).toEqual([]);
-    expect(visibleText(holdingsPage(paper), 'desktop')).toMatch(/Paper mode/);
+    expect(visibleText(holdingsPage(paper), 'desktop')).toMatch(/No wallet key on this server/);
   });
 });
 
