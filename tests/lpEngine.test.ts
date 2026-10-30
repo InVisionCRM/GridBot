@@ -208,7 +208,14 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s).toMatchObject({ reranges: 2, config: { bandPct: 0.03 } });
     // ±3% on a pool whose ticks are 0.5% apart (50 × 0.01%): within a tick of 1.03 / 0.97
     expect(Math.abs(s.position!.upper / s.position!.lower - 1.03 / 0.97)).toBeLessThan(0.0101);
-    await expect(lp.move(0.001)).rejects.toThrow(/±1% to ±50%/);
+    await expect(lp.move(0.0005)).rejects.toThrow(/±0\.1% to ±50%/);
+    // ±0.1% (the narrowest) on that pool opens one tick step wide (50 ticks = 1.0001^50 edge to edge), around the price
+    await lp.move(0.001);
+    await lp.tick();
+    s = lp.status();
+    expect(s.config!.bandPct).toBe(0.001);
+    expect(s.position!.upper / s.position!.lower).toBeCloseTo(1.0001 ** 50, 6);
+    expect(s.price! >= s.position!.lower && s.price! <= s.position!.upper).toBe(true);
     lp.stop();
     await expect(lp.move()).rejects.toThrow(/Resume it first/);
   });
@@ -373,9 +380,10 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s.idle.base * PRICE + s.idle.quote).toBeGreaterThan(995);
   });
 
-  it('refuses ranges outside ±1–50%, no amount, and markets that are not V3 pools', async () => {
+  it('refuses ranges outside ±0.1–50%, no amount, and markets that are not V3 pools', async () => {
     const { lp } = world();
-    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.6, capital: 100 })).rejects.toThrow(/±1% to ±50%/);
+    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.6, capital: 100 })).rejects.toThrow(/±0\.1% to ±50%/);
+    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.0009, capital: 100 })).rejects.toThrow(/±0\.1% to ±50%/);
     await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0 })).rejects.toThrow(/amount/);
     await expect(lp.start({ mode: 'paper', market: 'DAI', bandPct: 0.1, capital: 100 })).rejects.toThrow(/needs a V3 pool/);
   });

@@ -6,7 +6,7 @@ import { STRATEGY_PRESETS } from '../live/presets';
 import { DEFAULT_GAS_RESERVE, parseGasRes, type GasReserveCfg } from '../live/gasReserve';
 import { humanAmount } from '../live/amount';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
-import { LP_BAND, LP_MIN_SWAP_SHARE } from '../market/lp';
+import { LP_BAND, LP_MIN_SWAP_SHARE, V3_STEP } from '../market/lp';
 import { EMPTY_POLICY, LpPolicyFields, optionalPayload } from './LpPolicyFields';
 import { rangeBaseShare } from '../live/v3Liquidity';
 import { L } from './Tip';
@@ -385,7 +385,7 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
   );
 }
 
-const LP_BANDS = [0.02, 0.05, 0.08, 0.12, 0.2];
+const LP_BANDS = [0.001, 0.005, 0.02, 0.05, 0.08, 0.12, 0.2];
 
 /** What the bot swaps before opening ±band around `spot` with `quote` + `base` coins: buy base with quote, or sell base. */
 function swapPlan(spot: number, band: number, quote: number, base: number): { share: number; side: 'buy' | 'sell' | null; amount: number } {
@@ -430,6 +430,8 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const spot = s.spots?.[pair] ?? m.spot ?? null;
   const b = +band / 100;
   const bandOk = b >= LP_BAND.min && b <= LP_BAND.max;
+  // the pool's tick step in % (a V3 pool's spacing × 0.01%), when its fee tier tells it
+  const step = m.kind === 'v3' && m.feeTier != null && V3_STEP[m.feeTier] != null ? V3_STEP[m.feeTier] / 100 : null;
   const gasCfg = parseGasRes(limits.gasRes) ?? DEFAULT_GAS_RESERVE;
   const q = +amount || 0, a = +baseAmt || 0;
   const funds = spendFunds(s, pair, q, gasCfg), baseFunds = coinFunds(s, pair, 'base', a, gasCfg);
@@ -459,6 +461,9 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
         {LP_BANDS.map((x) => <button key={x} type="button" className={`btn small-btn ${Math.abs(b - x) < 1e-9 ? 'primary' : ''}`} onClick={() => setBand(String(x * 100))}>±{x * 100}%</button>)}
       </div>
       {!bandOk && <p className="small neg">The range must be between ±{LP_BAND.min * 100}% and ±{LP_BAND.max * 100}%.</p>}
+      {bandOk && step != null && 2 * b * 100 < step && (
+        <p className="small warn">This pool moves in steps of {step}%: a range narrower than that opens one step wide ({step}% edge to edge) around the price, not ±{+(b * 100).toFixed(2)}%.</p>
+      )}
       <div className="verdict ok">
         <span>Puts your coins into the {m.dexName ?? m.dex} {feeLabel(m)} pool between <b>{spot && bandOk ? px(spot * (1 - b)) : '—'}</b> and <b>{spot && bandOk ? px(spot * (1 + b)) : '—'}</b> {m.quote}/{m.base}. {plan
           ? plan.side == null ? <>Your {m.base} and {m.quote} already match the range's mix, so <b>nothing is swapped</b>.</>

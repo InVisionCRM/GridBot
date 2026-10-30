@@ -1,18 +1,17 @@
 /**
- * The home's bottom drawer: one sheet for a bot's details, a profit moment, starting a bot, wallet & funds, and the
- * full list behind a column's "+N more". It slides up over the board; Escape, the scrim or Close put it away. A profit
- * moment closes on its own after a few seconds unless it was opened by a tap.
+ * The home's bottom drawer (Sheet.tsx): a bot's details, a profit moment, starting a bot, the wallet, and the full list
+ * behind a column's "+N more". A profit moment closes on its own after a few seconds unless it was opened by a tap.
  */
 import { useEffect, useState } from 'react';
 import { useRowActions } from './botRow';
 import { metricsOf } from './deskStats';
 import { amountsText, type BankedItem, type OpenItem } from './deskModel';
 import { ago, qty, usd } from './fmt';
+import { Sheet } from './Sheet';
+import { WalletView } from './Wallet';
 import type { HoldingsSnapshot } from '../live/holdingsMath';
 import type { AnyObj, BotKind, Nav, View } from './model';
 import { NewBot } from './NewBot';
-import { holdingsByToken } from './units';
-import { useChainFilter } from './chains';
 
 export type SheetOf =
   | { kind: 'bot'; botId: string }
@@ -27,32 +26,18 @@ export function DeskSheet({ sheet, close, s, bots, trader, holdings, nav, act, b
   sheet: SheetOf; close: () => void; s: AnyObj; bots: AnyObj[]; trader: AnyObj | null; holdings: HoldingsSnapshot | null;
   nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean;
 }) {
-  const [shown, setShown] = useState(false);
-  useEffect(() => { const r = requestAnimationFrame(() => setShown(true)); return () => cancelAnimationFrame(r); }, []);
-  useEffect(() => {
-    const on = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
-    addEventListener('keydown', on);
-    return () => removeEventListener('keydown', on);
-  }, [close]);
   const auto = sheet.kind === 'moment' && !sheet.pinned;
   useEffect(() => { if (!auto) return; const t = setTimeout(close, MOMENT_MS); return () => clearTimeout(t); }, [auto, close]);
   const go = (v: View) => { close(); nav(v); };
   const tall = sheet.kind === 'new' || sheet.kind === 'list' || sheet.kind === 'wallet';
   return (
-    <>
-      {!auto && <div className={`dk-scrim ${shown ? 'on' : ''}`} onClick={close} />}
-      <div className={`dk-sheet-wrap ${shown ? 'on' : ''}`} role="dialog" aria-modal={!auto} aria-label={sheetLabel(sheet)}>
-        <div className={`dk-sheet ${tall ? 'tall' : ''}`}>
-          <span className="dk-grab" aria-hidden="true" />
-          {sheet.kind === 'bot' && <BotSheet botId={sheet.botId} bots={bots} trader={trader} go={go} close={close} />}
-          {sheet.kind === 'moment' && <MomentSheet item={sheet.item} close={close} />}
-          {sheet.kind === 'new' && <NewSheet s={s} go={go} act={act} busy={busy} />}
-          {sheet.kind === 'wallet' && <WalletSheet holdings={holdings} go={go} />}
-          {sheet.kind === 'list' && <ListSheet title={sheet.title} items={sheet.items} />}
-          {sheet.kind !== 'moment' && <button type="button" className="dk-btn dk-close" onClick={close}>Close</button>}
-        </div>
-      </div>
-    </>
+    <Sheet label={sheetLabel(sheet)} close={close} tall={tall} auto={auto} closeButton={sheet.kind !== 'moment'}>
+      {sheet.kind === 'bot' && <BotSheet botId={sheet.botId} bots={bots} trader={trader} go={go} close={close} />}
+      {sheet.kind === 'moment' && <MomentSheet item={sheet.item} close={close} />}
+      {sheet.kind === 'new' && <NewSheet s={s} go={go} act={act} busy={busy} />}
+      {sheet.kind === 'wallet' && <WalletView s={s} snap={holdings} mode="drawer" nav={go} />}
+      {sheet.kind === 'list' && <ListSheet title={sheet.title} items={sheet.items} />}
+    </Sheet>
   );
 }
 const sheetLabel = (s: SheetOf) => (s.kind === 'bot' ? 'Bot details' : s.kind === 'moment' ? 'Profit banked' : s.kind === 'new' ? 'New bot' : s.kind === 'wallet' ? 'Wallet and funds' : s.title);
@@ -116,25 +101,6 @@ function NewSheet({ s, go, act, busy }: { s: AnyObj; go: (v: View) => void; act:
   // picking a bot type stays in the drawer; anything else (a started bot's page) leaves it
   const nav: Nav = (v) => { if (v.v === 'new') setKind(v.kind ?? 'grid'); else go(v); };
   return <div className="dk-sheet-body"><NewBot s={s} kind={kind} nav={nav} act={act} busy={busy} /></div>;
-}
-
-function WalletSheet({ holdings, go }: { holdings: HoldingsSnapshot | null; go: (v: View) => void }) {
-  const { chain } = useChainFilter();
-  if (!holdings) return <p className="muted">Reading the wallet…</p>;
-  if (!holdings.hasSigner) return <><span className="dk-eyebrow">Wallet & funds</span><p className="muted">No wallet key on this server: bots run on paper.</p></>;
-  const coins = holdingsByToken(holdings, chain).slice(0, 8);
-  const worth = holdings.netWorthExDustUsd ?? holdings.netWorthUsd;
-  return (
-    <>
-      <span className="dk-eyebrow">Wallet & funds</span>
-      <span className="dk-huge">{worth == null ? '—' : usd(worth)}</span>
-      <dl className="dk-kv">{coins.map((c) => <div key={c.sym}><dt>{c.sym}</dt><dd>{qty(c.amount, c.sym, 6, false)}{c.usd != null ? <small> · {usd(c.usd)}</small> : null}</dd></div>)}</dl>
-      <div className="dk-row">
-        <button type="button" className="dk-btn" onClick={() => go({ v: 'tools', tab: 'convert' })}>Convert</button>
-        <button type="button" className="dk-btn primary" onClick={() => go({ v: 'holdings' })}>Open wallet</button>
-      </div>
-    </>
-  );
 }
 
 function ListSheet({ title, items }: { title: string; items: (OpenItem | BankedItem)[] }) {

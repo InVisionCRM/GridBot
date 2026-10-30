@@ -82,7 +82,8 @@ describe('router settings', () => {
     expect(DEFAULT_MAX_PRIORITY_FEE_WEI[369]).toBeGreaterThan(935_000n * 1_000_000_000n);
     expect(router.maxPriorityFeeWei(369)).toBe(DEFAULT_MAX_PRIORITY_FEE_WEI[369]);
     expect(router.maxPriorityFeeWei(999)).toBeNull();
-    expect(defaultMaxPriorityFee(10, 200n * 1_000_000_000n)).toBe(20n * 1_000_000_000n);
+    expect(defaultMaxPriorityFee(999, 200n * 1_000_000_000n)).toBe(20n * 1_000_000_000n);
+    expect(DEFAULT_MAX_PRIORITY_FEE_WEI[137]).toBeGreaterThan(130n * 1_000_000_000n);
     expect(defaultMaxPriorityFee(369, 1n)).toBe(1n);
     expect(router.isHalted()).toBe(false);
     expect(etaP90Within(60 * 60, 60)).toBe(true);

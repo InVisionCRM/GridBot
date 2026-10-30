@@ -4,6 +4,9 @@
  * Every address below was taken from the official source cited in `sources` AND checked on-chain on
  * 2026-10-08 (eth_chainId, code at address, router.factory() / WETH9() / quoter.factory(), a live quote):
  * see `npm run check:onchain`. Do not add addresses that have not been verified the same way.
+ * Base, Arbitrum One, BNB Chain, Polygon PoS and OP Mainnet were re-checked on 2026-10-30: the same calls on every
+ * listed RPC plus positionManager.factory() / WETH9(), the eth_call state override the safety check needs, and on three
+ * live positions per chain the fees from the pool's counters equal what collect() pays.
  *
  * Server-side overrides (read in src/server/chains/runtime.ts): RPC_URL_<envSlug> (comma-separated list,
  * tried in order before the defaults) and an optional per-chain signing key with the same suffix.
@@ -96,8 +99,11 @@ export interface ChainConfig {
   /** Trading unavailable → config still listed, bots cannot start; reason shown in the UI. */
   trading: { enabled: boolean; reason?: string };
   dexes: DexConfig[];
-  /** L2 fee model: arbitrum = NodeInterface L1 gas component (Robinhood Chain is an Arbitrum Orbit L2). */
-  stack: 'l1' | 'arbitrum';
+  /**
+   * L2 fee model. op = GasPriceOracle.getL1Fee, charged on top of gasUsed × gasPrice (Base, OP Mainnet).
+   * arbitrum = NodeInterface L1 gas component, already inside gasUsed (Arbitrum One; Robinhood Chain is an Arbitrum Orbit L2).
+   */
+  stack: 'l1' | 'op' | 'arbitrum';
   /** Gas units used for ESTIMATES (approve, one swap). Probe-measured swap gas was 88–140k on every chain. */
   gasUnits: { approve: number; swap: number };
   /** Warn when the signer's native balance drops below this (native units) */
@@ -119,11 +125,19 @@ export interface ChainConfig {
 const UNI_V2_SRC = 'https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments';
 /**
  * Uniswap V2 pairs on Ethereum and Robinhood run byte-identical code (keccak of the runtime code matched, 2026-10-17)
- * and both factories have feeTo set, so the canonical _mintFee applies: feeTo gets 1/6 of the fee growth.
+ * and both factories have feeTo set, so the canonical _mintFee applies: feeTo gets 1/6 of the fee growth. The same
+ * held on 2026-10-30 for Uniswap V2 on Base and Arbitrum and QuickSwap V2 on Polygon (pair code keccak 0x5b83bd…9ce5,
+ * feeTo set on every factory).
  */
 const UNI_V2_LP_SHARE = 5 / 6;
 const TIERS_UNI = [100, 500, 3000, 10000];
 const TIERS_CAKE = [100, 500, 2500, 10000];
+/**
+ * PancakeSwap V2 on BNB Chain (pair code differs from Uniswap's): router getAmountsOut equals the 25 bps formula to the
+ * wei, and fee mints to feeTo on WBNB/USDT measured 0.3200 of the √k growth (2026-10-30, mints with no earlier pair event
+ * in their block) → LPs keep 17 of the 25 bps.
+ */
+const CAKE_V2_LP_SHARE = 17 / 25;
 /** Canonical Uniswap V3 addresses (Ethereum mainnet). */
 const UNI_V3_CANON = {
   factory: '0x1F98431c8aD98523631AE4a59f267346ea31F984',
@@ -131,8 +145,9 @@ const UNI_V3_CANON = {
   quoter: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
   positionManager: '0xC36442b4a4522E871399CD717aBDD847Ab11FE88',
 };
-const uniV3 = (chainSrc: string, gecko: string, a = UNI_V3_CANON): DexConfig => ({
-  id: 'uniswap-v3', name: 'Uniswap V3', kind: 'v3', ...a, feeTiers: TIERS_UNI, source: chainSrc, gecko, screener: 'uniswap:v3', protocolFee: 'uniswap',
+/** `screener`: DexScreener leaves Uniswap V3 pools unlabeled on Arbitrum, Polygon and OP Mainnet ('uniswap:'; checked by factory() 2026-10-30). */
+const uniV3 = (chainSrc: string, gecko: string, a = UNI_V3_CANON, screener = 'uniswap:v3'): DexConfig => ({
+  id: 'uniswap-v3', name: 'Uniswap V3', kind: 'v3', ...a, feeTiers: TIERS_UNI, source: chainSrc, gecko, screener, protocolFee: 'uniswap',
 });
 
 /**
@@ -268,6 +283,118 @@ export const CHAINS: ChainConfig[] = [
       { label: 'Tether supported protocols', url: 'https://tether.to/en/supported-protocols' },
     ],
     note: 'L1 gas makes small grids uneconomic — the start gate will usually block them.',
+  },
+  {
+    id: 8453, key: 'base', envSlug: 'BASE', name: 'Base', short: 'BASE', color: '#2f6bff', nativeSymbol: 'ETH',
+    wrappedNative: { symbol: 'WETH', name: 'Wrapped Ether', address: '0x4200000000000000000000000000000000000006', decimals: 18, kind: 'wrapped' },
+    stables: [{ symbol: 'USDC', name: 'USD Coin', address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', decimals: 6, kind: 'stable' }],
+    // publicnode first: it serves 20,000-block eth_getLogs; base.drpc.org (free plan) refuses spans over ~100 blocks (2026-10-30)
+    rpcs: ['https://base-rpc.publicnode.com', 'https://mainnet.base.org', 'https://base.drpc.org'],
+    explorer: 'https://basescan.org', geckoSlug: 'base', screener: 'base', status: 'live', trading: { enabled: true },
+    dexes: [
+      uniV3('https://github.com/Uniswap/contracts/blob/main/deployments/8453.md', 'uniswap-v3-base', {
+        factory: '0x33128a8fC17869897dcE68Ed026d694621f6FDfD', router: '0x2626664c2603336E57B271c5C0b26F421741e481', quoter: '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a',
+        positionManager: '0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1',
+      }),
+      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap-v2-base', screener: 'uniswap:v2', factory: '0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6', router: '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24', feeBps: 30, lpShare: UNI_V2_LP_SHARE, source: 'https://github.com/Uniswap/contracts/blob/main/deployments/8453.md' },
+    ],
+    stack: 'op', gasUnits: { approve: 60_000, swap: 180_000 }, lowGasNative: 0.0005, blockTimeSec: 2, logChunk: 10_000,
+    sources: [
+      { label: 'Base docs — network information', url: 'https://docs.base.org/base-chain/quickstart/connecting-to-base' },
+      { label: 'Uniswap/contracts deployments/8453.md (v2, v3)', url: 'https://github.com/Uniswap/contracts/blob/main/deployments/8453.md' },
+      { label: 'Circle USDC addresses', url: 'https://developers.circle.com/stablecoins/usdc-contract-addresses' },
+    ],
+    note: 'OP-stack L2, ETH gas. Aerodrome (the largest Base DEX) is not supported: its pools are not Uniswap-compatible.',
+  },
+  {
+    id: 42161, key: 'arbitrum', envSlug: 'ARBITRUM', name: 'Arbitrum One', short: 'ARB', color: '#28a0f0', nativeSymbol: 'ETH',
+    wrappedNative: { symbol: 'WETH', name: 'Wrapped Ether', address: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', decimals: 18, kind: 'wrapped' },
+    stables: [
+      { symbol: 'USDC', name: 'USD Coin (native)', address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6, kind: 'stable' },
+      { symbol: 'USDT', name: 'USD₮0', address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', decimals: 6, kind: 'stable', note: 'on-chain symbol "USD₮0"' },
+    ],
+    // arb1 first: the only one of the three serving eth_getLogs over 100 blocks (publicnode asks for a token, drpc free plan refuses; 2026-10-30)
+    rpcs: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum-one-rpc.publicnode.com', 'https://arbitrum.drpc.org'],
+    explorer: 'https://arbiscan.io', geckoSlug: 'arbitrum', screener: 'arbitrum', status: 'live', trading: { enabled: true },
+    dexes: [
+      uniV3('https://github.com/Uniswap/contracts/blob/main/deployments/42161.md', 'uniswap_v3_arbitrum', UNI_V3_CANON, 'uniswap:'),
+      { id: 'uniswap-v2', name: 'Uniswap V2', kind: 'v2', gecko: 'uniswap-v2-arbitrum', screener: 'uniswap:v2', factory: '0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9', router: '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24', feeBps: 30, lpShare: UNI_V2_LP_SHARE, source: 'https://github.com/Uniswap/contracts/blob/main/deployments/42161.md', note: 'Shallow; V3 holds the liquidity.' },
+    ],
+    stack: 'arbitrum', gasUnits: { approve: 60_000, swap: 220_000 }, lowGasNative: 0.0005, blockTimeSec: 0.25, logChunk: 20_000,
+    sources: [
+      { label: 'Arbitrum docs — RPC endpoints', url: 'https://docs.arbitrum.io/build-decentralized-apps/reference/node-providers' },
+      { label: 'Uniswap/contracts deployments/42161.md (v2, v3)', url: 'https://github.com/Uniswap/contracts/blob/main/deployments/42161.md' },
+      { label: 'Circle USDC addresses', url: 'https://developers.circle.com/stablecoins/usdc-contract-addresses' },
+    ],
+  },
+  {
+    id: 56, key: 'bsc', envSlug: 'BSC', name: 'BNB Chain', short: 'BNB', color: '#f0b90b', nativeSymbol: 'BNB',
+    wrappedNative: { symbol: 'WBNB', name: 'Wrapped BNB', address: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', decimals: 18, kind: 'wrapped' },
+    stables: [
+      { symbol: 'USDT', name: 'Tether USD (BSC-USD)', address: '0x55d398326f99059fF775485246999027B3197955', decimals: 18, kind: 'stable', note: '18 decimals on BNB Chain' },
+      { symbol: 'USDC', name: 'USD Coin (Binance-Peg)', address: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', decimals: 18, kind: 'stable', note: '18 decimals on BNB Chain' },
+    ],
+    // publicnode first: the bnbchain/defibit dataseeds answer every eth_getLogs with "limit exceeded" (2026-10-30)
+    rpcs: ['https://bsc-rpc.publicnode.com', 'https://bsc-dataseed.bnbchain.org', 'https://bsc-dataseed1.defibit.io', 'https://bsc.drpc.org'],
+    explorer: 'https://bscscan.com', geckoSlug: 'bsc', screener: 'bsc', status: 'live', trading: { enabled: true },
+    dexes: [
+      {
+        id: 'pancakeswap-v3', name: 'PancakeSwap V3', kind: 'v3', gecko: 'pancakeswap-v3-bsc', screener: 'pancakeswap:v3', factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865',
+        router: '0x13f4EA83D0bd40E75C8222255bc855a974568Dd4', quoter: '0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997', feeTiers: TIERS_CAKE, protocolFee: 'pancake',
+        positionManager: '0x46A15B0b27311cedF172AB29E4f4766fbE7F4364', source: 'https://developer.pancakeswap.finance/contracts/v3/addresses',
+      },
+      { id: 'pancakeswap-v2', name: 'PancakeSwap V2', kind: 'v2', gecko: 'pancakeswap_v2', screener: 'pancakeswap:v2', factory: '0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73', router: '0x10ED43C718714eb63d5aA57B78B54704E256024E', feeBps: 25, lpShare: CAKE_V2_LP_SHARE, source: 'https://developer.pancakeswap.finance/contracts/v2/addresses' },
+    ],
+    stack: 'l1', gasUnits: { approve: 60_000, swap: 200_000 }, lowGasNative: 0.005, blockTimeSec: 0.75, logChunk: 5000,
+    sources: [
+      { label: 'BNB Chain docs — RPC', url: 'https://docs.bnbchain.org/bnb-smart-chain/developers/json_rpc/json-rpc-endpoint/' },
+      { label: 'PancakeSwap v3 addresses', url: 'https://developer.pancakeswap.finance/contracts/v3/addresses' },
+      { label: 'PancakeSwap v2 addresses', url: 'https://developer.pancakeswap.finance/contracts/v2/addresses' },
+    ],
+  },
+  {
+    id: 137, key: 'polygon', envSlug: 'POLYGON', name: 'Polygon PoS', short: 'POL', color: '#8247e5', nativeSymbol: 'POL',
+    wrappedNative: { symbol: 'WPOL', name: 'Wrapped POL', address: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270', decimals: 18, kind: 'wrapped' },
+    stables: [
+      { symbol: 'USDC', name: 'USD Coin (native)', address: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', decimals: 6, kind: 'stable' },
+      { symbol: 'USDT', name: 'USDT0', address: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F', decimals: 6, kind: 'stable', note: 'on-chain symbol "USDT0"' },
+    ],
+    // publicnode serves up to 10,000 blocks per eth_getLogs; polygon.drpc.org (free plan) about 100 (2026-10-30)
+    rpcs: ['https://polygon-bor-rpc.publicnode.com', 'https://polygon.drpc.org'],
+    explorer: 'https://polygonscan.com', geckoSlug: 'polygon_pos', screener: 'polygon', status: 'live', trading: { enabled: true },
+    dexes: [
+      uniV3('https://github.com/Uniswap/contracts/blob/main/deployments/137.md', 'uniswap_v3_polygon_pos', UNI_V3_CANON, 'uniswap:'),
+      { id: 'quickswap-v2', name: 'QuickSwap V2', kind: 'v2', gecko: 'quickswap', screener: 'quickswap:v2', factory: '0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32', router: '0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff', feeBps: 30, lpShare: UNI_V2_LP_SHARE, source: 'https://docs.quickswap.exchange/overview/contracts-and-addresses' },
+    ],
+    stack: 'l1', gasUnits: { approve: 60_000, swap: 200_000 }, lowGasNative: 1, blockTimeSec: 2, logChunk: 3000,
+    sources: [
+      { label: 'Polygon docs — RPC endpoints', url: 'https://docs.polygon.technology/pos/reference/rpc-endpoints/' },
+      { label: 'Uniswap/contracts deployments/137.md (v3)', url: 'https://github.com/Uniswap/contracts/blob/main/deployments/137.md' },
+      { label: 'QuickSwap contracts', url: 'https://docs.quickswap.exchange/overview/contracts-and-addresses' },
+      { label: 'Circle USDC addresses', url: 'https://developers.circle.com/stablecoins/usdc-contract-addresses' },
+    ],
+    note: 'polygon-rpc.com returns 401 without a key; publicnode/drpc are used.',
+  },
+  {
+    id: 10, key: 'optimism', envSlug: 'OPTIMISM', name: 'OP Mainnet', short: 'OP', color: '#ff0420', nativeSymbol: 'ETH',
+    wrappedNative: { symbol: 'WETH', name: 'Wrapped Ether', address: '0x4200000000000000000000000000000000000006', decimals: 18, kind: 'wrapped' },
+    stables: [
+      { symbol: 'USDC', name: 'USD Coin (native)', address: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', decimals: 6, kind: 'stable' },
+      { symbol: 'USDT', name: 'Tether USD', address: '0x94b008aA00579c1307B0EF2c499aD98a8ce58e58', decimals: 6, kind: 'stable' },
+    ],
+    // mainnet.optimism.io serves 10,000-block eth_getLogs, old ranges included; publicnode only recent ones (2026-10-30)
+    rpcs: ['https://mainnet.optimism.io', 'https://optimism-rpc.publicnode.com', 'https://optimism.drpc.org'],
+    explorer: 'https://optimistic.etherscan.io', geckoSlug: 'optimism', screener: 'optimism', status: 'live', trading: { enabled: true },
+    // Blockscout's OP Mainnet instance; lists a wallet's ERC-20s (checked 2026-10-30)
+    tokenApi: 'https://explorer.optimism.io/api/v2',
+    dexes: [uniV3('https://github.com/Uniswap/contracts/blob/main/deployments/10.md', 'uniswap_v3_optimism', UNI_V3_CANON, 'uniswap:')],
+    stack: 'op', gasUnits: { approve: 60_000, swap: 180_000 }, lowGasNative: 0.0005, blockTimeSec: 2, logChunk: 10_000,
+    sources: [
+      { label: 'Optimism docs — networks', url: 'https://docs.optimism.io/superchain/networks' },
+      { label: 'Uniswap/contracts deployments/10.md (v3)', url: 'https://github.com/Uniswap/contracts/blob/main/deployments/10.md' },
+      { label: 'Circle USDC addresses', url: 'https://developers.circle.com/stablecoins/usdc-contract-addresses' },
+    ],
+    note: 'OP-stack L2, ETH gas.',
   },
 ];
 

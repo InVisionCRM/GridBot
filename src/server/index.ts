@@ -34,6 +34,10 @@ import { tryStartPush } from './push/service';
 import { lpSnapsFromStatus } from './push/lpWatch';
 import { dailySummary } from './push/summary';
 import { chainBootLine, registerRpcUrls } from './chains/rpcUrl';
+import { chainById } from '../live/chains';
+import { holdingsSnapshot } from './holdings/read';
+import { WalletHistory, WORTH_EVERY_MS, type WorthFile } from './holdings/history';
+import { Logos } from './holdings/logos';
 
 loadEnv();
 // RPC URLs can hold an API key: register them before anything can log one (logs and the API show the host only).
@@ -191,11 +195,16 @@ const swap = swapForHost(!!copy, {
     ...bot.routerReservations(),
   ],
 });
+// The Wallet drawer's chart (a point at most every 15 min, also on a timer so it fills while no page is open) and coin logos
+const wallet = {
+  history: new WalletHistory(new JsonStore<WorthFile>(path.join(dataDir, 'wallet-history.json'))),
+  logos: new Logos(path.join(dataDir, 'logos'), (id) => chainById(id)?.geckoSlug ?? null, (url) => gecko.getJson(url)),
+};
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
   lpReplay: (q) => lpReplay.replay(q), gridReplay: (q) => gridReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
-  friends, autopilot, tokenTrader, router, copy: !!copy, ...(push ? { push } : {}),
+  friends, autopilot, tokenTrader, router, copy: !!copy, ...(push ? { push } : {}), wallet,
 });
 if (isProd) {
   app.get('/sw.js', (_req, res) => {
@@ -222,6 +231,11 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   void autopilot.tick();
   autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
   tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
+  if (hub.runtimes().some((rt) => rt.signer)) {
+    walletTimer = setInterval(() => {
+      holdingsSnapshot(bot, fetchJson).then((s) => wallet.history.note(s)).catch((e: Error) => log.warn(`wallet history: ${e.message}`));
+    }, WORTH_EVERY_MS);
+  }
   if (push) {
     pushTimer = setInterval(() => { void push.tick().catch(() => log.warn('push: tick failed')); }, 15_000);
     log.info('Web push ready');
@@ -241,10 +255,12 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 });
 let autopilotTimer: ReturnType<typeof setInterval> | null = null;
 let tokenTimer: ReturnType<typeof setInterval> | null = null;
+let walletTimer: ReturnType<typeof setInterval> | null = null;
 let pushTimer: ReturnType<typeof setInterval> | null = null;
 const shutdown = () => {
   if (autopilotTimer) clearInterval(autopilotTimer);
   if (tokenTimer) clearInterval(tokenTimer);
+  if (walletTimer) clearInterval(walletTimer);
   if (pushTimer) clearInterval(pushTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
   try { bot.flush(); } catch { /* logged by the store */ }

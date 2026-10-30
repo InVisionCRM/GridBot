@@ -1,7 +1,7 @@
 /**
- * Crypto units only (Kyle's rule): no screen shows a dollar amount, except the home, where Kyle chose (2026-10-30) a
- * big dollar figure with the coins under it: there every dollar figure sits beside its units (checked below). Renders
- * the header, the Bots page and its desk table, Holdings, Analytics (live, paper, market conditions), the token trader,
+ * Crypto units only (Kyle's rule): no screen shows a dollar amount, except the home and the Wallet (Holdings), where
+ * Kyle chose (2026-10-30) dollars with the coins under them: there every dollar figure sits beside its units (checked
+ * below). Renders the header, the Bots page and its desk table, Analytics (live, paper, market conditions), the token trader,
  * and every LP, grid and trend page from the real sanitized status payload (tests/helpers/unitsScreens.ts), with the
  * old "$" switch forced ON, and fails on any "$" or "USD" in the text, a tooltip (title) or an aria-label. Coin names
  * like USDC / USDG are fine; "USD" as a word is not.
@@ -54,7 +54,6 @@ function dollarsIn(html: string): string[] {
 const screens: [string, () => string][] = [
   ['Header', () => render(createElement(Header, { s: S, view: { v: 'home' }, nav: noop, chain: 'all', setChain: noop, connected: true, ver: null, holdings: HOLDINGS as never, onActivity: noop, onGuide: noop }))],
   ['Bots', () => render(createElement(Bots, { s: S, nav: noop, busy: false, onStopAll: noop }))],
-  ['Holdings', () => render(createElement(Holdings, { s: S, snap: HOLDINGS as never, loading: false, error: null, reload: noop, nav: noop }))],
   ['Analytics live', () => render(createElement(ModeAnalytics, { s: S, mode: 'live', seed: { ov: overview('live'), j: JOURNAL } }))],
   ['Analytics paper', () => render(createElement(ModeAnalytics, { s: S, mode: 'paper', seed: { ov: overview('paper'), j: JOURNAL } }))],
   ['Analytics market conditions', () => render(createElement(MarketsTab, { seed: PANELS }))],
@@ -98,6 +97,15 @@ describe('token trader in the coins it spends', () => {
     expect(TRADER.spendTotals.WETH.bought).toBeCloseTo(0.05126, 12);
     const html = render(createElement(TokenTraderPanel, { s: S, seed: TRADER }));
     expect(html).toMatch(/data-testid="tt-generated">\+0\.00437 WETH/);
+  });
+});
+
+describe('the Wallet (Holdings): every dollar figure sits over its coins (Kyle 2026-10-30)', () => {
+  it('each row\'s dollars have the row\'s coins right under them', () => {
+    const html = render(createElement(Holdings, { s: S, snap: HOLDINGS as never, loading: false, error: null, reload: noop, nav: noop }));
+    const vals = html.match(/<span class="wl-val"><b>[^<]*<\/b><small>[^<]*<\/small><\/span>/g) ?? [];
+    expect(vals.length).toBe(HOLDINGS.wallet.length);
+    for (const v of vals) expect(v).toMatch(/<b>\$[\d,.]+<\/b><small>[\d,.]+ [A-Z]/);
   });
 });
 

@@ -13,7 +13,7 @@ import { LpPool } from './lpPool';
 import { DEFAULT_DAYS, REPLAY_DAYS, type ReplayDays } from './poolHistory';
 import { REFRESH_MS, type ReplayPools, type WaitAnswer } from '../replay/pools';
 
-export const REPLAY_BANDS = [0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2];
+export const REPLAY_BANDS = [0.001, 0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2];
 /** Replay size when none is given: this many US dollars of the quote coin */
 export const REPLAY_USD = 1000;
 
