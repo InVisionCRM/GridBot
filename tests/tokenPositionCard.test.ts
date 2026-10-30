@@ -57,7 +57,7 @@ describe('exit targets', () => {
     expect(x.trail).toMatchObject({ armed: true });
     expect(x.trail.move).toBeCloseTo((1.8 * 0.8) / 1.6 - 1, 12);
     expect(x.tp1).toMatchObject({ done: true, move: null });
-    expect(x.time.does).toMatch(/^off: it is up 60%/);
+    expect(x.time.does).toBe('off: up over +10%');
   });
 });
 

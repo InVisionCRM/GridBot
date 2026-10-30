@@ -364,7 +364,7 @@ function PositionCard({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: num
         <button type="button" className="tk-sell" disabled={busy || !!p.sellNow} onClick={sell}>{p.sellNow ? 'Selling…' : 'Sell now'}</button>
       </header>
       <div className="tk-pos-now">
-        <span><small>Worth now</small><b>{p.value != null ? qty(p.value, sym, 5) : '—'}</b></span>
+        <span><small>Worth now</small><b>{p.value != null ? qty(p.value, sym, 5, false) : '—'}</b></span>
         <span className={up ? 'pos' : 'neg'}><small>Result</small><b><AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`} /></b><em>{p.pnl != null ? qty(pnl, sym, 5) : ''}</em></span>
       </div>
       <Spark marks={p.marks ?? []} entry={Number(p.entryPrice)} up={up} />

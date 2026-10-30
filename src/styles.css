@@ -1687,6 +1687,8 @@ button.wl-row:hover { background: var(--surface-2); }
 .wl-logo { position: relative; display: inline-block; flex: none; }
 .wl-logo-i { display: block; width: 100%; height: 100%; border-radius: 50%; overflow: hidden; background: var(--surface-2); }
 .wl-logo-i img, .wl-logo-i svg { display: block; width: 100%; height: 100%; object-fit: cover; }
+.wl-logo-i { position: relative; }
+.wl-logo-i img.wl-logo-wait { position: absolute; inset: 0; opacity: 0; }
 .wl-chain { position: absolute; right: -3px; bottom: -3px; width: 17px; height: 17px; border-radius: 50%; border: 2px solid #1A1C20; display: grid; place-items: center; font: 800 0.55rem/1 var(--font); color: #0E0F11; }
 .wl-pair { position: relative; width: 48px; height: 40px; flex: none; }
 .wl-pair > .wl-logo { position: absolute; }

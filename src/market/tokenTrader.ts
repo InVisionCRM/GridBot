@@ -429,7 +429,7 @@ export function exitTargets(p: ExitPos): ExitTarget[] {
     { key: 'tp2', label: 'Take profit', does: `sells a third at +${pct(EXIT.tp2)}`, move: p.tp2Done ? null : at(EXIT.tp2), done: p.tp2Done },
     {
       key: 'time', label: 'Time stop', move: null, msLeft: Math.max(0, p.openedAt + EXIT.timeStopMs - p.now),
-      does: gain >= EXIT.timeStopMinGain ? `off: it is up ${pct(gain)}, over +${pct(EXIT.timeStopMinGain)}` : `sells all after ${EXIT.timeStopMs / 3600_000} h unless up +${pct(EXIT.timeStopMinGain)}`,
+      does: gain >= EXIT.timeStopMinGain ? `off: up over +${pct(EXIT.timeStopMinGain)}` : `sells all at ${EXIT.timeStopMs / 3600_000} h if under +${pct(EXIT.timeStopMinGain)}`,
     },
   ];
 }
