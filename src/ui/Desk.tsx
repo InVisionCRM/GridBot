@@ -68,8 +68,12 @@ function useNarrow(): boolean {
   return narrow;
 }
 
-/** How many rows of `rowH` fit in the element: lists show what fits and count the rest, never scroll. */
-function useFit(ref: RefObject<HTMLElement | null>, rowH: number, gap = 8): number {
+/**
+ * How many rows of `rowH` fit in the element: lists show what fits and count the rest, never scroll. `list` changes
+ * whenever the element is put on the page or swapped (2026-10-30: a list first shown as its empty state was never
+ * measured, kept the default 5 and cut the last cards off).
+ */
+function useFit(ref: RefObject<HTMLElement | null>, list: unknown, rowH: number, gap = 8): number {
   const [n, setN] = useState(5);
   useLayoutEffect(() => {
     const el = ref.current;
@@ -77,7 +81,7 @@ function useFit(ref: RefObject<HTMLElement | null>, rowH: number, gap = 8): numb
     const ro = new ResizeObserver(() => setN(Math.max(1, Math.floor((el.clientHeight + gap) / (rowH + gap)))));
     ro.observe(el);
     return () => ro.disconnect();
-  }, [ref, rowH, gap]);
+  }, [ref, list, rowH, gap]);
   return n;
 }
 
@@ -395,7 +399,7 @@ function Column({ title, color, count, children }: { title: string; color: strin
 function FlowBoard({ open, banked, narrow, onOpen, onMore }: { open: OpenItem[]; banked: BankedItem[]; narrow: boolean; onOpen: (id: string) => void; onMore: (title: string, items: (OpenItem | BankedItem)[]) => void }) {
   const box = useRef<HTMLDivElement>(null), listRef = useRef<HTMLDivElement>(null);
   const [col, setCol] = useState<'Open' | 'Almost' | 'Banked'>('Open');
-  const fit = useFit(listRef, CARD_H);
+  const fit = useFit(listRef, `${open.length > 0 || banked.length > 0}:${narrow}`, CARD_H);
   const sorted = useMemo(() => open.slice().sort((a, b) => b.close - a.close), [open]);
   const almost = sorted.filter((o) => o.close >= ALMOST), rest = sorted.filter((o) => o.close < ALMOST);
   const fresh = Date.now() - 8000;
@@ -522,8 +526,8 @@ function FunnelBoard({ funnel, held, on, onOpen, onSetup }: { funnel: ReturnType
 
 function Payday({ open, onOpen }: { open: OpenItem[]; onOpen: (id: string) => void }) {
   const box = useRef<HTMLDivElement>(null);
-  const fit = useFit(box, CARD_H);
   const items = useMemo(() => open.filter((o) => o.close > 0).sort((a, b) => b.close - a.close), [open]);
+  const fit = useFit(box, items.length > 0, CARD_H);
   useFlip(box, items.slice(0, fit).map((o) => o.key).join());
   if (!items.length) return <p className="muted small dk-empty-s">Nothing near its target yet.</p>;
   return (
@@ -538,8 +542,9 @@ function Payday({ open, onOpen }: { open: OpenItem[]; onOpen: (id: string) => vo
 const RIVER_TYPES = new Set(['filled', 'range', 'sent', 'alert', 'started', 'stopped', 'error', 'skipped', 'queued']);
 function River({ events }: { events: ActivityEvent[] }) {
   const box = useRef<HTMLDivElement>(null);
-  const fit = useFit(box, 30, 6);
-  const rows = useMemo(() => events.filter((e) => RIVER_TYPES.has(e.type)).slice(-fit).reverse(), [events, fit]);
+  const shown = useMemo(() => events.filter((e) => RIVER_TYPES.has(e.type)), [events]);
+  const fit = useFit(box, shown.length > 0, 30, 6);
+  const rows = useMemo(() => shown.slice(-fit).reverse(), [shown, fit]);
   useFlip(box, rows.map((r) => r.id).join());
   if (!rows.length) return <p className="muted small dk-empty-s">Fills, fees and range moves stream in here as they happen.</p>;
   return (
