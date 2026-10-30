@@ -26,6 +26,7 @@ import type { Emit } from './activity';
 import type { Store } from './store';
 import type { PoolSniper, SnipeHit } from '../market/sniper';
 import { requestHalt, systemHalt, type Halt } from './audit';
+import { VENUES } from '../../live/venues';
 import type { Generated } from '../../types/generated';
 import type { ReservedBalance } from '../swap/holds';
 import { NATIVE } from '../../live/swapMath';
@@ -111,6 +112,8 @@ export interface TraderOptions {
   enforceSizeImpact: boolean;
   /** Used only when `enforceSizeImpact` is on. Default 1%. */
   sizeImpactCap: number;
+  /** Launch venue (venues.ts id) → bought from. Missing means on. */
+  venues: Record<string, boolean>;
   sniper: SniperOptions;
 }
 
@@ -157,6 +160,11 @@ export interface Position {
   tp2Done: boolean;
   source: 'scan' | 'snipe';
   exitPlan: string;
+  /**
+   * 'chain' once entryLiq was set from the pool's own depth (the first on-chain mark). Until then entryLiq is
+   * GeckoTerminal's reserve figure, which on-chain depth can't be compared with.
+   */
+  liqBase?: 'chain';
   /**
    * Live only: a split sell stopped partway (a part failed, reverted, or Off completely landed between parts). The
    * token amount is re-read from the wallet before this position may sell again; the remaining parts are never
@@ -338,6 +346,7 @@ export const DEFAULT_TRADER: TraderOptions = {
   enforceHolderCheck: false, maxHolderShare: DEFAULT_MAX_HOLDER_SHARE, maxTop10Share: DEFAULT_MAX_TOP10_SHARE,
   minHolderCoverage: DEFAULT_MIN_HOLDER_COVERAGE,
   enforceSizeImpact: false, sizeImpactCap: DEFAULT_SIZE_IMPACT_CAP,
+  venues: {},
   sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
 };
 
@@ -756,6 +765,15 @@ export class TokenTrader {
     n.maxTop10Share = clampHolderShare(n.maxTop10Share, DEFAULT_MAX_TOP10_SHARE);
     n.minHolderCoverage = clampHolderCoverage(n.minHolderCoverage);
     if (n.sniper.mevRpc && !/^https:\/\//.test(n.sniper.mevRpc)) throw new Error('MEV URL must be an https RPC.');
+    if ('venues' in o) {
+      const v = o.venues;
+      if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('Venues must be a list of on/off switches.');
+      for (const [id, on] of Object.entries(v)) {
+        if (!VENUES.some((x) => x.id === id)) throw new Error(`Unknown venue ${id}.`);
+        if (typeof on !== 'boolean') throw new Error(`Venue ${id} must be on or off.`);
+      }
+      n.venues = { ...this.state.options.venues, ...v };
+    }
     this.state.options = n;
     this.save();
   }
@@ -958,7 +976,11 @@ export class TokenTrader {
 
   private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null; note: string | null }> {
     if (!this.d.assess) return { ok: false, reason: 'no safety check', buyTax: 0, sellTax: 0, gate: null, warn: null, note: null };
-    const g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk);
+    // A check that throws (pool not found, a V4 log scan the RPC refused) skips this pool only. The scan checks its pools
+    // together, so one throw used to end the whole round.
+    let g: GateInput;
+    try { g = await this.d.assess(pool, this.state.options.mode, this.state.options.risk); }
+    catch (e) { return { ok: false, reason: `safety check failed: ${(e as Error).message}`, buyTax: 0, sellTax: 0, gate: null, warn: null, note: null }; }
     let gate: GateInput = { ...g, mode: this.state.options.mode, risk: this.state.options.risk, minLiquidityUsd: this.gateFloor(pool, g.minLiquidityUsd) };
     if (this.state.options.enforceHolderCheck) {
       const chainName = chainById(pool.chainId)?.name ?? `chain ${pool.chainId}`;
@@ -1260,7 +1282,6 @@ export class TokenTrader {
       this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: signalOf(pool.source), source: pool.dex, reason: why, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol });
     };
     if (!this.wantChain(pool.chainId)) { skip('chain is off', 'rules'); return; }
-    if (pool.kind === 'v4') { skip("this app doesn't swap V4", 'rules'); return; }
     if (this.entriesStopped(pool.chainId)) { skip('new buys are stopped (Stop all)', 'rules'); return; }
     const a = await this.assess(pool);
     if (!a.ok || !a.gate) { skip(a.reason ?? 'safety', 'checks'); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
@@ -1285,7 +1306,7 @@ export class TokenTrader {
         this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
       };
       if (!this.wantChain(p.chainId)) { skip('chain is off'); continue; }
-      if (p.kind === 'v4') { skip("this app doesn't swap V4"); continue; }
+      if (p.venue && this.state.options.venues[p.venue] === false) { skip(`${VENUES.find((v) => v.id === p.venue)?.name ?? p.venue} is switched off`); continue; }
       if (this.entriesStopped(p.chainId)) { skip('new buys are stopped (Stop all)'); continue; }
       eligible.push(p);
     }
@@ -1315,8 +1336,14 @@ export class TokenTrader {
   private async takeSnipes() {
     const sn = this.state.options.sniper;
     if (!sn.on || !this.d.sniper) return;
-    const { cursors, hits, notes } = await this.d.sniper.tick(this.state.cursors, { delayBlocks: sn.delayBlocks, delaySec: sn.delaySec });
+    const { cursors, hits: all, notes } = await this.d.sniper.tick(this.state.cursors, { delayBlocks: sn.delayBlocks, delaySec: sn.delaySec });
     this.state.cursors = cursors;
+    // V4 creations the sniper can't buy (it reads Ethereum's PoolManager and has no pool key route) go to the reject
+    // log only: counting them as found, then filtered, buried the funnel (2026-10-30: 1,474 found, 1,474 out).
+    for (const hit of all.filter((h) => h.skip || h.kind === 'v4')) {
+      this.reject({ chainId: hit.chainId, pool: hit.pool, token: hit.token0, signal: 'snipe', source: hit.dex, reason: hit.skip ?? "the sniper doesn't buy V4 pools", price: null, feeBps: hit.fee != null ? hit.fee / 100 : null });
+    }
+    const hits = all.filter((h) => !h.skip && h.kind !== 'v4');
     if (hits.length) this.funnelToday().scouted += hits.length;
     for (const n of notes) this.say(n.msg, n.level);
     let room = this.hourRoom();
@@ -1327,8 +1354,6 @@ export class TokenTrader {
         this.reject({ chainId: hit.chainId, pool: hit.pool, token, signal: 'snipe', source: hit.dex, reason, price: null, feeBps: hit.fee != null ? hit.fee / 100 : null });
       };
       if (sn.chains[hit.chainId] === false) { rejectHit('sniper is off for this chain', hit.pool.slice(0, 8)); continue; }
-      if (hit.skip) { rejectHit(hit.skip, 'V4'); continue; }
-      if (hit.kind === 'v4') { this.reject({ chainId: hit.chainId, pool: hit.pool, token: hit.token0, signal: 'snipe', source: hit.dex, reason: "this app doesn't swap V4", price: null, feeBps: hit.fee != null ? hit.fee / 100 : null }); continue; }
       const pool = await this.d.resolve?.(hit) ?? null;
       if (!pool) { rejectHit('could not price the new pool', hit.pool.slice(0, 8)); continue; }
       const minLiq = Math.max(sn.minLiquidityUsd, this.floorUsd());

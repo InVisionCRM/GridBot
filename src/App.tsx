@@ -19,6 +19,7 @@ import { ViewError } from './ui/ViewError';
 import { Tools } from './ui/Tools';
 import { Opportunities } from './ui/Opportunities';
 import { SmartTrader } from './ui/SmartTrader';
+import { TokenTraderPage } from './ui/TokenTraderPage';
 import { TokenTraderChoiceBanner } from './ui/TokenTrader';
 import { useVersion } from './ui/System';
 import { normalizeView, type View } from './ui/model';
@@ -162,6 +163,7 @@ export default function App() {
           {view.v === 'more' && <More s={s} nav={nav} holdings={holdings.data} onGuide={() => setGuide(true)} />}
           {view.v === 'opps' && <Opportunities s={s} nav={nav} act={act} busy={busy} />}
           {view.v === 'auto' && <SmartTrader s={s} nav={nav} />}
+          {view.v === 'token' && <TokenTraderPage s={s} nav={nav} />}
           {view.v === 'holdings' && <Holdings s={s} snap={holdings.data} loading={holdings.loading} error={holdings.err} reload={holdings.reload} focus={view.focus} nav={nav} />}
           {view.v === 'new' && <NewBot s={s} kind={view.kind} trendPrefill={view.trendPrefill} gridPrefill={view.gridPrefill} lpPrefill={view.lpPrefill} nav={nav} act={act} busy={busy} />}
           {view.v === 'grid' && <GridDetail s={s} id={view.id} events={events} ticks={ticks} nav={nav} act={act} busy={busy} />}

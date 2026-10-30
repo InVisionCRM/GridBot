@@ -32,6 +32,8 @@ const NATIVE_KEY = {
 const NATIVE_POOL_ID = '0x892cfd4e384f62fc574cd1b46380b2f4028c887439b92329dfd7ca5fc706da99';
 /** Doppler initializer. AFTER_SWAP_RETURNS_DELTA is set, so the empty allowlist rejects it. */
 const DOPPLER = '0x4e3468951D49f2EEa976eD0D6e75fFCb44a9a544';
+/** Not on any allowlist; AFTER_SWAP_RETURNS_DELTA like the launcher hooks (low 14 bits 0x0004) */
+const UNLISTED = '0x1111111111111111111111111111111111110004';
 
 const coder = AbiCoder.defaultAbiCoder();
 
@@ -209,7 +211,7 @@ describe('V4 adapter', () => {
     expect(built.method).toBe('execute');
     expect(V4_ROUTER.decodeFunctionData('execute', built.data)[0]).toBe('0x10');
 
-    const bad = ref({ hooks: DOPPLER });
+    const bad = ref({ hooks: UNLISTED });
     await expect(ad.quote(ref(), WETH, NATIVE_KEY.currency1, 10n ** 15n)).rejects.toThrow(/not in this V4 pool/);
     expect(() => ad.buildSwap({
       pool: ref(), tokenIn: WETH, tokenOut: NATIVE_KEY.currency1, amountIn: 1n, amountOutMin: 1n,

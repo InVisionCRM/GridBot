@@ -80,7 +80,7 @@ function BotSheet({ botId, bots, trader, go, close }: { botId: string; bots: Any
   } else {
     facts.push(['Holding', (b.positions ?? []).map((p: AnyObj) => `$${String(p.label).split('/')[0]}`).join(', ') || 'nothing'], ['Mode', b.options?.mode === 'live' ? 'Live' : 'Paper']);
   }
-  const page: View | null = b.kind === 'grid' || b.kind === 'trend' || b.kind === 'lp' ? { v: b.kind, id: b.id } : b.kind === 'token' ? { v: 'auto' } : null;
+  const page: View | null = b.kind === 'grid' || b.kind === 'trend' || b.kind === 'lp' ? { v: b.kind, id: b.id } : b.kind === 'token' ? { v: 'token' } : null;
   return (
     <>
       <span className="dk-eyebrow">{name} · {b.mode === 'live' || b.options?.mode === 'live' ? 'Live' : 'Paper'} · {running ? 'running' : b.status ?? 'off'}</span>

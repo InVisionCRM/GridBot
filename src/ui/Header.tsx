@@ -73,7 +73,7 @@ function DeskMenu({ s, nav, onGuide, onActivity, close }: { s: AnyObj; nav: Nav;
           <button type="button" className="tile" onClick={() => jump({ v: 'new', kind: 'grid' })}><Icon name="grid" size={18} /><b>Grid</b><small>Buy low, sell one level up</small></button>
           <button type="button" className="tile" onClick={() => jump({ v: 'new', kind: 'trend' })}><Icon name="trend" size={18} /><b>Trend</b><small>Follow a move, then stand aside</small></button>
           <button type="button" className="tile" onClick={() => jump({ v: 'new', kind: 'lp' })}><Icon name="drop" size={18} /><b>Liquidity</b><small>Earn fees inside a range</small></button>
-          <button type="button" className="tile" onClick={() => jump({ v: 'auto' })}><Icon name="target" size={18} /><b>Token trader</b><small>New pools, size limits, exits</small></button>
+          <button type="button" className="tile" onClick={() => jump({ v: 'token' })}><Icon name="target" size={18} /><b>Token trader</b><small>New pools, size limits, exits</small></button>
         </div>
       </div>
       <div>

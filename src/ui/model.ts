@@ -24,6 +24,7 @@ export type View =
   | { v: 'more' }
   | { v: 'opps' }
   | { v: 'auto' }
+  | { v: 'token' }
   | { v: 'holdings'; focus?: HoldingsFocus }
   | { v: 'new'; kind: BotKind; trendPrefill?: TrendPrefill; gridPrefill?: GridPrefill; lpPrefill?: LpPrefill }
   | { v: 'grid'; id: string }
@@ -31,7 +32,7 @@ export type View =
   | { v: 'lp'; id: string }
   | { v: 'tools'; tab: ToolTab; btPrefill?: BtPrefill; analytics?: 'live' | 'paper' }
   | { v: 'alerts' };
-const STORED_VIEWS = ['home', 'bots', 'more', 'opps', 'auto', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools', 'alerts'] as const;
+const STORED_VIEWS = ['home', 'bots', 'more', 'opps', 'auto', 'token', 'holdings', 'new', 'grid', 'trend', 'lp', 'tools', 'alerts'] as const;
 
 /** A saved tools/alerts tab is the Alerts screen now. Unknown shapes are dropped. */
 export function normalizeView(raw: unknown): View | null {
