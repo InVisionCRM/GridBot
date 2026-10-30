@@ -244,6 +244,31 @@ function Hero({ mode, setMode, genUsd, genUnits, running, banked, range, setRang
 }
 
 /** Profits banked over the range: steps up at each profit (a dot), slides with the clock, pulses at now. */
+/**
+ * A smooth line through the points, never overshooting them (monotone cubic, as d3's curveMonotoneX): the curve only
+ * rises where the total rose, and stays flat where it stayed flat. Points on the same x keep the later one.
+ */
+function smoothPath(raw: [number, number][]): Path2D {
+  const p: [number, number][] = [];
+  for (const q of raw) { if (p.length && q[0] - p[p.length - 1][0] < 0.5) p[p.length - 1] = [p[p.length - 1][0], q[1]]; else p.push(q); }
+  const path = new Path2D();
+  path.moveTo(p[0][0], p[0][1]);
+  if (p.length < 3) { for (const q of p.slice(1)) path.lineTo(q[0], q[1]); return path; }
+  const n = p.length, s: number[] = [], m: number[] = [];
+  for (let i = 0; i < n - 1; i++) s.push((p[i + 1][1] - p[i][1]) / (p[i + 1][0] - p[i][0]));
+  m.push(s[0]);
+  for (let i = 1; i < n - 1; i++) {
+    const h0 = p[i][0] - p[i - 1][0], h1 = p[i + 1][0] - p[i][0], c = (s[i - 1] * h1 + s[i] * h0) / (h0 + h1);
+    m.push(s[i - 1] * s[i] <= 0 ? 0 : (Math.sign(s[i - 1]) + Math.sign(s[i])) * Math.min(Math.abs(s[i - 1]), Math.abs(s[i]), 0.5 * Math.abs(c)));
+  }
+  m.push(s[n - 2]);
+  for (let i = 0; i < n - 1; i++) {
+    const d = (p[i + 1][0] - p[i][0]) / 3;
+    path.bezierCurveTo(p[i][0] + d, p[i][1] + d * m[i], p[i + 1][0] - d, p[i + 1][1] - d * m[i + 1], p[i + 1][0], p[i + 1][1]);
+  }
+  return path;
+}
+
 function BankedChart({ curve, from, onPick }: { curve: { t: number; v: number; item: BankedItem }[]; from: number; onPick: (b: BankedItem) => void }) {
   const cv = useRef<HTMLCanvasElement>(null);
   const reduced = useReducedMotion();
@@ -268,11 +293,8 @@ function BankedChart({ curve, from, onPick }: { curve: { t: number; v: number; i
       const max = Math.max(...pts.map((p) => p.v), 0), min = Math.min(...pts.map((p) => p.v), 0), pad = (max - min) * 0.18 || 1;
       // edge to edge across the card (room on the right for the pulse at now), the curve in the lower part
       const X = (t: number) => ((t - from) / span) * (w - 16), Y = (v: number) => h - 14 - ((v - min + pad * 0.3) / (max - min + pad * 1.3)) * (h - 40);
-      const path = new Path2D();
-      path.moveTo(X(from), Y(0));
-      let v = 0;
-      for (const p of pts) { path.lineTo(X(p.t), Y(v)); path.lineTo(X(p.t), Y(p.v)); v = p.v; }
-      path.lineTo(X(now), Y(v));
+      const v = pts.length ? pts[pts.length - 1].v : 0;
+      const path = smoothPath([[X(from), Y(0)], ...pts.map((p): [number, number] => [X(p.t), Y(p.v)]), [X(now), Y(v)]]);
       const area = new Path2D(path);
       area.lineTo(X(now), h); area.lineTo(X(from), h); area.closePath();
       const grad = g.createLinearGradient(0, Y(max), 0, h);
