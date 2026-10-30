@@ -408,6 +408,32 @@ export function decideExit(p: ExitPos): ExitDecision {
   return { action: 'hold' };
 }
 
+/**
+ * The exit rules of an open position as a person reads them: what each one does and how far the price is from setting
+ * it off (the same math as decideExit). `move` = the price change from now that fires it (−0.24 = a 24% fall); null
+ * once taken. The time stop has `msLeft` instead.
+ */
+export interface ExitTarget { key: 'stop' | 'trail' | 'tp1' | 'tp2' | 'time'; label: string; does: string; move: number | null; msLeft?: number; done?: boolean; armed?: boolean }
+export function exitTargets(p: ExitPos): ExitTarget[] {
+  const keep = (1 - Math.max(0, Math.min(p.exitFee ?? 0, 0.99))) * (1 - Math.max(0, Math.min(p.exitTax ?? 0, 0.99)));
+  const at = (gain: number) => (p.price > 0 && keep > 0 ? (p.entryPrice * (1 + gain)) / keep / p.price - 1 : null);
+  const armed = p.peak * keep >= p.entryPrice * (1 + EXIT.trailArm);
+  const gain = p.entryPrice > 0 ? (p.price * keep) / p.entryPrice - 1 : 0;
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  return [
+    { key: 'stop', label: 'Stop-loss', does: `sells all at −${pct(EXIT.hardStop)}`, move: at(-EXIT.hardStop) },
+    armed
+      ? { key: 'trail', label: 'Trailing stop', does: `sells all ${pct(EXIT.trailGap)} below its peak`, move: p.price > 0 ? (p.peak * (1 - EXIT.trailGap)) / p.price - 1 : null, armed: true }
+      : { key: 'trail', label: 'Trailing stop', does: `arms at +${pct(EXIT.trailArm)}`, move: at(EXIT.trailArm), armed: false },
+    { key: 'tp1', label: 'Take profit', does: `sells a third at +${pct(EXIT.tp1)}`, move: p.tp1Done ? null : at(EXIT.tp1), done: p.tp1Done },
+    { key: 'tp2', label: 'Take profit', does: `sells a third at +${pct(EXIT.tp2)}`, move: p.tp2Done ? null : at(EXIT.tp2), done: p.tp2Done },
+    {
+      key: 'time', label: 'Time stop', move: null, msLeft: Math.max(0, p.openedAt + EXIT.timeStopMs - p.now),
+      does: gain >= EXIT.timeStopMinGain ? `off: it is up ${pct(gain)}, over +${pct(EXIT.timeStopMinGain)}` : `sells all after ${EXIT.timeStopMs / 3600_000} h unless up +${pct(EXIT.timeStopMinGain)}`,
+    },
+  ];
+}
+
 /** Split a token sell so each piece stays under the impact cap. Pieces are human token amounts. */
 export function splitSell(tokens: number, tokenReserve: number, feeBps: number, maxImpact: number): number[] {
   if (!(tokens > 0)) return [];
@@ -520,7 +546,9 @@ export function fromTopPool(p: { address: string; name: string; dex: string; bas
   if (!(tokenUsd && spendUsd && spendUsd > 0)) return null;
   const price = tokenUsd / spendUsd;
   if (!(price > 0)) return null;
-  const [left, right] = p.name.split('/').map((s) => s.trim());
+  // GeckoTerminal names V3/V4 pools with their fee tier ("PEPE / WETH 0.3%"): the symbol is the first word of each side
+  // (2026-10-30: "WETH 0.3%" was taken as the spend coin's symbol and shown on every amount)
+  const [left, right] = p.name.split('/').map((s) => s.trim().split(/\s+/)[0]);
   const tokenSymbol = (bs ? right : left) || 'TOKEN';
   const spendSymbol = (bs ? left : right) || 'QUOTE';
   const quoteReserve = (p.liquidityUsd / 2) / spendUsd;

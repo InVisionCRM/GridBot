@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { TokenTraderPage } from '../src/ui/TokenTraderPage';
 import { SmartTrader } from '../src/ui/SmartTrader';
-import { DEPTH, STYLES, ladderRungs, ladderX, lookCycle, radarBlips, radarSectors, scorecard, styleOf, timeUsed } from '../src/ui/tokenModel';
+import { DEPTH, STYLES, lookCycle, radarBlips, radarSectors, scorecard, styleOf } from '../src/ui/tokenModel';
 import { normalizeView } from '../src/ui/model';
 import { S, TRADER } from './helpers/unitsScreens';
 
@@ -16,21 +16,6 @@ describe('token trader styles', () => {
     expect(styleOf({ ...STYLES[0].patch, enforceHolderCheck: false })).toBeNull();
     // a saved file without the optional checks reads them as off
     expect(styleOf({ risk: 'any' })).toBe('wild');
-  });
-});
-
-describe('exit ladder', () => {
-  it('runs from the −25% stop to the +100% take profit; taken take profits are marked', () => {
-    expect(ladderX(-0.25)).toBe(0);
-    expect(ladderX(1)).toBe(1);
-    expect(ladderX(0)).toBeCloseTo(0.2, 12);
-    expect(ladderX(-0.9)).toBe(0);
-    expect(ladderX(4)).toBe(1);
-    const r = ladderRungs({ tp1Done: true, tp2Done: false });
-    expect(r.map((x) => [x.key, x.done])).toEqual([['stop', false], ['zero', false], ['arm', false], ['tp1', true], ['tp2', false]]);
-    expect(timeUsed(NOW - 3 * 3600_000, NOW)).toBeCloseTo(0.5, 12);
-    expect(timeUsed(NOW - 9 * 3600_000, NOW)).toBe(1);
-    expect(timeUsed(Number(undefined), NOW)).toBe(0); // a position saved without its open time
   });
 });
 
@@ -89,7 +74,8 @@ describe('the page', () => {
     expect(html).toMatch(/Today&#x27;s funnel/);
     for (const st of ['Careful', 'Balanced', 'Wild']) expect(html).toContain(`<b>${st}</b>`);
     expect(html).toMatch(/How much/);
-    expect(html).toMatch(/class="tk-ladder"/);
+    expect(html).toMatch(/Sell now/);
+    expect(html).toMatch(/Stop-loss/);
     expect(html).toMatch(/Scorecard/);
     expect(html).toMatch(/Advanced/);
     // nothing on the page loops on its own: motion comes from runs, coins and counts

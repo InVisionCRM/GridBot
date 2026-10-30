@@ -1,9 +1,7 @@
 /**
- * The Token trader page's figures (pure): the three styles, where a position sits on its exit ladder, the scorecard
- * of closed sells, and the radar's blips. Exit points are the trader's own (market/tokenTrader.ts EXIT), measured from
- * the effective entry like the server measures them.
+ * The Token trader page's figures (pure): the three styles, the scorecard of closed sells, the radar's blips and the
+ * discovery cycle. A position's exit distances come from the server (market/tokenTrader.ts exitTargets).
  */
-import { EXIT } from '../market/tokenTrader';
 import type { AnyObj } from './model';
 
 export type StyleId = 'careful' | 'balanced' | 'wild';
@@ -35,26 +33,6 @@ export function styleOf(o: AnyObj | null | undefined): StyleId | null {
   const hit = STYLES.find((s) => (Object.keys(s.patch) as (keyof Patch)[]).every((k) => (o[k] ?? false) === s.patch[k]));
   return hit?.id ?? null;
 }
-
-/** The ladder runs from the hard stop to the second take profit. */
-const LO = -EXIT.hardStop, HI = EXIT.tp2;
-/** 0..1 along the ladder for a gain (clamped at both ends) */
-export const ladderX = (gain: number) => Math.max(0, Math.min(1, (gain - LO) / (HI - LO)));
-
-export interface Rung { key: string; label: string; x: number; done: boolean; kind: 'stop' | 'zero' | 'arm' | 'tp' }
-/** The exit points on the ladder; done = already taken (take profits) */
-export function ladderRungs(p: AnyObj): Rung[] {
-  return [
-    { key: 'stop', label: `−${EXIT.hardStop * 100}%`, x: ladderX(-EXIT.hardStop), done: false, kind: 'stop' },
-    { key: 'zero', label: '0', x: ladderX(0), done: false, kind: 'zero' },
-    { key: 'arm', label: `+${EXIT.trailArm * 100}%`, x: ladderX(EXIT.trailArm), done: false, kind: 'arm' },
-    { key: 'tp1', label: `+${EXIT.tp1 * 100}%`, x: ladderX(EXIT.tp1), done: !!p.tp1Done, kind: 'tp' },
-    { key: 'tp2', label: `+${EXIT.tp2 * 100}%`, x: ladderX(EXIT.tp2), done: !!p.tp2Done, kind: 'tp' },
-  ];
-}
-
-/** Share of the 6 h time stop used, 0..1 */
-export const timeUsed = (openedAt: number, now: number) => (Number.isFinite(openedAt) ? Math.max(0, Math.min(1, (now - openedAt) / EXIT.timeStopMs)) : 0);
 
 export interface Scorecard { sells: number; wins: number; winRate: number | null; best: AnyObj | null; worst: AnyObj | null }
 /** Closed sells with a result: how many won, the best and the worst (by their result in dollars, shown in coins) */

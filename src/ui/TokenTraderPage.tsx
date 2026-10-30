@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { http } from './api';
-import { ago, pct, qty } from './fmt';
+import { ago, qty } from './fmt';
 import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj, type Nav } from './model';
 import { haltText } from './haltText';
@@ -14,9 +14,10 @@ import { MoneyDetails } from './MoneyDetails';
 import { AnimatedNumber } from './motion';
 import { Icon, type IconName } from './icons';
 import { useEthUsd } from './units';
+import { CoinLogo } from './Wallet';
 import { VENUES } from '../live/venues';
 import { EthLimit, SpendDetails, TokenAdvanced, blockedNote, feePct, generatedText, modeLabel, offCompletely, startTrader } from './TokenTrader';
-import { STYLES, ladderRungs, ladderX, lookCycle, radarBlips, radarSectors, scorecard, styleOf, timeUsed } from './tokenModel';
+import { STYLES, lookCycle, radarBlips, radarSectors, scorecard, styleOf } from './tokenModel';
 
 /** The two auto traders share the "Auto traders" tile: this switches between their pages. */
 export function TraderSwitch({ at, nav }: { at: 'auto' | 'token'; nav: Nav }) {
@@ -81,7 +82,7 @@ export function TokenTraderPage({ s, nav, seed, now: fixedNow }: { s: AnyObj; na
         <Funnel t={t} />
       </div>
       <Setup s={s} t={t} save={save} ethUsd={ethUsd} savedAt={savedAt} />
-      <Positions s={s} t={t} now={now} />
+      <Positions s={s} t={t} now={now} busy={busy} run={run} />
       <div className="tk-split">
         <Score t={t} />
         <Trades t={t} s={s} now={now} />
@@ -329,51 +330,80 @@ function Step({ n, title, note, children }: { n: number; title: string; note?: s
 }
 
 // ── positions ───────────────────────────────────────────────────────────
-function Positions({ s, t, now }: { s: AnyObj; t: AnyObj; now: number }) {
+function Positions({ s, t, now, busy, run }: { s: AnyObj; t: AnyObj; now: number; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<boolean> }) {
   const ps: AnyObj[] = t.positions ?? [];
   return (
     <section className="tk-card">
       <h3><Icon name="coins" size={16} /> Open positions <span className="muted small">{ps.length ? `${ps.length} open` : 'none open'}</span></h3>
-      {!ps.length && <p className="muted small">Each buy shows here on its exit ladder: the stop at −25%, take profits at +50% and +100%, a trailing stop once it is up 30%, and a 6 h time stop.</p>}
+      {!ps.length && <p className="muted small">Each buy shows here with what it is worth now, its price since the buy, and how far each exit is.</p>}
       <div className="tk-pos-grid">
-        {ps.map((p, i) => <PositionCard key={p.id} p={p} s={s} now={now} i={i} />)}
+        {ps.map((p) => <PositionCard key={p.id} p={p} s={s} now={now} busy={busy} run={run} />)}
       </div>
     </section>
   );
 }
 
-function PositionCard({ p, s, now, i }: { p: AnyObj; s: AnyObj; now: number; i: number }) {
-  const gain = Number(p.pnlPct ?? 0);
-  const x = ladderX(gain) * 100, zero = ladderX(0) * 100;
-  const used = timeUsed(Number(p.openedAt), now);
-  const R = 15, C = 2 * Math.PI * R;
+/** A price older than this is shown as stale: the trader re-reads every open position each 10 s tick */
+const STALE_MS = 60_000;
+
+function PositionCard({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: number; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<boolean> }) {
+  const pnl = Number(p.pnl ?? 0), gain = Number(p.pnlPct ?? 0), up = pnl >= 0;
+  const sym = p.spendSym ?? '';
+  const chain = chainOf(s, p.chainId);
   const blocked = blockedNote(p);
+  const stale = p.markedAt == null || now - Number(p.markedAt) > STALE_MS;
+  const sell = () => {
+    if (p.mode === 'live' && !confirm(`Sell all of ${p.tokenSym} now, with real money? It sells through the pool like any exit (split under the impact cap).`)) return;
+    void run(() => http(`/api/token-trader/positions/${encodeURIComponent(p.id)}/sell`, 'POST'));
+  };
   return (
-    <article className={`tk-pos ${gain >= 0 ? 'up' : 'down'}`} style={{ animationDelay: `${i * 70}ms` }}>
+    <article className={`tk-pos ${up ? 'up' : 'down'}`} title={`pool fee ${feePct(p.feeBps)}${p.dynamicFee ? ' (dynamic)' : ''} · found ${p.source === 'snipe' ? 'by the sniper' : 'in new and trending pools'}`}>
       <header>
-        <b>{p.label}</b>
-        <ChainBadge c={chainOf(s, p.chainId)} testnet={false} />
-        <span className="tk-chip">{p.source}</span>
-        <span className="grow" />
-        <svg className="tk-clock" viewBox="0 0 36 36" aria-label={`${Math.round(used * 100)}% of the 6 h time stop used`}>
-          <circle cx="18" cy="18" r={R} className="bg" />
-          <circle cx="18" cy="18" r={R} className="fg" strokeDasharray={C} strokeDashoffset={C * (1 - used)} />
-        </svg>
+        <CoinLogo coin={{ chainId: p.chainId, address: p.token, symbol: p.tokenSym }} chain={chain} size={34} />
+        <span className="tk-pos-id"><b>{p.tokenSym}</b><small>{chain?.name ?? ''} · paid in {sym} · opened {ago(p.openedAt, now)}</small></span>
+        <button type="button" className="tk-sell" disabled={busy || !!p.sellNow} onClick={sell}>{p.sellNow ? 'Selling…' : 'Sell now'}</button>
       </header>
-      <div className="tk-pos-big">
-        <AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`} className={gain >= 0 ? 'pos' : 'neg'} />
-        <small>{p.pnl != null && p.spendSym ? qty(p.pnl, p.spendSym, 5) : ''}</small>
+      <div className="tk-pos-now">
+        <span><small>Worth now</small><b>{p.value != null ? qty(p.value, sym, 5) : '—'}</b></span>
+        <span className={up ? 'pos' : 'neg'}><small>Result</small><b><AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`} /></b><em>{p.pnl != null ? qty(pnl, sym, 5) : ''}</em></span>
       </div>
-      <div className="tk-ladder" aria-label={`at ${pct(gain, 1, true)} on the exit ladder`}>
-        <i className={`tk-ladder-fill ${gain >= 0 ? 'up' : 'down'}`} style={{ left: `${Math.min(x, zero)}%`, width: `${Math.abs(x - zero)}%` }} />
-        {ladderRungs(p).map((r) => <span key={r.key} className={`tk-rung ${r.kind} ${r.done ? 'done' : ''}`} style={{ left: `${r.x * 100}%` }}><em>{r.label}</em></span>)}
-        <i className="tk-puck" style={{ left: `${x}%` }} />
-      </div>
-      <p className="tk-pos-foot small">
-        {blocked ? <b className="neg" role="alert">{blocked}</b> : <>exit plan: {p.exitPlan}</>}
-        <span className="muted"> · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''} · opened {ago(p.openedAt, now)}</span>
-      </p>
+      <Spark marks={p.marks ?? []} entry={Number(p.entryPrice)} up={up} />
+      <p className={`tk-fresh ${stale ? 'stale' : ''}`}>{p.markedAt == null ? 'price not read yet' : `price read ${ago(p.markedAt, now)}`}{stale && p.markedAt != null ? ': stale, see the error above' : ''}</p>
+      {blocked && <p className="tk-pos-block neg" role="alert">{blocked}</p>}
+      <ul className="tk-exits">
+        {(p.exits ?? []).map((x: AnyObj) => <ExitRow key={x.key} x={x} />)}
+      </ul>
     </article>
+  );
+}
+
+/** One exit rule: what it does and how far the price is from it */
+function ExitRow({ x }: { x: AnyObj }) {
+  const away = x.key === 'time'
+    ? (x.does.startsWith('off') ? '—' : x.msLeft > 0 ? `${Math.floor(x.msLeft / 3600_000)}h ${Math.floor((x.msLeft % 3600_000) / 60_000)}m left` : 'now')
+    : x.done ? 'taken' : x.move == null ? '—' : `${x.move >= 0 ? '+' : '−'}${Math.abs(x.move * 100).toFixed(1)}% away`;
+  const near = x.move != null && Math.abs(x.move) < 0.05;
+  return (
+    <li className={`tk-exit is-${x.key} ${x.done ? 'done' : ''} ${near ? 'near' : ''}`}>
+      <b>{x.label}</b><span>{x.does}</span><em>{away}</em>
+    </li>
+  );
+}
+
+/** The position's prices since the buy, with the buy price dashed */
+function Spark({ marks, entry, up }: { marks: [number, number][]; entry: number; up: boolean }) {
+  if (marks.length < 2) return <div className="tk-spark empty"><span className="muted small">the chart fills in as its price is read</span></div>;
+  const W = 300, H = 56, ys = [...marks.map((m) => m[1]), entry].filter((v) => Number.isFinite(v) && v > 0);
+  const lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || hi * 0.01 || 1;
+  const t0 = marks[0][0], t1 = marks[marks.length - 1][0] || t0 + 1;
+  const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * W, y = (v: number) => H - 4 - ((v - lo) / span) * (H - 8);
+  const pts = marks.map(([t, v]) => `${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  return (
+    <svg className={`tk-spark ${up ? 'up' : 'down'}`} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-label="price since the buy">
+      <line x1="0" x2={W} y1={y(entry)} y2={y(entry)} className="entry" />
+      <polygon points={`0,${H} ${pts} ${W},${H}`} className="area" />
+      <polyline points={pts} className="line" />
+    </svg>
   );
 }
 

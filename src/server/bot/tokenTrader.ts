@@ -14,7 +14,7 @@ import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
 import { simSell, type CostModel } from '../../market/costs';
 import { unverifiedOwnerReport, type OwnerReport } from '../../market/ownerPowers';
 import {
-  decideExit, filterFresh, gateToken, sizeBuy, splitSell, EXIT, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SIZE_IMPACT_CAP, DEFAULT_SNIPER_MIN_LIQ_USD,
+  decideExit, exitTargets, filterFresh, gateToken, sizeBuy, splitSell, EXIT, DEFAULT_MIN_POOL_AGE_SEC, DEFAULT_SIZE_IMPACT_CAP, DEFAULT_SNIPER_MIN_LIQ_USD,
   type FreshPool, type GateInput,
   effectiveEntry, sellSidePrice,
 } from '../../market/tokenTrader';
@@ -158,6 +158,11 @@ export interface Position {
   tp2Done: boolean;
   source: 'scan' | 'snipe';
   exitPlan: string;
+  /** Its prices since the buy, [time, price] (the last MARKS_KEPT reads), and when the last one was read */
+  marks?: [number, number][];
+  markedAt?: number;
+  /** Sell it all on the next exit pass: asked for by hand (Sell now). Stays until it is sold. */
+  sellNow?: number;
   /**
    * 'chain' once entryLiq was set from the pool's own depth (the first on-chain mark). Until then entryLiq is
    * GeckoTerminal's reserve figure, which on-chain depth can't be compared with.
@@ -328,6 +333,8 @@ const genOf = (p: Position): PositionGen => p.gen ?? (p.gen = { feeBooked: 0, co
 const gasOfError = (e: unknown): number => { const g = (e as { opts?: { gasNative?: number } } | null)?.opts?.gasNative; return typeof g === 'number' && g > 0 ? g : 0; };
 
 const HOUR = 3600_000;
+/** Prices kept per open position for its chart: 6 h of 10 s ticks would be 2,160; one in 3 of the newest is plenty */
+export const MARKS_KEPT = 240;
 const num = (n: number) => +n.toPrecision(6);
 const FEED_MAX = 80;
 const TRADE_MAX = 200;
@@ -644,7 +651,13 @@ export class TokenTrader {
       const cost = p.spentUsd * (p.entryTokens > 0 ? p.tokens / p.entryTokens : 0);
       // the same open result in the spend coin (display only)
       const pnl = p.usdPerSpend > 0 ? pnlUsd / p.usdPerSpend : null;
-      return { ...p, pnlUsd, pnl, spendSym: p.label.split('/').pop(), pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p) };
+      const share = p.entryTokens > 0 ? p.tokens / p.entryTokens : 0;
+      return {
+        ...p, pnlUsd, pnl, spendSym: this.spendSymbol(p), tokenSym: p.label.split('/')[0].trim(), pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p),
+        /** What it is worth now in its spend coin (what it cost, plus its open result) */
+        value: pnl == null ? null : p.spent * share + pnl,
+        exits: exitTargets(this.exitOf(p)),
+      };
     });
     const out = {
       ...rest, id: 'token-trader', kind: 'token' as const,
@@ -687,7 +700,8 @@ export class TokenTrader {
     const k = genKey(mode, chainId, coin);
     return g[k] ?? (g[k] = { mode, chainId, coin: coin.toLowerCase(), symbol, proceeds: 0, cost: 0, fees: 0, taxes: 0, gasNative: 0, closed: 0, fills: 0 });
   }
-  private spendSymbol(p: Pick<Position, 'label' | 'spend'>) { return p.label.split('/')[1] ?? p.spend; }
+  /** The spend coin's symbol. Labels saved before 2026-10-30 can carry the pool's fee tier ("WETH 0.3%"): first word only. */
+  private spendSymbol(p: Pick<Position, 'label' | 'spend'>) { return p.label.split('/')[1]?.trim().split(/\s+/)[0] || p.spend; }
   private view(coin: { chainId: number; coin: string; symbol: string }, x: Omit<GenLedger, 'chainId' | 'coin' | 'symbol'>): Generated {
     const info = this.d.coinInfo?.(coin.chainId, coin.coin) ?? null;
     const gasInAmount = !!info?.native;
@@ -855,6 +869,19 @@ export class TokenTrader {
   }
 
   /** Lift a Stop all / STOP chain for the token trader: new buys and snipes may happen again. */
+  /**
+   * Sell now, by hand: the whole position sells on the next exit pass, through the same sell path (split under the impact
+   * cap, booked like every exit). The request stays until it is sold, so a sell that stops partway goes again.
+   */
+  sellNow(id: string) {
+    const p = this.state.positions.find((x) => x.id === id);
+    if (!p) throw new Error('No open position with that id: it may have just sold.');
+    if (!this.canSell()) throw new Error('The token trader is off completely, so nothing sells. Turn it on, or to "Off for new buys", first.');
+    p.sellNow = this.now();
+    this.say(`${p.label}: Sell now asked by hand; it sells on the next exit pass`, 'info', { mode: p.mode });
+    this.save();
+  }
+
   resumeEntries() {
     if (!this.state.entriesHalt) return;
     this.state.entriesHalt = null;
@@ -1429,7 +1456,7 @@ export class TokenTrader {
     const usd = r.amountOut * p.usdPerSpend;
     const share = p.entryTokens > 0 ? ps.tokens / p.entryTokens : 0;
     const why = `sell ${ps.hash} settled`;
-    this.state.trades.unshift({ t: this.now(), side: 'sell', mode: p.mode, chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - p.spentUsd * share, spendSym: p.label.split('/').pop(), amount: r.amountOut, pnl: r.amountOut - p.spent * share });
+    this.state.trades.unshift({ t: this.now(), side: 'sell', mode: p.mode, chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - p.spentUsd * share, spendSym: this.spendSymbol(p), amount: r.amountOut, pnl: r.amountOut - p.spent * share });
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
     this.say(`sold ${p.label}: ${why}`, 'success', { mode: p.mode });
     this.noteSell(p, { quote: r.amountOut, sold: ps.tokens, price: p.price, impact: null, txs: [ps.hash], flat: !(p.tokens > p.entryTokens * 1e-8), gas: null });
@@ -1490,6 +1517,10 @@ export class TokenTrader {
         const m = 'm' in r ? r.m : null;
         if (m) {
           Object.assign(p, m);
+          if (m.price != null) {
+            p.markedAt = this.now();
+            p.marks = [...(p.marks ?? []), [p.markedAt, p.price] as [number, number]].slice(-MARKS_KEPT);
+          }
           if (Object.prototype.hasOwnProperty.call(m, 'feeBps')) this.noteFeeReread(p.id);
         }
         // Off completely landed while the mark was read: don't sell (a live send is refused by canSell too).
@@ -1507,7 +1538,8 @@ export class TokenTrader {
         if (!(await this.reconcile(p))) { p.exitPlan = this.blocked(p) ?? p.exitPlan; left.push(p); continue; }
         if (!(p.tokens > p.entryTokens * 1e-8)) continue;
       }
-      const d = decideExit(this.exitOf(p));
+      const ex = this.exitOf(p);
+      const d: ReturnType<typeof decideExit> = p.sellNow ? { action: 'sell', frac: Math.max(0, Math.min(1, ex.remainingFrac)), why: 'sold by hand (Sell now)' } : decideExit(ex);
       p.exitPlan = d.action === 'hold' ? 'hold' : d.why;
       if (d.action === 'hold') { left.push(p); continue; }
       if (p.dynamicFee && this.d.feeNow) {
@@ -1588,7 +1620,7 @@ export class TokenTrader {
         const cost = p.spentUsd * (p.entryTokens > 0 ? sold / p.entryTokens : 0);
         const costCoin = p.spent * (p.entryTokens > 0 ? sold / p.entryTokens : 0); // the same cost in the spend coin (log only)
         const why = stopped ? `${d.why} (partial: ${num(sold)} of ${num(qty)})` : d.why;
-        this.state.trades.unshift({ t: this.now(), side: 'sell', mode: p.mode, chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost, spendSym: p.label.split('/').pop(), amount: quote, pnl: quote - costCoin });
+        this.state.trades.unshift({ t: this.now(), side: 'sell', mode: p.mode, chainId: p.chainId, pool: p.pool, label: p.label, usd, price: p.price, why, pnlUsd: usd - cost, spendSym: this.spendSymbol(p), amount: quote, pnl: quote - costCoin });
         this.say(`sold ${p.label}: ${why}`, usd - cost >= 0 ? 'success' : 'warn', { mode: p.mode });
       }
       if (tp && (sold > 0 || pend || stopped)) {
