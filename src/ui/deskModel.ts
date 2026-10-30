@@ -125,7 +125,9 @@ export function bankedItems(bots: AnyObj[], trader: AnyObj | null, mode: Mode): 
         });
       }
     } else if (b.kind === 'lp') {
+      const listed = { base: 0, quote: 0 };
       for (const c of (b.collections ?? []) as AnyObj[]) {
+        listed.base += c.base; listed.quote += c.quote;
         const amounts = [{ sym: String(b.base), amt: c.base }, { sym: q, amt: c.quote }].filter((a) => a.amt !== 0);
         out.push({
           key: `${b.id}:fees:${c.t}`, botId: b.id, kind: 'lp', sym: String(b.base), title: `${pairTitle(b)} · liquidity`,
@@ -133,6 +135,8 @@ export function bankedItems(bots: AnyObj[], trader: AnyObj | null, mode: Mode): 
           t: c.t, amounts, usd: usdOf(b, amounts),
         });
       }
+      const earlier = earlierFees(b, listed, q);
+      if (earlier) out.push(earlier);
     }
   }
   for (const t of (trader?.trades ?? []) as AnyObj[]) {
@@ -144,6 +148,27 @@ export function bankedItems(bots: AnyObj[], trader: AnyObj | null, mode: Mode): 
     });
   }
   return out.sort((a, b) => b.t - a.t);
+}
+
+/**
+ * A liquidity bot's fees collected before collections were itemised (or past the last 60 kept): its lifetime fee coins
+ * (totals.feeCoins) minus the listed ones. Their times weren't recorded, so they're banked at the last point all of them
+ * were in hand: the close for a closed bot (its last price reading when a close to cash left it unarchived), else its
+ * last range move (each move collects), else its start.
+ */
+function earlierFees(b: AnyObj, listed: { base: number; quote: number }, q: string): BankedItem | null {
+  const fc = b.totals?.feeCoins;
+  if (!fc) return null;
+  const left = (all: number, got: number) => (all - got > Math.abs(all) * 1e-9 ? all - got : 0);
+  const amounts = [{ sym: String(b.base), amt: left(fc.base, listed.base) }, { sym: q, amt: left(fc.quote, listed.quote) }].filter((a) => a.amt !== 0);
+  if (!amounts.length) return null;
+  const closed = b.archivedAt != null || b.status === 'closed';
+  const t = closed ? (b.archivedAt ?? b.priceAt) : (b.lastRerangeAt ?? b.startedAt);
+  if (num(t) == null) return null;
+  return {
+    key: `${b.id}:fees:earlier`, botId: b.id, kind: 'lp', sym: String(b.base), title: `${pairTitle(b)} · liquidity`,
+    sub: 'fees collected earlier (exact times not recorded)', t, amounts, usd: usdOf(b, amounts),
+  };
 }
 
 export function ladders(bots: AnyObj[], mode: Mode): Ladder[] {

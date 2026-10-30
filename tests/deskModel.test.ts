@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ALMOST, bankedCurve, bankedItems, funnelOf, ladders, openItems } from '../src/ui/deskModel';
-import { listBots } from '../src/ui/botRow';
+import { allBots, listBots, totalGeneratedUsd } from '../src/ui/botRow';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Obj = Record<string, any>;
@@ -45,6 +45,36 @@ describe('home board data', () => {
       ['lp', [{ sym: 'ETH', amt: 0.001 }, { sym: 'USDG', amt: 2.5 }], 0.001 * 2000 + 2.5],
     ]);
     expect(items[1].sub).toBe('fees collected on a range move');
+  });
+
+  it('banked: a closed bot still counts; a liquidity bot\'s fees from before itemised collections bank at its close', () => {
+    // lp-mvnm73sx-hghe (live USDC/ETH) was running on 2026-10-27 with fees and no itemised collections; close it as it was later
+    const ever = allBots(S, 'all').map((b) => (b.id === 'lp-mvnm73sx-hghe' ? { ...b, status: 'closed', archivedAt: 1_800_000_000_000 } : b));
+    const closedLive = ever.filter((b) => b.mode === 'live' && b.archivedAt);
+    expect(closedLive.map((b) => b.id).sort()).toEqual(['lp-mvfv3g7g-to6l', 'lp-mvnciwej-9uzx', 'lp-mvnm73sx-hghe']);
+    expect(listBots({ ...S, lps: ever.filter((b) => b.kind === 'lp') }, 'all').some((b) => b.id === 'lp-mvnm73sx-hghe')).toBe(false);
+    const items = bankedItems(ever, null, 'live');
+    const usdc = items.find((i) => i.key === 'lp-mvnm73sx-hghe:fees:earlier')!;
+    expect(usdc.t).toBe(1_800_000_000_000);
+    expect(usdc.sub).toBe('fees collected earlier (exact times not recorded)');
+    const hghe = ever.find((b) => b.id === 'lp-mvnm73sx-hghe')!;
+    expect(usdc.amounts).toEqual([{ sym: hghe.base, amt: hghe.totals.feeCoins.base }, { sym: 'ETH', amt: hghe.totals.feeCoins.quote }]);
+    for (const id of ['lp-mvfv3g7g-to6l', 'lp-mvnciwej-9uzx']) expect(items.some((i) => i.key === `${id}:fees:earlier`)).toBe(true);
+    // the home's Generated adds the closed bots' Generated to the open ones'
+    const sum = (bs: Obj[]) => bs.filter((b) => b.mode === 'live').reduce((a, b) => a + b.metrics.generatedUsd, 0);
+    expect(totalGeneratedUsd(ever, 'live')).toBeCloseTo(sum(ever), 9);
+    expect(totalGeneratedUsd(listBots(S, 'all'), 'live')).toBeCloseTo(sum(listBots(S, 'all')), 9);
+  });
+
+  it('banked: itemised collections are not counted twice in the earlier fees', () => {
+    const lp = { id: 'l2', kind: 'lp', mode: 'live', base: 'ETH', quote: 'USDG', usdPerQuote: 1, price: 2000, status: 'running', lastRerangeAt: 3, startedAt: 1,
+      totals: { feeCoins: { base: 0.003, quote: 7 } }, collections: [{ t: 5, base: 0.001, quote: 2.5, why: 'moved' }] };
+    const earlier = bankedItems([lp], null, 'live').find((i) => i.key === 'l2:fees:earlier')!;
+    expect(earlier.t).toBe(3);
+    expect(earlier.amounts[0].amt).toBeCloseTo(0.002, 12);
+    expect(earlier.amounts[1].amt).toBeCloseTo(4.5, 12);
+    const all = { ...lp, totals: { feeCoins: { base: 0.001, quote: 2.5 } } };
+    expect(bankedItems([all], null, 'live').some((i) => i.key === 'l2:fees:earlier')).toBe(false);
   });
 
   it('ladders: each grid\'s level prices (one more than its intervals), which hold, and the price', () => {
