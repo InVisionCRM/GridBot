@@ -26,16 +26,17 @@ export interface PowerSig {
   selector: string;
   /**
    * Safe and medium skip when a non-renounced owner can call this.
-   * Trading, fee-exempt, and upgrade selectors are reported and do not by themselves skip.
+   * Mint (Kyle, 2026-10-30: launcher tokens carry mint functions), trading, fee-exempt, and upgrade selectors are
+   * reported and do not by themselves skip.
    */
   blocks: boolean;
 }
 
 const SIGS: { kind: PowerKind; sig: string; blocks: boolean }[] = [
-  { kind: 'mint', sig: 'mint(address,uint256)', blocks: true },
-  { kind: 'mint', sig: 'mint(uint256)', blocks: true },
-  { kind: 'mint', sig: 'mint(address,uint256,bytes)', blocks: true },
-  { kind: 'mint', sig: 'mintTo(address,uint256)', blocks: true },
+  { kind: 'mint', sig: 'mint(address,uint256)', blocks: false },
+  { kind: 'mint', sig: 'mint(uint256)', blocks: false },
+  { kind: 'mint', sig: 'mint(address,uint256,bytes)', blocks: false },
+  { kind: 'mint', sig: 'mintTo(address,uint256)', blocks: false },
   { kind: 'blacklist', sig: 'setBlacklist(address,bool)', blocks: true },
   { kind: 'blacklist', sig: 'blacklistAddress(address)', blocks: true },
   { kind: 'blacklist', sig: 'setBot(address,bool)', blocks: true },

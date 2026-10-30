@@ -1744,7 +1744,7 @@ button.wl-row:hover { background: var(--surface-2); }
   .mo-sub { -webkit-line-clamp: 1; }
 }
 
-/* ── Token trader page (TokenTraderPage.tsx): Terminal Mint, with motion everywhere it means something ── */
+/* ── Token trader page (TokenTraderPage.tsx): Terminal Mint. Motion only on real events: a discovery run, a coin landing, a count rising, a save ── */
 .tk { display: flex; flex-direction: column; gap: 14px; max-width: 1180px; margin: 0 auto; width: 100%; padding-bottom: 16px; }
 .tk > * { animation: tk-rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .tk > *:nth-child(2) { animation-delay: 0.05s; } .tk > *:nth-child(3) { animation-delay: 0.1s; } .tk > *:nth-child(4) { animation-delay: 0.15s; }
@@ -1768,20 +1768,23 @@ button.wl-row:hover { background: var(--surface-2); }
   radial-gradient(120% 140% at 0% 0%, rgba(92, 208, 141, 0.10), transparent 55%),
   radial-gradient(90% 120% at 100% 100%, rgba(91, 141, 239, 0.08), transparent 60%), var(--surface); }
 .tk.is-live .tk-hero { background: radial-gradient(120% 140% at 0% 0%, rgba(242, 112, 107, 0.12), transparent 55%), radial-gradient(90% 120% at 100% 100%, rgba(245, 184, 65, 0.08), transparent 60%), var(--surface); }
-.tk-hero::after { content: ''; position: absolute; inset: 0; background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.035) 45%, transparent 60%); transform: translateX(-100%); pointer-events: none; }
-.tk.is-on .tk-hero::after { animation: tk-sheen 5s ease-in-out infinite; }
-@keyframes tk-sheen { 0%, 40% { transform: translateX(-100%); } 70%, 100% { transform: translateX(100%); } }
 .tk-orb { position: relative; width: 84px; height: 84px; display: grid; place-items: center; }
-.tk-orb i { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--line-2); }
+.tk-orb::before { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--line-2); }
+.tk-orb.on::before { border-color: transparent; }
+/* the ring fills from one discovery run to the next */
+.tk-orb-ring { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.tk-orb-ring circle { fill: none; stroke-width: 3; }
+.tk-orb-ring .bg { stroke: var(--line-2); }
+.tk-orb-ring .fg { stroke: var(--profit); stroke-linecap: round; stroke-dasharray: 1; stroke-dashoffset: 1; animation-name: tk-fill; animation-timing-function: linear; animation-fill-mode: forwards; }
+.tk-orb.live .tk-orb-ring .fg { stroke: var(--loss); }
+@keyframes tk-fill { to { stroke-dashoffset: 0; } }
+/* one ripple when a run lands; a brighter one for a buy */
+.tk-orb-pulse { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--profit); opacity: 0; animation: tk-ripple 1.3s cubic-bezier(0.2, 0.6, 0.3, 1) 1; }
+.tk-orb-pulse.buy { border-width: 3px; border-color: var(--warn); animation-duration: 1.8s; }
 .tk-orb b { position: relative; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); transition: background 0.4s, color 0.4s, box-shadow 0.4s; }
-.tk-orb.on i { border-color: var(--profit); animation: tk-ripple 2.4s cubic-bezier(0.2, 0.6, 0.3, 1) infinite; }
-.tk-orb.on i:nth-child(2) { animation-delay: 0.8s; } .tk-orb.on i:nth-child(3) { animation-delay: 1.6s; }
 .tk-orb.on b { background: var(--profit); color: var(--on-profit); box-shadow: 0 0 28px rgba(92, 208, 141, 0.55); }
-.tk-orb.on b svg { animation: tk-turn 6s linear infinite; }
-.tk-orb.on.live i { border-color: var(--loss); }
 .tk-orb.on.live b { background: var(--loss); box-shadow: 0 0 28px rgba(242, 112, 107, 0.55); }
-@keyframes tk-ripple { from { transform: scale(0.62); opacity: 0.9; } to { transform: scale(1.35); opacity: 0; } }
-@keyframes tk-turn { to { transform: rotate(360deg); } }
+@keyframes tk-ripple { from { transform: scale(0.62); opacity: 0.9; } to { transform: scale(1.45); opacity: 0; } }
 .tk-eyebrow { font: 600 0.72rem var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
 .tk-head { margin: 2px 0 6px; font: 700 clamp(1.5rem, 3.6vw, 2.3rem) var(--font); letter-spacing: -0.02em; }
 .tk-mode { display: inline-block; font: 600 0.78rem var(--mono); padding: 3px 10px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
@@ -1793,12 +1796,9 @@ button.wl-row:hover { background: var(--surface-2); }
 .tk-seg button { appearance: none; border: 0; background: none; color: var(--muted); font: 600 0.82rem var(--font); padding: 7px 10px; border-radius: 9px; cursor: pointer; transition: background 0.25s, color 0.25s; }
 .tk-seg button.on { background: var(--surface-2); color: var(--text); }
 .tk-seg button:disabled { cursor: not-allowed; }
-.tk-go { position: relative; overflow: hidden; appearance: none; border: 0; border-radius: 14px; padding: 13px 18px; background: var(--profit); color: var(--on-profit); font: 700 1rem var(--font); cursor: pointer; box-shadow: 0 6px 24px rgba(92, 208, 141, 0.35); animation: tk-breathe 2.6s ease-in-out infinite; transition: transform 0.15s; }
-.tk-go:hover { transform: translateY(-1px); } .tk-go:active { transform: scale(0.98); }
-.tk-go::after { content: ''; position: absolute; inset: 0; background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.45) 50%, transparent 80%); transform: translateX(-120%); animation: tk-shine 2.8s ease-in-out infinite; }
+.tk-go { position: relative; overflow: hidden; appearance: none; border: 0; border-radius: 14px; padding: 13px 18px; background: var(--profit); color: var(--on-profit); font: 700 1rem var(--font); cursor: pointer; box-shadow: 0 6px 24px rgba(92, 208, 141, 0.35); transition: transform 0.15s, box-shadow 0.2s; }
+.tk-go:hover { transform: translateY(-1px); box-shadow: 0 8px 30px rgba(92, 208, 141, 0.5); } .tk-go:active { transform: scale(0.98); }
 .tk-go span { position: relative; z-index: 1; }
-@keyframes tk-shine { 0%, 50% { transform: translateX(-120%); } 100% { transform: translateX(120%); } }
-@keyframes tk-breathe { 0%, 100% { box-shadow: 0 6px 24px rgba(92, 208, 141, 0.3); } 50% { box-shadow: 0 6px 34px rgba(92, 208, 141, 0.6); } }
 .danger-ghost { color: var(--loss); }
 
 /* radar + funnel side by side */
@@ -1806,14 +1806,21 @@ button.wl-row:hover { background: var(--surface-2); }
 .tk-radar { position: relative; width: min(100%, 300px); aspect-ratio: 1; margin: 2px auto 4px; border-radius: 50%; overflow: hidden; background: radial-gradient(circle at 50% 50%, rgba(92, 208, 141, 0.07), transparent 70%), var(--bg); border: 1px solid var(--line); }
 .tk-ring { position: absolute; border-radius: 50%; border: 1px dashed rgba(92, 208, 141, 0.18); }
 .tk-ring.r1 { inset: 12%; } .tk-ring.r2 { inset: 28%; } .tk-ring.r3 { inset: 42%; }
-.tk-cross { position: absolute; inset: 0; background: linear-gradient(rgba(92, 208, 141, 0.12), rgba(92, 208, 141, 0.12)) center / 1px 100% no-repeat, linear-gradient(rgba(92, 208, 141, 0.12), rgba(92, 208, 141, 0.12)) center / 100% 1px no-repeat; }
-.tk-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(92, 208, 141, 0.42), rgba(92, 208, 141, 0.08) 55deg, transparent 90deg); opacity: 0.35; }
-.tk-radar.on .tk-sweep { opacity: 1; animation: tk-turn 3.6s linear infinite; }
+.tk-sectors { position: absolute; inset: 0; width: 100%; height: 100%; }
+.tk-sectors line { stroke: rgba(92, 208, 141, 0.16); stroke-width: 0.35; }
+.tk-sector-name { position: absolute; transform: translate(-50%, -50%); font: 600 0.6rem var(--mono); letter-spacing: 0.06em; color: var(--faint); pointer-events: none; }
+/* the sweep goes round once per discovery run: where it points is how far the next run is */
+.tk-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from -90deg, transparent 270deg, rgba(92, 208, 141, 0.08) 300deg, rgba(92, 208, 141, 0.42) 360deg); animation-name: tk-turn; animation-timing-function: linear; animation-fill-mode: forwards; }
+@keyframes tk-turn { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .tk-radar-core { position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px; border-radius: 50%; background: var(--profit); box-shadow: 0 0 12px var(--profit); }
 .tk-blip { position: absolute; width: 9px; height: 9px; margin: -4.5px; border-radius: 50%; background: var(--faint); animation: tk-pop 0.5s cubic-bezier(0.2, 1.4, 0.4, 1) both; transition: opacity 1s; }
 .tk-blip.is-bought { background: var(--profit); box-shadow: 0 0 10px var(--profit); }
-.tk-blip.is-bought::after { content: ''; position: absolute; inset: -6px; border-radius: 50%; border: 1.5px solid var(--profit); animation: tk-ping 1.8s ease-out infinite; }
-.tk-blip.is-checks { background: var(--loss); } .tk-blip.is-buy { background: var(--warn); } .tk-blip.is-rules { background: var(--muted); }
+.tk-blip::after { content: ''; position: absolute; inset: -6px; border-radius: 50%; border: 1.5px solid currentColor; opacity: 0; animation: tk-ping 1.2s ease-out 0.15s 1; }
+.tk-blip.is-bought::after { animation-iteration-count: 3; color: var(--profit); }
+.tk-blip.is-checks { background: var(--loss); color: var(--loss); } .tk-blip.is-buy { background: var(--warn); color: var(--warn); } .tk-blip.is-rules { background: var(--muted); color: var(--muted); }
+.tk-legend { margin: -4px 0 0; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 10px; color: var(--muted); }
+.tk-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: -6px; }
+.tk-legend .is-rules { background: var(--muted); } .tk-legend .is-checks { background: var(--loss); } .tk-legend .is-buy { background: var(--warn); } .tk-legend .is-bought { background: var(--profit); }
 @keyframes tk-pop { from { transform: scale(0); } to { transform: scale(1); } }
 @keyframes tk-ping { from { transform: scale(0.5); opacity: 1; } to { transform: scale(1.8); opacity: 0; } }
 .tk-feed, .tk-trades { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -1841,11 +1848,15 @@ button.wl-row:hover { background: var(--surface-2); }
 .tk-stage-bar i { display: block; height: 100%; border-radius: 4px; background: currentColor; transition: width 0.9s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .tk-stage.is-scouted { color: var(--hold); } .tk-stage.is-rules { color: var(--warn); } .tk-stage.is-checks { color: #B58CFF; } .tk-stage.is-buy { color: var(--loss); } .tk-stage.is-bought { color: var(--profit); }
 .tk-stage > :not(.tk-stage-bar):not(.tk-stage-ic) { color: var(--text); }
-.tk-flow { position: absolute; left: 30px; bottom: -12px; width: 2px; height: 14px; z-index: 1; display: none; }
-.tk-stages.on .tk-flow { display: block; }
-.tk-flow i { position: absolute; left: -1px; width: 4px; height: 4px; border-radius: 50%; background: var(--profit); animation: tk-drip 1.2s linear infinite; }
-.tk-flow i:nth-child(2) { animation-delay: 0.4s; } .tk-flow i:nth-child(3) { animation-delay: 0.8s; }
-@keyframes tk-drip { from { top: -2px; opacity: 0; } 30% { opacity: 1; } to { top: 14px; opacity: 0; } }
+/* a stage whose count rose since the last refresh lights up once and shows how many came in */
+.tk-stage.is-scouted { --tone: var(--hold); } .tk-stage.is-rules { --tone: var(--warn); } .tk-stage.is-checks { --tone: #B58CFF; } .tk-stage.is-buy { --tone: var(--loss); } .tk-stage.is-bought { --tone: var(--profit); }
+.tk-stage-hit { position: absolute; inset: 0; border-radius: 14px; pointer-events: none; animation: tk-hit 1.4s ease-out forwards; }
+@keyframes tk-hit { from { box-shadow: inset 0 0 0 1.5px var(--tone), 0 0 22px color-mix(in srgb, var(--tone) 45%, transparent); } to { box-shadow: inset 0 0 0 1.5px transparent, 0 0 0 transparent; } }
+.tk-bump { position: absolute; right: 14px; top: -6px; font: 700 0.78rem var(--mono); font-style: normal; color: var(--tone) !important; animation: tk-float 1.6s ease-out forwards; pointer-events: none; }
+@keyframes tk-float { from { opacity: 0; transform: translateY(8px); } 15% { opacity: 1; } to { opacity: 0; transform: translateY(-14px); } }
+/* the change you made is saved */
+.tk-saved { font: 600 0.72rem var(--mono); color: var(--profit); background: var(--up-bg); padding: 2px 8px; border-radius: 999px; animation: tk-saved 2.4s ease-out forwards; }
+@keyframes tk-saved { from { opacity: 0; transform: scale(0.8); } 12% { opacity: 1; transform: scale(1.06); } 20% { transform: none; } 80% { opacity: 1; } to { opacity: 0; } }
 
 /* setup */
 .tk-step { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; padding: 4px 0; }
@@ -1901,9 +1912,8 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 .tk-rung em { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); font: 400 0.66rem var(--mono); font-style: normal; color: var(--muted); white-space: nowrap; }
 .tk-rung.stop { background: var(--loss); } .tk-rung.tp { background: var(--profit); } .tk-rung.arm { background: var(--warn); }
 .tk-rung.done { box-shadow: 0 0 0 3px var(--up-bg); } .tk-rung.done em { color: var(--profit); }
-.tk-puck { position: absolute; top: 8px; width: 18px; height: 18px; margin-left: -9px; border-radius: 50%; background: var(--text); border: 3px solid var(--bg); box-shadow: 0 0 0 2px var(--text); transition: left 0.9s cubic-bezier(0.2, 0.9, 0.2, 1); animation: tk-glow 2s ease-in-out infinite; }
+.tk-puck { position: absolute; top: 8px; width: 18px; height: 18px; margin-left: -9px; border-radius: 50%; background: var(--text); border: 3px solid var(--bg); box-shadow: 0 0 0 2px var(--text); transition: left 0.9s cubic-bezier(0.2, 0.9, 0.2, 1); }
 .tk-pos.up .tk-puck { box-shadow: 0 0 0 2px var(--profit), 0 0 14px var(--profit); } .tk-pos.down .tk-puck { box-shadow: 0 0 0 2px var(--loss), 0 0 14px var(--loss); }
-@keyframes tk-glow { 50% { transform: scale(1.12); } }
 .tk-pos-foot { margin: 0; color: var(--secondary); }
 
 /* scorecard */

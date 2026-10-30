@@ -4,7 +4,7 @@
  * right now and where each coin left), setup in three choices (style, how much, where) with every other setting under
  * Advanced, open positions on their exit ladders, the scorecard, and the trades. Server: bot/tokenTrader.ts.
  */
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { http } from './api';
 import { ago, pct, qty } from './fmt';
 import { ChainBadge, chainOf } from './chains';
@@ -16,7 +16,7 @@ import { Icon, type IconName } from './icons';
 import { useEthUsd } from './units';
 import { VENUES } from '../live/venues';
 import { EthLimit, SpendDetails, TokenAdvanced, blockedNote, feePct, generatedText, modeLabel, offCompletely, startTrader } from './TokenTrader';
-import { STYLES, ladderRungs, ladderX, radarBlips, scorecard, styleOf, timeUsed } from './tokenModel';
+import { STYLES, ladderRungs, ladderX, lookCycle, radarBlips, radarSectors, scorecard, styleOf, timeUsed } from './tokenModel';
 
 /** The two auto traders share the "Auto traders" tile: this switches between their pages. */
 export function TraderSwitch({ at, nav }: { at: 'auto' | 'token'; nav: Nav }) {
@@ -33,7 +33,7 @@ function useTrader(seed?: AnyObj) {
   const [t, setT] = useState<AnyObj | null>(seed ?? null);
   const [err, setErr] = useState<string | null>(null);
   const load = useCallback(() => http('/api/token-trader').then((x) => { setT(x); setErr(null); }).catch((e) => setErr(errMsg(e))), []);
-  useEffect(() => { void load(); const id = setInterval(load, 3000); return () => clearInterval(id); }, [load]);
+  useEffect(() => { void load(); const id = setInterval(load, 2000); return () => clearInterval(id); }, [load]);
   return { t, setT, err, setErr };
 }
 
@@ -49,14 +49,15 @@ export function TokenTraderPage({ s, nav, seed, now: fixedNow }: { s: AnyObj; na
   const [busy, setBusy] = useState(false);
   const ethUsd = useEthUsd();
   const now = useNow(fixedNow);
-  const run = async (fn: () => Promise<AnyObj | void>) => {
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const run = async (fn: () => Promise<AnyObj | void>): Promise<boolean> => {
     setBusy(true);
-    try { const x = await fn(); if (x) setT(x); setErr(null); } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
+    try { const x = await fn(); if (x) setT(x); setErr(null); return true; } catch (e) { setErr(errMsg(e)); return false; } finally { setBusy(false); }
   };
   if (err && !t) return <main className="tk"><TraderSwitch at="token" nav={nav} /><div className="banner error"><span className="grow">{err}</span></div></main>;
   if (!t) return <main className="tk"><TraderSwitch at="token" nav={nav} /><p className="muted">Loading…</p></main>;
   const o = t.options;
-  const save = (patch: AnyObj) => void run(() => http('/api/token-trader', 'PUT', patch));
+  const save = (patch: AnyObj) => void run(() => http('/api/token-trader', 'PUT', patch)).then((ok) => { if (ok) setSavedAt(Date.now()); });
   const on = !!t.on, live = o.mode === 'live';
 
   return (
@@ -76,10 +77,10 @@ export function TokenTraderPage({ s, nav, seed, now: fixedNow }: { s: AnyObj; na
         </div>
       )}
       <div className="tk-watch">
-        <Radar t={t} s={s} now={now} />
+        <Radar t={t} s={s} now={now} live={fixedNow == null} />
         <Funnel t={t} />
       </div>
-      <Setup s={s} t={t} setT={setT} save={save} ethUsd={ethUsd} />
+      <Setup s={s} t={t} save={save} ethUsd={ethUsd} savedAt={savedAt} />
       <Positions s={s} t={t} now={now} />
       <div className="tk-split">
         <Score t={t} />
@@ -92,12 +93,12 @@ export function TokenTraderPage({ s, nav, seed, now: fixedNow }: { s: AnyObj; na
 }
 
 // ── hero ────────────────────────────────────────────────────────────────
-function Hero({ t, busy, run, ethUsd, save }: { t: AnyObj; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<void>; ethUsd: number | null; save: (p: AnyObj) => void }) {
+function Hero({ t, busy, run, ethUsd, save }: { t: AnyObj; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<boolean>; ethUsd: number | null; save: (p: AnyObj) => void }) {
   const o = t.options, on = !!t.on;
   const head = on ? 'Hunting new pools' : t.runMode === 'full' ? 'Fully off' : t.positions.length ? 'Watching its exits' : 'Resting';
   return (
     <section className="tk-hero">
-      <div className={`tk-orb ${on ? 'on' : ''} ${o.mode === 'live' ? 'live' : ''}`} aria-hidden="true"><i /><i /><i /><b><Icon name="target" size={26} /></b></div>
+      <Orb t={t} />
       <div className="tk-hero-main">
         <span className="tk-eyebrow">Token trader</span>
         <h1 className="tk-head">{head}</h1>
@@ -123,24 +124,77 @@ function Hero({ t, busy, run, ethUsd, save }: { t: AnyObj; busy: boolean; run: (
   );
 }
 
+// ── orb: one ring per discovery run ─────────────────────────────────────
+/**
+ * The ring fills from one discovery run to the next (status.look) and the orb sends one ripple when a run lands; a
+ * buy sends a brighter one. Nothing moves while the trader is off.
+ */
+function Orb({ t }: { t: AnyObj }) {
+  const on = !!t.on, at = t.look?.last?.at ?? null, bought = t.funnel?.bought ?? 0;
+  return (
+    <div className={`tk-orb ${on ? 'on' : ''} ${t.options.mode === 'live' ? 'live' : ''}`} aria-hidden="true">
+      {on && at != null && <Cycle key={at} at={at} everyMs={t.look.everyMs} render={(style) => (
+        <svg className="tk-orb-ring" viewBox="0 0 84 84"><circle cx="42" cy="42" r="39" className="bg" /><circle cx="42" cy="42" r="39" className="fg" pathLength={1} style={style} /></svg>
+      )} />}
+      {on && at != null && <i key={`look-${at}`} className="tk-orb-pulse" />}
+      {on && bought > 0 && <i key={`buy-${bought}`} className="tk-orb-pulse buy" />}
+      <b><Icon name="target" size={26} /></b>
+    </div>
+  );
+}
+
+/**
+ * A CSS animation that runs once over one discovery cycle, started where the cycle is now. Keyed by the run's time, so
+ * it starts over when a new run lands; its offset is read once, so a refresh doesn't move it.
+ */
+function Cycle({ at, everyMs, render }: { at: number; everyMs: number; render: (style: CSSProperties) => ReactNode }) {
+  const [offset] = useState(() => Math.max(0, Date.now() - at));
+  return <>{render({ animationDuration: `${everyMs}ms`, animationDelay: `-${Math.min(offset, everyMs)}ms` })}</>;
+}
+
+/** "next look in 12 s" (a 1 s clock of its own, so the page doesn't redraw every second) */
+function NextLook({ look, live, now: fixed }: { look: AnyObj | null; live: boolean; now: number }) {
+  const [now, setNow] = useState(fixed);
+  useEffect(() => { if (!live) return; const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, [live]);
+  const c = lookCycle(look, now);
+  if (!c) return <>first look on the next check</>;
+  const found = look?.last?.found ?? 0;
+  return <>{c.inMs > 0 ? `next look in ${Math.ceil(c.inMs / 1000)} s` : 'looking now'} · last look found {found} pool{found === 1 ? '' : 's'}</>;
+}
+
 // ── radar ───────────────────────────────────────────────────────────────
-function Radar({ t, s, now }: { t: AnyObj; s: AnyObj; now: number }) {
-  const blips = radarBlips(t.feed, now);
-  const last = (t.feed ?? [])[0];
+/**
+ * One slice per chain it reads. A coin is a blip in its chain's slice, as deep as it got: the rim is the rules, then
+ * the safety check, then the buy; the core is bought. A new blip pops in once. The sweep goes round once per discovery
+ * run and is where the next run is.
+ */
+function Radar({ t, s, now, live }: { t: AnyObj; s: AnyObj; now: number; live: boolean }) {
+  const tradable: AnyObj[] = (s.chains ?? []).filter((c: AnyObj) => c.tradable);
+  const reads = tradable.map((c) => c.id as number).filter((id) => !t.options.chains?.length || t.options.chains.includes(id));
+  const sectors = radarSectors(reads);
+  const blips = radarBlips(t.feed, now, reads);
+  const at = t.look?.last?.at ?? null;
   return (
     <section className="tk-card tk-radar-card">
-      <h3><Icon name="search" size={16} /> Radar <span className="muted small">{last ? `last look ${ago(last.t, now)}` : 'nothing yet'}</span></h3>
+      <h3><Icon name="search" size={16} /> Radar <span className="muted small">{t.on ? <NextLook look={t.look} live={live} now={now} /> : 'off: not looking'}</span></h3>
       <div className={`tk-radar ${t.on ? 'on' : ''}`}>
-        <i className="tk-ring r1" /><i className="tk-ring r2" /><i className="tk-ring r3" /><i className="tk-cross" />
-        <i className="tk-sweep" />
-        {blips.map((b, i) => (
-          <span key={b.key} className={`tk-blip is-${b.tone}`} style={{ left: `${b.x}%`, top: `${b.y}%`, opacity: b.fade, animationDelay: `${i * 60}ms` }} title={b.label} />
+        <i className="tk-ring r1" /><i className="tk-ring r2" /><i className="tk-ring r3" />
+        <svg className="tk-sectors" viewBox="0 0 100 100" aria-hidden="true">
+          {sectors.length > 1 && sectors.map((x) => <line key={x.chainId} x1="50" y1="50" x2={50 + Math.cos(x.from) * 50} y2={50 + Math.sin(x.from) * 50} />)}
+        </svg>
+        {sectors.map((x) => (
+          <span key={x.chainId} className="tk-sector-name" style={{ left: `${50 + Math.cos(x.mid) * 40}%`, top: `${50 + Math.sin(x.mid) * 40}%` }}>{chainOf(s, x.chainId)?.short ?? x.chainId}</span>
+        ))}
+        {t.on && at != null && <Cycle key={at} at={at} everyMs={t.look.everyMs} render={(style) => <i className="tk-sweep" style={style} />} />}
+        {blips.map((b) => (
+          <span key={b.key} className={`tk-blip is-${b.tone}`} style={{ left: `${b.x}%`, top: `${b.y}%`, opacity: b.fade }} title={`${b.label}: ${b.tone === 'bought' ? 'bought' : b.tone === 'checks' ? 'failed the safety check' : b.tone === 'buy' ? 'stopped at the buy' : 'outside the rules'}`} />
         ))}
         <b className="tk-radar-core" />
       </div>
+      <p className="tk-legend small"><i className="is-rules" /> rules <i className="is-checks" /> safety <i className="is-buy" /> at the buy <i className="is-bought" /> bought</p>
       <ul className="tk-feed">
-        {(t.feed ?? []).slice(0, 6).map((f: AnyObj, i: number) => (
-          <li key={`${f.pool}:${f.t}`} className={`tk-feed-row is-${f.verdict === 'bought' ? 'bought' : f.stage ?? 'rules'}`} style={{ animationDelay: `${i * 45}ms` }}>
+        {(t.feed ?? []).slice(0, 6).map((f: AnyObj) => (
+          <li key={`${f.pool}:${f.t}`} className={`tk-feed-row is-${f.verdict === 'bought' ? 'bought' : f.stage ?? 'rules'}`}>
             <span className="tk-chip">{f.verdict === 'bought' ? 'bought' : f.stage === 'checks' ? 'unsafe' : f.stage === 'buy' ? 'at buy' : 'rule'}</span>
             {f.chainId ? <ChainBadge c={chainOf(s, f.chainId)} testnet={false} /> : null}
             <b className="tk-feed-label">{f.label}</b>
@@ -176,9 +230,8 @@ function Funnel({ t }: { t: AnyObj }) {
             <li key={st.key} className={`tk-stage is-${st.key}`} style={{ animationDelay: `${i * 70}ms` }}>
               <span className="tk-stage-ic"><Icon name={st.icon} size={18} /></span>
               <span className="tk-stage-name"><b>{st.label}</b><small>{st.sub}</small></span>
-              <span className="tk-stage-n"><AnimatedNumber value={n} format={(x) => Math.round(x).toLocaleString()} />{out ? <small> out</small> : null}</span>
+              <StageCount n={n} out={out} />
               <span className="tk-stage-bar"><i style={{ width: `${Math.min(100, (n / top) * 100)}%` }} /></span>
-              {i < STAGES.length - 1 && <span className="tk-flow" aria-hidden="true"><i /><i /><i /></span>}
             </li>
           );
         })}
@@ -187,8 +240,22 @@ function Funnel({ t }: { t: AnyObj }) {
   );
 }
 
+/** A stage's count; when it rises between refreshes, the stage lights up once and shows how many came in. */
+function StageCount({ n, out }: { n: number; out: boolean }) {
+  const prev = useRef(n);
+  const [bump, setBump] = useState<{ by: number; at: number } | null>(null);
+  useEffect(() => { if (n > prev.current) setBump({ by: n - prev.current, at: n }); prev.current = n; }, [n]);
+  return (
+    <span className="tk-stage-n">
+      {bump && <i key={bump.at} className="tk-stage-hit" aria-hidden="true" onAnimationEnd={() => setBump(null)} />}
+      <AnimatedNumber value={n} format={(x) => Math.round(x).toLocaleString()} />{out ? <small> out</small> : null}
+      {bump && <em key={`+${bump.at}`} className="tk-bump">+{bump.by}</em>}
+    </span>
+  );
+}
+
 // ── setup ───────────────────────────────────────────────────────────────
-function Setup({ s, t, setT, save, ethUsd }: { s: AnyObj; t: AnyObj; setT: (t: AnyObj) => void; save: (p: AnyObj) => void; ethUsd: number | null }) {
+function Setup({ s, t, save, ethUsd, savedAt }: { s: AnyObj; t: AnyObj; save: (p: AnyObj) => void; ethUsd: number | null; savedAt: number | null }) {
   const o = t.options;
   const style = styleOf(o);
   const tradable: AnyObj[] = (s.chains ?? []).filter((c: AnyObj) => c.tradable);
@@ -201,7 +268,7 @@ function Setup({ s, t, setT, save, ethUsd }: { s: AnyObj; t: AnyObj; setT: (t: A
   const venues = VENUES.filter((v) => tradable.some((c) => c.id === v.chainId));
   return (
     <section className="tk-card tk-setup">
-      <h3><Icon name="gear" size={16} /> Set it up <span className="muted small">three choices; everything else is under Advanced</span></h3>
+      <h3><Icon name="gear" size={16} /> Set it up {savedAt != null && <span key={savedAt} className="tk-saved" role="status">Saved ✓</span>}<span className="muted small">three choices; each change saves when you tap it or leave its box</span></h3>
       <Step n={1} title="Style" note={style ? null : 'Custom: set by hand under Advanced'}>
         <div className="tk-styles">
           {STYLES.map((st, i) => (
@@ -239,14 +306,14 @@ function Setup({ s, t, setT, save, ethUsd }: { s: AnyObj; t: AnyObj; setT: (t: A
           </>
         )}
         <label className="tk-toggle">
-          <input type="checkbox" checked={!!o.sniper.on} onChange={(e) => save({ sniper: { ...o.sniper, on: e.target.checked } })} />
+          <input type="checkbox" checked={!!o.sniper.on} onChange={(e) => save({ sniper: { on: e.target.checked } })} />
           <span className="tk-toggle-track" aria-hidden="true"><i /></span>
           <span><b>Sniper</b> <small className="muted">buys a pool the moment liquidity lands (skips the age rule)</small></span>
         </label>
       </Step>
       <details className="tk-more">
         <summary><Icon name="list" size={14} /> Advanced <span className="muted small">limits, checks, sniper timing, send RPC</span></summary>
-        <TokenAdvanced s={s} t={t} setT={setT} save={save} />
+        <TokenAdvanced s={s} t={t} save={save} />
       </details>
     </section>
   );

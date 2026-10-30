@@ -78,25 +78,53 @@ export function TokenTraderChoiceBanner() {
 }
 
 /**
- * Every setting the trader has, for the page's Advanced section (the page itself sets the style, the amounts, the
- * chains and the venues). `t` is the status; `setT` edits a field before it is saved on blur.
+ * A number setting, typed in the unit it is shown in (stored = shown × scale). What is typed stays until the box is
+ * left, then it is saved; the page's refresh every 2 s can't overwrite it (2026-10-30: it did, so an edit such as the
+ * minimum pool age was replaced by the old value before it was saved).
  */
-export function TokenAdvanced({ s, t, setT, save }: { s: AnyObj; t: AnyObj; setT: (t: AnyObj) => void; save: (patch: AnyObj) => void }) {
+export function NumField({ label, value, scale = 1, onSave }: { label: string; value: number; scale?: number; onSave: (v: number) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const shown = text ?? String(+(value / scale).toFixed(2));
+  return (
+    <label className="smart-field"><span className="k">{label}</span>
+      <input value={shown} inputMode="decimal" onChange={(e) => setText(e.target.value.replace(/[,\s]/g, ''))}
+        onBlur={() => { const n = Number(text); setText(null); if (text != null && text !== '' && Number.isFinite(n) && n >= 0 && n * scale !== value) onSave(n * scale); }} />
+    </label>
+  );
+}
+
+/** The Ethereum send RPC, kept as typed until the box is left (like NumField); empty = none */
+function RpcField({ value, onSave }: { value: string | null; onSave: (v: string | null) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  return (
+    <label className="smart-field"><span className="k">Ethereum send RPC (optional, broadcast only)</span>
+      <input placeholder="https://rpc.flashbots.net" value={text ?? value ?? ''} onChange={(e) => setText(e.target.value)}
+        onBlur={() => { const v = text?.trim() || null; setText(null); if (text != null && v !== value) onSave(v); }} />
+    </label>
+  );
+}
+
+/**
+ * Every setting the trader has, for the page's Advanced section (the page itself sets the style, the amounts, the
+ * chains and the venues). `t` is the status; each change is saved when its box is left or its switch is tapped.
+ */
+export function TokenAdvanced({ s, t, save }: { s: AnyObj; t: AnyObj; save: (patch: AnyObj) => void }) {
   const ethUsd = useEthUsd();
   const o = t.options;
   const chains: AnyObj[] = (s.chains ?? []).filter((c: AnyObj) => c.tradable);
   const liqEth = (usd: number) => inEth(usd, ethUsd);
+  const sn = (patch: AnyObj) => save({ sniper: patch });
   return (
     <div className="tk-adv">
       <div className="tt-grid">
         <EthLimit label="Per trade" usd={o.perTradeUsd} ethUsd={ethUsd} onSave={(v) => save({ perTradeUsd: v })} />
         <EthLimit label="Total open" usd={o.totalUsd} ethUsd={ethUsd} onSave={(v) => save({ totalUsd: v })} />
-        <label className="smart-field"><span className="k">Min pool age (hours)</span><input value={Math.round(o.minPoolAgeSec / 3600)} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, minPoolAgeSec: numIn(e.target.value) * 3600 } })} onBlur={() => save({ minPoolAgeSec: o.minPoolAgeSec })} /></label>
+        <NumField label="Min pool age (hours)" value={o.minPoolAgeSec} scale={3600} onSave={(v) => save({ minPoolAgeSec: v })} />
         <label className="check" style={{ alignSelf: 'end' }}><input type="checkbox" checked={!!o.enforceWashAndAge} onChange={(e) => save({ enforceWashAndAge: e.target.checked })} /><span>Wash and pool age</span></label>
-        <label className="smart-field"><span className="k">Max pool share %</span><input value={Math.round(o.maxPoolShare * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxPoolShare: numIn(e.target.value) / 100 } })} onBlur={() => save({ maxPoolShare: o.maxPoolShare })} /></label>
-        <label className="smart-field"><span className="k">Impact cap %</span><input value={Math.round(o.maxImpact * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxImpact: numIn(e.target.value) / 100 } })} onBlur={() => save({ maxImpact: o.maxImpact })} /></label>
-        <label className="smart-field"><span className="k">Trade-size cap %</span><input value={Math.round((o.sizeImpactCap ?? 0.01) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, sizeImpactCap: numIn(e.target.value) / 100 } })} onBlur={() => save({ sizeImpactCap: o.sizeImpactCap })} /></label>
-        <label className="smart-field"><span className="k">{`Min liquidity (≈ ${liqEth(o.minLiquidityUsd ?? 0)})`}</span><input value={o.minLiquidityUsd ?? 0} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, minLiquidityUsd: numIn(e.target.value) } })} onBlur={() => save({ minLiquidityUsd: o.minLiquidityUsd ?? 0 })} /></label>
+        <NumField label="Max pool share %" value={o.maxPoolShare} scale={0.01} onSave={(v) => save({ maxPoolShare: v })} />
+        <NumField label="Impact cap %" value={o.maxImpact} scale={0.01} onSave={(v) => save({ maxImpact: v })} />
+        <NumField label="Trade-size cap %" value={o.sizeImpactCap ?? 0.01} scale={0.01} onSave={(v) => save({ sizeImpactCap: v })} />
+        <NumField label={`Min liquidity (≈ ${liqEth(o.minLiquidityUsd ?? 0)})`} value={o.minLiquidityUsd ?? 0} onSave={(v) => save({ minLiquidityUsd: v })} />
         <label className="smart-field"><span className="k">Risk</span>
           <select value={o.risk} onChange={(e) => save({ risk: e.target.value })}>
             <option value="safe">Safe</option>
@@ -122,7 +150,7 @@ export function TokenAdvanced({ s, t, setT, save }: { s: AnyObj; t: AnyObj; setT
       </div>
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.enforceOwnerPowers} onChange={(e) => save({ enforceOwnerPowers: e.target.checked })} /><span>Owner powers</span></label>
-        <span className="muted small">Off leaves the gate as it is. On, safe and medium skip when a non-renounced owner can mint, blacklist, pause, or change tax or limits, or a live admin can upgrade the contract. A failed read skips those modes too.</span>
+        <span className="muted small">Off leaves the gate as it is. On, safe and medium skip when a non-renounced owner can blacklist, pause, or change tax or limits, or a live admin can upgrade the contract. A mint function is shown but never skips a coin. A failed read skips those modes too.</span>
       </div>
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={!!o.enforceLiquidityFloor} onChange={(e) => save({ enforceLiquidityFloor: e.target.checked })} /><span>{`Enforce liquidity floor (≈ ${liqEth(ENFORCED_LIQUIDITY_FLOOR_USD)})`}</span></label>
@@ -130,31 +158,24 @@ export function TokenAdvanced({ s, t, setT, save }: { s: AnyObj; t: AnyObj; setT
       </div>
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={o.enforceHolderCheck === true} onChange={(e) => save({ enforceHolderCheck: e.target.checked })} /><span>Holder concentration</span></label>
-        <label className="smart-field"><span className="k">Max holder %</span><input value={Math.round((o.maxHolderShare ?? 0.1) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxHolderShare: numIn(e.target.value) / 100 } })} onBlur={() => save({ maxHolderShare: o.maxHolderShare })} /></label>
-        <label className="smart-field"><span className="k">Max top 10 %</span><input value={Math.round((o.maxTop10Share ?? 0.4) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, maxTop10Share: numIn(e.target.value) / 100 } })} onBlur={() => save({ maxTop10Share: o.maxTop10Share })} /></label>
-        <label className="smart-field"><span className="k">Min coverage %</span><input value={Math.round((o.minHolderCoverage ?? 0.9) * 1000) / 10} inputMode="decimal" onChange={(e) => setT({ ...t, options: { ...o, minHolderCoverage: numIn(e.target.value) / 100 } })} onBlur={() => save({ minHolderCoverage: o.minHolderCoverage })} /></label>
-        <span className="muted small">Off unless checked, and off changes nothing. When on, safe and medium skip a largest holder over the max holder % (default 10) or a top 10 over the max top 10 % (default 40), after ignoring pools, burn addresses and known lockers. No holder source, or a failed read, skips those modes and says which.</span>
+        <NumField label="Max holder %" value={o.maxHolderShare ?? 0.1} scale={0.01} onSave={(v) => save({ maxHolderShare: v })} />
+        <NumField label="Max top 10 %" value={o.maxTop10Share ?? 0.4} scale={0.01} onSave={(v) => save({ maxTop10Share: v })} />
+        <NumField label="Min coverage %" value={o.minHolderCoverage ?? 0.9} scale={0.01} onSave={(v) => save({ minHolderCoverage: v })} />
+        <span className="muted small">Off unless checked, and off changes nothing. When on, safe and medium skip a largest holder over the max holder % (default 10) or a top 10 over the max top 10 % (default 40), after ignoring pools, burn addresses and known lockers. No holder source, or a failed read, skips those modes and says which. On Robinhood Chain the holder read came back unverified or thin for each of 3 launcher coins tested (2026-10-30), so with this on those coins are skipped.</span>
       </div>
       <div className="tt-row" style={{ marginTop: 10 }}>
         <label className="check"><input type="checkbox" checked={o.enforceSizeImpact === true} onChange={(e) => save({ enforceSizeImpact: e.target.checked })} /><span>Cap impact at the trade size</span></label>
-        <span className="muted small">Off unless checked, and off changes nothing. The impact cap above still sizes the trade. When this is on, that sized trade is quoted again (V3 through the quoter) and skipped if the move is over the trade-size cap. The default cap is 1%. A quote that fails skips the buy.</span>
+        <span className="muted small">Off unless checked, and off changes nothing. The impact cap above still sizes the trade. When this is on, that sized trade is quoted again through the same pool the safety check read (V2, V3 and V4) and skipped if the move is over the trade-size cap. The default cap is 1%. A quote that fails skips the buy.</span>
       </div>
       <div className="tt-row" style={{ marginTop: 10 }}>
-        <label className="check"><input type="checkbox" checked={!!o.sniper.on} onChange={(e) => save({ sniper: { ...o.sniper, on: e.target.checked } })} /><span>Sniper</span></label>
-        <EthLimit label="Min liquidity" usd={o.sniper.minLiquidityUsd} ethUsd={ethUsd} onSave={(v) => save({ sniper: { ...o.sniper, minLiquidityUsd: v } })} />
-        <label className="smart-field"><span className="k">Delay blocks</span><input value={o.sniper.delayBlocks} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, delayBlocks: numIn(e.target.value) } } })} onBlur={() => save({ sniper: o.sniper })} /></label>
-        <label className="smart-field"><span className="k">Delay seconds</span><input value={o.sniper.delaySec} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, delaySec: numIn(e.target.value) } } })} onBlur={() => save({ sniper: o.sniper })} /></label>
-        <label className="smart-field"><span className="k">Max / hour</span><input value={o.sniper.maxPerHour} inputMode="numeric" onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, maxPerHour: numIn(e.target.value) } } })} onBlur={() => save({ sniper: o.sniper })} /></label>
+        <label className="check"><input type="checkbox" checked={!!o.sniper.on} onChange={(e) => sn({ on: e.target.checked })} /><span>Sniper</span></label>
+        <EthLimit label="Min liquidity" usd={o.sniper.minLiquidityUsd} ethUsd={ethUsd} onSave={(v) => sn({ minLiquidityUsd: v })} />
+        <NumField label="Delay blocks" value={o.sniper.delayBlocks} onSave={(v) => sn({ delayBlocks: Math.round(v) })} />
+        <NumField label="Delay seconds" value={o.sniper.delaySec} onSave={(v) => sn({ delaySec: v })} />
+        <NumField label="Max / hour" value={o.sniper.maxPerHour} onSave={(v) => sn({ maxPerHour: Math.round(v) })} />
+        <span className="muted small">The sniper watches the chains picked under Where.</span>
       </div>
-      <div className="tt-row">
-        {chains.map((c) => (
-          <label key={c.id} className="check"><input type="checkbox" checked={o.sniper.chains?.[c.id] !== false} onChange={(e) => save({ sniper: { ...o.sniper, chains: { ...o.sniper.chains, [c.id]: e.target.checked } } })} /><span><ChainBadge c={chainOf(s, c.id)} testnet={false} /> sniper</span></label>
-        ))}
-      </div>
-      <label className="smart-field"><span className="k">Ethereum send RPC (optional, broadcast only)</span>
-        <input placeholder="https://rpc.flashbots.net" value={o.sniper.mevRpc ?? ''} onChange={(e) => setT({ ...t, options: { ...o, sniper: { ...o.sniper, mevRpc: e.target.value || null } } })} onBlur={() => save({ sniper: o.sniper })} />
-      </label>
-
+      <RpcField value={o.sniper.mevRpc ?? null} onSave={(v) => sn({ mevRpc: v })} />
     </div>
   );
 }
@@ -170,8 +191,6 @@ export function blockedNote(p: AnyObj): string | null {
   return `${p.exitsBlocked}${p.blockedSince ? ` since ${ago(p.blockedSince)}` : ''}`;
 }
 
-function numIn(v: string) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
-
 /**
  * "On · paper" / "Off for new buys · exits running (N)" / "Off completely, no exits".
  * Each number once per card: when the new-buys-stopped banner is up it carries "Exits still managed: N", so the tag
@@ -183,13 +202,13 @@ export function modeLabel(t: AnyObj, o: AnyObj): string {
   return t.entriesHalt ? 'Off for new buys · exits running' : `Off for new buys · exits running (${t.exitsManaged ?? 0})`;
 }
 
-export async function offCompletely(t: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<void>) {
+export async function offCompletely(t: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<unknown>) {
   const n = t.positions?.length ?? 0;
   if (!confirm(`Turn the token trader off completely? Nothing will run: no buys, no snipes and no exits.${n ? ` The stop-losses and take-profits of its ${n} open position(s) will NOT be watched until you turn it on or back to "Off for new buys".` : ''}`)) return;
   await run(() => http('/api/token-trader/off', 'POST', { mode: 'full' }));
 }
 
-export async function startTrader(o: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<void>, ethUsd: number | null) {
+export async function startTrader(o: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<unknown>, ethUsd: number | null) {
   if (o.mode === 'live' && !confirm(`Turn the token trader on with real money? Up to ${inEth(o.perTradeUsd, ethUsd)} a trade and ${inEth(o.totalUsd, ethUsd)} open. The sniper is ${o.sniper.on ? 'on' : 'off'}.`)) return;
   await run(() => http('/api/token-trader/on', 'POST'));
 }

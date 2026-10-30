@@ -28,7 +28,7 @@ function useAuto() {
   const [a, setA] = useState<AnyObj | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const load = useCallback(() => http('/api/autopilot').then((x) => { setA(x); setErr(null); }).catch((e) => setErr(errMsg(e))), []);
-  useEffect(() => { void load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { void load(); const t = setInterval(load, 2000); return () => clearInterval(t); }, [load]);
   return { a, setA, err, load };
 }
 

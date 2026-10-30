@@ -19,7 +19,7 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
     let dead = false;
     const load = () => http<AnyObj>('/api/token-trader').then((d) => { if (!dead) setTrader(d); }).catch(() => undefined);
     void load();
-    const t = setInterval(load, 15_000);
+    const t = setInterval(load, 5000);
     return () => { dead = true; clearInterval(t); };
   }, []);
   const [pend, setPend] = useState<Set<string>>(new Set());

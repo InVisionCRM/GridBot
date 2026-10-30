@@ -60,11 +60,14 @@ describe('owner power scan', () => {
     expect(powersInBytecode(code('mint(uint256)'))?.some((p) => p.sig === 'mint(address,uint256)')).toBe(false);
   });
 
-  it('a live owner holding mint(uint256) blocks; a renounced owner with the same mint does not', () => {
-    const live = assessOwnerPowers(facts({ tokenCode: code('mint(uint256)') }));
+  it('a live owner holding setTax(uint256) blocks; a renounced owner with the same power does not; a mint never blocks (2026-10-30)', () => {
+    const live = assessOwnerPowers(facts({ tokenCode: code('setTax(uint256)') }));
     expect(live.unverified).toBe(false);
-    expect(live.why).toMatch(/holds mint\(uint256\)/);
+    expect(live.why).toMatch(/holds setTax\(uint256\)/);
     expect(live.renounced).toBe(false);
+    const mint = assessOwnerPowers(facts({ tokenCode: code('mint(uint256)') }));
+    expect(mint.why).toBeNull();
+    expect(mint.note).toMatch(/mint\(uint256\)/);
 
     for (const owner of [getAddress(ZERO_ADDRESS), getAddress(DEAD_ADDRESS)]) {
       const gone = assessOwnerPowers(facts({ tokenCode: code('mint(address,uint256)'), owner: { state: 'address', address: owner } }));
@@ -146,10 +149,10 @@ describe('owner power scan', () => {
     const live = assessOwnerPowers(facts({
       tokenCode: code(),
       impl: { state: 'address', address: IMPL },
-      implCode: code('upgradeTo(address)', 'mint(uint256)'),
+      implCode: code('upgradeTo(address)', 'setTax(uint256)'),
       implOwner: { state: 'address', address: LIVE },
     }));
-    expect(live.why).toMatch(/holds mint\(uint256\)/);
+    expect(live.why).toMatch(/holds setTax\(uint256\)/);
     expect(live.why).toMatch(/upgradeable by live admin/);
 
     const renouncedImpl = assessOwnerPowers(facts({
@@ -173,10 +176,10 @@ describe('owner power scan', () => {
   it('missing bytecode, a failed slot, or an unread owner who might hold a power is unverified', () => {
     expect(assessOwnerPowers(facts({ tokenCode: null })).why).toMatch(/bytecode unread/);
     expect(assessOwnerPowers(facts({ impl: { state: 'fail' } })).why).toMatch(/proxy slots unread/);
-    const unread = assessOwnerPowers(facts({ tokenCode: code('mint(uint256)'), owner: { state: 'fail' } }));
+    const unread = assessOwnerPowers(facts({ tokenCode: code('setTax(uint256)'), owner: { state: 'fail' } }));
     expect(unread.unverified).toBe(true);
     expect(unread.why).toMatch(/owner unread/);
-    expect(unread.why).toMatch(/mint\(uint256\)/);
+    expect(unread.why).toMatch(/setTax\(uint256\)/);
     const noPower = assessOwnerPowers(facts({ owner: { state: 'fail' } }));
     expect(noPower.unverified).toBe(false);
     expect(noPower.why).toBeNull();
@@ -237,14 +240,14 @@ describe('owner power reads', () => {
     [EIP1967_BEACON]: ZERO_WORD,
   };
 
-  it('reads a live mint, then serves the cached report without another call', async () => {
+  it('reads a live tax setter, then serves the cached report without another call', async () => {
     const { reader, seen } = scripted({
-      code: { [TOKEN.toLowerCase()]: code('mint(uint256)') },
+      code: { [TOKEN.toLowerCase()]: code('setTax(uint256)') },
       storage: emptySlots,
       calls: { [`${TOKEN.toLowerCase()} ${ownerData}`]: word(LIVE) },
     });
     const r = await readOwnerPowers(reader, 4663, TOKEN, { paceMs: 0 });
-    expect(r.why).toMatch(/holds mint\(uint256\)/);
+    expect(r.why).toMatch(/holds setTax\(uint256\)/);
     const n = seen.length;
     expect(n).toBeGreaterThan(0);
     const again = await readOwnerPowers(reader, 4663, TOKEN, { paceMs: 0 });

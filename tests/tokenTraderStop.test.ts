@@ -76,7 +76,7 @@ describe('Stop all and the token trader', () => {
     const fresh = pool({ tokenSymbol: 'SNIPE', source: 'snipe', liquidityUsd: 20_000 });
     let hits: SnipeHit[] = [hitOf(fresh)];
     const s = make({ hits: () => { const h = hits; hits = []; return h; }, snipes: [fresh] });
-    s.t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null } });
+    s.t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, mevRpc: null } });
     s.t.turnOn();
     s.t.stopEntries(null, systemHalt('stop-all', 'Stop all button', NOW));
     await s.t.tick();

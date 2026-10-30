@@ -23,7 +23,7 @@ export function readSettings() {
     rpcUrl: process.env.RPC_URL?.trim() || net.rpcUrl,
     port: Number(process.env.PORT || 3847),
     stateFile: resolve(process.env.STATE_FILE || 'data/state.json'),
-    pollMs: Math.max(2000, Number(process.env.POLL_MS || 10_000)),
+    pollMs: Math.max(2000, Number(process.env.POLL_MS || 5_000)),
     approval: (process.env.APPROVAL_MODE === 'max' ? 'max' : 'exact') as 'exact' | 'max',
     maxRetries: Math.max(0, Number(process.env.MAX_RETRIES ?? 1)),
     retryDelayMs: Math.max(0, Number(process.env.RETRY_DELAY_MS ?? 5000)),

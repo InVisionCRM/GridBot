@@ -132,7 +132,7 @@ export function classicAuto() {
 }
 
 export function classicTrader() {
-  return { on: false, openUsd: 0, positions: [], trades: [], feed: [], options: { mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 3600, maxPoolShare: 0.02, maxImpact: 0.03, risk: 'safe', sniper: { on: false, minLiquidityUsd: 10000, delayBlocks: 1, delaySec: 3, maxPerHour: 4, chains: {} } } };
+  return { on: false, openUsd: 0, positions: [], trades: [], feed: [], options: { mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 3600, maxPoolShare: 0.02, maxImpact: 0.03, risk: 'safe', sniper: { on: false, minLiquidityUsd: 10000, delayBlocks: 1, delaySec: 3, maxPerHour: 4 } } };
 }
 
 export function classicOpps() {

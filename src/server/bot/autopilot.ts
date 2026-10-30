@@ -82,7 +82,26 @@ export interface AutopilotState {
   scanAt: number | null;
   log: AutoEntry[];
 }
-export interface ScanView { at: number | null; chains: { chainId: number; items: Opportunity[]; error: string | null; partial?: boolean }[] }
+export interface ScanView { at: number | null; running?: boolean; chains: { chainId: number; at?: number; items: Opportunity[]; error: string | null; partial?: boolean }[] }
+
+/**
+ * The newest result in a scan. A chain finished while the scan still runs counts, so a review comes as each chain
+ * finishes instead of after all of them (a full scan of 8 chains takes up to an hour of GeckoTerminal's budget).
+ */
+export const scanMark = (s: ScanView): number | null =>
+  s.chains.reduce<number | null>((m, c) => (c.partial || c.at == null ? m : Math.max(m ?? 0, c.at)), s.at);
+
+/**
+ * Whether a review logs what it decided for a chain: only when the chain has a newer result than the last review
+ * (`prev`, that review's scanMark). A scan finishes chain by chain and each one brings a review, so without this one
+ * scan would log every account up to 8 times.
+ */
+export function speaks(scan: ScanView, chainId: number, prev: number | null): boolean {
+  const mark = scanMark(scan);
+  if (mark == null || mark === prev) return false;
+  const at = scan.chains.find((x) => x.chainId === chainId)?.at ?? scan.at;
+  return at == null || prev == null || at > prev;
+}
 
 export const DEFAULT_OPTIONS: AutoOptions = { grid: true, lp: true, newTokens: true, risk: 'any', slots: 3, stopLossPct: 0.2 };
 /** A review at least this often, even without a new scan; a pool that failed to open is skipped this long */
@@ -485,7 +504,8 @@ export class Autopilot {
         try { scan = await this.d.scan(); } catch (e) { this.warn(`couldn't read the opportunity scan: ${msg(e)}`); }
         // Due: a day since the last review, a new scan, money back from a bot, or a swap for a new bot landed (those
         // set reviewedAt to null, so a review missed now, e.g. the scan unread, still comes on the next check)
-        const due = this.state.reviewedAt == null || this.now() - this.state.reviewedAt >= REVIEW_MS || (scan?.at != null && scan.at !== this.state.scanAt);
+        const mark = scan ? scanMark(scan) : null;
+        const due = this.state.reviewedAt == null || this.now() - this.state.reviewedAt >= REVIEW_MS || (mark != null && mark !== this.state.scanAt);
         if (scan !== undefined && due) await this.reviewNow(false, scan);
       }
       this.settle(); // closes decided this tick start now
@@ -624,15 +644,15 @@ export class Autopilot {
     if (!this.state.on) return;
     const scan = scanIn === undefined ? await this.d.scan() : scanIn;
     if (!scan) { this.say('no opportunity scan (it is off: CANDLES_GECKO=off), so nothing to pick from', 'warn'); this.state.reviewedAt = this.now(); return; }
-    if (scan.at == null) { if (force) this.say('waiting for the first opportunity scan to finish (up to an hour)'); return; }
-    const loud = force || scan.at !== this.state.scanAt;
+    const mark = scanMark(scan), prev = this.state.scanAt;
+    if (mark == null) { if (force) this.say('waiting for the first opportunity scan to finish its first chain'); return; }
     for (const a of this.state.accounts) {
       if (!this.state.on) break; // turned off meanwhile
       if (a.halted || a.killed || !this.chainOn(a.budget.chainId)) continue;
-      try { await this.reviewAccount(a, scan, loud); } catch (e) { this.warn(`${this.chainName(a.budget.chainId)}: ${msg(e)}`, a.budget.chainId); }
+      try { await this.reviewAccount(a, scan, force || speaks(scan, a.budget.chainId, prev)); } catch (e) { this.warn(`${this.chainName(a.budget.chainId)}: ${msg(e)}`, a.budget.chainId); }
     }
     this.state.reviewedAt = this.now();
-    this.state.scanAt = scan.at;
+    this.state.scanAt = mark;
     this.save();
   }
 
@@ -640,7 +660,7 @@ export class Autopilot {
     const c = a.budget.chainId, name = this.hub.chain(c).name, o = this.state.options;
     const chain = scan.chains.find((x) => x.chainId === c);
     if (!chain || chain.error || chain.partial) {
-      if (loud) this.say(`${name}: ${!chain ? 'not in the scan' : chain.error ? `today's scan of it failed (${chain.error})` : 'still being scanned'}; its bots stay as they are`, 'warn', c);
+      if (loud) this.say(`${name}: ${!chain ? (scan.running ? 'its first opportunity scan is running' : 'not in the scan') : chain.error ? `today's scan of it failed (${chain.error})` : 'still being scanned'}; its bots stay as they are`, !chain && scan.running ? 'info' : 'warn', c);
       return;
     }
     if (a.pending.length) { if (loud) this.say(`${name}: waiting for a swap to confirm before deciding`, 'info', c); return; }
