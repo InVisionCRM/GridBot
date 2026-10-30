@@ -234,6 +234,13 @@ const DEFAULTS: { chain: string; base: 'native' | BuiltInToken; quote: 'native' 
     pool: { dex: 'uniswap-v2', kind: 'v2', address: '0xA43fe16908251ee70EF74718545e4FE6C5cCEc9f', feeBps: 30 }, probe: 6_000_000, safety: verified('low', CLEAN, null, 28_930_325) },
   { chain: 'ethereum', base: { symbol: 'HEX', name: 'HEX', address: '0x2b591e99afE9f32eAA6214f7B7629768c40Eeb39', decimals: 8 }, quote: 'native',
     pool: { dex: 'uniswap-v2', kind: 'v2', address: '0x55D5c232D921B9eAA6b37b5845E439aCD04b4DBa', feeBps: 30 }, probe: 40_000, safety: verified('low', CLEAN, null, 350_951) },
+  // Native/stable on the five chains re-added 2026-10-30: pool factory(), tokens and fee() read on-chain; each is its
+  // pair's deepest pool, or (Base) the 0.05% pool with $1.7M USDC beside the 0.3% pool's $45M, so a grid pays less fee.
+  { chain: 'base', base: 'native', quote: 'USDC', pool: { dex: 'uniswap-v3', kind: 'v3', address: '0xd0b53D9277642d899DF5C87A3966A349A798F224', feeBps: 5, feeTier: 500 }, probe: 0.01 },
+  { chain: 'arbitrum', base: 'native', quote: 'USDC', pool: { dex: 'uniswap-v3', kind: 'v3', address: '0xC6962004f452bE9203591991D15f6b388e09E8D0', feeBps: 5, feeTier: 500 }, probe: 0.01 },
+  { chain: 'bsc', base: 'native', quote: 'USDT', pool: { dex: 'pancakeswap-v3', kind: 'v3', address: '0x172fcD41E0913e95784454622d1c3724f546f849', feeBps: 1, feeTier: 100 }, probe: 0.05 },
+  { chain: 'polygon', base: 'native', quote: 'USDC', pool: { dex: 'uniswap-v3', kind: 'v3', address: '0xB6e57ed85c4c9dbfEF2a68711e9d6f36c56e0FcB', feeBps: 5, feeTier: 500 }, probe: 100 },
+  { chain: 'optimism', base: 'native', quote: 'USDC', pool: { dex: 'uniswap-v3', kind: 'v3', address: '0xc1738D90E2E26C35784A0d3E3d8A9f795074bcA4', feeBps: 30, feeTier: 3000 }, probe: 0.01 },
 ];
 
 export function defaultMarkets(chains: ChainConfig[] = CHAINS): MarketDef[] {

@@ -7,7 +7,7 @@ import { defaultMarkets, legacyMarkets, type MarketDef } from '../src/live/marke
 import { getAmountOut, NATIVE } from '../src/live/swapMath';
 import { ADDRESS_THIS } from '../src/live/v3Math';
 import { analyzeEconomics } from '../src/live/economics';
-import { V3_ROUTER } from '../src/server/dex/abis';
+import { ARB_NODE_INTERFACE, ARB_NODE_INTERFACE_ADDR, OP_GAS_ORACLE, OP_GAS_ORACLE_ADDR, V3_ROUTER } from '../src/server/dex/abis';
 import { V2Adapter } from '../src/server/dex/v2';
 import { V3Adapter } from '../src/server/dex/v3';
 import { classify, type ProbeResult } from '../src/server/dex/safety';
@@ -64,15 +64,19 @@ describe('Chain registry', () => {
     }
     expect(CHAINS[0].id).toBe(LEGACY_CHAIN_ID);
   });
-  it('covers exactly PulseChain, Robinhood Chain and Ethereum', () => {
-    expect(CHAINS.map((c) => c.key)).toEqual(['pulsechain', 'robinhood', 'ethereum']);
-    expect([...new Set(defaultMarkets().map((m) => m.chainId))].sort()).toEqual([1, 4663]);
+  it('covers PulseChain, Robinhood Chain, Ethereum, Base, Arbitrum One, BNB Chain, Polygon PoS and OP Mainnet', () => {
+    expect(CHAINS.map((c) => c.key)).toEqual(['pulsechain', 'robinhood', 'ethereum', 'base', 'arbitrum', 'bsc', 'polygon', 'optimism']);
+    expect([...new Set(defaultMarkets().map((m) => m.chainId))].sort((a, b) => a - b)).toEqual([1, 10, 56, 137, 4663, 8453, 42161]);
+    expect(Object.fromEntries(CHAINS.map((c) => [c.key, c.stack]))).toEqual({
+      pulsechain: 'l1', robinhood: 'arbitrum', ethereum: 'l1', base: 'op', arbitrum: 'arbitrum', bsc: 'l1', polygon: 'l1', optimism: 'op',
+    });
   });
   it('built-in Ethereum and Robinhood pairs: verified token pairs carry their safety report; /ETH pairs spend native ETH', () => {
     const d = defaultMarkets();
     expect(d.map((m) => m.key)).toEqual([
       'robinhood:ETH/USDG', 'robinhood:NVDA/USDG', 'robinhood:SPY/USDG', 'robinhood:GOOGL/USDG', 'robinhood:SPCX/USDG', 'robinhood:CRCL/USDG', 'robinhood:USO/USDG',
       'ethereum:ETH/USDC', 'ethereum:WBTC/USDT', 'ethereum:WBTC/ETH', 'ethereum:LINK/ETH', 'ethereum:PEPE/ETH', 'ethereum:HEX/ETH',
+      'base:ETH/USDC', 'arbitrum:ETH/USDC', 'bsc:BNB/USDT', 'polygon:POL/USDC', 'optimism:ETH/USDC',
     ]);
     for (const m of d) {
       expect(m.candlePool, m.key).toBe(m.pool.address);
@@ -83,6 +87,22 @@ describe('Chain registry', () => {
     expect(d.find((m) => m.key === 'ethereum:WBTC/USDT')!.base.decimals).toBe(8);
     expect(d.find((m) => m.key === 'ethereum:HEX/ETH')!.base.decimals).toBe(8);
     expect(d.filter((m) => m.chainId === 4663 && !m.base.native).every((m) => m.safety!.risk === 'medium' && m.safety!.proxy)).toBe(true);
+  });
+  it('L1 data fee: OP stack asks the GasPriceOracle and pays it on top; Arbitrum gas is already in gasUsed; L1 chains pay none', async () => {
+    const asked: string[] = [];
+    const reader = {
+      call: async (tx: { to: string; data: string }) => {
+        asked.push(tx.to.toLowerCase());
+        if (tx.to === OP_GAS_ORACLE_ADDR) return OP_GAS_ORACLE.encodeFunctionResult('getL1Fee', [12_345n]);
+        return ARB_NODE_INTERFACE.encodeFunctionResult('gasEstimateL1Component', [100n, 0n, 0n]);
+      },
+    } as unknown as MultiDexMock;
+    const rt = (key: string) => new ChainRuntime(chainByKey(key)!, reader, null, { adapters: [] });
+    expect(await rt('base').l1Fee('0x' + '11'.repeat(20), '0x1234', 7n)).toEqual({ wei: 12_345n, separate: true });
+    expect(await rt('optimism').l1Fee('0x' + '11'.repeat(20), '0x1234', 7n)).toEqual({ wei: 12_345n, separate: true });
+    expect(await rt('arbitrum').l1Fee('0x' + '11'.repeat(20), '0x1234', 7n)).toEqual({ wei: 700n, separate: false });
+    expect(await rt('bsc').l1Fee('0x' + '11'.repeat(20), '0x1234', 7n)).toEqual({ wei: 0n, separate: false });
+    expect(asked).toEqual([OP_GAS_ORACLE_ADDR.toLowerCase(), OP_GAS_ORACLE_ADDR.toLowerCase(), ARB_NODE_INTERFACE_ADDR.toLowerCase()]);
   });
   it('a chain with trading disabled is not tradable', () => {
     const off = { ...ETH, trading: { enabled: false, reason: 'test: no DEX' }, dexes: [] };
@@ -301,12 +321,17 @@ describe('Multi-chain operation', () => {
 });
 
 describe('GeckoTerminal DEX ids (daily scan reads only these pools)', () => {
-  it('every DEX this app trades on PulseChain, Robinhood and Ethereum names its GeckoTerminal id', () => {
+  it('every DEX this app trades names its GeckoTerminal id', () => {
     const ids = Object.fromEntries(CHAINS.map((c) => [c.key, c.dexes.map((d) => `${d.id}=${d.gecko}`)]));
     expect(ids).toEqual({
       pulsechain: ['pulsex-v2=pulsex-v2', 'pulsex-v1=pulsex', '9mm-v2=9mm-v2', '9mm-v3=9mm-v3'],
       robinhood: ['uniswap-v3=uniswap-v3-robinhood', 'uniswap-v2=uniswap-v2-robinhood', 'pancakeswap-v3=pancakeswap-v3-robinhood', 'uniswap-v4=uniswap-v4-robinhood'],
       ethereum: ['uniswap-v3=uniswap_v3', 'uniswap-v2=uniswap_v2'],
+      base: ['uniswap-v3=uniswap-v3-base', 'uniswap-v2=uniswap-v2-base'],
+      arbitrum: ['uniswap-v3=uniswap_v3_arbitrum', 'uniswap-v2=uniswap-v2-arbitrum'],
+      bsc: ['pancakeswap-v3=pancakeswap-v3-bsc', 'pancakeswap-v2=pancakeswap_v2'],
+      polygon: ['uniswap-v3=uniswap_v3_polygon_pos', 'quickswap-v2=quickswap'],
+      optimism: ['uniswap-v3=uniswap_v3_optimism'],
     });
   });
 });

@@ -26,7 +26,7 @@ const DUMMY = '0x000000000000000000000000000000000000dEaD';
 const V3F = new Interface(['function feeAmountTickSpacing(uint24) view returns (int24)']);
 /** Sample spend-coin amounts for preset checks (≈$100 per pair in Oct 2026; presets carry no amount of their own). */
 const SAMPLE_AMOUNTS: Record<string, number> = { DAI: 100, USDC: 100, HEX: 45_000, eHEX: 120_000, PLSX: 14_500_000, 'HEX~': 10_000_000, 'PLSX~': 10_000_000, 'eHEX~': 10_000_000 };
-const NATIVE_USD: Record<string, [number, number]> = { PLS: [1e-6, 1e-3], ETH: [500, 20_000] };
+const NATIVE_USD: Record<string, [number, number]> = { PLS: [1e-6, 1e-3], ETH: [500, 20_000], BNB: [100, 5_000], POL: [0.02, 10] };
 
 
 for (const net of Object.values(NETWORKS)) {

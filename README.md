@@ -1,7 +1,7 @@
 # GridBot
 
-Server-side grid + trend bots for EVM DEXes. Auto-signs with your key. It runs on **PulseChain, Ethereum and Robinhood
-Chain**, on Uniswap-V2-style and Uniswap-V3-style DEXes, with **custom tokens on every chain**. On PulseChain a pair can trade on **PulseX V1, PulseX V2,
+Server-side grid + trend bots for EVM DEXes. Auto-signs with your key. It runs on **PulseChain, Ethereum, Robinhood
+Chain, Base, Arbitrum One, BNB Chain, Polygon PoS and OP Mainnet**, on Uniswap-V2-style and Uniswap-V3-style DEXes, with **custom tokens on every chain**. On PulseChain a pair can trade on **PulseX V1, PulseX V2,
 9mm V2 or 9mm V3**, using the best pool or one you pick. Chains run in parallel, each with its own nonce queue. Within a chain, one tx is in flight at a time.
 
 > Tip: use a dedicated hot wallet that holds only what the bot trades, plus gas on each chain you use.
@@ -47,16 +47,16 @@ Dev: `npm run dev` (UI :5173, API :3847).
 
 ## Multi-chain
 
-- **Chains.** PulseChain, Robinhood Chain and Ethereum are on by default. `CHAINS=ethereum` (for example) limits the set; PulseChain is always on. Bots, alerts and custom tokens saved for a chain that isn't loaded stay stopped and show as unavailable until you remove them.
+- **Chains.** PulseChain, Robinhood Chain, Ethereum, Base, Arbitrum One, BNB Chain, Polygon PoS and OP Mainnet are on by default. `CHAINS=ethereum` (for example) limits the set; PulseChain is always on. Bots, alerts and custom tokens saved for a chain that isn't loaded stay stopped and show as unavailable until you remove them.
 - **RPCs.** `RPC_URL_<SLUG>` (comma-separated list allowed) comes first, then the built-in public fallbacks. On PulseChain the legacy `RPC_URL` also works. The reader rotates endpoints on transport errors and 429s, uses a 12 s timeout, and limits concurrency per chain. A chain with one RPC (Robinhood) has nothing to rotate to: a 429 there is retried after 1 s, 2 s and 4 s, other errors after 0.4 s and 0.8 s. Robinhood's RPC rate-limits `eth_getLogs` and, while those run, refuses ordinary reads too, for seconds at a time (measured 2026-10-22: `eth_call` alone, 0 of 400 refused at up to 30 a second; with log reads at 4 a second, 2 of 75; at 8, 9 of 75). The only log reads in normal running are the liquidity replay's swap history; during it, a live liquidity bot's tick failed with *exceeded maximum retry limit … 429 Too Many Requests*. In six paired 3–4-minute runs under that load, the old 0.4 s + 0.8 s let 47 of ~3,100 bot reads fail, these waits 3. In the app, a full 7-day ETH/USDG history read alongside a ±1% paper liquidity bot then gave the bot no errors. A failed read only skips that tick: a liquidity bot's tries count mined reverts, not refused reads. Simulations with state overrides try every endpoint, because support varies by RPC. A JSON-RPC error that ethers reports as a call revert (*missing revert data*, e.g. `-32603 Internal error` or `-32005 Rate limit exceeded`) also rotates; only a real revert (revert data, a reason, code 3 or a node message saying *reverted*) is final. An endpoint that fails sits out 30 s (doubling per failure in a row, up to 10 min) so rotation skips it. Each chain's RPC health (`rpcHealth` in `/api/status`: state, endpoints, failing since) is in the status; when every endpoint of a chain keeps failing for 3 min (`RPC_ALERT_MINUTES`), the app shows a red banner and writes an Activity entry with a notification, and another when it recovers (no failure for 2 min). An RPC URL can hold an API key (in its path, query or user:password). The app uses the full URL only to send requests: the boot log, the status API and the stream show it as `scheme://host[:port]`, and every log line and API answer cuts the rest of a configured URL, including inside provider errors.
-- **Multicall3 read batching.** Reads that start together go out as one Multicall3 `aggregate3` eth_call (Multicall3 is at `0xcA11…CA11` on all three chains). This covers a poll's prices, a quote's quoter and pool reads, and a wallet's balances. Measured on the public RPCs on 2026-10-27: one price pass over the 19 built-in markets went from 19 requests to 3 (one per chain), and from 248 ms to 123 ms.
+- **Multicall3 read batching.** Reads that start together go out as one Multicall3 `aggregate3` eth_call (Multicall3 is at `0xcA11…CA11` on every chain here; checked on the five added 2026-10-30). This covers a poll's prices, a quote's quoter and pool reads, and a wallet's balances. Measured on the public RPCs on 2026-10-27: one price pass over the 19 built-in markets went from 19 requests to 3 (one per chain), and from 248 ms to 123 ms.
   - Answers are the same as direct reads. Only DEX views, plus `balanceOf`/`decimals` on the chain's built-in coins, are batched. Custom-token reads, calls with `from`, the safety probe and send-path reads go direct.
   - A call that fails inside a batch is re-run on its own, so its error is the same as a direct call's.
   - A chain without the contract reads direct. A batch that fails as a whole runs its reads direct.
   - `MULTICALL=0` turns batching off. Tested in `tests/multicall.test.ts`.
 - **Keys.** One `PRIVATE_KEY` signs on every chain (same EVM address). The optional `PRIVATE_KEY_<SLUG>` (e.g. `PRIVATE_KEY_ETHEREUM`) overrides it for that chain. Optional quote keys `ACROSS_API_KEY`, `RELAY_API_KEY` and `LIFI_API_KEY` are for the capital router. Keys are read only in `src/server/env.ts`, removed from `process.env` immediately, redacted from logs, and never sent to the UI (`tests/noSecrets.test.ts`). A quote key shorter than 6 characters is refused: it is not stored, that provider stays keyless, and the server warns with the variable name only. The router API reports only whether each quote key is set.
 - **Queues.** Each chain has its own `TxGate` + nonce queue, so chains trade in parallel while one chain never has two txs in flight. **Stop all** stops everything; with a chain selected it stops only that chain. It also stops the Smart trader there (it opens, swaps and closes nothing until **Carry on**) and the token trader's new buys and snipes (until **Resume new buys**); the token trader keeps managing the exits of positions it already holds. Stop all also turns the capital router off. A start that is still in progress when Stop all is pressed is refused. `POST /api/bot/stop` takes `{ "id": "<bot id>" }` for one bot, or `{ "all": true }` for every bot.
-- **Gas.** The gas balance is polled per chain, with a warning in the feed when it drops below the chain's threshold (50k PLS; 0.01 ETH on Ethereum; 0.0005 ETH on Robinhood). Gas is converted to the market's base and quote units through the chain's native/USD market. On Robinhood (an Arbitrum Orbit L2) the cost and start gates add the L1 component from `NodeInterface.gasEstimateL1Component`.
+- **Gas.** The gas balance is polled per chain, with a warning in the feed when it drops below the chain's threshold (50k PLS; 0.01 ETH on Ethereum; 0.0005 ETH on Robinhood, Base, Arbitrum and OP Mainnet; 0.005 BNB; 1 POL). Gas is converted to the market's base and quote units through the chain's native/USD market. On Robinhood and Arbitrum the cost and start gates add the L1 component from `NodeInterface.gasEstimateL1Component`; on Base and OP Mainnet (OP-stack) they add `GasPriceOracle.getL1Fee` (`0x4200…000F`), which is charged on top of the L2 gas (about 1% of it on Base and 4–8% on OP Mainnet, measured 2026-10-30).
 - **Markets.** The key `chain:BASE/QUOTE` (e.g. `ethereum:ETH/USDC`) is used by every feature: grids, trend bots, backtests, charts, market panels, alerts, analytics and the journal. The existing PulseChain keys (`DAI`, `HEX`, …) and `data/state.json` load unchanged as chain 369.
 - **UI.** The chain filter in the top bar applies to every screen. Chain badges and explorer links per chain. Tools → Analytics shows aggregated ≈USD with a per-chain breakdown. DEX/version + fee tags appear on each grid, trend bot, pool and fill.
 
@@ -94,7 +94,7 @@ Sources:
 
 ## Opportunities and follow-up
 
-**Opportunities** (its own tab) are found by `src/server/market/scanner.ts` once a day (checked every 30 min; results in `data/picks.json`), or by **Scan now**. For each chain (PulseChain, Ethereum, Robinhood):
+**Opportunities** (its own tab) are found by `src/server/market/scanner.ts` once a day (checked every 30 min; results in `data/picks.json`), or by **Scan now**. For each chain:
 
 1. **Busiest pools of the DEXes this app trades.** GeckoTerminal `/networks/{slug}/dexes/{dex}/pools?sort=h24_volume_usd_desc`, up to 5 pages of 20 for each tradable DEX (ids in `src/live/chains.ts`, field `gecko`; PulseChain: pulsex-v2, pulsex (V1), 9mm-v2, 9mm-v3; Robinhood: uniswap-v3/v2-robinhood, pancakeswap-v3-robinhood; Ethereum: uniswap_v3, uniswap_v2). The chain-wide list was the wrong input: on 2026-10-17, 33 of Robinhood's 40 busiest pools were Uniswap V4 (not tradable here, most reported with $0 liquidity), which crowded out the real Uniswap V3 stock pools (NVDA ~6.7k trades/day, SPCX ~11k). A 429 or 5xx is retried once. The background candle download pauses while a scan runs.
 2. **Filter** (`pickTokens` in `src/market/scan.ts`). Volume alone is misleading: on 2026-10-17 the top Ethereum list had $53M of "volume" on a $45 pool and stablecoin/stablecoin pairs that never move, and Robinhood had $30–60M "volume" pools with ~19 trades. A pool is kept only if:
@@ -369,7 +369,7 @@ Friends get their own copy of the app on your computer and open it on their phon
 
 **Checked**: `tests/friends.test.ts` covers key boxes, invites (once, expiry), lockout, new-password links ending old log-ins, cookie forgery and expiry, a copy's environment (no `HOST_PASSWORD_HASH`), and the gateway (no log-in → /login or 401, the forwarded request is local with no cookie or Origin, changes from another site refused, the live stream passing through, a copy that is down). `tests/hostLogin.test.ts` covers the owner: no cookie → login, wrong-password lockout, a friend cookie cannot reach the host app, an owner cookie reaches the host API with a rewritten localhost Host and Origin, a change from another site refused, a forged or expired cookie refused, the public host allow-list (and a spoofed `X-Forwarded-Host` refused), the live stream passing through, and the host app still rejecting that public host on a direct connection. `tests/friends.test.ts` also covers the relay (candle URLs only, cache, waits while the scan runs) and a copy's candles round-tripping through the relay route. In the sandbox, an end-to-end run on a 390 px phone screen: invite → sign up with a key → app → Account. The copy's environment was checked as above, your app was killed and restarted, and the copy came back with the friend still logged in.
 
-## Chains, DEXes & sources (verified 2026-10-08)
+## Chains, DEXes & sources (verified 2026-10-08; Base, Arbitrum One, BNB Chain, Polygon PoS and OP Mainnet 2026-10-30)
 
 Every address below was checked on-chain (code, `router.factory()`, `quoter.factory()`, token `symbol()`/`decimals()`, a live quote). `npm run check:onchain` re-runs all of it read-only. Nothing is guessed: chains or DEXes without an official deployment are left out or marked unavailable.
 
@@ -445,6 +445,104 @@ Token pairs verified 2026-10-17 (deepest pool for a ≈$1,000 trade, decimals on
 RPC fallbacks: `https://ethereum-rpc.publicnode.com`, `https://eth.drpc.org`, `https://eth-mainnet.public.blastapi.io` · explorer https://etherscan.io
 
 Sources: [Uniswap v3 Ethereum deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments) · [Uniswap v2 deployments](https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses) · [Tether supported protocols](https://tether.to/en/supported-protocols) · [Uniswap V3](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments) · [Uniswap V2](https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments)
+
+### Base — chain 8453 · OP-stack L2 · gas ETH · `RPC_URL_BASE` / `PRIVATE_KEY_BASE`
+
+OP-stack L2, ETH gas. Aerodrome (the largest Base DEX) is not supported: its pools are not Uniswap-compatible.
+
+| Contract | Address | Fee |
+|---|---|---|
+| Wrapped native WETH | `0x4200000000000000000000000000000000000006` | |
+| USDC (6 dec) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | |
+| Uniswap V3 factory | `0x33128a8fC17869897dcE68Ed026d694621f6FDfD` | tiers 100 / 500 / 3000 / 10000 |
+| Uniswap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x2626664c2603336E57B271c5C0b26F421741e481` | |
+| Uniswap V3 QuoterV2 | `0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a` | |
+| Uniswap V3 position manager | `0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1` | |
+| Uniswap V2 factory | `0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6` | 0.3% (LPs keep 83.3%) |
+| Uniswap V2 router | `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24` | |
+| Built-in ETH/USDC pool (uniswap-v3, the chain's USD reference) | `0xd0b53D9277642d899DF5C87A3966A349A798F224` | 0.05% |
+
+RPC fallbacks: `https://base-rpc.publicnode.com`, `https://mainnet.base.org`, `https://base.drpc.org` · explorer https://basescan.org
+
+Sources: [Base docs — network information](https://docs.base.org/base-chain/quickstart/connecting-to-base) · [Uniswap/contracts deployments/8453.md (v2, v3)](https://github.com/Uniswap/contracts/blob/main/deployments/8453.md) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses)
+
+### Arbitrum One — chain 42161 · Arbitrum L2 · gas ETH · `RPC_URL_ARBITRUM` / `PRIVATE_KEY_ARBITRUM`
+
+| Contract | Address | Fee |
+|---|---|---|
+| Wrapped native WETH | `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1` | |
+| USDC (6 dec) | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | |
+| USDT (6 dec) | `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9` | |
+| Uniswap V3 factory | `0x1F98431c8aD98523631AE4a59f267346ea31F984` | tiers 100 / 500 / 3000 / 10000 |
+| Uniswap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45` | |
+| Uniswap V3 QuoterV2 | `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` | |
+| Uniswap V3 position manager | `0xC36442b4a4522E871399CD717aBDD847Ab11FE88` | |
+| Uniswap V2 factory | `0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9` | 0.3% (LPs keep 83.3%) |
+| Uniswap V2 router | `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24` | |
+| Built-in ETH/USDC pool (uniswap-v3, the chain's USD reference) | `0xC6962004f452bE9203591991D15f6b388e09E8D0` | 0.05% |
+
+RPC fallbacks: `https://arb1.arbitrum.io/rpc`, `https://arbitrum-one-rpc.publicnode.com`, `https://arbitrum.drpc.org` · explorer https://arbiscan.io
+
+Sources: [Arbitrum docs — RPC endpoints](https://docs.arbitrum.io/build-decentralized-apps/reference/node-providers) · [Uniswap/contracts deployments/42161.md (v2, v3)](https://github.com/Uniswap/contracts/blob/main/deployments/42161.md) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses)
+
+### BNB Chain — chain 56 · L1 · gas BNB · `RPC_URL_BSC` / `PRIVATE_KEY_BSC`
+
+| Contract | Address | Fee |
+|---|---|---|
+| Wrapped native WBNB | `0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c` | |
+| USDT (18 dec) | `0x55d398326f99059fF775485246999027B3197955` | |
+| USDC (18 dec) | `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d` | |
+| PancakeSwap V3 factory | `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` | tiers 100 / 500 / 2500 / 10000 |
+| PancakeSwap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x13f4EA83D0bd40E75C8222255bc855a974568Dd4` | |
+| PancakeSwap V3 QuoterV2 | `0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997` | |
+| PancakeSwap V3 position manager | `0x46A15B0b27311cedF172AB29E4f4766fbE7F4364` | |
+| PancakeSwap V2 factory | `0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73` | 0.25% (LPs keep 68%) |
+| PancakeSwap V2 router | `0x10ED43C718714eb63d5aA57B78B54704E256024E` | |
+| Built-in BNB/USDT pool (pancakeswap-v3, the chain's USD reference) | `0x172fcD41E0913e95784454622d1c3724f546f849` | 0.01% |
+
+RPC fallbacks: `https://bsc-rpc.publicnode.com`, `https://bsc-dataseed.bnbchain.org`, `https://bsc-dataseed1.defibit.io`, `https://bsc.drpc.org` · explorer https://bscscan.com
+
+Sources: [BNB Chain docs — RPC](https://docs.bnbchain.org/bnb-smart-chain/developers/json_rpc/json-rpc-endpoint/) · [PancakeSwap v3 addresses](https://developer.pancakeswap.finance/contracts/v3/addresses) · [PancakeSwap v2 addresses](https://developer.pancakeswap.finance/contracts/v2/addresses)
+
+### Polygon PoS — chain 137 · L1 · gas POL · `RPC_URL_POLYGON` / `PRIVATE_KEY_POLYGON`
+
+polygon-rpc.com returns 401 without a key; publicnode/drpc are used.
+
+| Contract | Address | Fee |
+|---|---|---|
+| Wrapped native WPOL | `0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270` | |
+| USDC (6 dec) | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | |
+| USDT (6 dec) | `0xc2132D05D31c914a87C6611C10748AEb04B58e8F` | |
+| Uniswap V3 factory | `0x1F98431c8aD98523631AE4a59f267346ea31F984` | tiers 100 / 500 / 3000 / 10000 |
+| Uniswap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45` | |
+| Uniswap V3 QuoterV2 | `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` | |
+| Uniswap V3 position manager | `0xC36442b4a4522E871399CD717aBDD847Ab11FE88` | |
+| QuickSwap V2 factory | `0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32` | 0.3% (LPs keep 83.3%) |
+| QuickSwap V2 router | `0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff` | |
+| Built-in POL/USDC pool (uniswap-v3, the chain's USD reference) | `0xB6e57ed85c4c9dbfEF2a68711e9d6f36c56e0FcB` | 0.05% |
+
+RPC fallbacks: `https://polygon-bor-rpc.publicnode.com`, `https://polygon.drpc.org` · explorer https://polygonscan.com
+
+Sources: [Polygon docs — RPC endpoints](https://docs.polygon.technology/pos/reference/rpc-endpoints/) · [Uniswap/contracts deployments/137.md (v3)](https://github.com/Uniswap/contracts/blob/main/deployments/137.md) · [QuickSwap contracts](https://docs.quickswap.exchange/overview/contracts-and-addresses) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses)
+
+### OP Mainnet — chain 10 · OP-stack L2 · gas ETH · `RPC_URL_OPTIMISM` / `PRIVATE_KEY_OPTIMISM`
+
+OP-stack L2, ETH gas.
+
+| Contract | Address | Fee |
+|---|---|---|
+| Wrapped native WETH | `0x4200000000000000000000000000000000000006` | |
+| USDC (6 dec) | `0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85` | |
+| USDT (6 dec) | `0x94b008aA00579c1307B0EF2c499aD98a8ce58e58` | |
+| Uniswap V3 factory | `0x1F98431c8aD98523631AE4a59f267346ea31F984` | tiers 100 / 500 / 3000 / 10000 |
+| Uniswap V3 router (IV3SwapRouter: SwapRouter02 / SmartRouter) | `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45` | |
+| Uniswap V3 QuoterV2 | `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` | |
+| Uniswap V3 position manager | `0xC36442b4a4522E871399CD717aBDD847Ab11FE88` | |
+| Built-in ETH/USDC pool (uniswap-v3, the chain's USD reference) | `0xc1738D90E2E26C35784A0d3E3d8A9f795074bcA4` | 0.30% |
+
+RPC fallbacks: `https://mainnet.optimism.io`, `https://optimism-rpc.publicnode.com`, `https://optimism.drpc.org` · explorer https://optimistic.etherscan.io
+
+Sources: [Optimism docs — networks](https://docs.optimism.io/superchain/networks) · [Uniswap/contracts deployments/10.md (v3)](https://github.com/Uniswap/contracts/blob/main/deployments/10.md) · [Circle USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses)
 
 ## Strategies
 
@@ -552,7 +650,7 @@ New bot → **Liquidity**, or **Try liquidity** on a pool in Opportunities (open
 - **The pool stays put while a position is in it.** A pair's pool can't be switched, and the pair can't be removed, while a liquidity bot on it holds a position: the position lives in that pool, and the bot reads the pair's pool. Before this, switching (by hand, or a PulseChain preset's best-pool switch) left the bot reading another pool's price and fees for its position, and removing the pair left a position the app could no longer close.
 
 - **Open.** The amount is in the coin the bot spends, optionally plus base coins you already hold (*Also use ETH you hold*): only the difference to the range's mix at today's price is swapped (nothing when it's under 1% of the value), and a live start checks the wallet holds both. Then the position manager is approved for the ERC-20 side(s), and the position is minted. A native side (ETH, PLS) is paid with the tx value (`mint` + `refundETH`); enough of it for gas stays in the wallet (the gas set-aside when the bot spends the native coin, otherwise twice the open's gas).
-- **Earn.** Fees owed come from the pool's own counters (fee growth inside the range), the same numbers `collect()` pays out. This was checked against `collect()` on live positions on all three chains.
+- **Earn.** Fees owed come from the pool's own counters (fee growth inside the range), the same numbers `collect()` pays out. This was checked against `collect()` on live positions on PulseChain, Ethereum and Robinhood, and on 2026-10-30 on three live positions each on Base, Arbitrum, BNB Chain, Polygon and OP Mainnet (every amount equal).
 - **Move the range (both ways).** Exit (`decreaseLiquidity` + `collect` + `burn` in one multicall), swap back to the mix, and open around the price.
   - **Auto-move (on by default):** as soon as the price is outside the range at a fresh reading, the range moves to the price at the same width. Off: it waits for the price to come back.
   - **Optional gates (off unless set, per bot, under Advanced):** a dwell (minutes outside before a move), a cooldown (minutes after a move before another auto-move; the first move is not held), a price buffer past the edge, an ATR width (Wilder ATR, hourly candles; never narrower than the width you set), a near-edge warning, and a move-vs-wait check (estimated gas + swap cost against the recent fee pace). Two named presets fill the width and the waits and do nothing until you choose one: Preset A is ±2%, 12h outside, then 24h cooldown; Preset B is ±3%, 4h outside, then 12h cooldown. With none of the gates set, the decision is the one above. `PUT /api/bot/lps/:id/policy`.

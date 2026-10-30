@@ -26,13 +26,21 @@ export const DEFAULT_GAS_CAPS: Record<TxKind, number> = {
 const GWEI = 1_000_000_000n;
 /**
  * Wei per gas. A send aborts above this. Ethereum 500 gwei is past a severe spike.
- * Robinhood (Orbit) is an L2, so 30 gwei is already far above a normal price.
+ * Robinhood (Orbit), Arbitrum, Base and OP Mainnet are L2s, so 30 gwei is already far above a normal price
+ * (0.001–0.02 gwei on 2026-10-30). BNB Chain ran 0.05 gwei; 10 gwei stops a runaway.
+ * Polygon's base fee ran 111–253 gwei over 1,024 blocks (2026-10-30), above the 200 gwei fallback; 3,000 gwei leaves
+ * room for its spikes and still stops a runaway.
  * PulseChain prices run high in wei because PLS is cheap; 2,000,000 gwei still stops a runaway.
  */
 export const DEFAULT_MAX_GAS_PRICE_WEI: Readonly<Record<number, bigint>> = {
   1: 500n * GWEI,
+  10: 30n * GWEI,
+  56: 10n * GWEI,
+  137: 3_000n * GWEI,
   369: 2_000_000n * GWEI,
   4663: 30n * GWEI,
+  8453: 30n * GWEI,
+  42161: 30n * GWEI,
 };
 export const FALLBACK_MAX_GAS_PRICE_WEI = 200n * GWEI;
 /**
@@ -41,12 +49,19 @@ export const FALLBACK_MAX_GAS_PRICE_WEI = 200n * GWEI;
  * Ethereum 50 gwei is above a normal 1–3 gwei tip and still stops a runaway.
  * PulseChain live tips run about 31,000–58,000 gwei, and the feeHistory p90 is about 935,000 gwei.
  * 1,000,000 gwei pays that. The gas budget still bounds what a send can spend.
- * Robinhood is an L2, so 2 gwei is already a high tip. Any other chain uses a tenth of its gas-price cap.
+ * Robinhood, Arbitrum, Base and OP Mainnet are L2s, so 2 gwei is already a high tip. BNB Chain has no base fee, so the
+ * tip is the whole price (0.05 gwei suggested, p90 0.1); 5 gwei. Polygon's RPCs suggested 25–30 gwei tips and its
+ * feeHistory p90 ran about 130 gwei (2026-10-30); 500 gwei pays that. Any other chain uses a tenth of its gas-price cap.
  */
 export const DEFAULT_MAX_PRIORITY_FEE_WEI: Readonly<Record<number, bigint>> = {
   1: 50n * GWEI,
+  10: 2n * GWEI,
+  56: 5n * GWEI,
+  137: 500n * GWEI,
   369: 1_000_000n * GWEI,
   4663: 2n * GWEI,
+  8453: 2n * GWEI,
+  42161: 2n * GWEI,
 };
 /** 1 native coin per gas unit. A stored cap cannot be set above this. */
 export const MAX_GAS_PRICE_WEI_CAP = 10n ** 18n;

@@ -1,5 +1,5 @@
 /**
- * Opportunity scan per chain (PulseChain, Ethereum, Robinhood), once a day and on demand:
+ * Opportunity scan per chain, once a day and on demand:
  *   GeckoTerminal top pools of each DEX this app trades (SCAN_PAGES pages) → pickTokens (real liquidity, real trades,
  *   a native/stable side; up to SCAN_RULES.maxTokens) + the markets already in the app → the safety check for new
  *   tokens (hub.inspect: honeypot / tax simulation). Every safety level is kept: a token that fails is shown with

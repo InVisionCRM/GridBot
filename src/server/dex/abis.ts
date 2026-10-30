@@ -126,5 +126,8 @@ export const PERMIT2 = new Interface([
   'function approve(address token, address spender, uint160 amount, uint48 expiration)',
   'function allowance(address user, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)',
 ]);
+/** OP-stack predeploy (Base, OP Mainnet): the L1 data fee a tx with this calldata pays on top of its L2 gas. */
+export const OP_GAS_ORACLE = new Interface(['function getL1Fee(bytes) view returns (uint256)']);
+export const OP_GAS_ORACLE_ADDR = '0x420000000000000000000000000000000000000F';
 export const ARB_NODE_INTERFACE = new Interface(['function gasEstimateL1Component(address to, bool contractCreation, bytes data) payable returns (uint64 gasEstimateForL1, uint256 baseFee, uint256 l1BaseFeeEstimate)']);
 export const ARB_NODE_INTERFACE_ADDR = '0x00000000000000000000000000000000000000C8';

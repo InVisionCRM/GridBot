@@ -3,7 +3,7 @@
  *
  *  open     swap part of the coin into the other one (the range's mix at today's price), approve, mint the position
  *  run      fees build up inside the position (counted in its value from the pool's own counters — the same numbers
- *           collect() pays out, checked against live positions on all three chains)
+ *           collect() pays out, checked against live positions on every chain in chains.ts)
  *  re-range as soon as the price is outside the range (either way, with moving on; see watchRange), or when asked
  *           (move: now, or to a new width): exit (remove all, collect, burn) → swap back to the range's mix → open around
  *           the price. Reinvested fees roll in here.

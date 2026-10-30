@@ -35,6 +35,9 @@ describe('DEX registry: every DEX the scan reads has a verified LP fee share', (
       'pulsechain:pulsex-v2': 22 / 29, 'pulsechain:pulsex-v1': 0, 'pulsechain:9mm-v2': null, 'pulsechain:9mm-v3': 'pancake',
       'robinhood:uniswap-v3': 'uniswap', 'robinhood:uniswap-v2': 5 / 6, 'robinhood:pancakeswap-v3': 'pancake', 'robinhood:uniswap-v4': null,
       'ethereum:uniswap-v3': 'uniswap', 'ethereum:uniswap-v2': 5 / 6,
+      'base:uniswap-v3': 'uniswap', 'base:uniswap-v2': 5 / 6, 'arbitrum:uniswap-v3': 'uniswap', 'arbitrum:uniswap-v2': 5 / 6,
+      'bsc:pancakeswap-v3': 'pancake', 'bsc:pancakeswap-v2': 17 / 25, 'polygon:uniswap-v3': 'uniswap', 'polygon:quickswap-v2': 5 / 6,
+      'optimism:uniswap-v3': 'uniswap',
     });
   });
 });
