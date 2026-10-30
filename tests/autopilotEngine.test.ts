@@ -276,13 +276,14 @@ describe('smart trader (paper, mock chain)', () => {
     expect(ap.state.options).toMatchObject({ slots: 2, grid: true, lp: true });
   });
 
-  it("coins other than the budget's still to swap back keep the account: the page shows it and new budgets wait", async () => {
+  it("coins other than the budget's still to swap back keep the account and the page shows it; paper books can be reset (live waits: sameNameCoins.test.ts)", async () => {
     const { ap, acct } = setup({ scan: view(1, []) });
     await ap.turnOn();
     acct().coins = { DAI: 100, PLS: 10 / P0 }; // 10 DAI of PLS the sweep couldn't swap back
     ap.turnOff(false);
     expect(ap.status().accounts[0].holds).toBe(true);
-    expect(() => ap.configure({ mode: 'paper', options: {}, budgets: [{ chainId: NET.chainId, coin: 'DAI', amount: 300 }] })).toThrow(/coins other than DAI to settle/);
+    ap.configure({ mode: 'paper', options: {}, budgets: [{ chainId: NET.chainId, coin: 'DAI', amount: 300 }] });
+    expect(ap.state.accounts).toEqual([]);
   });
 
   it('turned on while a check is running: no error, and the next check reviews', async () => {
