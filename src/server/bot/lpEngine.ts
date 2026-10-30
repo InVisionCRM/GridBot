@@ -991,11 +991,18 @@ export class LpEngine {
   }
   /**
    * Native coin kept out of the position, in native units. Spending the native coin (its amount is native): the gas
-   * set-aside of that amount. Native base (ETH/USDG …: the amount is in the quote coin): room for the open's own gas.
+   * set-aside of that amount. Native base (ETH/USDG …: the amount is in the quote coin): room for the open's own gas,
+   * at maxFeePerGas: the node takes value + gas limit × maxFeePerGas from the balance before it runs the mint, and
+   * ethers signs maxFeePerGas = 2 × base fee + tip, about twice the gas price (2026-10-30, ETH/USDG on Robinhood: a
+   * re-open was refused 0.0000032 ETH short, 563,506 gas × 0.041 gwei against 960,000 × 0.0207 gwei kept).
    */
   private async nativeKeep(pool: LpPool): Promise<number> {
     if (pool.def.quote.native) return gasReserve(this.state.config!.capital, reserveCfg(this.state.limits));
-    return OPEN_GAS_HEADROOM * gasInBase(LP_GAS.v3.open, await this.hub.quoter(this.state.market).market());
+    const fee = await this.hub.rt(this.chainId).reader.getFeeData();
+    const maxFee = fee.maxFeePerGas ?? fee.gasPrice;
+    if (maxFee == null) throw new Error('no gas price from the chain');
+    const snap = await this.hub.quoter(this.state.market).market();
+    return OPEN_GAS_HEADROOM * LP_GAS.v3.open * fromUnits(maxFee, 18) + (snap.extraPlsPerSwap ?? 0);
   }
   private async receiptGas(r: ReceiptLike, v: PoolView) {
     return fromUnits(r.gasUsed * (r.gasPrice ?? 0n), 18) * (await this.hub.quoter(this.state.market).basePerNative()) * v.price;
