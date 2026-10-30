@@ -158,6 +158,11 @@ export interface Position {
   source: 'scan' | 'snipe';
   exitPlan: string;
   /**
+   * 'chain' once entryLiq was set from the pool's own depth (the first on-chain mark). Until then entryLiq is
+   * GeckoTerminal's reserve figure, which on-chain depth can't be compared with.
+   */
+  liqBase?: 'chain';
+  /**
    * Live only: a split sell stopped partway (a part failed, reverted, or Off completely landed between parts). The
    * token amount is re-read from the wallet before this position may sell again; the remaining parts are never
    * assumed sold.

@@ -20,6 +20,7 @@ import { readOwnerPowers } from './ownerRead';
 import { ExecError, LiveExecutor, gasOf, parseAmountOut, type ChainReader, type Fill, type Quote, type Quoter, type TxSender } from '../bot/chain';
 import { fromUnits } from '../../live/swapMath';
 import type { DexConfig } from '../../live/chains';
+import type { MarketDef } from '../../live/markets';
 import type { SafetyLimits } from '../../live/limits';
 import type { SharedNonce, TxGate } from '../bot/txGate';
 import { poolFeeBps, readV3FeeBps } from '../dex/poolFee';
@@ -153,6 +154,7 @@ export function createTokenTrader(o: {
     // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
     quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
     resolve: (hit) => resolveHit(o.hub, hit),
+    mark: positionMarker(o.hub),
     ownerPowers: (pool) => readOwnerPowers(o.hub.rt(pool.chainId).reader, pool.chainId, pool.token),
     // the signer's on-chain balance of the position's token (reconcile after a sell that stopped partway)
     balanceOf: async (p) => {
@@ -253,6 +255,46 @@ export async function liveSwap(
   });
 }
 
+/** The pool and its safety (sell tax, sell simulation) are looked up again this often; price and depth every tick. */
+export const MARK_DRAFT_EVERY_MS = 10 * 60_000;
+
+type MarkHub = Pick<Hub, 'inspect' | 'draftQuoter'>;
+
+/**
+ * Today's pool for an open position (2026-10-30: production passed no mark, so a position's price stayed at its entry;
+ * the stop, take profits and trailing stop never fired and every position waited for the 6 h time stop).
+ * Price is the pool mid (quote depth ÷ token depth: V2 reserves, V3/V4 active-range virtual reserves), with both
+ * depths for sell sizing. Liquidity is 2 × quote depth in dollars; the first mark sets entryLiq to it, so the
+ * liquidity-pulled exit compares like with like. Every MARK_DRAFT_EVERY_MS the safety check runs again: its sell tax
+ * replaces the position's, and sellSimOk turns false only on a proven honeypot. A simulation that could not run (an
+ * RPC refusing state overrides) changes nothing, so it can't set off a sell-everything.
+ */
+export function positionMarker(hub: MarkHub, now: () => number = Date.now) {
+  const drafts = new Map<string, { at: number; draft: MarketDef }>();
+  return async (p: Position): Promise<Partial<Position> | null> => {
+    const out: Partial<Position> = {};
+    let d = drafts.get(p.id);
+    if (!d || now() - d.at >= MARK_DRAFT_EVERY_MS) {
+      const draft = await draftOf(hub, positionPool(p), 'sell').catch(() => null);
+      if (draft) {
+        d = { at: now(), draft };
+        drafts.set(p.id, d);
+        const s = draft.safety;
+        if (s?.simulated && s.sellTaxPct != null) out.sellTax = s.sellTaxPct;
+        if (s?.honeypot === true) out.sellSimOk = false;
+      }
+    }
+    if (!d) return Object.keys(out).length ? out : null;
+    const m = await hub.draftQuoter(d.draft).market();
+    if (!(m.plsReserve > 0) || !(m.quoteReserve > 0)) return Object.keys(out).length ? out : null;
+    const liq = 2 * m.quoteReserve * p.usdPerSpend;
+    return {
+      ...out, price: m.quoteReserve / m.plsReserve, quoteReserve: m.quoteReserve, tokenReserve: m.plsReserve, liq,
+      ...(p.liqBase !== 'chain' ? { entryLiq: liq, liqBase: 'chain' as const } : {}),
+    };
+  };
+}
+
 function positionPool(p: Position): FreshPool {
   return {
     chainId: p.chainId, pool: p.pool, dex: p.dex, kind: 'v2', token: p.token, spend: p.spend,
@@ -267,7 +309,7 @@ function positionPool(p: Position): FreshPool {
  * a coin whose sell tax rose past the live cap is the one an exit wants out of, and a sell that would really revert
  * fails at its own quote or on-chain.
  */
-async function draftOf(hub: Hub, pool: FreshPool, side: 'buy' | 'sell') {
+async function draftOf(hub: Pick<Hub, 'inspect'>, pool: FreshPool, side: 'buy' | 'sell'): Promise<MarketDef> {
   const r = await hub.inspect({ chainId: pool.chainId, address: pool.token, quote: pool.spend, pool: pool.pool });
   if (!r.draft) throw new Error(r.safety?.reasons?.[0] ?? 'no pool to trade');
   if (side === 'buy' && !r.safety?.liveAllowed) throw new Error(r.safety?.reasons?.join(' ') || 'safety check does not allow live trading');
