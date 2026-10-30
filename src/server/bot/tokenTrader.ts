@@ -335,6 +335,8 @@ const gasOfError = (e: unknown): number => { const g = (e as { opts?: { gasNativ
 const HOUR = 3600_000;
 /** Prices kept per open position for its chart: 6 h of 10 s ticks would be 2,160; one in 3 of the newest is plenty */
 export const MARKS_KEPT = 240;
+/** A buy the pool can take only below this share of the per-trade amount is skipped (dust) */
+export const MIN_BUY_SHARE = 0.1;
 const num = (n: number) => +n.toPrecision(6);
 const FEED_MAX = 80;
 const TRADE_MAX = 200;
@@ -416,7 +418,14 @@ export class TokenTrader {
      * V3 must be a QuoterV2 (or equivalent tick-walk) quote. Called only when `enforceSizeImpact` is on.
      * A throw is "could not verify".
      */
-    quoteImpact?: (pool: FreshPool, spend: number) => Promise<number>;
+    /**
+     * The pool as it is now (price, depth), read on-chain through the market the safety check built. Every buy is sized
+     * from it, paper and live: GeckoTerminal's figures are only what found the pool (2026-10-30: a paper buy priced at
+     * GeckoTerminal's 2.4e-16 met an on-chain 1.0e-14 on its first mark and booked a +4079% take profit, twice).
+     */
+    poolNow?: (pool: FreshPool) => Promise<{ price: number; quoteReserve: number; tokenReserve: number }>;
+    /** What spending `spend` on the pool brings now (tokens after the token's buy tax) and its price impact, quoted on-chain */
+    quoteBuy?: (pool: FreshPool, spend: number) => Promise<{ tokens: number; impact: number }>;
     /** Latest price, depth, volume, tax, sell simulation. Paper tests can omit this and call mark(). */
     mark?: (p: Position) => Promise<Partial<Position> | null>;
     live?: {
@@ -1191,6 +1200,11 @@ export class TokenTrader {
     }
     // Its own reason: a full "Total open" read as "too thin" (2026-10-30: a paper run filled $500 on Robinhood, then
     // skipped all 10 Base pools, deep ones included, as "size is under the limits or the pool is too thin")
+    if (this.d.poolNow) {
+      let now: { price: number; quoteReserve: number; tokenReserve: number };
+      try { now = await this.d.poolNow(pool); } catch (e) { skip(`could not read the pool now (${(e as Error).message.slice(0, 120)})`); return; }
+      pool = { ...pool, ...now };
+    }
     const openUsd = this.openUsd();
     if (!(o.totalUsd - openUsd > 0)) { skip(`Total open is used up (${usdAsEth(openUsd)} open of ${usdAsEth(o.totalUsd)}); buys start again as positions close`); return; }
     const sized = sizeBuy({
@@ -1199,21 +1213,24 @@ export class TokenTrader {
       buyTax, price: pool.price, maxImpact: o.maxImpact, maxPoolShare: o.maxPoolShare || TOKEN_MAX_POOL_SHARE,
     });
     if (!sized) { skip('the pool is too thin for a buy within the impact cap, or its price is unknown'); return; }
-    let recordedImpact = sized.impact;
+    // A pool that takes only a sliver of the per-trade amount is skipped: such a position can't pay its own exit
+    if (sized.usd < o.perTradeUsd * MIN_BUY_SHARE) { skip(`the pool takes only ${usdAsEth(sized.usd)} within the impact cap, under ${MIN_BUY_SHARE * 100}% of the ${usdAsEth(o.perTradeUsd)} per trade`); return; }
+    let recordedImpact = sized.impact, quotedTokens: number | null = null;
+    if (this.d.quoteBuy) {
+      let q: { tokens: number; impact: number };
+      try { q = await this.d.quoteBuy(pool, sized.spend); } catch (e) { skip(`could not quote this buy on the pool (${(e as Error).message.slice(0, 120)})`); return; }
+      if (!(q.tokens > 0)) { skip('the pool quotes no tokens for this buy'); return; }
+      quotedTokens = q.tokens;
+      if (Number.isFinite(q.impact)) recordedImpact = q.impact;
+    }
     if (o.enforceSizeImpact) {
-      let impact: number | null = null;
-      try {
-        if (!this.d.quoteImpact) throw new Error('no impact quote');
-        const quoted = await this.d.quoteImpact(pool, sized.spend);
-        impact = Number.isFinite(quoted) ? quoted : null;
-      } catch { impact = null; }
-      const again = gateToken({ ...gate, enforceSizeImpact: true, sizeImpact: impact, sizeImpactCap: o.sizeImpactCap });
+      const again = gateToken({ ...gate, enforceSizeImpact: true, sizeImpact: quotedTokens != null ? recordedImpact : null, sizeImpactCap: o.sizeImpactCap });
       if (!again.ok) { skip(again.reason ?? 'price impact'); return; }
-      if (impact != null) recordedImpact = impact;
     }
     const ctx = { pool, source, buyTax, sellTax, impact: recordedImpact, why: sized.why, warn, note };
     if (o.mode !== 'live') {
-      this.opened(ctx, 'paper', { tokens: sized.tokens, spent: sized.spend, spentUsd: sized.usd, tx: null, gasUsed: null, gasPrice: null, gasNative: null });
+      // paper fills at the pool's own quote, as a live buy would
+      this.opened(ctx, 'paper', { tokens: quotedTokens ?? sized.tokens, spent: sized.spend, spentUsd: sized.usd, tx: null, gasUsed: null, gasPrice: null, gasNative: null });
       return;
     }
     if (!this.d.live) throw new Error('live broker missing');
