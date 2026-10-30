@@ -232,7 +232,15 @@ const genKey = (mode: TradeMode, chainId: number, coin: string) => `${mode}:${ch
  */
 /** `mode`: paper or live (rows written before it was recorded have none). */
 export interface TradeLog { t: number; side: 'buy' | 'sell'; mode?: TradeMode; chainId: number; pool: string; label: string; usd: number; price: number; why: string; pnlUsd: number | null; spendSym?: string; amount?: number; pnl?: number | null }
-export interface FeedItem { t: number; chainId: number; pool: string; label: string; verdict: 'bought' | 'skipped'; why: string }
+/**
+ * Where a coin left the funnel: rules (the scan's age / liquidity floor, chain off, V4, sniper limits, Stop all),
+ * checks (the safety check said no), buy (refused at the buy itself: size, impact, fee read, stopped meanwhile).
+ * A bought coin has stage 'buy'. Items saved before stages were recorded have none.
+ */
+export type FunnelStage = 'rules' | 'checks' | 'buy';
+export interface FeedItem { t: number; chainId: number; pool: string; label: string; verdict: 'bought' | 'skipped'; why: string; stage?: FunnelStage }
+/** Today's funnel (the server's local day): coins the scan and the sniper found, and where each left or got bought */
+export interface FunnelCounts { day: string; scouted: number; rules: number; checks: number; buy: number; bought: number }
 
 export interface TraderState {
   version: 1;
@@ -241,6 +249,8 @@ export interface TraderState {
   positions: Position[];
   trades: TradeLog[];
   feed: FeedItem[];
+  /** Today's funnel counts; reset at the server's local midnight. Missing until the first scan after this was added. */
+  funnel?: FunnelCounts;
   cursors: Record<string, number>;
   /** Sniper buy timestamps (ms), for the per-hour cap */
   snipesAt: number[];
@@ -932,9 +942,18 @@ export class TokenTrader {
     return !c.length || c.includes(id);
   }
 
-  private feed(item: FeedItem) {
+  private feed(item: FeedItem & { stage: FunnelStage }) {
     this.state.feed.unshift(item);
     if (this.state.feed.length > FEED_MAX) this.state.feed.length = FEED_MAX;
+    const f = this.funnelToday();
+    if (item.verdict === 'bought') f.bought++;
+    else f[item.stage]++;
+  }
+  /** Today's counts, started fresh on a new local day */
+  private funnelToday(): FunnelCounts {
+    const day = new Date(this.now()).toDateString();
+    if (this.state.funnel?.day !== day) this.state.funnel = { day, scouted: 0, rules: 0, checks: 0, buy: 0, bought: 0 };
+    return this.state.funnel;
   }
 
   private async assess(pool: FreshPool): Promise<{ ok: boolean; reason: string | null; buyTax: number; sellTax: number; gate: GateInput | null; warn: string | null; note: string | null }> {
@@ -1103,7 +1122,7 @@ export class TokenTrader {
     const o = this.state.options;
     const label = `${pool.tokenSymbol}/${pool.spendSymbol}`;
     const skip = (why: string) => {
-      this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why });
+      this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why, stage: 'buy' });
       this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: signalOf(pool.source), source: pool.dex, reason: why, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol });
     };
     const same = (x: { pool: string; chainId: number }) => x.pool.toLowerCase() === pool.pool.toLowerCase() && x.chainId === pool.chainId;
@@ -1196,7 +1215,7 @@ export class TokenTrader {
     const extra = [c.warn, c.note].filter((s): s is string => !!s).join('; ');
     const why = extra ? `buy ${c.why}; ${extra}` : `buy ${c.why}`;
     this.state.trades.unshift({ t: this.now(), side: 'buy', mode, chainId: pool.chainId, pool: pool.pool, label: pos.label, usd: spentUsd, price: entry, why, pnlUsd: null, spendSym: pool.spendSymbol, amount: spent, pnl: null });
-    this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why });
+    this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label: pos.label, verdict: 'bought', why, stage: 'buy' });
     this.say(`bought ${pos.label} on ${pool.dex}: ${why}`, 'success', source === 'snipe' ? { notify: true, data: { push: 'sniper' }, mode } : { mode });
     this.rememberEntry(pos, pool, c.impact, f.tx, f.gasUsed, f.gasPrice, f.gasNative);
     if (this.state.trades.length > TRADE_MAX) this.state.trades.length = TRADE_MAX;
@@ -1236,15 +1255,15 @@ export class TokenTrader {
     // Turned off since this tick started (POST /on runs a tick at once; discovery can take minutes): stop here,
     // before the safety check's reads. buy() checks canBuy() again after them.
     if (!this.state.on) return;
-    const skip = (why: string) => {
-      this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why });
+    const skip = (why: string, stage: FunnelStage) => {
+      this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why, stage });
       this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: signalOf(pool.source), source: pool.dex, reason: why, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol });
     };
-    if (!this.wantChain(pool.chainId)) { skip('chain is off'); return; }
-    if (pool.kind === 'v4') { skip("this app doesn't swap V4"); return; }
-    if (this.entriesStopped(pool.chainId)) { skip('new buys are stopped (Stop all)'); return; }
+    if (!this.wantChain(pool.chainId)) { skip('chain is off', 'rules'); return; }
+    if (pool.kind === 'v4') { skip("this app doesn't swap V4", 'rules'); return; }
+    if (this.entriesStopped(pool.chainId)) { skip('new buys are stopped (Stop all)', 'rules'); return; }
     const a = await this.assess(pool);
-    if (!a.ok || !a.gate) { skip(a.reason ?? 'safety'); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
+    if (!a.ok || !a.gate) { skip(a.reason ?? 'safety', 'checks'); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
     await this.buy({ ...pool, source: source === 'snipe' ? 'snipe' : pool.source }, source, a.buyTax, a.sellTax, a.gate, a.warn, a.note);
   }
 
@@ -1253,14 +1272,16 @@ export class TokenTrader {
     if (this.state.entriesHalt?.chains === null) return; // stopped everywhere: don't even look
     const pools = await this.d.discover();
     if (!this.state.on) return; // turned off while discovery was pending (2026-10-27: 4 paper buys ~3 min after off)
-    const { keep, skipped } = filterFresh(pools.filter((p) => p.source !== 'snipe'), { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: this.floorUsd() });
-    for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why });
+    const scanned = pools.filter((p) => p.source !== 'snipe');
+    this.funnelToday().scouted += scanned.length;
+    const { keep, skipped } = filterFresh(scanned, { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: this.floorUsd() });
+    for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why, stage: 'rules' });
     const eligible: FreshPool[] = [];
     for (const p of keep) {
       if (!this.state.on) break;
       const label = `${p.tokenSymbol}/${p.spendSymbol}`;
       const skip = (why: string) => {
-        this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why });
+        this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why, stage: 'rules' });
         this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
       };
       if (!this.wantChain(p.chainId)) { skip('chain is off'); continue; }
@@ -1275,7 +1296,7 @@ export class TokenTrader {
       const label = `${p.tokenSymbol}/${p.spendSymbol}`;
       if (!a.ok || !a.gate) {
         const why = a.reason ?? 'safety';
-        this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why });
+        this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why, stage: 'checks' });
         this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
         this.say(`skipped ${label}: ${a.reason}`, 'warn');
         continue;
@@ -1296,12 +1317,13 @@ export class TokenTrader {
     if (!sn.on || !this.d.sniper) return;
     const { cursors, hits, notes } = await this.d.sniper.tick(this.state.cursors, { delayBlocks: sn.delayBlocks, delaySec: sn.delaySec });
     this.state.cursors = cursors;
+    if (hits.length) this.funnelToday().scouted += hits.length;
     for (const n of notes) this.say(n.msg, n.level);
     let room = this.hourRoom();
     for (const hit of hits) {
       if (!this.state.on) break; // turned off while the sniper's log read was pending
       const rejectHit = (reason: string, label: string, token = hit.token0) => {
-        this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label, verdict: 'skipped', why: reason });
+        this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label, verdict: 'skipped', why: reason, stage: 'rules' });
         this.reject({ chainId: hit.chainId, pool: hit.pool, token, signal: 'snipe', source: hit.dex, reason, price: null, feeBps: hit.fee != null ? hit.fee / 100 : null });
       };
       if (sn.chains[hit.chainId] === false) { rejectHit('sniper is off for this chain', hit.pool.slice(0, 8)); continue; }
@@ -1312,8 +1334,8 @@ export class TokenTrader {
       const minLiq = Math.max(sn.minLiquidityUsd, this.floorUsd());
       // the gate compares dollars (unchanged); the reason a screen shows is in ETH (src/lib/ethUnits.ts)
       const thinWhy = `liquidity under ${usdAsEth(minLiq)}`;
-      if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: thinWhy }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: thinWhy, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
-      if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already` }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `${sn.maxPerHour} snipes an hour already`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
+      if (pool.liquidityUsd < minLiq) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: thinWhy, stage: 'rules' }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: thinWhy, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
+      if (room <= 0) { this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label: `${pool.tokenSymbol}/${pool.spendSymbol}`, verdict: 'skipped', why: `${sn.maxPerHour} snipes an hour already`, stage: 'rules' }); this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: 'snipe', source: pool.dex, reason: `${sn.maxPerHour} snipes an hour already`, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol }); continue; }
       const before = this.state.positions.length;
       try { await this.consider({ ...pool, source: 'snipe', createdAt: null }, 'snipe'); } catch (e) { this.lastError = `${pool.tokenSymbol}/${pool.spendSymbol}: ${(e as Error).message}`; }
       if (this.state.positions.length > before) { this.state.snipesAt.push(this.now()); room--; }
