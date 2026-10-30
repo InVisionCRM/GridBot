@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { decodeSwap, KEEP_DAYS, PoolHistories, type PoolRef } from '../src/server/lp/poolHistory';
-import { V3_SWAP_TOPIC, type LogReader } from '../src/server/market/onchain';
-import { syncAnswer } from '../src/server/lp/replay';
+import { decodeSwap, decodeSync, DEFAULT_DAYS as KEEP_DAYS, MAX_DAYS, PoolHistories, type PoolRef } from '../src/server/lp/poolHistory';
+import { SYNC_TOPIC, V3_SWAP_TOPIC, type LogReader } from '../src/server/market/onchain';
+import { syncAnswer } from '../src/server/replay/pools';
 
 const POOL = '0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca';
 const T0 = 1_790_000_000;
@@ -31,7 +31,7 @@ function chain(o: { days: number; every: number; cap: number }) {
   return { reader, calls, latest, grow: (blocks: number) => { head += blocks; } };
 }
 
-const REF: PoolRef = { chainId: 4663, pool: POOL, feeTier: 100, lpShare: 0.75, logChunk: 20_000 };
+const REF: PoolRef = { chainId: 4663, pool: POOL, kind: 'v3', feeTier: 100, lpShare: 0.75, logChunk: 20_000 };
 /** No waiting in tests */
 const fast = (now: () => number) => ({ now, gapMs: 0, sleep: async () => {} });
 
@@ -79,7 +79,8 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
     const again = new PoolHistories(dir, () => c.reader, fast(() => t)).get(REF);
     expect(again.minutes.length).toBeGreaterThan(0); // part of the week was saved
     expect(again.state.ready).toBe(false);
-    expect(syncAnswer({ ...again.state, syncing: true })).toMatchObject({ state: 'syncing' });
+    expect(again.covers(KEEP_DAYS)).toBe(false);
+    expect(syncAnswer({ ...again.state, syncing: true }, again.covers(KEEP_DAYS), 7)).toMatchObject({ state: 'syncing' });
   });
 
   it('a later sync reads only the new blocks and continues the last minute', async () => {
@@ -87,15 +88,15 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
     let t = (T0 + c.latest) * 1000;
     const h = new PoolHistories(null, () => c.reader, fast(() => t)).get(REF);
     expect(h.state.ready).toBe(false);
-    await h.sync();
+    await h.sync(1);
     expect(h.state.ready).toBe(true);
     const n = h.minutes.length, logs = c.calls.logs;
     c.grow(600);
     t += 600_000;
-    const topUp = h.sync();
-    // the week already read stays usable while the new blocks are read
+    const topUp = h.sync(1);
+    // the day already read stays usable while the new blocks are read
     expect(h.state).toMatchObject({ syncing: true, ready: true });
-    expect(syncAnswer(h.state)).toBeNull();
+    expect(syncAnswer(h.state, h.covers(1), 1)).toBeNull();
     await topUp;
     expect(h.minutes.length).toBeGreaterThanOrEqual(n + 9);
     expect(h.minutes.length).toBeLessThanOrEqual(n + 10);
@@ -109,7 +110,7 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
     const c = chain({ days: 1, every: 60, cap: 10_000 });
     const dir = mkdtempSync(join(tmpdir(), 'ph-'));
     const now = () => (T0 + c.latest) * 1000;
-    await new PoolHistories(dir, () => c.reader, fast(now)).get(REF).sync();
+    await new PoolHistories(dir, () => c.reader, fast(now)).get(REF).sync(1);
     expect(new PoolHistories(dir, () => c.reader, fast(now)).get(REF).minutes.length).toBeGreaterThan(1000);
     expect(new PoolHistories(dir, () => c.reader, fast(now)).get({ ...REF, lpShare: 0.8 }).minutes).toEqual([]);
   });
@@ -118,11 +119,11 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
     const c = chain({ days: 1, every: 1, cap: 0 });
     const h = new PoolHistories(null, () => c.reader, fast(() => (T0 + c.latest) * 1000)).get(REF);
     const first = h.sync();
-    expect(syncAnswer(h.state)).toEqual({ state: 'syncing', done: 0, total: 0 }); // a first read shows its progress
+    expect(syncAnswer(h.state, h.covers(7), 7)).toEqual({ state: 'syncing', days: 7, done: 0, total: 0 }); // a first read shows its progress
     await expect(first).rejects.toThrow(/exceeds limit/);
     expect(h.state.error).toMatch(/exceeds limit/);
     expect(h.state).toMatchObject({ syncing: false, ready: false });
-    expect(syncAnswer(h.state)).toEqual({ state: 'error', error: h.state.error });
+    expect(syncAnswer(h.state, h.covers(7), 7)).toEqual({ state: 'error', error: h.state.error });
   });
 
   it('a rate-limited RPC (429) is waited out, 1 s then 2 s, without shrinking the requests', async () => {
@@ -149,5 +150,122 @@ describe('PoolHistories: a pool\'s swaps kept as minutes', () => {
     await expect(h.sync()).rejects.toThrow(/429/);
     expect(waits).toEqual([1000, 2000, 4000, 8000, 16000]);
     expect(h.state.error).toMatch(/429/);
+  });
+
+  it('a longer window reads the days before the history, newest first, and equals reading that window from scratch', async () => {
+    const c = chain({ days: 40, every: 45, cap: 10_000 });
+    const now = () => (T0 + c.latest) * 1000;
+    const h = new PoolHistories(null, () => c.reader, fast(now)).get(REF);
+    await h.sync(7);
+    expect(h.covers(7)).toBe(true);
+    expect(h.covers(30)).toBe(false);
+    const week = h.minutes.length;
+    await h.sync(30);
+    expect(h.covers(30)).toBe(true);
+    expect(h.minutes.length).toBeGreaterThan(week * 4);
+    expect(h.minutes.every((x, i) => i === 0 || x.t > h.minutes[i - 1].t)).toBe(true);
+    const fresh = new PoolHistories(null, () => c.reader, fast(now)).get(REF);
+    await fresh.sync(30);
+    // the boundary minutes join exactly: the same minutes, swaps and fees as one read of the 30 days
+    expect(h.minutes.length).toBe(fresh.minutes.length);
+    expect(h.minutes.reduce((a, m) => a + m.n, 0)).toBe(fresh.minutes.reduce((a, m) => a + m.n, 0));
+    for (let i = 0; i < h.minutes.length; i++) {
+      const a = h.minutes[i], b = fresh.minutes[i];
+      expect([a.t, a.n, a.c]).toEqual([b.t, b.n, b.c]);
+      expect(a.f0).toBeCloseTo(b.f0, 20);
+    }
+  });
+
+  it('a long read stopped half way keeps the days it read; the next sync carries on from there', async () => {
+    const c = chain({ days: 40, every: 600, cap: 10_000 });
+    const dir = mkdtempSync(join(tmpdir(), 'ph-'));
+    let t = (T0 + c.latest) * 1000;
+    const h = new PoolHistories(dir, () => c.reader, { now: () => t, gapMs: 0, sleep: async () => {} }).get(REF);
+    await h.sync(7);
+    const start = h.state.from!;
+    // each request takes 40 s, so the read saves as it goes; the RPC dies part way back
+    let calls = 0;
+    const real = c.reader.getLogs;
+    c.reader.getLogs = async (f) => { if (++calls > 6) throw new Error('connect ECONNREFUSED'); t += 40_000; return real(f); };
+    await expect(h.sync(30)).rejects.toThrow(/ECONNREFUSED/);
+    const again = new PoolHistories(dir, () => c.reader, fast(() => t)).get(REF);
+    expect(again.state.from!).toBeLessThan(start); // the days read before it stopped were kept
+    expect(again.covers(7)).toBe(true);
+    expect(again.covers(30)).toBe(false);
+    c.reader.getLogs = real;
+    await again.sync(30);
+    expect(again.covers(30)).toBe(true);
+    expect(again.minutes.every((x, i) => i === 0 || x.t > again.minutes[i - 1].t)).toBe(true);
+  });
+
+  it(`keeps at most ${MAX_DAYS} days`, async () => {
+    const c = chain({ days: MAX_DAYS + 3, every: 3600, cap: 10_000 });
+    const h = new PoolHistories(null, () => c.reader, fast(() => (T0 + c.latest) * 1000)).get({ ...REF, logChunk: 1_000_000 });
+    await h.sync(MAX_DAYS);
+    const first = h.minutes[0].t, last = h.minutes[h.minutes.length - 1].t;
+    expect(last - first).toBeLessThanOrEqual(MAX_DAYS * DAY);
+    expect(h.covers(MAX_DAYS)).toBe(true);
+    expect(() => h.sync(MAX_DAYS + 1)).toThrow(/1 to 365 days/);
+  });
+
+  it('a file from before the history said where it starts (version 1) is read again from scratch', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ph-'));
+    writeFileSync(join(dir, `4663-${POOL}.json`), JSON.stringify({ version: 1, chainId: 4663, pool: POOL, feeTier: 100, lpShare: 0.75, toBlock: 5, lastTick: 1, rows: [[T0, 1, 1, 1, 0, 0, 1, 1]], ready: true }));
+    const h = new PoolHistories(dir, () => chain({ days: 1, every: 60, cap: 10_000 }).reader, fast(() => T0 * 1000)).get(REF);
+    expect(h.minutes).toEqual([]);
+    expect(h.state).toMatchObject({ ready: false, from: null });
+  });
+});
+
+describe('replay window', () => {
+  it('7 days unless one of 1, 7, 30 or 365 is asked for; anything else is refused', async () => {
+    const { replayDays } = await import('../src/server/lp/replay');
+    expect(replayDays(undefined)).toBe(7);
+    expect(replayDays('')).toBe(7);
+    expect(replayDays('1')).toBe(1);
+    expect(replayDays('30')).toBe(30);
+    expect(replayDays(365)).toBe(365);
+    expect(() => replayDays('14')).toThrow(/1, 7, 30, 365/);
+    expect(() => replayDays('abc')).toThrow(/1, 7, 30, 365/);
+  });
+  it('a window the history does not cover yet answers with the read\'s progress; a covered one answers from the history', () => {
+    const s = { syncing: true, done: 10, total: 100, error: null, at: null, ready: true, from: 0 };
+    expect(syncAnswer(s, false, 30)).toEqual({ state: 'syncing', days: 30, done: 10, total: 100 });
+    expect(syncAnswer(s, true, 7)).toBeNull();
+    expect(syncAnswer({ ...s, syncing: false, error: 'boom' }, true, 7)).toEqual({ state: 'error', error: 'boom' });
+  });
+});
+
+describe('a V2 pool: the price from each Sync\'s reserves', () => {
+  it('decodes reserves to the price on the tick scale (fractional), and skips an empty side', () => {
+    const d = '0x' + hex(4n * 10n ** 18n) + hex(10n ** 18n); // 4 token0 : 1 token1 → raw token1 per token0 = 0.25
+    const s = decodeSync(d, 7)!;
+    expect(1.0001 ** s.tick).toBeCloseTo(0.25, 12);
+    expect(s).toMatchObject({ t: 7, a0: 0, a1: 0, liq: 0 });
+    expect(decodeSync('0x' + hex(0n) + hex(5n), 7)).toBeNull();
+  });
+  it('reads Sync events into minutes (low, high and close per minute), no fees', async () => {
+    // reserve1 grows by 1/1000 each Sync: the price rises by 0.1 % a trade, one trade every 20 s
+    const syncAt = (n: number) => ({ blockNumber: n, index: 0, topics: [SYNC_TOPIC], data: '0x' + hex(10n ** 21n) + hex(10n ** 21n + BigInt(n) * 10n ** 18n) });
+    const latest = DAY;
+    const seen: string[][] = [];
+    const reader: LogReader = {
+      getBlockNumber: async () => latest,
+      getBlock: async (n: number) => ({ timestamp: T0 + n }),
+      getLogs: async (f) => {
+        seen.push(f.topics[0] as string[]);
+        const first = Math.ceil(f.fromBlock / 20) * 20;
+        return Array.from({ length: first <= f.toBlock ? Math.floor((f.toBlock - first) / 20) + 1 : 0 }, (_, i) => syncAt(first + i * 20));
+      },
+    };
+    const h = new PoolHistories(null, () => reader, fast(() => (T0 + latest) * 1000)).get({ ...REF, kind: 'v2', feeTier: 2900, lpShare: 1 });
+    await h.sync(1);
+    expect(seen.every((t) => t.length === 1 && t[0] === SYNC_TOPIC)).toBe(true);
+    const m = h.minutes[10];
+    expect(m.n).toBe(3);
+    const lastBlock = m.t - T0 + 40; // the minute's third Sync
+    expect(1.0001 ** m.c).toBeCloseTo((1000 + lastBlock) / 1000, 9);
+    expect(m.hi).toBe(m.c); // rising: the close is the high
+    expect([m.f0, m.f1, m.liq]).toEqual([0, 0, 0]);
   });
 });

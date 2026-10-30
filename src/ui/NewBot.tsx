@@ -17,6 +17,7 @@ import { ChainBadge, Orientation, PairPicker, chainOf, feeLabel, marketsOf, mk, 
 import { TrendConfigEditor, strategyRule } from './TrendConfig';
 import { LinesEditor } from './LinesEditor';
 import { LpReplay } from './LpReplay';
+import { GridReplay } from './GridReplay';
 import { coinFunds, errMsg, floorSig, spendFunds, type AnyObj, type BotKind, type Funds, type GridPrefill, type LpPrefill, type Nav, type TrendPrefill } from './model';
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
@@ -307,6 +308,8 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
         <p className="small"><Orientation m={m} />{m.quoteNative && +amount > 0 ? <span className="muted"> · plus {amt(customFunds.reserve, m.quote)} kept aside for gas</span> : null}</p>
         {econErr && <div className="banner error">{econErr}</div>}
         {econ ? <Verdict e={econ} quote={m.quote} fee={feeLabel(m)} /> : !(+amount > 0) && <p className="muted small">Enter an amount of {m.quote} to see what each trade nets.</p>}
+        <GridReplay pair={pair} capital={+amount} lower={+lower} upper={+upper} levels={+count} usdPer={m.usdPerQuote ?? null}
+          onPick={(lo, hi, n) => { setLower(String(lo)); setUpper(String(hi)); setCount(String(n)); }} />
       </>}
 
       <FollowUp on={follow} set={setFollow} />

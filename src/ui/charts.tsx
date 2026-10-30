@@ -1,8 +1,4 @@
 /** Small charts. Strokes and tracks come from --chart-* so the desk palette restyles them. */
-import { useId } from 'react';
-import { useContext } from 'react';
-import { pct } from './fmt';
-import { EthUsdCtx, inEthShort } from './units';
 import { rangeTone } from './series';
 
 function lineOf(points: number[], w: number, h: number) {
@@ -30,67 +26,7 @@ export function Sparkline({ points, width = 132, height = 44 }: { points: number
   );
 }
 
-/** Filled area of a real series. Flat when every point is the same. */
-export function AreaChart({ points }: { points: number[] }) {
-  const w = 640, h = 220;
-  const { d, xy } = lineOf(points, w, h);
-  const id = useId();
-  const last = points[points.length - 1] ?? 0;
-  const first = points[0] ?? 0;
-  const tone = last >= first ? 'var(--chart-up)' : 'var(--chart-down)';
-  const end = xy[xy.length - 1]?.[0] ?? w;
-  const area = `${d} L${end.toFixed(1)} ${h} L1 ${h} Z`;
-  return (
-    <svg className="chart area" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label="Portfolio value">
-      <defs>
-        <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={tone} stopOpacity="0.28" />
-          <stop offset="100%" stopColor={tone} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <g stroke="var(--line)" strokeWidth="1" vectorEffect="non-scaling-stroke">
-        {[0.25, 0.5, 0.75].map((p) => <line key={`h${p}`} x1="0" x2={w} y1={h * p} y2={h * p} />)}
-        {[0.25, 0.5, 0.75].map((p) => <line key={`v${p}`} y1="0" y2={h} x1={w * p} x2={w * p} />)}
-      </g>
-      <path d={area} fill={`url(#${id})`} />
-      <path d={d} fill="none" stroke={tone} strokeWidth="2" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
-    </svg>
-  );
-}
 
-/** Slices are sized by value (dollars inside, never shown); the centre and legend read in ETH and percent. */
-export function Donut({ slices }: { slices: { key: string; label: string; usd: number; color: string; units?: string }[] }) {
-  const ethUsd = useContext(EthUsdCtx);
-  const total = slices.reduce((a, s) => a + s.usd, 0);
-  const r = 42;
-  const c = 2 * Math.PI * r;
-  let off = 0;
-  return (
-    <div className="donut">
-      <div className="donut-ring">
-        <svg viewBox="0 0 120 120" aria-hidden="true">
-          <circle cx="60" cy="60" r={r} fill="none" stroke="var(--line)" strokeWidth="12" />
-          {total > 0 && slices.map((s) => {
-            const len = (s.usd / total) * c;
-            const el = (
-              <circle key={s.key} cx="60" cy="60" r={r} fill="none" stroke={s.color} strokeWidth="12"
-                strokeDasharray={`${len.toFixed(2)} ${(c - len).toFixed(2)}`} strokeDashoffset={(-off).toFixed(2)} transform="rotate(-90 60 60)" />
-            );
-            off += len;
-            return el;
-          })}
-        </svg>
-        <span className="donut-total">{inEthShort(total, ethUsd)}</span>
-      </div>
-      <ul>
-        {slices.map((s) => (
-          <li key={s.key} title={s.units}><i style={{ background: s.color }} />{s.label}<b>{total > 0 ? pct(s.usd / total, 0) : '—'} · {inEthShort(s.usd, ethUsd)}</b></li>
-        ))}
-        {!slices.length && <li className="muted">No balances yet</li>}
-      </ul>
-    </div>
-  );
-}
 
 /** Price sitting in (or outside) a liquidity or grid range. Ticks mark the band; the dot glows. */
 export function RangeBar({ lower, upper, price, inRange, wide }: { lower: number; upper: number; price: number | null; inRange: boolean | null; wide?: boolean }) {
@@ -112,12 +48,3 @@ export function RangeBar({ lower, upper, price, inRange, wide }: { lower: number
   );
 }
 
-/** A 0–1 bar. `value` is a fraction. */
-export function Meter({ value }: { value: number }) {
-  const w = Math.max(0, Math.min(1, value));
-  return (
-    <span className="chart meter" aria-hidden="true">
-      <i style={{ width: `${w * 100}%` }} />
-    </span>
-  );
-}

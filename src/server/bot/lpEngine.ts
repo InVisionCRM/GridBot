@@ -112,6 +112,10 @@ export interface LpStep {
   waitUntil?: number;
 }
 
+/** Fees collected at once: taken out on a range move or the close, compounded back in, or sent to the payout address */
+export interface FeeCollection { t: number; base: number; quote: number; why: 'moved' | 'closed' | 'compounded' | 'sent' }
+const COLLECTIONS_KEPT = 60;
+
 export interface LpState {
   kind: 'lp';
   /** 5: fees per coin, swap costs and what moves locked in are kept (see upgradeLp) */
@@ -142,6 +146,8 @@ export interface LpState {
    */
   aside?: Coins;
   step: LpStep | null;
+  /** Each time fees were collected, newest first (the last COLLECTIONS_KEPT): when, the coins, and why. Old saves omit it. */
+  collections?: FeeCollection[];
   outSince: number | null;
   lastRerangeAt: number | null;
   reranges: number;
@@ -545,7 +551,7 @@ export class LpEngine {
     if (p && vw) {
       const coins = vw.coins, fees = vw.owed;
       this.addIdle({ base: coins.base + fees.base, quote: coins.quote + fees.quote });
-      this.addFees(fees, vw.v.price);
+      this.addFees(fees, vw.v.price, 'closed');
       if (p.putIn) this.addMoveLoss(p.putIn, coins, vw.v.price);
     } else if (p?.putIn) this.addIdle(p.putIn);
     this.state.position = null;
@@ -1116,7 +1122,7 @@ export class LpEngine {
       const coins = pool.coinsFor(Number(p.liquidity), p.tickLower, p.tickUpper, v), fees = pool.coinsFromRaw(o.raw0, o.raw1, v);
       const snap = await this.hub.quoter(this.state.market).market();
       this.addIdle({ base: coins.base + fees.base, quote: coins.quote + fees.quote });
-      this.addFees(fees, v.price);
+      this.addFees(fees, v.price, this.exitWhy(s));
       this.addGas(this.gasQuote(LP_GAS.v3.close, v, snap), v);
       return this.exited(s, fees, coins, v);
     }
@@ -1128,7 +1134,7 @@ export class LpEngine {
       const principal = pool.coinsFromRaw(dec.args.amount0 as bigint, dec.args.amount1 as bigint, v);
       const fees = { base: got.base - principal.base, quote: got.quote - principal.quote };
       this.addIdle(got);
-      this.addFees(fees, v.price);
+      this.addFees(fees, v.price, this.exitWhy(s));
       return this.exited(s, fees, principal, v);
     }
     const me = await (this.executor as LiveExecutor).address();
@@ -1165,11 +1171,18 @@ export class LpEngine {
     this.addCoins('moveCoins', soldBase && price > 0 ? { base: loss / price, quote: 0 } : { base: 0, quote: loss });
   }
 
-  private addFees(f: Coins, price: number) {
+  private addFees(f: Coins, price: number, why: FeeCollection['why']) {
     const t = this.state.totals;
     t.fees += f.base * price + f.quote;
     t.feeCoins = { base: t.feeCoins.base + f.base, quote: t.feeCoins.quote + f.quote };
+    if (f.base > 0 || f.quote > 0) {
+      const c = this.state.collections ?? (this.state.collections = []);
+      c.unshift({ t: this.now(), base: f.base, quote: f.quote, why });
+      if (c.length > COLLECTIONS_KEPT) c.length = COLLECTIONS_KEPT;
+    }
   }
+  /** Why an exit's fees came out: the close, or a range move */
+  private exitWhy(s: LpStep): FeeCollection['why'] { return s.action === 'close' || this.state.closing ? 'closed' : 'moved'; }
   /**
    * The position is out (a move or closing) with `principal` (fees apart). It sold the coin that rose and bought the one
    * that fell: against the coins it went in with, at this price, that difference is now final ("lost to moves").
@@ -1471,7 +1484,7 @@ export class LpEngine {
       const col = events(r, pool.npm, 'Collect')[0];
       const fees = pool.coinsFromRaw(col.args.amount0 as bigint, col.args.amount1 as bigint, v);
       this.addIdle(fees);
-      this.addFees(fees, v.price);
+      this.addFees(fees, v.price, 'compounded');
       s.taken = fees;
       s.stage = 'approve';
       s.tries = 0;
@@ -1489,7 +1502,7 @@ export class LpEngine {
     if (!(worth > 0) || !(add > 0n)) { this.state.step = null; return; }
     const used = pool.coinsFor(Number(add), p.tickLower, p.tickUpper, v);
     p.paper = { ...p.paper!, owed0: '0', owed1: '0' };
-    this.addFees(fees, v.price);
+    this.addFees(fees, v.price, 'compounded');
     p.liquidity = (BigInt(p.liquidity) + add).toString();
     if (p.putIn) p.putIn = { base: p.putIn.base + used.base, quote: p.putIn.quote + used.quote };
     this.addIdle({ base: Math.max(0, fees.base - used.base), quote: Math.max(0, fees.quote - used.quote) });
@@ -1536,7 +1549,7 @@ export class LpEngine {
 
   private sent(fees: Coins, price: number, to: string) {
     const worth = fees.base * price + fees.quote;
-    this.addFees(fees, price);
+    this.addFees(fees, price, 'sent');
     this.state.totals.sent += worth;
     this.state.step = null;
     this.ev('sent', `Liquidity ${this.label}: sent ${worth.toPrecision(5)} ${this.quoteSym} of fees to ${to}`, { level: 'success', notify: true });
@@ -1554,7 +1567,7 @@ export class LpEngine {
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
       status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, aside: s.aside ?? { base: 0, quote: 0 }, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
-      outSince: s.outSince, move: this.moveStatus(), hold: this.hold, positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, feeHist: (s.feeHist ?? []).filter(([t]) => t >= this.now() - FEE_HIST_SHOWN_MS), startPrice: s.startPrice, equityHist: downsampleByTime(s.equity, 600),
+      outSince: s.outSince, move: this.moveStatus(), hold: this.hold, positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, collections: s.collections ?? [], pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, feeHist: (s.feeHist ?? []).filter(([t]) => t >= this.now() - FEE_HIST_SHOWN_MS), startPrice: s.startPrice, equityHist: downsampleByTime(s.equity, 600),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
     };
   }

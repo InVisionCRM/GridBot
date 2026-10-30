@@ -1,66 +1,26 @@
 /**
  * New bot → Liquidity: what each range, with and without moving, would have earned on the pool's real trades over the
- * last days (server: /api/lp/replay, market/lpReplay.ts), and the position it opens with today's money: its coins and
- * its share of the pool. Click a row to use its settings.
+ * last day, 7, 30 or 365 days (server: /api/lp/replay, market/lpReplay.ts), and the position it opens with today's
+ * money: its coins and its share of the pool. It opens on 7 days; a longer window is read from the chain only when it is
+ * picked. Click a row to use its settings.
  */
-import { useEffect, useState } from 'react';
 import type { ReplayRow } from '../market/lpReplay';
-import { http } from './api';
 import { L, Tip } from './Tip';
 import { cls, num, pct, qty, time } from './fmt';
 import { Usd } from './money';
+import { ReplayFrame, youngNote, type Days } from './ReplayWindow';
 
-type Answer =
-  | { state: 'syncing'; done: number; total: number }
-  | { state: 'error'; error: string }
-  | { state: 'ready'; from: number; to: number; swaps: number; capital: number; base: string; quote: string; gasMove: number; maxImpact: number; rows: ReplayRow[] };
-type Ready = Extract<Answer, { state: 'ready' }>;
-
-/** Re-asks while the server reads the pool's history; waits for typing to stop before asking for a new amount. */
-function useReplay(pair: string, capital: number, maxImpact: number | null, nonce: number) {
-  const [a, setA] = useState<Answer | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true, next: ReturnType<typeof setTimeout> | null = null;
-    const ask = async () => {
-      const q = new URLSearchParams({ market: pair });
-      if (capital > 0) q.set('capital', String(capital));
-      if (maxImpact != null) q.set('maxImpact', String(maxImpact));
-      try {
-        const r = await http<Answer>(`/api/lp/replay?${q}`);
-        if (!alive) return;
-        setA(r); setErr(null);
-        if (r.state === 'syncing') next = setTimeout(ask, 3000);
-      } catch (e) { if (alive) { setA(null); setErr((e as Error).message); } }
-    };
-    const first = setTimeout(ask, 500);
-    return () => { alive = false; clearTimeout(first); if (next) clearTimeout(next); };
-  }, [pair, capital, maxImpact, nonce]);
-  return { a, err };
-}
+type Ready = { days: Days; from: number; to: number; swaps: number; capital: number; base: string; quote: string; gasMove: number; maxImpact: number; rows: ReplayRow[] };
 
 export function LpReplay({ pair, capital, maxImpact, band, rerange, usdPer, onPick }: {
   pair: string; capital: number; maxImpact: number | null; band: number; rerange: boolean; usdPer: number | null; onPick: (band: number, rerange: boolean) => void;
 }) {
-  const [nonce, setNonce] = useState(0);
-  const { a, err } = useReplay(pair, capital, maxImpact, nonce);
-  const retry = <button type="button" className="btn small-btn" onClick={() => setNonce((n) => n + 1)}>Try again</button>;
-
+  const params: Record<string, string> = { market: pair };
+  if (capital > 0) params.capital = String(capital);
+  if (maxImpact != null) params.maxImpact = String(maxImpact);
   return (
-    <div className="replay">
-      <h3>What it would have earned last week</h3>
-      {err && <div className="banner error"><span className="grow">{err}</span>{retry}</div>}
-      {a?.state === 'error' && <div className="banner error"><span className="grow">Couldn't read the pool's trades: {a.error}</span>{retry}</div>}
-      {(!a && !err) && <p className="muted small">Looking up the pool's trades…</p>}
-      {a?.state === 'syncing' && (
-        <div className="replay-sync">
-          <p className="small">Reading this pool's trades from the chain{a.total ? `: ${Math.floor((100 * a.done) / a.total)}%` : '…'}</p>
-          <div className="replay-bar"><span style={{ width: `${a.total ? (100 * a.done) / a.total : 0}%` }} /></div>
-          <p className="muted small">The first time takes a few minutes on a busy pool (Robinhood's ETH/USDG has about 200,000 trades a day). After that only the new trades are read.</p>
-        </div>
-      )}
-      {a?.state === 'ready' && <Ready a={a} band={band} rerange={rerange} usdPer={usdPer} onPick={onPick} />}
-    </div>
+    <ReplayFrame<Ready> title={(w) => `What it would have earned over ${w}`} path="/api/lp/replay" params={params}
+      ready={(a) => <Ready a={a} band={band} rerange={rerange} usdPer={usdPer} onPick={onPick} />} />
   );
 }
 
@@ -83,6 +43,7 @@ export function Ready({ a, band, rerange, usdPer, onPick }: { a: Ready; band: nu
     <>
       <p className="muted small">
         {num(a.swaps, 0)} real trades from {time(a.from * 1000)} to {time(a.to * 1000)}, replayed with {qty(a.capital, q, 4, false)} and the bot's own rules.
+        {youngNote(a)}{' '}
         Earned is the fees in each coin, less the swap fees paid in that coin and gas: coins, not prices. What the coins'
         price did is left out, and so is the change in the coin mix the position holds (shown on its own). Tap a row to use it.
       </p>

@@ -16,6 +16,8 @@ import { CandleSync, geckoBackfill, onchainBackfill } from './market/backfill';
 import { VersionCheck } from './system/version';
 import { DailyScanner, localScan, scanDepsFromHub, type ScanFile } from './market/scanner';
 import { PoolHistories } from './lp/poolHistory';
+import { ReplayPools } from './replay/pools';
+import { GridReplay } from './replay/grid';
 import { LpReplay } from './lp/replay';
 import { Converter } from './convert/converter';
 import { swapForHost } from './swap/wire';
@@ -146,7 +148,9 @@ const friends = copy ? undefined
         hostAuth, gatewayHost: process.env.GATEWAY_HOST?.trim() || null,
         say: (msg, level) => activity.emitEvent({ type: 'info', kind: 'system', level, msg }),
       });
-const lpReplay = new LpReplay(hub, new PoolHistories(path.join(dataDir, 'pool-history'), (id) => readers.get(id)!), cfg.approval);
+const replayPools = new ReplayPools(hub, new PoolHistories(path.join(dataDir, 'pool-history'), (id) => readers.get(id)!));
+const lpReplay = new LpReplay(hub, replayPools, cfg.approval);
+const gridReplay = new GridReplay(hub, replayPools, cfg.approval);
 const convert = new Converter({ hub, allocations: () => bot.allocations().rows, approval: cfg.approval, emit: activity.emitEvent, fetchJson });
 // The smart trader: budgets per chain, run as grid and liquidity bots picked from the opportunity scan.
 const autopilot = new Autopilot({
@@ -189,7 +193,7 @@ const swap = swapForHost(!!copy, {
 });
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
-  lpReplay: (q) => lpReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
+  lpReplay: (q) => lpReplay.replay(q), gridReplay: (q) => gridReplay.replay(q), convert, swap, poolSearch: new PoolSearch(hub, fetchJson),
   relay: copy ? undefined : new GeckoRelay(gecko, { busy: () => dailyScan?.status().running ?? false }),
   friends, autopilot, tokenTrader, router, copy: !!copy, ...(push ? { push } : {}),
 });

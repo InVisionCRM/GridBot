@@ -172,8 +172,8 @@ describe('positionFor: a position opened now', () => {
 });
 
 describe('replayTable', () => {
-  it('each range with moves on and off', () => {
-    const tab = replayTable(minutes(repeat(T, 1440)), POOL, BASE, [0.02, 0.05]);
+  it('each range with moves on and off', async () => {
+    const tab = await replayTable(minutes(repeat(T, 1440)), POOL, BASE, [0.02, 0.05]);
     expect(tab.map((r) => [r.bandPct, r.rerange])).toEqual([[0.02, true], [0.02, false], [0.05, true], [0.05, false]]);
     // the price never moves: narrower earns more (more liquidity for the same money), nothing is lost to moves
     expect(tab[0].fees).toBeGreaterThan(tab[2].fees);

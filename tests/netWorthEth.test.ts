@@ -1,11 +1,9 @@
 /**
- * Home's Net worth and its change chip are in ETH (crypto units only), and TrendDetail shows no dollar figure beside
- * Generated. ETH price: the wallet snapshot's ETH row, else /api/bot/status chains[].nativeUsd (Ethereum first, then
- * any ETH-native chain); no price → a dash. Rendered from the real sanitized status payload.
+ * The ETH price the screens use: the wallet snapshot's ETH row, else /api/bot/status chains[].nativeUsd (Ethereum
+ * first, then any ETH-native chain); none → null. And TrendDetail shows no dollar figure beside Generated.
+ * (Net worth now lives in the home's Wallet & funds drawer: dollars with the coins under them, Kyle 2026-10-30.)
  */
 import { readFileSync } from 'node:fs';
-import { createElement, type ReactElement } from 'react';
-import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/ui/motion', async (orig) => {
@@ -14,7 +12,6 @@ vi.mock('../src/ui/motion', async (orig) => {
 });
 import { ShowUsdCtx } from '../src/ui/money';
 import { EthUsdCtx, ethUsdOf, holdingsByToken } from '../src/ui/units';
-import { Home } from '../src/ui/Home';
 import { gridMetrics, lpMetrics } from '../src/metrics/botMetrics';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -41,25 +38,12 @@ const home = (eth: number | null) => render(createElement(Home, { s: S, nav: noo
 const text = (html: string) => html.replace(/<[^>]+>/g, '');
 const hero = (html: string) => /<section class="card hero-card"[\s\S]*?<\/section>/.exec(html)![0];
 
-describe('Home net worth in ETH', () => {
-  it('ETH price source', () => {
+describe('ETH price source', () => {
+  it('the wallet snapshot\'s ETH row, else the status chains\' native price; none → null', () => {
     expect(ethUsdOf(S, HOLD as never)).toBe(2341.179);
     expect(ethUsdOf(S, null)).toBeCloseTo(2341.0064, 4);
     expect(ethUsdOf({ chains: [{ id: 369, nativeSymbol: 'PLS', nativeUsd: 0.00001 }] }, null)).toBeNull();
-  });
-  it('net worth = dollar total ÷ ETH price, plus a per-token list; chip in ETH; no "$" in the hero even with the switch on', () => {
-    const eth = ethUsdOf(S, HOLD as never)!;
-    const h = hero(home(eth));
-    expect(text(h)).toContain(`Net worth${(net / eth).toLocaleString('en-US', { maximumFractionDigits: 4 })} ETH`);
-    expect(text(h)).toContain('1.65 ETH · 840.5 USDG');
-    expect(text(h)).toMatch(/ETH [+−-]?[\d.]*%?/);
-    expect(text(h)).not.toMatch(/\$|\bUSD\b/);
     expect(holdingsByToken(HOLD as never).map((t) => t.sym)).toEqual(['ETH', 'USDG']);
-  });
-  it('no ETH price → a dash, never dollars', () => {
-    const h = text(hero(home(null)));
-    expect(h).toContain('Net worth—');
-    expect(h).not.toMatch(/\$/);
   });
 });
 
