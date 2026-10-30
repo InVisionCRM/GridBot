@@ -26,8 +26,18 @@ import { MIN_SCAN_CANDLES, SETUP_BANDS } from './scan';
  */
 /** A swap to the range's mix smaller than this share of the value isn't worth its fee and gas: the leftover stays idle. */
 export const LP_MIN_SWAP_SHARE = 0.01;
-/** Ranges a liquidity bot allows: ±1% … ±50% around the price. */
-export const LP_BAND = { min: 0.01, max: 0.5 };
+/**
+ * Ranges a liquidity bot allows: ±0.1% … ±50% around the price (Kyle, 2026-10-30: down from ±1%). A pool can't hold a
+ * range narrower than its tick step: rangeTicks widens it outward to the step, so on a 0.3% or 1% pool ±0.1% opens one
+ * step wide (V3_STEP).
+ */
+export const LP_BAND = { min: 0.001, max: 0.5 };
+/**
+ * A V3 pool's tick spacing by its fee tier (fee in hundredths of a bip), as the Uniswap V3 and PancakeSwap V3 factories
+ * enable them. One tick is 0.01%, so a range is at least `spacing × 0.01%` wide edge to edge. The bot itself reads the
+ * real spacing from the pool; this is only for telling you before it opens.
+ */
+export const V3_STEP: Record<number, number> = { 100: 1, 500: 10, 2500: 50, 3000: 60, 10000: 200 };
 export const LP_GAS = { v3: { open: 480_000, close: 250_000 }, v2: { open: 170_000, close: 215_000 } } as const;
 /** increaseLiquidity gas, beside a collect (LP_GAS.v3.close), when fees are compounded without moving the range. */
 export const LP_INCREASE_GAS = 200_000;
