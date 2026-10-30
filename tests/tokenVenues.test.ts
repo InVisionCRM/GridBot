@@ -8,7 +8,7 @@ import { CHAINS, chainById } from '../src/live/chains';
 import { DOPPLER_HOOK, PONS_V2_HOOK, venueOf, venueHooks, VENUES, ZERO_HOOK } from '../src/live/venues';
 import type { TopPool } from '../src/market/scan';
 import type { FreshPool, GateInput } from '../src/market/tokenTrader';
-import { DISCOVER_EVERY_MS, DISCOVER_PER_CHAIN, dexFor, discover, everyAtMost, venueHookCheck, withPoolFees } from '../src/server/market/tokenFeed';
+import { DISCOVER_MIN_MS, DISCOVER_PER_CHAIN, dexFor, discover, discoverEveryMs, everyAtMost, venueHookCheck, withPoolFees } from '../src/server/market/tokenFeed';
 import { TokenTrader, type TraderState } from '../src/server/bot/tokenTrader';
 import { MemoryStore } from '../src/server/bot/store';
 import type { PoolSniper, SnipeHit } from '../src/server/market/sniper';
@@ -73,7 +73,7 @@ describe('discovery', () => {
       newPools: async (slug: string) => (slug === 'pulsechain' ? pulseRows : slug === 'robinhood' ? hoodRows : []),
       trendingPools: async () => [],
     };
-    const out = await discover(hub as never, gecko as never);
+    const out = await discover(hub as never, gecko as never, () => true);
     expect(out.filter((p) => p.chainId === 369)).toHaveLength(DISCOVER_PER_CHAIN);
     const v4 = out.find((p) => p.pool === id(1))!;
     expect(v4).toMatchObject({ chainId: 4663, kind: 'v4', venue: 'uniswap-v4', spend: WETH, feeBps: 100 });
@@ -140,13 +140,13 @@ describe('token trader with venues', () => {
     expect(t.status().feed.some((f) => f.pool === bad.pool && /safety check failed: Pool not found/.test(f.why))).toBe(true);
   });
 
-  it('GeckoTerminal is read for new pools at most every 2 minutes (the trader asks every 20 s tick)', async () => {
+  it('GeckoTerminal is read for new pools at most once per interval (the trader asks every 10 s tick)', async () => {
     let calls = 0, now = NOW;
-    const read = everyAtMost(async () => { calls++; return [1]; }, DISCOVER_EVERY_MS, () => now);
+    const read = everyAtMost(async () => { calls++; return [1]; }, () => DISCOVER_MIN_MS, () => now);
     expect(await read()).toEqual([1]);
-    now += 20_000;
-    expect(await read()).toEqual([]);
-    now += DISCOVER_EVERY_MS;
+    now += 10_000;
+    expect(await read()).toBeNull();
+    now += DISCOVER_MIN_MS;
     expect(await read()).toEqual([1]);
     expect(calls).toBe(2);
   });

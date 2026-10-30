@@ -28,7 +28,7 @@ import type { Hub } from '../chains/hub';
 import { sameAddr } from '../dex/types';
 import { lpShareOf } from '../lp/lpShare';
 import { onchainFeePace } from './feePace';
-import { RateLimited } from './gecko';
+import { retryOnce } from './gecko';
 
 /** partial: still being scanned (shown as its pools are tested; only when it has no earlier result) */
 export interface ScanChain { chainId: number; name: string; at: number; items: Opportunity[]; tested: number; skipped: Skipped[]; error: string | null; partial?: boolean }
@@ -115,17 +115,6 @@ const lc = (a: string) => a.toLowerCase();
 const msg = (e: unknown) => (e as Error).message.slice(0, 200);
 const pct = (x: number) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%`;
 
-/**
- * One retry after a 429 (GeckoSource waits out the back-off before the next request) or a GeckoTerminal 5xx
- * (the real scan on 2026-10-17 lost ETH/USDC to a single HTTP 500).
- */
-async function retryOnce<T>(fn: () => Promise<T>): Promise<T> {
-  try { return await fn(); } catch (e) {
-    if (e instanceof RateLimited || /GeckoTerminal HTTP 5\d\d/.test((e as Error).message)) return fn();
-    throw e;
-  }
-}
-
 /** What a running scan is doing now. */
 export interface ScanProgress { chain: string; chainNo: number; chains: number; phase: 'finding pools' | 'checking new tokens' | 'testing pairs'; done: number; total: number }
 
@@ -171,8 +160,8 @@ export class DailyScanner {
     return this.d.chains().some((c) => !this.file.chains.some((x) => x.chainId === c.id));
   }
 
-  /** Check every 30 min; scan when isDue. */
-  start(checkMs = 30 * 60_000) {
+  /** Check every minute; scan when isDue (a chain just added starts its scan within a minute). */
+  start(checkMs = 60_000) {
     if (this.timer) return;
     const due = () => { if (this.isDue()) void this.run().catch(() => undefined); };
     due();
@@ -191,7 +180,11 @@ export class DailyScanner {
     try {
       const chains: ScanChain[] = [];
       this.live = { done: chains, current: null };
-      const list = this.d.chains();
+      // Chains with no result yet go first: a chain just added has results in minutes, not after a rescan of the others
+      // (2026-10-30: the Smart trader said "not in the scan" for the 5 chains added back while PulseChain, Robinhood and
+      // Ethereum were rescanned ahead of them)
+      const all = this.d.chains(), had = (id: number) => this.file.chains.some((x) => x.chainId === id);
+      const list = [...all.filter((c) => !had(c.id)), ...all.filter((c) => had(c.id))];
       for (const [i, c] of list.entries()) chains.push(await this.scanChain(c, i + 1, list.length, usd));
       const feeMarks = this.d.store.load()?.feeMarks ?? this.file.feeMarks;
       this.file = { version: 4, at: this.now(), testUsd: usd, chains, ...(feeMarks ? { feeMarks } : {}) };

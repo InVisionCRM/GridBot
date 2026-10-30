@@ -146,8 +146,9 @@ describe('Off completely, no exits', () => {
     s.t.turnOff('full'); // lands while the first position's mark is awaited
     gate.resolve(null);
     await tick;
-    expect(s.calls.mark - marks).toBe(1); // the second position was not even read
-    expect(s.t.status().positions).toHaveLength(2); // and the first, whose read was in flight, was not sold
+    // both prices are read at the start of the pass (at once, 2026-10-30), before off lands; reads move nothing
+    expect(s.calls.mark - marks).toBe(2);
+    expect(s.t.status().positions).toHaveLength(2); // and neither was sold after off
     expect(s.t.status().trades.filter((x) => x.side === 'sell')).toHaveLength(0);
   });
 });

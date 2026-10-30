@@ -49,14 +49,13 @@ describe('fresh-pool filter', () => {
 });
 
 describe('safety gate', () => {
-  it('blocks a honeypot, a failed sell, a pause, bad decimals, thin liquidity, a mint and a pulled pool in both modes', () => {
+  it('blocks a honeypot, a failed sell, a pause, bad decimals, thin liquidity and a pulled pool in both modes (a mint function does not: 2026-10-30)', () => {
     for (const mode of ['paper', 'live'] as const) {
       expect(gateToken(clean({ mode, honeypot: true })).reason).toMatch(/honeypot/);
       expect(gateToken(clean({ mode, sellSimOk: false })).reason).toMatch(/sell simulation/);
       expect(gateToken(clean({ mode, paused: true })).reason).toMatch(/paused/);
       expect(gateToken(clean({ mode, decimals: null })).reason).toMatch(/decimals/);
       expect(gateToken(clean({ mode, liquidityUsd: 100, minLiquidityUsd: 5_000 })).reason).toMatch(/under the/);
-      expect(gateToken(clean({ mode, canMint: true })).reason).toMatch(/mint/);
       expect(gateToken(clean({ mode, recentLiqPull: true })).reason).toMatch(/pulled/);
     }
   });

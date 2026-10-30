@@ -93,19 +93,19 @@ export interface FreshPool {
 }
 
 /** Scan discovery. Snipes are not passed here: min age does not apply to them. */
-export function filterFresh(pools: FreshPool[], o: { now: number; minAgeMs: number; minLiquidityUsd?: number }): { keep: FreshPool[]; skipped: { pool: string; why: string }[] } {
-  const keep: FreshPool[] = [], skipped: { pool: string; why: string }[] = [];
+export function filterFresh(pools: FreshPool[], o: { now: number; minAgeMs: number; minLiquidityUsd?: number }): { keep: FreshPool[]; skipped: { pool: FreshPool; why: string }[] } {
+  const keep: FreshPool[] = [], skipped: { pool: FreshPool; why: string }[] = [];
   const seen = new Set<string>();
   for (const p of pools) {
     const id = `${p.chainId}:${p.pool.toLowerCase()}`;
-    if (seen.has(id)) { skipped.push({ pool: p.pool, why: 'already seen' }); continue; }
+    if (seen.has(id)) { skipped.push({ pool: p, why: 'already seen' }); continue; }
     seen.add(id);
-    if (!(p.price > 0) || !(p.quoteReserve > 0)) { skipped.push({ pool: p.pool, why: 'no price or depth' }); continue; }
+    if (!(p.price > 0) || !(p.quoteReserve > 0)) { skipped.push({ pool: p, why: 'no price or depth' }); continue; }
     const minL = o.minLiquidityUsd ?? 0;
-    if (p.liquidityUsd < minL) { skipped.push({ pool: p.pool, why: `liquidity ${usdAsEth(p.liquidityUsd)} is below ${usdAsEth(minL)}` }); continue; }
+    if (p.liquidityUsd < minL) { skipped.push({ pool: p, why: `liquidity ${usdAsEth(p.liquidityUsd)} is below ${usdAsEth(minL)}` }); continue; }
     if (p.createdAt != null && o.minAgeMs > 0 && o.now - p.createdAt < o.minAgeMs) {
       const h = Math.max(0, Math.round((o.now - p.createdAt) / 3600_000));
-      skipped.push({ pool: p.pool, why: `pool is ${h}h old (minimum ${Math.round(o.minAgeMs / 3600_000)}h for scan discovery)` });
+      skipped.push({ pool: p, why: `pool is ${h}h old (minimum ${Math.round(o.minAgeMs / 3600_000)}h for scan discovery)` });
       continue;
     }
     keep.push(p);
@@ -125,8 +125,6 @@ export interface GateInput {
   maxTax?: number;
   liquidityUsd: number;
   minLiquidityUsd: number;
-  /** Owner can mint, when the token exposes it. null = not detectable. */
-  canMint: boolean | null;
   canPause: boolean | null;
   canBlacklist: boolean | null;
   proxy: boolean | null;
@@ -256,7 +254,6 @@ export function gateToken(g: GateInput): GateResult {
   if (g.paused === true) return hard('token is paused');
   if (g.decimals == null || !(g.decimals >= 0 && g.decimals <= 36)) return hard('decimals unreadable');
   if (g.liquidityUsd < g.minLiquidityUsd) return hard(`liquidity ${usdAsEth(g.liquidityUsd)} is under the ${usdAsEth(g.minLiquidityUsd)} minimum`);
-  if (g.canMint === true) return hard('owner can mint');
   if (g.recentLiqPull) return hard('liquidity was pulled');
   const tax = Math.max(g.buyTax ?? 0, g.sellTax ?? 0);
   if (g.mode === 'live' && tax > maxTax) return hard(`tax ${(tax * 100).toFixed(1)}% is over the ${(maxTax * 100).toFixed(0)}% live cap`);

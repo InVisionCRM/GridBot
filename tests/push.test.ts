@@ -744,7 +744,7 @@ describe('paper and live pushes', () => {
       store: new MemoryStore<TraderState>(), now: () => now, sniper, emit: (e) => events.push(e),
       assess: async () => gate, resolve: async () => fresh,
     });
-    t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null } });
+    t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, mevRpc: null } });
     t.turnOn();
     await t.tick();
     const buy = events.find((e) => e.data?.push === 'sniper');

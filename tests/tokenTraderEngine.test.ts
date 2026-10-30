@@ -81,7 +81,7 @@ describe('token trader engine', () => {
     expect(resumed.status().trades[0].side).toBe('sell');
   });
 
-  it('skips a young pool on the scan and a honeypot, and a snipe ignores the age', async () => {
+  it('with the age check on, skips a young pool on the scan; skips a honeypot; a snipe ignores the age', async () => {
     const now = 1_700_000_000_000;
     const young = pool({ createdAt: now - 3600_000, tokenSymbol: 'YOUNG' });
     const bad = pool({ createdAt: now - 48 * 3600_000, tokenSymbol: 'BAD' });
@@ -90,6 +90,7 @@ describe('token trader engine', () => {
       discover: async () => [young, bad],
       assess: async (p) => clean({ honeypot: p.tokenSymbol === 'BAD' }),
     });
+    t.configure({ enforceWashAndAge: true }); // the minimum age is part of this check
     t.turnOn();
     await t.tick();
     expect(t.status().positions).toHaveLength(0);
@@ -101,7 +102,7 @@ describe('token trader engine', () => {
     const sn = trader({
       now: () => now, hits: [hit], resolve: async () => fresh,
     });
-    sn.t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null } });
+    sn.t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, mevRpc: null } });
     sn.t.turnOn();
     await sn.t.tick();
     expect(sn.t.status().positions).toHaveLength(1);
@@ -115,7 +116,7 @@ describe('token trader engine', () => {
     const thin = pool({ liquidityUsd: 100, tokenSymbol: 'THIN' });
     const hit = (p: FreshPool): SnipeHit => ({ chainId: 1, dex: 'uni', kind: 'v3', pool: p.pool, token0: p.token, token1: p.spend, fee: null, blockNumber: 1, at: now, skip: null });
     const { t } = trader({ now: () => now, hits: [hit(a), hit(b), hit(thin)], resolve: async (h) => [a, b, thin].find((p) => p.pool === h.pool) ?? null });
-    t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 1, chains: {}, mevRpc: null } });
+    t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 1, mevRpc: null } });
     t.turnOn();
     await t.tick();
     expect(t.status().positions).toHaveLength(1);
@@ -194,7 +195,7 @@ describe('token trader engine', () => {
       options: {
         mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 86_400,
         chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: 0.02,
-        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, mevRpc: null },
       },
       positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
     } as unknown as TraderState;
@@ -277,7 +278,7 @@ describe('token trader engine', () => {
       options: {
         mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 86_400,
         chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: 0.02,
-        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, mevRpc: null },
       },
       positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
     } as unknown as TraderState;
@@ -345,7 +346,7 @@ describe('token trader engine', () => {
       const fresh = pool({ createdAt: null, liquidityUsd: 20_000, volumeUsd, tokenSymbol: 'SNIPE', source: 'snipe' });
       const hit: SnipeHit = { chainId: 1, dex: 'uni-v3', kind: 'v3', pool: fresh.pool, token0: fresh.token, token1: fresh.spend, fee: 3000, blockNumber: 10, at: now, skip: null };
       const sn = trader({ now: () => now, hits: [hit], resolve: async () => fresh });
-      sn.t.configure({ risk, enforceWashAndAge: true, minPoolAgeSec: 24 * 3600, sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null } });
+      sn.t.configure({ risk, enforceWashAndAge: true, minPoolAgeSec: 24 * 3600, sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, mevRpc: null } });
       sn.t.turnOn();
       await sn.t.tick();
       return sn.t;
@@ -420,7 +421,7 @@ describe('token trader engine', () => {
     const { t } = trader();
     t.configure({ mode: 'live', chains: [1] });
     expect(() => t.turnOn()).toThrow(/not wired/);
-    expect(() => t.configure({ sniper: { on: false, minLiquidityUsd: 1, delayBlocks: 0, delaySec: 0, maxPerHour: 1, chains: {}, mevRpc: 'http://rpc.example' } })).toThrow(/https/);
+    expect(() => t.configure({ sniper: { on: false, minLiquidityUsd: 1, delayBlocks: 0, delaySec: 0, maxPerHour: 1, mevRpc: 'http://rpc.example' } })).toThrow(/https/);
     expect(() => t.configure({ maxImpact: 0.2 })).toThrow(/5%/);
     expect(() => t.configure({ minLiquidityUsd: -1 })).toThrow(/liquidity/i);
     expect(() => t.configure({ sizeImpactCap: 0.2 })).toThrow(/Trade-size/);
@@ -484,7 +485,7 @@ describe('token trader engine', () => {
       version: 1, on: false,
       options: {
         mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 24 * 3600, chains: [], risk: 'safe', maxImpact: 0.03, maxPoolShare: 0.02,
-        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, mevRpc: null },
       },
       positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
     } as unknown as TraderState);
@@ -563,7 +564,7 @@ describe('token trader engine', () => {
     });
     t.configure({
       minLiquidityUsd: 0, enforceLiquidityFloor: true,
-      sniper: { on: true, minLiquidityUsd: 80_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null },
+      sniper: { on: true, minLiquidityUsd: 80_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, mevRpc: null },
     });
     t.turnOn();
     await t.tick();
@@ -615,7 +616,7 @@ describe('token trader engine', () => {
       options: {
         mode: 'paper', perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 0, chains: [],
         risk: 'safe', maxImpact: 0.03, maxPoolShare: 0.02,
-        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, mevRpc: null },
       },
       positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
     } as TraderState);
@@ -750,7 +751,7 @@ describe('token trader engine', () => {
       options: {
         mode: 'paper' as const, perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 0, chains: [] as number[],
         risk: 'safe' as const, maxImpact: 0.03, maxPoolShare: 0.02,
-        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+        sniper: { on: false, minLiquidityUsd: 5_000, delayBlocks: 2, delaySec: 15, maxPerHour: 3, mevRpc: null },
       },
       positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
     };

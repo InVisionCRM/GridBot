@@ -39,7 +39,7 @@ export const TREND_ID = trendRaw.id;
 export const TRADER: Obj = (() => {
   const t: Obj = {
     id: 'token-trader', kind: 'token', on: true, openUsd: 120, lastError: null, entriesHalt: null, exitsManaged: 1,
-    options: { mode: 'paper', perTradeUsd: 60, totalUsd: 300, minPoolAgeSec: 7200, maxPoolShare: 0.02, maxImpact: 0.02, sizeImpactCap: 0.01, risk: 'safe', sniper: { on: false, minLiquidityUsd: 20000, delayBlocks: 2, delaySec: 0, maxPerHour: 3, chains: {} } },
+    options: { mode: 'paper', perTradeUsd: 60, totalUsd: 300, minPoolAgeSec: 7200, maxPoolShare: 0.02, maxImpact: 0.02, sizeImpactCap: 0.01, risk: 'safe', sniper: { on: false, minLiquidityUsd: 20000, delayBlocks: 2, delaySec: 0, maxPerHour: 3 } },
     trades: [
       { t: AS_OF - 3 * H, side: 'sell', chainId: 1, pool: 'p1', label: 'PEPE/WETH', usd: 70.23, price: 1e-5, why: 'take profit +50%', pnlUsd: 10.23, spendSym: 'WETH', amount: 0.03, pnl: 0.00437 },
       { t: AS_OF - 20 * H, side: 'buy', chainId: 1, pool: 'p1', label: 'PEPE/WETH', usd: 60, price: 1e-5, why: 'buy depth ok', pnlUsd: null, spendSym: 'WETH', amount: 0.02563, pnl: null },

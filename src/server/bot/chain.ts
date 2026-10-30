@@ -338,14 +338,20 @@ export class Quoter {
     if (probe > 0) return probe;
     if (this.probeSize) return this.probeSize;
     if (!(probeQuote && probeQuote > 0)) throw new Error(`${this.def.key}: no probe size`);
-    const q = await this.quoteRaw(pool, quote.address, base.address, amountToUnits(probeQuote, quote.decimals));
+    const q = await this.quoteRaw(pool, quote, base, amountToUnits(probeQuote, quote.decimals));
     const b = fromUnits(q.amountOut, base.decimals);
     if (!(b > 0)) throw new Error(`${this.def.key}: reverse probe returned 0`);
     this.probeSize = +b.toPrecision(3);
     return this.probeSize;
   }
-  private quoteRaw(pool: MarketDef['pool'], i: string, o: string, a: bigint) {
-    return (this.adapter.quote as (p: typeof pool, i: string, o: string, a: bigint, w?: boolean) => ReturnType<DexAdapter['quote']>)(pool, i, o, a, false);
+  /**
+   * A price read: V2 and V3 quote the wrapped address; a V4 pool quotes its own currency, so a native coin is
+   * address(0) there, as on every swap (2026-10-30: reading a native-ETH V4 pool with WETH threw "tokenOut is not in
+   * this V4 pool", which stopped every token-trader exit and buy on each tick).
+   */
+  private quoteRaw(pool: MarketDef['pool'], i: MarketDef['base'], o: MarketDef['base'], a: bigint) {
+    const id = (t: MarketDef['base']) => (pool.kind === 'v4' ? this.ref(t) : t.address);
+    return (this.adapter.quote as (p: typeof pool, i: string, o: string, a: bigint, w?: boolean) => ReturnType<DexAdapter['quote']>)(pool, id(i), id(o), a, false);
   }
 
   /** Quote per base, from an exact-in quote of `probe` base (includes the LP fee). */
@@ -356,7 +362,7 @@ export class Quoter {
     // At least one raw unit (0-decimals tokens with a fractional probe); price uses the units actually quoted.
     let amt = amountToUnits(probe, base.decimals);
     if (amt <= 0n) amt = 1n;
-    const q = await this.quoteRaw(pool, base.address, quote.address, amt);
+    const q = await this.quoteRaw(pool, base, quote, amt);
     return fromUnits(q.amountOut, quote.decimals) / fromUnits(amt, base.decimals);
   }
 

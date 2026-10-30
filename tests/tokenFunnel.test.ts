@@ -38,7 +38,7 @@ describe('token trader funnel', () => {
       assess: async (p) => (p === honeypot ? clean({ honeypot: true }) : clean()),
       resolve: async () => null,
     });
-    t.configure({ perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 24 * 3600, risk: 'safe', venues: { bankr: false } });
+    t.configure({ perTradeUsd: 100, totalUsd: 500, minPoolAgeSec: 24 * 3600, enforceWashAndAge: true, risk: 'safe', venues: { bankr: false } });
     t.turnOn();
     await t.tick();
     const s = t.status();

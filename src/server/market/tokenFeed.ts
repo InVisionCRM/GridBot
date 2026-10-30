@@ -7,7 +7,6 @@ import { JsonRpcProvider } from 'ethers';
 import { readDecimals } from '../../live/decimals';
 import { NATIVE_EEEE, NATIVE_ZERO } from '../../market/scan';
 import { fromTopPool, type FreshPool, type GateInput } from '../../market/tokenTrader';
-import { mintInBytecode } from '../../market/tokenChecks';
 import { applyLpUnlock, cachedTokenLp, LP_CHECK_TIMEOUT_MS, tokenLpKey, unverifiedLpUnlock, type TokenLpSnapshot } from '../../market/lpUnlock';
 import { unverifiedV3Lp, V3_LP_LOCK_CACHE_TTL_MS } from '../../market/v3LpLock';
 import { readLiveLpUnlock } from './lpUnlockRead';
@@ -22,17 +21,16 @@ import { fromUnits } from '../../live/swapMath';
 import type { ChainConfig, DexConfig } from '../../live/chains';
 import { VENUES, venueOf } from '../../live/venues';
 import type { MarketDef } from '../../live/markets';
-import type { SafetyLimits } from '../../live/limits';
+import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { SharedNonce, TxGate } from '../bot/txGate';
 import { poolFeeBps, readV3FeeBps } from '../dex/poolFee';
 import { JsonStore, type Store } from '../bot/store';
 import type { Emit } from '../bot/activity';
 import type { Hub } from '../chains/hub';
-import type { GeckoSource } from './gecko';
+import { retryOnce, type GeckoSource } from './gecko';
 import { PoolSniper, type LogSource, type SniperChain } from './sniper';
 import { SwapPending, TokenTrader, type Position, type TraderState } from '../bot/tokenTrader';
 import { PlayRejectLog } from '../bot/playRejects';
-import { quoteTradeImpact } from './tradeImpact';
 
 interface Reader extends ChainReader {
   getBlockNumber(): Promise<number>;
@@ -111,11 +109,14 @@ export function createTokenTrader(o: {
     v3LpLockCacheTtlMs: () => V3_LP_LOCK_CACHE_TTL_MS,
     v3LpLockCallBudget: () => 0,
   };
+  const drafts = draftStore();
+  const lookEveryMs = () => discoverEveryMs(o.hub.runtimes().filter((rt) => rt.tradable && rt.cfg.geckoSlug && rt.cfg.status === 'live' && trader.wants(rt.cfg.id)).length);
   const trader: TokenTrader = new TokenTrader({
     store: o.store, emit: o.emit, sniper,
     liveChains: () => o.hub.runtimes().filter((rt) => rt.tradable).map((rt) => ({ id: rt.cfg.id, name: rt.cfg.name, signer: !!rt.signer })),
-    discover: everyAtMost(() => discover(o.hub, o.gecko), DISCOVER_EVERY_MS),
-    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, flags.v3LpLockCheck(), flags.lpUnlockCheck(), {
+    discover: everyAtMost(() => discover(o.hub, o.gecko, (id) => trader.wants(id)), lookEveryMs),
+    lookEveryMs,
+    assess: (pool, mode, risk) => assess(o.hub, pool, mode, risk, (d) => drafts.keep(pool, d), flags.v3LpLockCheck(), flags.lpUnlockCheck(), {
       cacheEnabled: flags.v3LpLockCacheEnabled(), cacheTtlMs: flags.v3LpLockCacheTtlMs(), callBudget: flags.v3LpLockCallBudget(),
     }),
     // Called only when the holder check is on. Flag off never reaches this, so a scan makes no explorer calls.
@@ -153,7 +154,7 @@ export function createTokenTrader(o: {
       });
     },
     // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
-    quoteImpact: (pool, spend) => quoteTradeImpact(o.hub.rt(pool.chainId), pool, spend),
+    quoteImpact: (pool, spend) => quoteImpactOf(o.hub, drafts.get(pool), spend),
     resolve: (hit) => resolveHit(o.hub, hit),
     mark: positionMarker(o.hub),
     ownerPowers: (pool) => readOwnerPowers(o.hub.rt(pool.chainId).reader, pool.chainId, pool.token),
@@ -318,17 +319,19 @@ async function draftOf(hub: Pick<Hub, 'inspect'>, pool: FreshPool, side: 'buy' |
 }
 
 /**
- * GeckoTerminal new/trending lists are read at most this often: two calls a chain, on a budget of about 24 a minute
- * shared with the daily scan, charts and logos (the trader asks every 20 s tick). New pools the moment they open are
- * the sniper's job.
+ * How often GeckoTerminal's new/trending lists are read: two calls per chain the trader trades, kept to half of the
+ * ~24 calls a minute the app's GeckoTerminal client allows (the daily scan, charts and logos share it), and never more
+ * often than every 30 s (the lists themselves don't change faster). 1-3 chains: 30 s; all 8: 80 s.
  */
-export const DISCOVER_EVERY_MS = 2 * 60_000;
+export const DISCOVER_MIN_MS = 30_000;
+const DISCOVER_CALLS_PER_MIN = 12;
+export const discoverEveryMs = (chains: number) => Math.max(DISCOVER_MIN_MS, Math.ceil((Math.max(1, chains) * 2 * 60_000) / DISCOVER_CALLS_PER_MIN));
 
-/** `read` at most once per `everyMs`; in between, nothing new (an empty list). */
-export function everyAtMost<T>(read: () => Promise<T[]>, everyMs: number, now: () => number = Date.now): () => Promise<T[]> {
+/** `read` at most once per `everyMs()`; in between, null (not due). */
+export function everyAtMost<T>(read: () => Promise<T[]>, everyMs: () => number, now: () => number = Date.now): () => Promise<T[] | null> {
   let at: number | null = null;
   return async () => {
-    if (at != null && now() - at < everyMs) return [];
+    if (at != null && now() - at < everyMs()) return null;
     at = now();
     return read();
   };
@@ -354,17 +357,19 @@ export function dexFor(cfg: Pick<ChainConfig, 'id' | 'dexes'>, geckoDex: string)
   return dex ? { dex, venue: null } : null;
 }
 
-export async function discover(hub: Pick<Hub, 'runtimes' | 'rt'>, gecko: Pick<GeckoSource, 'newPools' | 'trendingPools'>): Promise<FreshPool[]> {
+/** `wants`: the chains the trader is set to trade ("Where"); the others are not read at all. */
+export async function discover(hub: Pick<Hub, 'runtimes' | 'rt'>, gecko: Pick<GeckoSource, 'newPools' | 'trendingPools'>, wants: (chainId: number) => boolean): Promise<FreshPool[]> {
   const out: FreshPool[] = [];
   for (const rt of hub.runtimes()) {
-    if (!rt.tradable || !rt.cfg.geckoSlug || rt.cfg.status !== 'live') continue;
+    if (!rt.tradable || !rt.cfg.geckoSlug || rt.cfg.status !== 'live' || !wants(rt.cfg.id)) continue;
     const wrapped = rt.cfg.wrappedNative.address.toLowerCase();
     // V4 pools name the native coin address(0); the trader spends the wrapped address, and hub.inspect searches both
     const spend = [wrapped, NATIVE_ZERO, ...rt.cfg.stables.map((s) => s.address)];
     let fresh: Awaited<ReturnType<GeckoSource['newPools']>> = [];
     let hot: Awaited<ReturnType<GeckoSource['newPools']>> = [];
-    try { fresh = await gecko.newPools(rt.cfg.geckoSlug); } catch { /* next chain */ }
-    try { hot = await gecko.trendingPools(rt.cfg.geckoSlug); } catch { /* next chain */ }
+    const slug = rt.cfg.geckoSlug;
+    try { fresh = await retryOnce(() => gecko.newPools(slug)); } catch { /* next chain */ }
+    try { hot = await retryOnce(() => gecko.trendingPools(slug)); } catch { /* next chain */ }
     const mine: FreshPool[] = [];
     const take = (rows: typeof fresh, source: 'new' | 'trending') => {
       for (const row of rows) {
@@ -402,6 +407,37 @@ export async function withPoolFees(
   return read.filter((p): p is NonNullable<typeof p> => !!p);
 }
 
+/** Any address works for a quote: nothing is sent and no allowance is read */
+const QUOTE_FROM = '0x000000000000000000000000000000000000dEaD';
+/** Markets the safety check built, kept for the impact quote that follows it on the same buy */
+const DRAFTS_KEPT = 200;
+
+export function draftStore() {
+  const m = new Map<string, MarketDef>();
+  const key = (p: Pick<FreshPool, 'chainId' | 'pool'>) => `${p.chainId}:${p.pool.toLowerCase()}`;
+  return {
+    keep(p: Pick<FreshPool, 'chainId' | 'pool'>, d: MarketDef) {
+      m.delete(key(p));
+      m.set(key(p), d);
+      if (m.size > DRAFTS_KEPT) m.delete(m.keys().next().value!);
+    },
+    get: (p: Pick<FreshPool, 'chainId' | 'pool'>) => m.get(key(p)) ?? null,
+  };
+}
+
+/**
+ * The price impact of spending `spend` on the market the safety check built: the same quoter, pool reference (app DEX
+ * id, V4 pool key, native coin) and decimals the live buy uses. It used to quote through the adapter named by the
+ * pool's GeckoTerminal label ('uniswap-v3-robinhood'), which no adapter is called, so the check failed, and skipped the
+ * coin, for every pool outside PulseChain and every V4 pool (2026-10-30).
+ */
+export async function quoteImpactOf(hub: Pick<Hub, 'draftQuoter'>, draft: MarketDef | null, spend: number): Promise<number> {
+  if (!draft) throw new Error('no safety check result for this pool');
+  const q = await hub.draftQuoter(draft).quote('buy', spend, DEFAULT_LIMITS, QUOTE_FROM, null);
+  if (!Number.isFinite(q.priceImpact)) throw new Error('the quote returned no impact');
+  return q.priceImpact;
+}
+
 /**
  * A venue's V4 pool trades only through that venue's own hook (venues.ts; Uniswap V4 = no hook). A pool under its
  * label with any other hook is refused before it can be simulated as safe.
@@ -412,18 +448,17 @@ export function venueHookCheck(pool: Pick<FreshPool, 'venue' | 'pool'>, hook: st
   if (hook == null || hook.toLowerCase() !== v.via.hook.toLowerCase()) throw new Error(`${v.name} pool ${pool.pool} trades through hook ${hook ?? '(none read)'}, not ${v.name}'s ${v.via.hook}`);
 }
 
-async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', v3LpLockCheck = false, lpUnlockCheck = false, v3Bounds: { cacheEnabled: boolean; cacheTtlMs: number; callBudget: number } = { cacheEnabled: false, cacheTtlMs: V3_LP_LOCK_CACHE_TTL_MS, callBudget: 0 }): Promise<GateInput> {
+async function assess(hub: Hub, pool: FreshPool, mode: 'paper' | 'live', _risk: 'safe' | 'medium' | 'any', onDraft: (d: MarketDef) => void, v3LpLockCheck = false, lpUnlockCheck = false, v3Bounds: { cacheEnabled: boolean; cacheTtlMs: number; callBudget: number } = { cacheEnabled: false, cacheTtlMs: V3_LP_LOCK_CACHE_TTL_MS, callBudget: 0 }): Promise<GateInput> {
   const r = await hub.inspect({ chainId: pool.chainId, address: pool.token, quote: pool.spend, pool: pool.pool });
   venueHookCheck(pool, r.draft?.pool.v4?.hooks ?? null);
+  if (r.draft) onDraft(r.draft);
   const s = r.safety;
-  let canMint: boolean | null = null;
-  try { canMint = mintInBytecode(await (hub.rt(pool.chainId).reader as Reader).getCode(pool.token)); } catch { canMint = null; }
   const gate: GateInput = {
     mode, risk: _risk, honeypot: s?.honeypot ?? null, sellSimOk: s ? s.simulated && s.honeypot !== true : false,
     paused: s?.paused ?? null, decimals: s?.decimals ?? r.token?.decimals ?? null,
     buyTax: s?.buyTaxPct ?? null, sellTax: s?.sellTaxPct ?? null,
     liquidityUsd: pool.liquidityUsd, minLiquidityUsd: pool.source === 'snipe' ? 0 : 0,
-    canMint, canPause: s?.paused != null ? true : null, canBlacklist: s?.blacklist != null ? true : null,
+    canPause: s?.paused != null ? true : null, canBlacklist: s?.blacklist != null ? true : null,
     // Unknown until the trader's holder check is on. That check fills this in; leaving it null here keeps the gate
     // identical when the check is off, and keeps this function from calling an explorer on every assess.
     proxy: s?.proxy != null ? true : null, lpUnlocked: null, holderConcentration: null, recentLiqPull: false,

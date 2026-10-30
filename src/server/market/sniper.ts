@@ -91,13 +91,15 @@ export class PoolSniper {
   /** Forget a pool so a test can see it twice only when it really is new. */
   has(chainId: number, pool: string) { return this.seen.has(poolKey(chainId, pool)); }
 
-  async tick(cursors: Record<string, number>, opts?: { delayBlocks?: number; delaySec?: number }): Promise<{ cursors: Record<string, number>; hits: SnipeHit[]; notes: SniperNote[] }> {
+  /** `wants`: the chains the token trader trades; the others are not read. */
+  async tick(cursors: Record<string, number>, opts?: { delayBlocks?: number; delaySec?: number; wants?: (chainId: number) => boolean }): Promise<{ cursors: Record<string, number>; hits: SnipeHit[]; notes: SniperNote[] }> {
     const next = { ...cursors };
     const hits: SnipeHit[] = [];
     const notes: SniperNote[] = [];
     const delayBlocks = opts?.delayBlocks ?? this.d.delayBlocks ?? 2;
     const delaySec = opts?.delaySec ?? this.d.delaySec ?? 15;
     for (const c of this.d.chains) {
+      if (opts?.wants && !opts.wants(c.id)) continue;
       let head = 0;
       try { head = await this.d.source.head(c.id); } catch (e) { notes.push({ level: 'warn', msg: `${c.name}: no block height (${(e as Error).message})` }); continue; }
       await this.watchV4(c, head, next, hits, notes);

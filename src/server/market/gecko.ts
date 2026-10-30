@@ -18,6 +18,18 @@ export const GECKO_TF: Record<TF, [string, number]> = {
 
 export class RateLimited extends Error { constructor(public readonly retryAt: number) { super('GeckoTerminal rate limit (429)'); } }
 
+/**
+ * One retry after a 429 (GeckoSource waits out the back-off before the next request) or a GeckoTerminal 5xx
+ * (the real scan on 2026-10-17 lost ETH/USDC to a single HTTP 500; token discovery lost a chain's new pools to one
+ * 429 on 2026-10-30).
+ */
+export async function retryOnce<T>(fn: () => Promise<T>): Promise<T> {
+  try { return await fn(); } catch (e) {
+    if (e instanceof RateLimited || /GeckoTerminal HTTP 5\d\d/.test((e as Error).message)) return fn();
+    throw e;
+  }
+}
+
 /** Slowest spacing the adaptive pace backs off to (≈5 requests a minute). */
 export const MAX_GAP_MS = 12_000;
 /** Successful requests in a row before the spacing tightens by 0.5 s again. */
@@ -32,7 +44,9 @@ export const SPEEDUP_AFTER = 20;
 export class GeckoSource {
   private nextAt = 0;
   private backoffUntil = 0;
-  private chain: Promise<unknown> = Promise.resolve();
+  /** Waiting requests, urgent ones first, each lane in arrival order */
+  private readonly queue: { run: () => Promise<void>; urgent: boolean }[] = [];
+  private pumping = false;
   private gap: number;
   private okStreak = 0;
   calls = 0;
@@ -67,29 +81,45 @@ export class GeckoSource {
   /** 429s received in the last `ms` */
   limitedWithin(ms: number) { const from = this.now() - ms; return this.limits.filter((t) => t >= from).length; }
 
-  /** Throttled, serialized request. */
-  private request<T>(fn: () => Promise<T>): Promise<T> {
-    const run = async () => {
-      const wait = this.nextAt - this.now();
-      if (wait > 0) await this.sleep(wait);
-      this.nextAt = this.now() + this.gap;
-      this.calls++;
-      return fn();
-    };
-    const p = this.chain.then(run, run);
-    this.chain = p.catch(() => undefined);
-    return p;
+  /**
+   * Throttled, serialized request. An urgent one goes ahead of every waiting non-urgent one (2026-10-30: the token
+   * trader's new-pool reads waited behind the opportunity scan and the candle history, minutes at this pace).
+   */
+  private request<T>(fn: () => Promise<T>, urgent = false): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const job = { urgent, run: () => fn().then(resolve, reject) };
+      const at = urgent ? this.queue.findIndex((j) => !j.urgent) : -1;
+      if (at < 0) this.queue.push(job); else this.queue.splice(at, 0, job);
+      void this.pump();
+    });
   }
 
+  private async pump() {
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      for (let job = this.queue.shift(); job; job = this.queue.shift()) {
+        const wait = this.nextAt - this.now();
+        if (wait > 0) await this.sleep(wait);
+        this.nextAt = this.now() + this.gap;
+        this.calls++;
+        await job.run();
+      }
+    } finally { this.pumping = false; }
+  }
+
+  /** Requests waiting their turn (urgent and not) */
+  get waiting() { return this.queue.length; }
+
   /** One GeckoTerminal URL's JSON, paced and backed off like every call (also what the host relays for friends' copies). */
-  getJson(url: string): Promise<unknown> {
+  getJson(url: string, urgent = false): Promise<unknown> {
     return this.request(async () => {
       const r = await this.fetchFn(url, { headers: { accept: 'application/json' } });
       if (r.status === 429) throw this.limited();
       if (!r.ok) throw new Error(`GeckoTerminal HTTP ${r.status}`);
       this.succeeded();
       return r.json();
-    });
+    }, urgent);
   }
 
   /** Top pools of one DEX on a network by 24 h volume (20 per page). */
@@ -97,14 +127,14 @@ export class GeckoSource {
     return parseTopPools(await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${network}/dexes/${dex}/pools?sort=h24_volume_usd_desc&page=${page}`));
   }
 
-  /** Newly created pools on a network (one page). Same row shape as the top-pool list, including pool_created_at. */
+  /** Newly created pools on a network (one page; urgent: the token trader is waiting). Same row shape as the top-pool list, including pool_created_at. */
   async newPools(network: string, page = 1): Promise<TopPool[]> {
-    return parseTopPools(await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${network}/new_pools?page=${page}`));
+    return parseTopPools(await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${network}/new_pools?page=${page}`, true));
   }
 
-  /** Trending pools on a network (one page). */
+  /** Trending pools on a network (one page; urgent: the token trader is waiting). */
   async trendingPools(network: string, page = 1): Promise<TopPool[]> {
-    return parseTopPools(await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${network}/trending_pools?page=${page}`));
+    return parseTopPools(await this.getJson(`https://api.geckoterminal.com/api/v2/networks/${network}/trending_pools?page=${page}`, true));
   }
 
   /** `token` = base token address (price is quoted per base); o.network / o.feeBps override the defaults per market. */

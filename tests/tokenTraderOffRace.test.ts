@@ -72,7 +72,7 @@ describe('token trader: off wins over a tick already in flight', () => {
     const fresh = pool({ tokenSymbol: 'SNIPE', source: 'snipe' });
     const d = deferred<SnipeHit[]>();
     const s = make({ hits: () => d.p, resolve: async () => fresh });
-    s.t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, chains: {}, mevRpc: null } });
+    s.t.configure({ sniper: { on: true, minLiquidityUsd: 5_000, delayBlocks: 0, delaySec: 0, maxPerHour: 3, mevRpc: null } });
     s.t.turnOn();
     const tick = s.t.tick();
     s.t.turnOff();

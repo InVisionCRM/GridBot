@@ -37,8 +37,6 @@ export interface SniperOptions {
   delayBlocks: number;
   delaySec: number;
   maxPerHour: number;
-  /** chain id → watched. Missing means on when the sniper is on. */
-  chains: Record<number, boolean>;
   /** Ethereum send URL only (Flashbots Protect and the like). Quotes and limits are unchanged. */
   mevRpc: string | null;
 }
@@ -48,8 +46,8 @@ export interface TraderOptions {
   perTradeUsd: number;
   totalUsd: number;
   /**
-   * Scan discovery skips a pool younger than this when its age is known. Snipes do not use it there.
-   * When enforceWashAndAge is on, the gate uses the same number for scan pools, and an unknown age skips safe and medium.
+   * Only with enforceWashAndAge on: scan discovery skips a pool younger than this when its age is known, and the gate
+   * uses the same number for scan pools (an unknown age skips safe and medium).
    * Snipes are exempt from the age leg (they only get the wash-volume leg).
    */
   minPoolAgeSec: number;
@@ -347,7 +345,7 @@ export const DEFAULT_TRADER: TraderOptions = {
   minHolderCoverage: DEFAULT_MIN_HOLDER_COVERAGE,
   enforceSizeImpact: false, sizeImpactCap: DEFAULT_SIZE_IMPACT_CAP,
   venues: {},
-  sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, chains: {}, mevRpc: null },
+  sniper: { on: false, minLiquidityUsd: DEFAULT_SNIPER_MIN_LIQ_USD, delayBlocks: 2, delaySec: 15, maxPerHour: 3, mevRpc: null },
 };
 
 const fresh = (): TraderState => ({ version: 1, on: false, options: structuredClone(DEFAULT_TRADER), positions: [], trades: [], feed: [], cursors: {}, snipesAt: [], plays: [] });
@@ -382,13 +380,17 @@ export class TokenTrader {
   private pendingBuy: { chainId: number; address: string; amount: number } | null = null;
   private readonly rejects: RejectSink;
   lastError: string | null = null;
+  /** The last discovery run: when, and how many pools it found (the page's radar sweeps between runs) */
+  private lastLook: { at: number; found: number } | null = null;
 
   constructor(private readonly d: {
     store: Store<TraderState>;
     now?: () => number;
     emit?: Emit;
-    /** Scan discovery (new + trending pools, DexScreener). Sniper hits are separate. */
-    discover?: () => Promise<FreshPool[]>;
+    /** Scan discovery (new + trending pools). null = not due yet (no run). Sniper hits are separate. */
+    discover?: () => Promise<FreshPool[] | null>;
+    /** How often discovery runs (tokenFeed.discoverEveryMs for the chains it reads) */
+    lookEveryMs?: () => number;
     /** Safety inputs for a pool. Required before any buy. */
     assess?: (pool: FreshPool, mode: 'paper' | 'live', risk: TraderOptions['risk']) => Promise<GateInput>;
     /**
@@ -650,6 +652,8 @@ export class TokenTrader {
       /** Liquidity floor scan buys and the gate actually use (the setting, raised to $50,000 when that flag is on). */
       effectiveMinLiquidityUsd: this.floorUsd(),
       lastError: this.lastError,
+      /** Discovery: the last run and how often it runs */
+      look: { last: this.lastLook, everyMs: this.d.lookEveryMs?.() ?? null },
       entriesHalt: this.state.entriesHalt ?? null,
       lastHalt: this.state.lastHalt ?? null,
       /** Open positions whose exits (stops, take-profits) are still managed, also while new buys are stopped */
@@ -783,7 +787,7 @@ export class TokenTrader {
     if (o.mode === 'live') {
       if (!this.d.live) throw new Error('Live trading is not wired on this server.');
       // every chain it would trade, "every chain" (no list) included
-      const keyless = (this.d.liveChains?.() ?? []).filter((c) => this.wantChain(c.id) && !c.signer).map((c) => c.name);
+      const keyless = (this.d.liveChains?.() ?? []).filter((c) => this.wants(c.id) && !c.signer).map((c) => c.name);
       if (keyless.length) throw new Error(`Live needs a signing key on every chain it trades; there is none on ${keyless.join(', ')}. Pick only chains with a key, or add one.`);
     }
     this.state.on = true;
@@ -792,7 +796,7 @@ export class TokenTrader {
     const ageH = Math.round(o.minPoolAgeSec / 3600);
     const ageNote = o.enforceWashAndAge
       ? `pools at least ${ageH}h old, safe/medium skip an unknown age or wash volume; snipes skip only wash volume`
-      : `pools at least ${ageH}h old unless the sniper is on`;
+      : 'pools of any age (the wash and pool age check is off)';
     this.say(`token trader on (${o.mode}): up to ${usdAsEth(o.perTradeUsd)} a trade, ${usdAsEth(o.totalUsd)} open, ${ageNote}`);
     this.save();
   }
@@ -955,7 +959,8 @@ export class TokenTrader {
     });
   }
 
-  private wantChain(id: number) {
+  /** A chain the trader is set to trade ("Where": an empty list means every chain). Discovery and the sniper read only these. */
+  wants(id: number) {
     const c = this.state.options.chains;
     return !c.length || c.includes(id);
   }
@@ -1157,12 +1162,16 @@ export class TokenTrader {
       if (fee == null) { skip("could not read the pool's current fee"); return; }
       pool = { ...pool, feeBps: fee };
     }
+    // Its own reason: a full "Total open" read as "too thin" (2026-10-30: a paper run filled $500 on Robinhood, then
+    // skipped all 10 Base pools, deep ones included, as "size is under the limits or the pool is too thin")
+    const openUsd = this.openUsd();
+    if (!(o.totalUsd - openUsd > 0)) { skip(`Total open is used up (${usdAsEth(openUsd)} open of ${usdAsEth(o.totalUsd)}); buys start again as positions close`); return; }
     const sized = sizeBuy({
-      perTradeUsd: o.perTradeUsd, totalUsd: o.totalUsd, openUsd: this.openUsd(),
+      perTradeUsd: o.perTradeUsd, totalUsd: o.totalUsd, openUsd,
       quoteReserve: pool.quoteReserve, usdPerSpend: pool.usdPerSpend, feeBps: pool.feeBps,
       buyTax, price: pool.price, maxImpact: o.maxImpact, maxPoolShare: o.maxPoolShare || TOKEN_MAX_POOL_SHARE,
     });
-    if (!sized) { skip('size is under the limits or the pool is too thin'); return; }
+    if (!sized) { skip('the pool is too thin for a buy within the impact cap, or its price is unknown'); return; }
     let recordedImpact = sized.impact;
     if (o.enforceSizeImpact) {
       let impact: number | null = null;
@@ -1281,7 +1290,7 @@ export class TokenTrader {
       this.feed({ t: this.now(), chainId: pool.chainId, pool: pool.pool, label, verdict: 'skipped', why, stage });
       this.reject({ chainId: pool.chainId, pool: pool.pool, token: pool.token, signal: signalOf(pool.source), source: pool.dex, reason: why, price: pool.price, feeBps: pool.feeBps, spendSymbol: pool.spendSymbol });
     };
-    if (!this.wantChain(pool.chainId)) { skip('chain is off', 'rules'); return; }
+    if (!this.wants(pool.chainId)) { skip('chain is off', 'rules'); return; }
     if (this.entriesStopped(pool.chainId)) { skip('new buys are stopped (Stop all)', 'rules'); return; }
     const a = await this.assess(pool);
     if (!a.ok || !a.gate) { skip(a.reason ?? 'safety', 'checks'); this.say(`skipped ${label}: ${a.reason}`, 'warn'); return; }
@@ -1292,11 +1301,17 @@ export class TokenTrader {
     if (!this.d.discover) return;
     if (this.state.entriesHalt?.chains === null) return; // stopped everywhere: don't even look
     const pools = await this.d.discover();
+    if (pools == null) return; // not due yet
     if (!this.state.on) return; // turned off while discovery was pending (2026-10-27: 4 paper buys ~3 min after off)
     const scanned = pools.filter((p) => p.source !== 'snipe');
+    this.lastLook = { at: this.now(), found: scanned.length };
     this.funnelToday().scouted += scanned.length;
-    const { keep, skipped } = filterFresh(scanned, { now: this.now(), minAgeMs: this.state.options.minPoolAgeSec * 1000, minLiquidityUsd: this.floorUsd() });
-    for (const s of skipped) this.feed({ t: this.now(), chainId: 0, pool: s.pool, label: s.pool.slice(0, 8), verdict: 'skipped', why: s.why, stage: 'rules' });
+    // The minimum age is part of the "wash and pool age" check: off, new pools are looked at too (2026-10-30: it applied
+    // in every style, and every pool of GeckoTerminal's new-pools lists was under 24 h old, so half of discovery was
+    // thrown away before any check, in Wild too)
+    const o = this.state.options;
+    const { keep, skipped } = filterFresh(scanned, { now: this.now(), minAgeMs: o.enforceWashAndAge ? o.minPoolAgeSec * 1000 : 0, minLiquidityUsd: this.floorUsd() });
+    for (const s of skipped) this.feed({ t: this.now(), chainId: s.pool.chainId, pool: s.pool.pool, label: `${s.pool.tokenSymbol}/${s.pool.spendSymbol}`, verdict: 'skipped', why: s.why, stage: 'rules' });
     const eligible: FreshPool[] = [];
     for (const p of keep) {
       if (!this.state.on) break;
@@ -1305,26 +1320,36 @@ export class TokenTrader {
         this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why, stage: 'rules' });
         this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
       };
-      if (!this.wantChain(p.chainId)) { skip('chain is off'); continue; }
+      if (!this.wants(p.chainId)) { skip('chain is off'); continue; }
       if (p.venue && this.state.options.venues[p.venue] === false) { skip(`${VENUES.find((v) => v.id === p.venue)?.name ?? p.venue} is switched off`); continue; }
       if (this.entriesStopped(p.chainId)) { skip('new buys are stopped (Stop all)'); continue; }
       eligible.push(p);
     }
-    // Safety reads, including LP checks, overlap. Each check has its own timeout, so one pool cannot stall the rest.
-    const checked = await Promise.all(eligible.map(async (p) => ({ p, a: await this.assess(p) })));
-    for (const { p, a } of checked) {
-      if (!this.state.on) break; // turned off while the safety reads were pending
-      const label = `${p.tokenSymbol}/${p.spendSymbol}`;
-      if (!a.ok || !a.gate) {
-        const why = a.reason ?? 'safety';
-        this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why, stage: 'checks' });
-        this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
-        this.say(`skipped ${label}: ${a.reason}`, 'warn');
-        continue;
-      }
-      // one buy that fails (a send error, no key on its chain) is recorded; the other pools still get their turn
-      try { await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn, a.note); } catch (e) { this.lastError = `${label}: ${(e as Error).message}`; }
+    // Safety reads, including LP checks, overlap, and each pool is decided as soon as its own check finishes, one
+    // decision at a time in the order they finish (2026-10-30: a batch of 29 checks took 4 min, single Robinhood checks
+    // 34-52 s, and nothing was shown or bought until the slowest one finished).
+    let line: Promise<void> = Promise.resolve();
+    await Promise.all(eligible.map(async (p) => {
+      const a = await this.assess(p);
+      const turn = line.then(() => this.decideScanned(p, a));
+      line = turn;
+      await turn;
+    }));
+  }
+
+  /** A scanned pool after its safety check: skipped with the reason, or bought. */
+  private async decideScanned(p: FreshPool, a: Awaited<ReturnType<TokenTrader['assess']>>) {
+    if (!this.state.on) return; // turned off while the safety reads were pending
+    const label = `${p.tokenSymbol}/${p.spendSymbol}`;
+    if (!a.ok || !a.gate) {
+      const why = a.reason ?? 'safety';
+      this.feed({ t: this.now(), chainId: p.chainId, pool: p.pool, label, verdict: 'skipped', why, stage: 'checks' });
+      this.reject({ chainId: p.chainId, pool: p.pool, token: p.token, signal: signalOf(p.source), source: p.dex, reason: why, price: p.price, feeBps: p.feeBps, spendSymbol: p.spendSymbol });
+      this.say(`skipped ${label}: ${a.reason}`, 'warn');
+      return;
     }
+    // one buy that fails (a send error, no key on its chain) is recorded; the other pools still get their turn
+    try { await this.buy(p, 'scan', a.buyTax, a.sellTax, a.gate, a.warn, a.note); } catch (e) { this.lastError = `${label}: ${(e as Error).message}`; }
   }
 
   private hourRoom() {
@@ -1336,7 +1361,7 @@ export class TokenTrader {
   private async takeSnipes() {
     const sn = this.state.options.sniper;
     if (!sn.on || !this.d.sniper) return;
-    const { cursors, hits: all, notes } = await this.d.sniper.tick(this.state.cursors, { delayBlocks: sn.delayBlocks, delaySec: sn.delaySec });
+    const { cursors, hits: all, notes } = await this.d.sniper.tick(this.state.cursors, { delayBlocks: sn.delayBlocks, delaySec: sn.delaySec, wants: (id) => this.wants(id) });
     this.state.cursors = cursors;
     // V4 creations the sniper can't buy (it reads Ethereum's PoolManager and has no pool key route) go to the reject
     // log only: counting them as found, then filtered, buried the funnel (2026-10-30: 1,474 found, 1,474 out).
@@ -1353,7 +1378,6 @@ export class TokenTrader {
         this.feed({ t: this.now(), chainId: hit.chainId, pool: hit.pool, label, verdict: 'skipped', why: reason, stage: 'rules' });
         this.reject({ chainId: hit.chainId, pool: hit.pool, token, signal: 'snipe', source: hit.dex, reason, price: null, feeBps: hit.fee != null ? hit.fee / 100 : null });
       };
-      if (sn.chains[hit.chainId] === false) { rejectHit('sniper is off for this chain', hit.pool.slice(0, 8)); continue; }
       const pool = await this.d.resolve?.(hit) ?? null;
       if (!pool) { rejectHit('could not price the new pool', hit.pool.slice(0, 8)); continue; }
       const minLiq = Math.max(sn.minLiquidityUsd, this.floorUsd());
@@ -1449,11 +1473,21 @@ export class TokenTrader {
 
   private async exits() {
     const left: Position[] = [];
+    // Every position's price is read at once; the exits below still go one by one (2026-10-30: read one after another,
+    // 11 open positions took minutes on Robinhood and held back each discovery behind them)
+    const marks = new Map<string, Promise<{ m: Partial<Position> | null } | { e: unknown }>>();
+    if (this.d.mark) for (const p of this.state.positions) marks.set(p.id, this.d.mark(p).then((m) => ({ m }), (e: unknown) => ({ e })));
     for (const p of this.state.positions) {
       // Turned off completely while this loop was awaiting: leave the rest alone.
       if (!this.canSell()) { left.push(p); continue; }
-      if (this.d.mark) {
-        const m = await this.d.mark(p);
+      const read = marks.get(p.id);
+      if (read) {
+        // One pool whose price can't be read keeps its last price; it doesn't stop the other exits and every buy (a
+        // throw here failed the whole tick, and a failed exit pass skips entries: 2026-10-30, a thin V4 pool's quote
+        // reverted on each tick and the trader bought nothing more)
+        const r = await read;
+        if ('e' in r) this.lastError = `${p.label}: price read failed, last price kept (${(r.e as Error).message.slice(0, 120)})`;
+        const m = 'm' in r ? r.m : null;
         if (m) {
           Object.assign(p, m);
           if (Object.prototype.hasOwnProperty.call(m, 'feeBps')) this.noteFeeReread(p.id);

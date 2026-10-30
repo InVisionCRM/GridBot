@@ -227,10 +227,10 @@ const server = app.listen(cfg.port, '127.0.0.1', async () => {
   bot.startLoop(cfg.pollMs);
   sync.start();
   dailyScan?.start();
-  // A first check at once: its prices and unconfirmed swaps are read now, not a minute after a restart
+  // A first check at once: its prices and unconfirmed swaps are read now, not 15 s after a restart
   void autopilot.tick();
-  autopilotTimer = setInterval(() => void autopilot.tick(), 60_000);
-  tokenTimer = setInterval(() => void tokenTrader?.tick(), 20_000);
+  autopilotTimer = setInterval(() => void autopilot.tick(), 15_000);
+  tokenTimer = setInterval(() => void tokenTrader?.tick(), 10_000);
   if (hub.runtimes().some((rt) => rt.signer)) {
     walletTimer = setInterval(() => {
       holdingsSnapshot(bot, fetchJson).then((s) => wallet.history.note(s)).catch((e: Error) => log.warn(`wallet history: ${e.message}`));

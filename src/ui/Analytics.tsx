@@ -116,7 +116,7 @@ export function ModeAnalytics({ s, mode, seed }: { s: AnyObj; mode: 'live' | 'pa
     let dead = false;
     const load = () => http(`/api/analytics/overview?mode=${mode}`).then((o) => !dead && setOv(o)).catch(() => undefined);
     void load();
-    const t = setInterval(load, 20_000);
+    const t = setInterval(load, 10_000);
     return () => { dead = true; clearInterval(t); };
   }, [sig, mode]);
   useEffect(() => { void http(`/api/analytics/journal?limit=300&${qs}`).then(setJ).catch(() => undefined); }, [qs, sig]);
