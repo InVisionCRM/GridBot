@@ -246,6 +246,15 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s2.position!.feesBefore).toEqual(s2.totals.feeCoins);
     expect(s2.positionFees!.coins.base).toBeCloseTo(p2.feeCoins.base - s2.totals.feeCoins.base, 12);
     expect(s2.positionFees!.coins.quote).toBeCloseTo(p2.feeCoins.quote - s2.totals.feeCoins.quote, 12);
+    // the collection itself is recorded: the coins taken out at the move, and why
+    expect(s0.collections).toEqual([]);
+    expect(s2.collections).toHaveLength(1);
+    expect(s2.collections[0]).toMatchObject({ why: 'moved', base: s2.totals.feeCoins.base, quote: s2.totals.feeCoins.quote });
+    // closing collects what the new position earned: the newest entry says so (a collection of nothing isn't recorded)
+    m.addFees(pool, Q128 / 10n ** 6n, Q128 / 10n ** 6n);
+    await lp.tick();
+    expect(lp.close()).toBe(false);
+    expect(lp.status().collections[0].why).toBe('closed');
   });
 
   it('paper close takes the position out from the last reading and keeps both coins', async () => {
