@@ -1950,6 +1950,8 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 }
 @media (max-width: 600px) {
   .tk-styles { grid-template-columns: 1fr; }
+  .tk-exit { grid-template-columns: 78px minmax(0, 1fr) auto; gap: 6px; font-size: 0.72rem; }
+  .tk-exit b { font-size: 0.72rem; }
   .tk-amounts { grid-template-columns: 1fr 1fr; }
   .tk-hero { padding: 16px; gap: 14px; }
   .tk-orb { width: 64px; height: 64px; } .tk-orb b { width: 42px; height: 42px; }
