@@ -7,7 +7,7 @@
  * through the injected broker (the chain's signer; an optional Ethereum MEV URL changes only the broadcast).
  */
 import { usdAsEth } from '../../lib/ethUnits';
-import { tokenMetrics, tokenSpendTotals } from '../../metrics/botMetrics';
+import { positionMetrics, tokenMetrics, tokenSpendTotals } from '../../metrics/botMetrics';
 import { chainById } from '../../live/chains';
 import { DEFAULT_MAX_HOLDER_SHARE, DEFAULT_MAX_TOP10_SHARE, DEFAULT_MIN_HOLDER_COVERAGE, clampHolderCoverage, clampHolderShare } from '../../market/holders';
 import { HARD_CAPS, type SafetyLimits } from '../../live/limits';
@@ -709,12 +709,14 @@ export class TokenTrader {
       const share = p.entryTokens > 0 ? p.tokens / p.entryTokens : 0;
       // the pool route is the server's (quoter internals); the page gets whether there is one
       const { market, ...pub } = p;
-      return {
+      const row = {
         ...pub, routed: !!market, pnlUsd, pnl, spendSym: this.spendSymbol(p), tokenSym: p.label.split('/')[0].trim(), pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p),
         /** What it is worth now in its spend coin (what it cost, plus its open result) */
         value: pnl == null ? null : p.spent * share + pnl,
         exits: exitTargets(this.exitOf(p)),
       };
+      /** Its own figures (value, P&L, Generated, age, estimates): the Bots tab row reads these */
+      return { ...row, metrics: positionMetrics(row, this.posGenerated(p), this.now()) };
     });
     const out = {
       ...rest, id: 'token-trader', kind: 'token' as const,
