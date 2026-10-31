@@ -127,6 +127,30 @@ describe('the exits a card lists include the pool watch', () => {
   });
 });
 
+describe('an empty pool: the position is closed as a total loss, paper and live', () => {
+  for (const mode of ['paper', 'live'] as const) {
+    it(`${mode}: closed with the reason, nothing received, the whole cost in Generated as a loss`, async () => {
+      const { t, later } = trader();
+      await t.tick(); // buys (paper)
+      const st = (t as unknown as { state: TraderState }).state;
+      const p = st.positions[0];
+      if (mode === 'live') p.mode = 'live';
+      const before = Object.values(st.generated!).find((l) => l.mode === mode)?.cost ?? 0;
+      const costCoin = p.spent;
+      (t as unknown as { d: { mark: (p: Position) => Promise<Partial<Position>> } }).d.mark = async () => ({ emptyPool: true, liq: 0 });
+      later(10_000); await t.tick();
+      expect(t.status().positions).toHaveLength(0);
+      const row = t.status().trades[0];
+      expect(row).toMatchObject({ side: 'sell', mode, amount: 0, usd: 0, why: 'pool has no liquidity: closed as a total loss (nothing can be sold)' });
+      expect(row.pnl).toBeCloseTo(-costCoin, 12);
+      const l = Object.values(st.generated!).find((x) => x.mode === mode)!;
+      expect(l.proceeds).toBe(0);
+      // the buy fee was booked at the buy; the close books the rest of the cost: the whole spend is now a loss
+      expect(l.cost - before).toBeCloseTo(costCoin - p.spent * (p.feeBps / 10_000), 9);
+    });
+  }
+});
+
 describe("a read that fails shows on that position's card", () => {
   it('readError is set (last price kept) and cleared by the next read that works', async () => {
     const { t, depth, later, pos } = trader();

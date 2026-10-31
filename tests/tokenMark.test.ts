@@ -126,7 +126,7 @@ describe('position marks from the pool', () => {
     const hub = fakeHub({ quote: 40, token: 1e6 });
     let fail = true;
     const q = hub.draftQuoter;
-    hub.draftQuoter = () => ({ market: async () => { if (fail) throw new Error('execution reverted'); return q().market(); } });
+    hub.draftQuoter = () => ({ market: async () => { if (fail) throw new Error('execution reverted'); return q().market(); }, depth: async () => ({ quoteReserve: 40, plsReserve: 1e6 }) });
     const mark = positionMarker(hub as never, () => NOW);
     await mark(position()); await settle(); // check done, route built
     await expect(mark(position())).rejects.toThrow('execution reverted');
@@ -146,9 +146,19 @@ describe('position marks from the pool', () => {
     expect(hub.calls.inspect).toBe(MARK_CHECKS_PER_CHAIN);
   });
 
-  it('a pool that reads empty is an error (the card shows it), not a silent old price', async () => {
-    const hub = fakeHub({ quote: 0, token: 1e6 });
-    await expect(positionMarker(hub as never, () => NOW)(position({ market: ROUTE, checkedAt: NOW }))).rejects.toThrow('the pool reads empty');
+  it('an empty pool: a quote that reverts on a pool with no depth, or reserves at 0, reads as emptyPool (no price)', async () => {
+    const p = position({ market: ROUTE, checkedAt: NOW });
+    // TGLN/WETH on Base, 2026-10-31: liquidity 0 at its price; the quoter reverted "Unexpected error" for any amount
+    const reverting = { market: async () => { throw new Error('execution reverted: "Unexpected error"'); }, depth: async () => ({ quoteReserve: 0, plsReserve: 0 }) };
+    expect(await positionMarker({ inspect: async () => ({}), draftQuoter: () => reverting } as never, () => NOW)(p)).toEqual({ emptyPool: true, liq: 0 });
+    const zero = fakeHub({ quote: 0, token: 1e6 });
+    expect(await positionMarker(zero as never, () => NOW)(p)).toEqual({ emptyPool: true, liq: 0 });
+  });
+
+  it('a read that fails on a pool that still has depth stays a read error', async () => {
+    const p = position({ market: ROUTE, checkedAt: NOW });
+    const failing = { market: async () => { throw new Error('timeout'); }, depth: async () => ({ quoteReserve: 40, plsReserve: 1e6 }) };
+    await expect(positionMarker({ inspect: async () => ({}), draftQuoter: () => failing } as never, () => NOW)(p)).rejects.toThrow('timeout');
   });
 
   it('with the marker, a position that falls 30% is sold on the hard stop instead of waiting for the time stop', async () => {

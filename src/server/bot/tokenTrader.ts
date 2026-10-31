@@ -172,6 +172,8 @@ export interface Position {
   /** When the last safety check of this position's pool finished, and why it measured nothing when it didn't */
   checkedAt?: number;
   checkNote?: string | null;
+  /** The pool has no liquidity at its price (or a side at 0): no swap of any size can go through. Closed as a total loss. */
+  emptyPool?: boolean;
   /** Pool watch: the deepest on-chain liquidity seen since the buy, and when the pool's depth last changed */
   liqPeak?: number;
   movedAt?: number;
@@ -803,6 +805,21 @@ export class TokenTrader {
     const fee = gross * (1 - t) * f, tax = gross * t;
     g.costSold += basis; g.proceeds += quote; g.fees += fee; g.taxes += tax; g.gasNative += gasNative;
     l.cost += basis; l.proceeds += quote; l.fees += fee; l.taxes += tax; l.gasNative += gasNative; l.fills++; if (countClose) l.closed++;
+  }
+  /**
+   * The pool is empty (no liquidity at its price, or a side at 0): no sell of any size can go through, so the position is
+   * closed as a total loss, paper and live alike (Kyle, 2026-10-31: "yes, close it on live and paper"). Its tokens count
+   * as sold for nothing; a live position's tokens stay in the wallet, worth nothing unless the pool is refilled.
+   */
+  private writeOff(p: Position) {
+    const tokens = p.tokens, cost = p.spentUsd * (p.entryTokens > 0 ? tokens / p.entryTokens : 0);
+    const costCoin = p.spent * (p.entryTokens > 0 ? tokens / p.entryTokens : 0);
+    const why = 'pool has no liquidity: closed as a total loss (nothing can be sold)';
+    this.bookSell(p, tokens, 0, 0, true);
+    p.tokens = 0;
+    this.state.trades.unshift({ t: this.now(), side: 'sell', mode: p.mode, chainId: p.chainId, pool: p.pool, label: p.label, usd: 0, price: 0, why, pnlUsd: -cost, spendSym: this.spendSymbol(p), amount: 0, pnl: -costCoin });
+    this.noteSell(p, { quote: 0, sold: tokens, price: 0, impact: null, txs: [], flat: true, gas: null });
+    this.say(`${p.label}: ${why}${p.mode === 'live' ? `; its ${tokens} tokens stay in the wallet` : ''}`, 'warn', { mode: p.mode, notify: p.mode === 'live' });
   }
   /** Tokens left the wallet without a known fill (see reconcile): counted, not priced */
   private bookUnpriced(p: Position) {
@@ -1615,6 +1632,7 @@ export class TokenTrader {
         if (!(await this.reconcile(p))) { p.exitPlan = this.blocked(p) ?? p.exitPlan; left.push(p); continue; }
         if (!(p.tokens > p.entryTokens * 1e-8)) continue;
       }
+      if (p.emptyPool) { this.writeOff(p); continue; }
       const ex = this.exitOf(p);
       const d: ReturnType<typeof decideExit> = p.sellNow ? { action: 'sell', frac: Math.max(0, Math.min(1, ex.remainingFrac)), why: 'sold by hand (Sell now)' } : decideExit(ex);
       p.exitPlan = d.action === 'hold' ? 'hold' : d.why;
