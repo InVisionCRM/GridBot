@@ -23,6 +23,7 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
     return () => { dead = true; clearInterval(t); };
   }, []);
   const [pend, setPend] = useState<Set<string>>(new Set());
+  const [resetNote, setResetNote] = useState<string | null>(null);
   const here = (b: AnyObj) => chain === 'all' || (b.chainId ?? s.legacyChainId) === chain;
   const all: AnyObj[] = [
     ...s.grids.map((g: AnyObj) => ({ ...g, kind: 'grid' })),
@@ -56,6 +57,20 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
       setHide(new Set()); setPend(new Set()); setRowErr(e.message);
     });
   };
+  /** Every paper bot (all chains, closed ones too), the token trader's paper positions and history, the Smart trader's paper books */
+  const resetPaper = () => {
+    const paperBots = [...s.grids, ...(s.trends ?? []), ...(s.lps ?? [])].filter((b: AnyObj) => b.mode !== 'live').length;
+    const paperPositions = ((trader?.positions ?? []) as AnyObj[]).filter((p) => p.mode !== 'live').length;
+    if (!confirm(`Reset paper on every chain? This removes ${paperBots} paper bot${paperBots === 1 ? '' : 's'} (closed ones too), the token trader's ${paperPositions} paper position${paperPositions === 1 ? '' : 's'} and its paper trades and Generated, and the Smart trader's paper books (its budgets and settings stay). Live bots, live positions and live history are not touched. This can't be undone.`)) return;
+    setRowErr(null);
+    setResetNote(null);
+    void http<AnyObj>('/api/paper/reset', 'POST').then((r) => {
+      const b = r.bots ?? {};
+      const parts = [`${(b.grids ?? 0) + (b.trends ?? 0) + (b.lps ?? 0)} paper bots`, r.token ? `${r.token.positions} token-trader positions and ${r.token.trades} trades` : null, r.smart?.accounts ? `${r.smart.accounts} Smart trader book${r.smart.accounts === 1 ? '' : 's'}` : null].filter(Boolean);
+      setResetNote(`Paper reset: removed ${parts.join(', ')}. Live was not touched.`);
+      return refresh();
+    }).catch((e: Error) => setRowErr(e.message));
+  };
   const clearClosed = () => {
     setRowErr(null);
     void botApi('archive-closed', 'POST', chain === 'all' ? {} : { chainId: chain }).then(() => refresh()).catch((e: Error) => setRowErr(e.message));
@@ -80,6 +95,7 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
       {low.map((c) => <p key={c.id} className="note">Low gas on {c.name}.</p>)}
       {checking && <SafetyChecking what="Checking safety before resuming…" />}
       {(err || rowErr) && <p className="note bad">{err || rowErr}</p>}
+      {resetNote && <p className="note">{resetNote}</p>}
       {(bots.length > 0 || traders.length > 0)
         ? <DeskTable s={s} bots={[...bots, ...traders]} nav={nav} pause={pause} close={close} />
         : <p className="muted home-empty">No bots{chain !== 'all' ? ' on this chain' : ''}. Start a grid above, in paper, to watch it with live prices.</p>}
@@ -87,6 +103,7 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
         <button type="button" className="text-stop" disabled={busy || running === 0} onClick={onStopAll}>Stop all</button>
         {closable.length > 0 && <button type="button" onClick={closeAll}>Close all</button>}
         {canClear && <button type="button" onClick={clearClosed}>Clear closed</button>}
+        <button type="button" onClick={resetPaper}>Reset paper</button>
         {kept > 0 && <button type="button" onClick={() => nav({ v: 'tools', tab: 'analytics' })}>{kept} closed in Analytics</button>}
       </p>
     </main>

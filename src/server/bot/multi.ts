@@ -631,6 +631,27 @@ export class MultiBot {
     return { ok: true, archived: n };
   }
 
+  /**
+   * Restart paper clean: every bot not marked live (grid, trend, liquidity; running, stopped or closed) and the paper
+   * value history go. Live bots and their history are not touched. Paper sends nothing, so nothing is in flight to
+   * settle; it runs between the poll's awaits, so a tick in progress never sees a half-removed set.
+   */
+  resetPaper() {
+    const paper = (m: Mode) => m !== 'live';
+    const n = { grids: 0, trends: 0, lps: 0 };
+    for (const [id, e] of this.engines) if (paper(e.state.mode)) { this.engines.delete(id); n.grids++; }
+    for (const [id, e] of this.trendEngines) if (paper(e.state.mode)) { this.trendEngines.delete(id); n.trends++; }
+    for (const [id, e] of this.lpEngines) if (paper(e.state.mode)) { this.lpEngines.delete(id); n.lps++; }
+    this.multi.grids = this.multi.grids.filter((b) => !paper(b.mode));
+    this.multi.trends = this.multi.trends.filter((b) => !paper(b.mode));
+    this.multi.lps = this.multi.lps.filter((b) => !paper(b.mode));
+    this.multi.portfolio.paper = [];
+    this.persist();
+    this.d.log.info(`paper reset: removed ${n.grids} grid, ${n.trends} trend and ${n.lps} liquidity bots`);
+    this.activity.emit('status');
+    return n;
+  }
+
   remove(id: string) {
     const eng = this.engines.get(id);
     if (eng && eng.state.status === 'running') eng.stop(systemHalt('remove', 'Removed', this.now()));
