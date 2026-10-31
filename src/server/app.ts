@@ -256,6 +256,14 @@ export function createApp(o: AppOpts) {
     const raw = req.body?.chainId;
     return bot.archiveClosed(raw == null || raw === '' ? undefined : Number(raw));
   }));
+  // Restart paper clean: the Smart trader's paper books first (so it never manages bots being removed), then every
+  // paper bot, then the token trader's paper positions and history. Live is never touched. A part this app doesn't run
+  // has nothing to reset (null).
+  app.post('/api/paper/reset', wrap(() => ({
+    smart: o.autopilot ? o.autopilot.resetPaper() : null,
+    bots: bot.resetPaper(),
+    token: o.tokenTrader ? o.tokenTrader.resetPaper() : null,
+  })));
 
   // ── Chains / custom markets ──────────────────────────────────────────
   app.get('/api/chains', wrap(() => ({

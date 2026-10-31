@@ -990,6 +990,28 @@ describe('LP bot in the app: API, status, restart, money split', () => {
     return { ...w, bot, store, call, close: () => new Promise((r) => server.close(r)) };
   }
 
+  it('Reset paper (POST /api/paper/reset): paper liquidity bots go; a live one is left byte-identical', async () => {
+    const store = new MemoryStore<MultiState>();
+    const a = await serve(store);
+    await a.bot.addLp({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: false });
+    await a.bot.tickAll();
+    await a.close();
+    const s = store.load()!;
+    const live = { ...JSON.parse(JSON.stringify(s.lps[0])), id: 'live-lp', mode: 'live', status: 'stopped' };
+    s.lps.push(live);
+    store.save(s);
+    const b = await serve(store);
+    const before = JSON.stringify(store.load()!.lps.filter((x) => x.mode === 'live'));
+    const r = await b.call('POST', '/api/paper/reset');
+    expect(r.status).toBe(200);
+    expect(r.body.bots).toEqual({ grids: 0, trends: 0, lps: 1 });
+    expect(r.body.smart).toBeNull();
+    expect(r.body.token).toBeNull();
+    expect(store.load()!.lps.map((x) => x.id)).toEqual(['live-lp']);
+    expect(JSON.stringify(store.load()!.lps)).toBe(before);
+    await b.close();
+  });
+
   it('a closed bot is worth its coins after a restart too (it is never read again once closed)', async () => {
     const store = new MemoryStore<MultiState>();
     const a = await serve(store);

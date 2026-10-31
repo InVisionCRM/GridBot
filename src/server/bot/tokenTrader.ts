@@ -643,6 +643,25 @@ export class TokenTrader {
 
   private now() { return (this.d.now ?? Date.now)(); }
   private save() { this.d.store.save(this.state); }
+
+  /**
+   * Restart paper clean: paper positions, paper trades, paper Generated, paper scoreboard records and the paper start
+   * go; live ones stay. Missing mode reads as paper, as everywhere (botMetrics). A scoreboard record has no mode: a paper
+   * buy records no transaction (tx_entry null), a live buy always records its hash. On/off and settings are kept.
+   */
+  resetPaper() {
+    const live = (m: TradeMode | undefined) => m === 'live';
+    const before = { positions: this.state.positions.length, trades: this.state.trades.length };
+    this.state.positions = this.state.positions.filter((p) => live(p.mode));
+    this.state.trades = this.state.trades.filter((t) => live(t.mode));
+    for (const [k, l] of Object.entries(this.state.generated ?? {})) if (!live(l.mode)) delete this.state.generated![k];
+    this.state.plays = this.state.plays.filter((x) => x.tx_entry != null);
+    if (this.state.startedAt) delete this.state.startedAt.paper;
+    this.save();
+    const n = { positions: before.positions - this.state.positions.length, trades: before.trades - this.state.trades.length };
+    this.say(`paper reset: ${n.positions} paper positions and ${n.trades} paper trades removed; live untouched`, 'info');
+    return n;
+  }
   private say(msg: string, level: 'info' | 'warn' | 'success' = 'info', extra?: { notify?: boolean; data?: Record<string, unknown>; mode?: 'paper' | 'live' }) {
     const { mode, ...rest } = extra ?? {};
     this.d.emit?.({ type: 'info', kind: 'system', level, msg, ...rest, ...(mode ? { mode } : {}) });

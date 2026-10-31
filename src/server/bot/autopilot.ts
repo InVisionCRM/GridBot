@@ -182,6 +182,23 @@ export class Autopilot {
 
   private now() { return (this.d.now ?? Date.now)(); }
   private save() { this.d.store.save(this.state); }
+
+  /**
+   * Restart paper clean: in paper mode its books go (accounts: coins, bots, pending swaps, loss baseline) and the next
+   * review starts from the budgets again; budgets, settings and on/off stay. Its paper bots are removed with every
+   * other paper bot (MultiBot.resetPaper). In live mode nothing changes.
+   */
+  resetPaper() {
+    if (this.state.mode !== 'paper') return { accounts: 0 };
+    const n = this.state.accounts.length;
+    this.state.accounts = [];
+    this.state.closeAll = false;
+    this.state.reviewedAt = null;
+    this.state.scanAt = null;
+    this.say(`paper reset: ${n} paper ${n === 1 ? 'book' : 'books'} cleared; the next review starts from the budgets`);
+    this.save();
+    return { accounts: n };
+  }
   private get hub() { return this.d.bot.hub; }
   private say(m: string, level: AutoEntry['level'] = 'info', chainId?: number) {
     this.state.log.push({ t: this.now(), level, msg: m, ...(chainId != null ? { chainId } : {}) });
