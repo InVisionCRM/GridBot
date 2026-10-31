@@ -2,7 +2,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { TokenTraderPage } from '../src/ui/TokenTraderPage';
+import { ExitLine, TokenTraderPage } from '../src/ui/TokenTraderPage';
 import { SmartTrader } from '../src/ui/SmartTrader';
 import { DEPTH, STYLES, lookCycle, radarBlips, radarSectors, scorecard, styleOf } from '../src/ui/tokenModel';
 import { normalizeView } from '../src/ui/model';
@@ -74,12 +74,45 @@ describe('the page', () => {
     expect(html).toMatch(/Today&#x27;s funnel/);
     for (const st of ['Careful', 'Balanced', 'Wild']) expect(html).toContain(`<b>${st}</b>`);
     expect(html).toMatch(/How much/);
-    expect(html).toMatch(/Sell now/);
-    expect(html).toMatch(/Stop-loss/);
+    // positions are cards: a front and a back to flip between, the exit track, the time stop, Exits closed, Sell now
+    expect(html).toMatch(/<article class="tk-pc up ">/);
+    expect(html).toMatch(/class="tk-pc-face tk-pc-front" aria-hidden="false"/);
+    expect(html).toMatch(/class="tk-pc-face tk-pc-back" aria-hidden="true"/);
+    expect(html).toMatch(/class="tk-pc-flipbtn" tabindex="0">Flip/);
+    expect(html).toMatch(/<dt>Bought at<\/dt>/);
+    expect(html).toMatch(/<dt>Highest since buy<\/dt><dd>\+7.1% vs the buy<\/dd>.*<dt>Sell tax<\/dt><dd>0.0%<\/dd>/);
+    expect(html).not.toMatch(/NaN/);
+    expect(html).toMatch(/class="tk-pc-drop" aria-expanded="false">Exits/);
+    expect(html).not.toMatch(/tk-pc-exits/);
+    expect(html).toMatch(/<button type="button" class="tk-sell">Sell now<\/button>/);
     expect(html).toMatch(/Scorecard/);
     expect(html).toMatch(/Advanced/);
     // nothing on the page loops on its own: motion comes from runs, coins and counts
     expect(html).not.toMatch(/tk-flow|tk-cross/);
+  });
+  it('a card with a price read shows the exit track: the result now between the stop and the last take-profit, and the time stop', () => {
+    const exits = [
+      { key: 'stop', does: 'sells all at −25%', move: -0.25, at: -0.25 },
+      { key: 'trail', does: 'arms at +30%', move: 0.3, at: 0.3, armed: false },
+      { key: 'tp1', does: 'sells a third at +50%', move: 0.5, at: 0.5, done: false },
+      { key: 'tp2', does: 'sells a third at +100%', move: 1, at: 1, done: false },
+      { key: 'time', does: 'sells all at 6 h if under +10%', move: null, msLeft: 5 * 3600_000, ms: 6 * 3600_000 },
+    ];
+    const seed = { ...TRADER, positions: TRADER.positions.map((p: Record<string, unknown>) => ({ ...p, exits })) };
+    const html = renderToStaticMarkup(createElement(TokenTraderPage, { s: S, nav: () => undefined, seed, now: NOW }));
+    // at the buy (result 0): the dot a fifth of the way along, labels at the stop, the trail, the first and last take-profit
+    expect(html).toMatch(/aria-label="result \+0.0%: stop at −25%, last take-profit at \+100%"/);
+    expect(html).toMatch(/class="tk-pc-dot up" style="left:20%"/);
+    expect(html).toMatch(/<span class="is-stop" style="left:0%">−25%<\/span><span class="is-trail" style="left:44%">\+30%<\/span><span class="is-tp1" style="left:60%">\+50%<\/span><span class="is-tp2" style="left:100%">\+100%<\/span>/);
+    expect(html).toMatch(/<span>Time stop<\/span>.*width:16.66.*5h 00m left/);
+  });
+  it('an exit line says what the rule does and how far the price is from it', () => {
+    const line = (x: Record<string, unknown>) => renderToStaticMarkup(createElement(ExitLine, { x: { does: 'sells all at −25%', ...x } }));
+    expect(line({ key: 'stop', move: -0.251 })).toMatch(/<b>Stop-loss<\/b><small>sells all at −25%<\/small><\/span><em>−25.1% away<\/em>/);
+    expect(line({ key: 'trail', armed: false, move: 0.3 })).toMatch(/<b>Trailing stop \(not armed\)<\/b>.*<em>\+30.0% away<\/em>/);
+    expect(line({ key: 'tp1', done: true })).toMatch(/class="tk-pc-exit is-tp1 done".*<em>taken<\/em>/);
+    expect(line({ key: 'time', msLeft: 3_420_000 })).toMatch(/<b>Time stop<\/b>.*<em>0h 57m left<\/em>/);
+    expect(line({ key: 'time', msLeft: 0, does: 'off: up over +10%' })).toMatch(/<em>off<\/em>/);
   });
   it('the radar says when the next look is and what the last one found', () => {
     const html = renderToStaticMarkup(createElement(TokenTraderPage, { s: S, nav: () => undefined, seed: { ...TRADER, look: { last: { at: NOW - 10_000, found: 7 }, everyMs: 30_000 } }, now: NOW }));

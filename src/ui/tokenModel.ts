@@ -92,3 +92,37 @@ export function lookCycle(look: AnyObj | null | undefined, now: number): { elaps
   const elapsed = Math.max(0, now - at);
   return { elapsed, everyMs: every, inMs: Math.max(0, every - elapsed) };
 }
+
+export interface TrackMark { key: string; at: number; x: number; done: boolean }
+export interface ExitTrack {
+  /** The result now after costs (the exit math's), and its place on the track (0..100) */
+  now: number; x: number;
+  /** The track runs from the stop (left) to the last take-profit (right) */
+  lo: number; hi: number;
+  marks: TrackMark[];
+  /** Share of the time stop's span gone (0..1), and whether the time stop is off (up enough) */
+  time: { frac: number; msLeft: number; off: boolean } | null;
+}
+/**
+ * A position's exits on one line, from status `exits` (exitTargets). The result now comes from the stop: it fires at
+ * `at` after a move of `move` from here, so (1 + now)(1 + move) = 1 + at. An armed trail has no fixed level: its
+ * place is the result it would fire at from here. null when the stop has no distance (no price read yet).
+ */
+export function exitTrack(exits: AnyObj[] | null | undefined): ExitTrack | null {
+  const by = new Map((exits ?? []).map((e) => [e.key, e]));
+  const stop = by.get('stop'), top = by.get('tp2');
+  if (stop?.move == null || stop.at == null || top?.at == null) return null;
+  const now = (1 + stop.at) / (1 + stop.move) - 1;
+  const lo = Number(stop.at), hi = Number(top.at);
+  // percent of the track, to 0.01 (a style value)
+  const x = (v: number) => Math.round(Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100)) * 100) / 100;
+  const marks = (['stop', 'trail', 'tp1', 'tp2'] as const).flatMap((k) => {
+    const e = by.get(k);
+    if (!e) return [];
+    const at = e.at != null ? Number(e.at) : e.move != null ? (1 + now) * (1 + e.move) - 1 : null;
+    return at == null ? [] : [{ key: k, at, x: x(at), done: !!e.done }];
+  });
+  const t = by.get('time');
+  const time = t && t.ms > 0 ? { frac: Math.max(0, Math.min(1, 1 - Number(t.msLeft) / Number(t.ms))), msLeft: Number(t.msLeft), off: String(t.does).startsWith('off') } : null;
+  return { now, x: x(now), lo, hi, marks, time };
+}

@@ -411,9 +411,10 @@ export function decideExit(p: ExitPos): ExitDecision {
 /**
  * The exit rules of an open position as a person reads them: what each one does and how far the price is from setting
  * it off (the same math as decideExit). `move` = the price change from now that fires it (−0.24 = a 24% fall); null
- * once taken. The time stop has `msLeft` instead.
+ * once taken. `at` = the result after costs that fires it (−0.25 for the stop), when it is a fixed level (not an armed
+ * trail, which follows the peak). The time stop has `msLeft` and `ms` (its whole span) instead.
  */
-export interface ExitTarget { key: 'stop' | 'trail' | 'tp1' | 'tp2' | 'time'; label: string; does: string; move: number | null; msLeft?: number; done?: boolean; armed?: boolean }
+export interface ExitTarget { key: 'stop' | 'trail' | 'tp1' | 'tp2' | 'time'; label: string; does: string; move: number | null; at?: number; msLeft?: number; ms?: number; done?: boolean; armed?: boolean }
 export function exitTargets(p: ExitPos): ExitTarget[] {
   const keep = (1 - Math.max(0, Math.min(p.exitFee ?? 0, 0.99))) * (1 - Math.max(0, Math.min(p.exitTax ?? 0, 0.99)));
   const at = (gain: number) => (p.price > 0 && keep > 0 ? (p.entryPrice * (1 + gain)) / keep / p.price - 1 : null);
@@ -421,14 +422,14 @@ export function exitTargets(p: ExitPos): ExitTarget[] {
   const gain = p.entryPrice > 0 ? (p.price * keep) / p.entryPrice - 1 : 0;
   const pct = (x: number) => `${Math.round(x * 100)}%`;
   return [
-    { key: 'stop', label: 'Stop-loss', does: `sells all at −${pct(EXIT.hardStop)}`, move: at(-EXIT.hardStop) },
+    { key: 'stop', label: 'Stop-loss', does: `sells all at −${pct(EXIT.hardStop)}`, move: at(-EXIT.hardStop), at: -EXIT.hardStop },
     armed
       ? { key: 'trail', label: 'Trailing stop', does: `sells all ${pct(EXIT.trailGap)} below its peak`, move: p.price > 0 ? (p.peak * (1 - EXIT.trailGap)) / p.price - 1 : null, armed: true }
-      : { key: 'trail', label: 'Trailing stop', does: `arms at +${pct(EXIT.trailArm)}`, move: at(EXIT.trailArm), armed: false },
-    { key: 'tp1', label: 'Take profit', does: `sells a third at +${pct(EXIT.tp1)}`, move: p.tp1Done ? null : at(EXIT.tp1), done: p.tp1Done },
-    { key: 'tp2', label: 'Take profit', does: `sells a third at +${pct(EXIT.tp2)}`, move: p.tp2Done ? null : at(EXIT.tp2), done: p.tp2Done },
+      : { key: 'trail', label: 'Trailing stop', does: `arms at +${pct(EXIT.trailArm)}`, move: at(EXIT.trailArm), at: EXIT.trailArm, armed: false },
+    { key: 'tp1', label: 'Take profit', does: `sells a third at +${pct(EXIT.tp1)}`, move: p.tp1Done ? null : at(EXIT.tp1), at: EXIT.tp1, done: p.tp1Done },
+    { key: 'tp2', label: 'Take profit', does: `sells a third at +${pct(EXIT.tp2)}`, move: p.tp2Done ? null : at(EXIT.tp2), at: EXIT.tp2, done: p.tp2Done },
     {
-      key: 'time', label: 'Time stop', move: null, msLeft: Math.max(0, p.openedAt + EXIT.timeStopMs - p.now),
+      key: 'time', label: 'Time stop', move: null, msLeft: Math.max(0, p.openedAt + EXIT.timeStopMs - p.now), ms: EXIT.timeStopMs,
       does: gain >= EXIT.timeStopMinGain ? `off: up over +${pct(EXIT.timeStopMinGain)}` : `sells all at ${EXIT.timeStopMs / 3600_000} h if under +${pct(EXIT.timeStopMinGain)}`,
     },
   ];

@@ -1894,41 +1894,81 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 .tk-more[open] .tk-adv { animation: tk-rise 0.35s both; }
 .tk-adv { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 
-/* open positions: what each is worth, its price since the buy, how far each exit is, and Sell now */
-.tk-pos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
-.tk-pos { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 16px; background: var(--surface-2); border: 1px solid var(--line); animation: tk-rise 0.5s both; transition: border-color 0.4s; min-width: 0; }
-.tk-pos.up { border-color: rgba(92, 208, 141, 0.35); } .tk-pos.down { border-color: rgba(242, 112, 107, 0.3); }
-.tk-pos header { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.tk-pos-id { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-.tk-pos-id b { font: 700 1rem var(--font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tk-pos-id small { color: var(--muted); font-size: 0.74rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tk-sell { appearance: none; flex: none; border: 1px solid var(--line-2); background: var(--bg); color: var(--text); font: 600 0.78rem var(--font); padding: 7px 12px; border-radius: 10px; cursor: pointer; transition: border-color 0.2s, color 0.2s, background 0.2s; }
+/* open positions: one ticker row each (logo, coin, price since the buy, worth, result, Sell); a tap opens its exits */
+.tk-spark { display: block; width: 96px; height: 26px; }
+.tk-spark .line { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.tk-spark .entry { stroke: var(--faint); stroke-dasharray: 2 3; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.tk-spark.up .line { stroke: var(--profit); } .tk-spark.down .line { stroke: var(--loss); }
+.tk-sell { appearance: none; border: 1px solid var(--line-2); background: var(--bg); color: var(--text); font: 600 0.74rem var(--font); padding: 6px 12px; border-radius: 9px; cursor: pointer; transition: border-color 0.2s, color 0.2s; }
 .tk-sell:hover:not(:disabled) { border-color: var(--loss); color: var(--loss); }
 .tk-sell:disabled { opacity: 0.6; cursor: default; }
-.tk-pos-now { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.tk-pos-now > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.tk-pos-now small { font: 600 0.66rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-.tk-pos-now b { font: 700 1.15rem var(--mono); letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
-.tk-pos-now .pos b { color: var(--profit); } .tk-pos-now .neg b { color: var(--loss); }
-.tk-pos-now em { font: 400 0.74rem var(--mono); font-style: normal; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tk-spark { display: block; width: 100%; height: 56px; }
-.tk-spark.empty { display: grid; place-items: center; border: 1px dashed var(--line); border-radius: 10px; }
-.tk-spark .line { fill: none; stroke-width: 1.6; vector-effect: non-scaling-stroke; }
-.tk-spark .area { stroke: none; opacity: 0.14; }
-.tk-spark .entry { stroke: var(--muted); stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.7; }
-.tk-spark.up .line { stroke: var(--profit); } .tk-spark.up .area { fill: var(--profit); }
-.tk-spark.down .line { stroke: var(--loss); } .tk-spark.down .area { fill: var(--loss); }
-.tk-fresh { margin: -6px 0 0; font: 400 0.7rem var(--mono); color: var(--muted); }
-.tk-fresh.stale { color: var(--warn); }
-.tk-pos-block { margin: 0; font-size: 0.8rem; }
-.tk-exits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--line); padding-top: 8px; }
-.tk-exit { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; font-size: 0.78rem; }
-.tk-exit b { font: 600 0.76rem var(--font); }
-.tk-exit span { color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tk-exit em { font: 500 0.74rem var(--mono); font-style: normal; color: var(--muted); white-space: nowrap; }
-.tk-exit.is-stop b { color: var(--loss); } .tk-exit.is-trail b { color: var(--warn); } .tk-exit.is-tp1 b, .tk-exit.is-tp2 b { color: var(--profit); }
-.tk-exit.near em { color: var(--text); font-weight: 700; }
-.tk-exit.done { opacity: 0.5; }
+.tk-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; align-items: start; }
+.tk-pc { position: relative; display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 18px; border: 1px solid var(--line); background: linear-gradient(165deg, var(--surface-2), var(--bg) 85%); animation: tk-rise 0.4s both; min-width: 0; }
+.tk-pc.up { box-shadow: inset 0 1px 0 rgba(92, 208, 141, 0.18); } .tk-pc.down { box-shadow: inset 0 1px 0 rgba(242, 112, 107, 0.18); }
+/* flip: both faces share one grid cell, so the card is as tall as the taller face */
+.tk-pc-flip { display: grid; perspective: 1100px; }
+.tk-pc-face { grid-area: 1 / 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; transition: transform 0.55s cubic-bezier(0.3, 0.7, 0.2, 1); }
+.tk-pc-back { transform: rotateY(180deg); }
+.tk-pc.flipped .tk-pc-front { transform: rotateY(-180deg); }
+.tk-pc.flipped .tk-pc-back { transform: rotateY(0); }
+.tk-pc-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tk-pc-name { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.tk-pc-name b { font: 700 1.05rem var(--font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-pc-name small { font: 400 0.7rem var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-pc-flipbtn { appearance: none; flex: none; border: 1px solid var(--line-2); background: var(--bg); color: var(--secondary); font: 600 0.72rem var(--font); padding: 5px 10px; border-radius: 999px; cursor: pointer; transition: color 0.2s, border-color 0.2s; }
+.tk-pc-flipbtn span { display: inline-block; transition: transform 0.4s; }
+.tk-pc-flipbtn:hover { color: var(--accent); border-color: var(--accent); } .tk-pc-flipbtn:hover span { transform: rotate(180deg); }
+.tk-pc-flipbtn:focus-visible, .tk-pc-drop:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tk-pc-result { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.tk-pc-pct { font: 700 1.9rem var(--mono); letter-spacing: -0.03em; line-height: 1; }
+.tk-pc-pct.pos { color: var(--profit); } .tk-pc-pct.neg { color: var(--loss); }
+.tk-pc-worth { display: flex; flex-direction: column; align-items: flex-end; font: 500 0.82rem var(--mono); color: var(--secondary); }
+.tk-pc-worth small { font: 500 0.72rem var(--mono); }
+.tk-pc .tk-spark { width: 100%; height: 54px; }
+.tk-pc-read { margin: -4px 0 0; display: flex; align-items: center; gap: 6px; font: 400 0.66rem var(--mono); color: var(--faint); }
+.tk-pc-read i { width: 6px; height: 6px; border-radius: 50%; background: var(--profit); }
+.tk-pc-read.stale { color: var(--warn); } .tk-pc-read.stale i { background: var(--warn); }
+/* the exit track */
+.tk-pc-track { display: flex; flex-direction: column; gap: 4px; padding-top: 2px; }
+.tk-pc-rail { position: relative; height: 10px; border-radius: 999px; background: linear-gradient(90deg, rgba(242, 112, 107, 0.22), var(--line) 22%, var(--line) 70%, rgba(92, 208, 141, 0.22)); }
+.tk-pc-fill { position: absolute; top: 0; bottom: 0; border-radius: 999px; transition: left 0.8s cubic-bezier(0.2, 0.8, 0.2, 1), width 0.8s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.tk-pc-fill.up { background: var(--profit); } .tk-pc-fill.down { background: var(--loss); }
+.tk-pc-zero { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); opacity: 0.55; }
+.tk-pc-tick { position: absolute; top: 1px; bottom: 1px; width: 2px; margin-left: -1px; background: var(--bg); }
+.tk-pc-tick.done { background: var(--profit); }
+.tk-pc-dot { position: absolute; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; border: 2px solid var(--bg); transition: left 0.8s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.tk-pc-dot.up { background: var(--profit); box-shadow: 0 0 10px var(--profit); } .tk-pc-dot.down { background: var(--loss); box-shadow: 0 0 10px var(--loss); }
+.tk-pc-scale { position: relative; height: 14px; font: 500 0.6rem var(--mono); color: var(--faint); }
+.tk-pc-scale span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.tk-pc-scale span:first-child { transform: none; } .tk-pc-scale span:last-child { transform: translateX(-100%); }
+.tk-pc-scale .is-stop { color: var(--loss); } .tk-pc-scale .is-trail { color: var(--warn); } .tk-pc-scale .is-tp1, .tk-pc-scale .is-tp2 { color: var(--profit); }
+.tk-pc-time { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; font: 500 0.68rem var(--mono); color: var(--muted); }
+.tk-pc-timebar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.tk-pc-timebar i { display: block; height: 100%; background: var(--warn); transition: width 1s linear; }
+.tk-pc-time.off .tk-pc-timebar i { background: var(--faint); }
+/* back */
+.tk-pc-facts { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+.tk-pc-facts div { min-width: 0; }
+.tk-pc-facts dt { font: 600 0.6rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.tk-pc-facts dd { margin: 2px 0 0; font: 500 0.8rem var(--mono); color: var(--text); overflow-wrap: anywhere; }
+.tk-pc-facts dd small { color: var(--muted); }
+/* actions and the exits dropdown */
+.tk-pc-block { margin: 0; font-size: 0.78rem; }
+.tk-pc-acts { display: flex; gap: 8px; }
+.tk-pc-drop { appearance: none; flex: 1; display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--line-2); background: var(--bg); color: var(--text); font: 600 0.78rem var(--font); padding: 8px 12px; border-radius: 10px; cursor: pointer; }
+.tk-pc-caret { display: inline-block; transition: transform 0.25s; color: var(--muted); }
+.tk-pc-drop[aria-expanded="true"] .tk-pc-caret { transform: rotate(180deg); }
+.tk-pc .tk-sell { padding: 8px 14px; font-size: 0.78rem; border-radius: 10px; }
+.tk-pc-exits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--line); animation: tk-drop 0.25s both; }
+@keyframes tk-drop { from { opacity: 0; transform: translateY(-6px); } }
+.tk-pc-exit { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 2px; border-bottom: 1px solid var(--line); }
+.tk-pc-exit > i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.tk-pc-exit.is-stop > i { background: var(--loss); } .tk-pc-exit.is-trail > i { background: var(--warn); } .tk-pc-exit.is-tp1 > i, .tk-pc-exit.is-tp2 > i { background: var(--profit); } .tk-pc-exit.is-time > i { background: var(--hold); }
+.tk-pc-exit span { display: flex; flex-direction: column; min-width: 0; }
+.tk-pc-exit b { font: 600 0.78rem var(--font); }
+.tk-pc-exit small { font-size: 0.7rem; color: var(--muted); }
+.tk-pc-exit em { font: 500 0.74rem var(--mono); font-style: normal; color: var(--secondary); white-space: nowrap; }
+.tk-pc-exit.done { opacity: 0.5; }
 
 /* scorecard */
 .tk-split { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 14px; }
@@ -1950,8 +1990,6 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 }
 @media (max-width: 600px) {
   .tk-styles { grid-template-columns: 1fr; }
-  .tk-exit { grid-template-columns: 78px minmax(0, 1fr) auto; gap: 6px; font-size: 0.72rem; }
-  .tk-exit b { font-size: 0.72rem; }
   .tk-amounts { grid-template-columns: 1fr 1fr; }
   .tk-hero { padding: 16px; gap: 14px; }
   .tk-orb { width: 64px; height: 64px; } .tk-orb b { width: 42px; height: 42px; }

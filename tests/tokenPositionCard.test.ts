@@ -9,6 +9,7 @@ import { MemoryStore } from '../src/server/bot/store';
 import { MARKS_KEPT, TokenTrader, type TraderState } from '../src/server/bot/tokenTrader';
 import type { PoolSniper } from '../src/server/market/sniper';
 import { setEthUsdSource } from '../src/lib/ethUnits';
+import { exitTrack } from '../src/ui/tokenModel';
 
 setEthUsdSource(() => 2500);
 const NOW = 1_800_000_000_000;
@@ -47,6 +48,7 @@ describe('exit targets', () => {
     expect(x.tp1.move).toBeCloseTo(0.5, 12);
     expect(x.tp2.move).toBeCloseTo(1, 12);
     expect(x.time.msLeft).toBe(EXIT.timeStopMs - 3600_000);
+    expect([x.stop.at, x.trail.at, x.tp1.at, x.tp2.at, x.time.ms]).toEqual([-0.25, 0.3, 0.5, 1, EXIT.timeStopMs]);
   });
   it('fees count like decideExit: with a 1% exit fee the stop is that much nearer', () => {
     const stop = exitTargets({ ...base, exitFee: 0.01 }).find((r) => r.key === 'stop')!;
@@ -58,6 +60,32 @@ describe('exit targets', () => {
     expect(x.trail.move).toBeCloseTo((1.8 * 0.8) / 1.6 - 1, 12);
     expect(x.tp1).toMatchObject({ done: true, move: null });
     expect(x.time.does).toBe('off: up over +10%');
+    expect(x.trail.at).toBeUndefined();
+  });
+});
+
+describe('the exit track on a position card', () => {
+  const base = { entryPrice: 1, price: 1, peak: 1, openedAt: NOW - 3600_000, now: NOW, entryVolume: 0, volume: 0, entryLiq: 0, liq: 0, sellTax: 0, entrySellTax: 0, sellSimOk: true, tp1Done: false, tp2Done: false, remainingFrac: 1 };
+  it('at the buy price the marker sits at 0%: a fifth of the way from the stop (−25%) to the last take-profit (+100%)', () => {
+    const k = exitTrack(exitTargets(base))!;
+    expect(k.now).toBeCloseTo(0, 12);
+    expect(k.x).toBeCloseTo(20, 9);
+    expect(k.marks.map((m) => [m.key, Math.round(m.x)])).toEqual([['stop', 0], ['trail', 44], ['tp1', 60], ['tp2', 100]]);
+    expect(k.time).toMatchObject({ msLeft: EXIT.timeStopMs - 3600_000, off: false });
+    expect(k.time!.frac).toBeCloseTo(1 / 6, 12);
+  });
+  it('the result now is the exit math\'s, fee in: price 1.2 with a 1% exit fee is +18.8%', () => {
+    expect(exitTrack(exitTargets({ ...base, price: 1.2, peak: 1.2, exitFee: 0.01 }))!.now).toBeCloseTo(1.2 * 0.99 - 1, 9);
+  });
+  it('an armed trail sits where it would fire: 20% under a 1.8 peak is +44%; a take-profit taken is marked done', () => {
+    const k = exitTrack(exitTargets({ ...base, price: 1.6, peak: 1.8, tp1Done: true }))!;
+    expect(k.marks.find((m) => m.key === 'trail')!.at).toBeCloseTo(0.44, 9);
+    expect(k.marks.find((m) => m.key === 'tp1')).toMatchObject({ done: true, at: 0.5 });
+    expect(k.time!.off).toBe(true);
+  });
+  it('no price read yet: no track', () => {
+    expect(exitTrack(exitTargets({ ...base, price: 0 }))).toBeNull();
+    expect(exitTrack(null)).toBeNull();
   });
 });
 

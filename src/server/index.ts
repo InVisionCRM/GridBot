@@ -37,7 +37,7 @@ import { chainBootLine, registerRpcUrls } from './chains/rpcUrl';
 import { chainById } from '../live/chains';
 import { holdingsSnapshot } from './holdings/read';
 import { WalletHistory, WORTH_EVERY_MS, type WorthFile } from './holdings/history';
-import { Logos } from './holdings/logos';
+import { Logos, logoSource } from './holdings/logos';
 
 loadEnv();
 // RPC URLs can hold an API key: register them before anything can log one (logs and the API show the host only).
@@ -198,7 +198,8 @@ const swap = swapForHost(!!copy, {
 // The Wallet drawer's chart (a point at most every 15 min, also on a timer so it fills while no page is open) and coin logos
 const wallet = {
   history: new WalletHistory(new JsonStore<WorthFile>(path.join(dataDir, 'wallet-history.json'))),
-  logos: new Logos(path.join(dataDir, 'logos'), (id) => chainById(id)?.geckoSlug ?? null, (url) => gecko.getJson(url)),
+  // GeckoTerminal's call is urgent (someone is looking at the page); one call covers up to 30 coins
+  logos: new Logos(path.join(dataDir, 'logos'), (id) => logoSource(chainById(id) ?? null), { geckoterminal: (url) => gecko.getJson(url, true), dexscreener: fetchJson }),
 };
 const app = createApp({
   bot, net: cfg.net, backfill, scanner, viewCandles: (pair) => sync.view(pair), system: { version, pollMs: cfg.pollMs },
