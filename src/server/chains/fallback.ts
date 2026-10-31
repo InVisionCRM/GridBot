@@ -129,7 +129,8 @@ export class FallbackReader implements ChainReader, LogReader {
   private readonly limiter: Limiter;
   readonly status: RpcStatus;
   private readonly endpoints: EndpointHealth[];
-  private episode: { since: number; lastFailAt: number; failures: number; lastError: string | null; alerted: boolean } | null = null;
+  /** okSince: the first good read after the alert went up (recovery is measured from it) */
+  private episode: { since: number; lastFailAt: number; failures: number; lastError: string | null; alerted: boolean; okSince?: number } | null = null;
   private lastOkAt: number | null = null;
   constructor(
     readonly urls: string[], readonly chainId: number,
@@ -166,6 +167,17 @@ export class FallbackReader implements ChainReader, LogReader {
     const ep = this.endpoints[i], t = this.now();
     Object.assign(ep, { ok: true, failsInRow: 0, lastOkAt: t, coolUntil: null });
     this.lastOkAt = t;
+    if (this.episode?.alerted && this.episode.okSince == null) this.episode.okSince = t;
+  }
+
+  /**
+   * Good reads came in this episode, within `withinMs`: the chain is being read, and a request that keeps failing is
+   * that request's problem (it shows where it is used), not the chain's. (2026-10-31: one kind of read failing on all
+   * its tries while every other read worked raised "RPC failing … bots can't read prices or trade" on Robinhood.)
+   */
+  private reading(withinMs: number) {
+    const ep = this.episode, t = this.now();
+    return this.lastOkAt != null && t - this.lastOkAt < withinMs && (!ep || this.lastOkAt > ep.since);
   }
 
   private markFail(i: number, e: unknown) {
@@ -216,7 +228,7 @@ export class FallbackReader implements ChainReader, LogReader {
     // An endpoint that failed but hasn't been tried since stays !ok; only a recent failure marks the chain degraded.
     const t = this.now(), anyBad = this.endpoints.some((x) => !x.ok && x.lastFailAt != null && t - x.lastFailAt < RPC_RECOVER_MS);
     return {
-      state: ep ? 'down' : anyBad ? 'degraded' : 'ok',
+      state: ep && !this.reading(RPC_RECOVER_MS) ? 'down' : ep || anyBad ? 'degraded' : 'ok',
       failingSince: ep?.since ?? null, lastFailAt: ep?.lastFailAt ?? null, lastOkAt: this.lastOkAt,
       failures: ep?.failures ?? 0, lastError: ep?.lastError ?? null, alerted: ep?.alerted ?? false,
       current: this.currentUrl, switches: this.status.switches, endpoints: this.endpoints.map((x) => ({ ...x })),
@@ -224,19 +236,22 @@ export class FallbackReader implements ChainReader, LogReader {
   }
 
   /**
-   * Called on the poll loop. 'alert' once when the chain has kept failing for alertAfterMs; 'recovered' once when an
-   * alerted episode is over (no failure for recoverMs and a success since). An episode that ends before the alert
-   * just closes quietly.
+   * Called on the poll loop. 'alert' once when the chain has kept failing for alertAfterMs with no good read for
+   * recoverMs; 'recovered' once when an alerted episode is over (no failure for recoverMs and a success since, or good
+   * reads for recoverMs since the first one after the alert). An episode that ends before the alert just closes quietly.
    */
   checkHealth(alertAfterMs = RPC_ALERT_AFTER_MS, recoverMs = RPC_RECOVER_MS): HealthChange | null {
     const ep = this.episode, t = this.now();
     if (!ep) return null;
     const quiet = t - ep.lastFailAt >= recoverMs && this.lastOkAt != null && this.lastOkAt > ep.lastFailAt;
-    if (quiet) {
+    // alerted, and good reads have kept coming for recoverMs since the first one: recovered, even if one kind of request
+    // still fails
+    const back = ep.alerted && ep.okSince != null && t - ep.okSince >= recoverMs && this.reading(recoverMs);
+    if (quiet || back) {
       this.episode = null;
       return ep.alerted ? { kind: 'recovered', minutes: Math.max(1, Math.round((ep.lastFailAt - ep.since) / 60_000)), failures: ep.failures } : null;
     }
-    if (!ep.alerted && t - ep.since >= alertAfterMs && t - ep.lastFailAt < recoverMs) {
+    if (!ep.alerted && t - ep.since >= alertAfterMs && t - ep.lastFailAt < recoverMs && !this.reading(recoverMs)) {
       ep.alerted = true;
       return { kind: 'alert', minutes: Math.round((t - ep.since) / 60_000), failures: ep.failures, lastError: ep.lastError };
     }
