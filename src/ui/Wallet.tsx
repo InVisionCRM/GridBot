@@ -35,14 +35,20 @@ function useWorth(range: Range, chain: number | 'all') {
 }
 
 // ── logos ────────────────────────────────────────────────────────────────
+/**
+ * A coin's logo. Its letter mark shows until the logo has loaded (logos come through GeckoTerminal's shared, paced queue
+ * and can take minutes: 2026-10-30 the token trader's cards showed empty circles meanwhile), and stays if there is none.
+ */
 export function CoinLogo({ coin, chain, size = 40 }: { coin: Pick<CoinView, 'chainId' | 'address' | 'symbol'>; chain: ChainInfo | null; size?: number }) {
-  const [failed, setFailed] = useState(false);
+  const [state, setState] = useState<'loading' | 'ok' | 'failed'>('loading');
   return (
     <span className="wl-logo" style={{ width: size, height: size } as CSSProperties}>
       <span className="wl-logo-i">
-        {coin.address && !failed
-          ? <img src={`/api/logo/${coin.chainId}/${coin.address}`} alt="" width={size} height={size} loading="lazy" onError={() => setFailed(true)} />
-          : <TokenMark symbol={coin.symbol} address={coin.address} size={size} />}
+        {state !== 'ok' && <TokenMark symbol={coin.symbol} address={coin.address} size={size} />}
+        {coin.address && state !== 'failed' && (
+          <img src={`/api/logo/${coin.chainId}/${coin.address}`} alt="" width={size} height={size} loading="lazy" className={state === 'ok' ? '' : 'wl-logo-wait'}
+            onLoad={() => setState('ok')} onError={() => setState('failed')} />
+        )}
       </span>
       {chain && <ChainDot chain={chain} />}
     </span>

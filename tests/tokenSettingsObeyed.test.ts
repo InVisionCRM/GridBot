@@ -7,7 +7,7 @@ import { CHAINS } from '../src/live/chains';
 import type { MarketDef } from '../src/live/markets';
 import { gateToken, type GateInput } from '../src/market/tokenTrader';
 import { POWER_SIGS } from '../src/market/ownerPowers';
-import { discover, discoverEveryMs, quoteImpactOf } from '../src/server/market/tokenFeed';
+import { discover, discoverEveryMs, poolNowOf, quoteBuyOf } from '../src/server/market/tokenFeed';
 import { PoolSniper } from '../src/server/market/sniper';
 import { MemoryStore } from '../src/server/bot/store';
 import { TokenTrader, type TraderState } from '../src/server/bot/tokenTrader';
@@ -43,13 +43,20 @@ describe('chains switched off are not read', () => {
 });
 
 describe('tokens inside the rules are not blocked', () => {
-  it("the impact check quotes the market the safety check built (a GeckoTerminal label used to name no adapter, so every non-PulseChain pool failed it)", async () => {
+  it("a buy is quoted on the market the safety check built (a GeckoTerminal label used to name no adapter, so every non-PulseChain pool failed the impact check)", async () => {
     const draft = { key: 'robinhood:NEW/WETH', pool: { dex: 'uniswap-v3', kind: 'v3', address: '0xpool', feeBps: 100 } } as unknown as MarketDef;
     let quoted: unknown = null;
-    const hub = { draftQuoter: (d: MarketDef) => ({ quote: async (side: string, amount: number) => { quoted = { d, side, amount }; return { priceImpact: 0.004 }; } }) };
-    expect(await quoteImpactOf(hub as never, draft, 0.05)).toBe(0.004);
+    const hub = { draftQuoter: (d: MarketDef) => ({ quote: async (side: string, amount: number) => { quoted = { d, side, amount }; return { priceImpact: 0.004, quotedOutHuman: 1234 }; } }) };
+    expect(await quoteBuyOf(hub as never, draft, 0.05)).toEqual({ tokens: 1234, impact: 0.004 });
     expect(quoted).toEqual({ d: draft, side: 'buy', amount: 0.05 });
-    await expect(quoteImpactOf(hub as never, null, 0.05)).rejects.toThrow(/no safety check result/);
+    await expect(quoteBuyOf(hub as never, null, 0.05)).rejects.toThrow(/no safety check result/);
+  });
+
+  it("the pool now: price is spend depth over token depth; an empty side is an error", async () => {
+    const draft = { key: 'x' } as unknown as MarketDef;
+    const at = (q: number, t: number) => ({ draftQuoter: () => ({ market: async () => ({ quoteReserve: q, plsReserve: t }) }) });
+    expect(await poolNowOf(at(2, 1_000) as never, draft)).toEqual({ price: 0.002, quoteReserve: 2, tokenReserve: 1_000 });
+    await expect(poolNowOf(at(0, 1_000) as never, draft)).rejects.toThrow(/empty/);
   });
 
   it('a mint function blocks nothing: not in the gate, not in owner powers', () => {

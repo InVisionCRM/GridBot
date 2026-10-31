@@ -36,7 +36,7 @@ function trader(o: {
   now?: () => number; discover?: () => Promise<FreshPool[]>;
   assess?: (p: FreshPool) => Promise<GateInput>;
   holders?: (p: FreshPool) => Promise<{ largest: number | null; top10: number | null; unverified: boolean; unavailable?: 'no-source' | 'read-failed'; chainName?: string }>;
-  quoteImpact?: (p: FreshPool, spend: number) => Promise<number>;
+  quoteBuy?: (p: FreshPool, spend: number) => Promise<{ tokens: number; impact: number }>;
   hits?: SnipeHit[]; resolve?: (h: SnipeHit) => Promise<FreshPool | null>;
   store?: MemoryStore<TraderState>;
   ownerPowers?: (p: FreshPool) => Promise<OwnerReport>;
@@ -48,7 +48,7 @@ function trader(o: {
     store, now: o.now ?? (() => 1_700_000_000_000), sniper,
     discover: o.discover, assess: async (p) => (o.assess ? o.assess(p) : clean()),
     holders: o.holders,
-    quoteImpact: o.quoteImpact,
+    quoteBuy: o.quoteBuy,
     resolve: o.resolve ?? (async () => null),
     ownerPowers: o.ownerPowers,
     poolFacts: o.poolFacts,
@@ -427,17 +427,15 @@ describe('token trader engine', () => {
     expect(() => t.configure({ sizeImpactCap: 0.2 })).toThrow(/Trade-size/);
   });
 
-  it('does not quote the trade size when the check is off, and skips when the quoted impact is over the cap', async () => {
+  it('with the check off the quoted impact is not capped; with it on, a quoted impact over the cap skips', async () => {
     const p = pool({ tokenSymbol: 'QUIET' });
-    let calls = 0;
     const off = trader({
       discover: async () => [p],
-      quoteImpact: async () => { calls++; throw new Error('rpc down'); },
+      quoteBuy: async () => ({ tokens: 1_000, impact: 0.5 }),
     });
     off.t.configure({ minPoolAgeSec: 0 });
     off.t.turnOn();
     await off.t.tick();
-    expect(calls).toBe(0);
     expect(off.t.status().positions).toHaveLength(1);
     expect(off.t.status().options.enforceSizeImpact).toBe(false);
     expect(off.t.status().options.maxImpact).toBe(0.03);
@@ -445,7 +443,7 @@ describe('token trader engine', () => {
     const spends: number[] = [];
     const hot = trader({
       discover: async () => [pool({ tokenSymbol: 'HOT' })],
-      quoteImpact: async (_p, spend) => { spends.push(spend); return 0.02; },
+      quoteBuy: async (_p, spend) => { spends.push(spend); return { tokens: 1_000, impact: 0.02 }; },
     });
     hot.t.configure({ minPoolAgeSec: 0, perTradeUsd: 100, enforceSizeImpact: true });
     hot.t.turnOn();
@@ -458,7 +456,7 @@ describe('token trader engine', () => {
 
     const ok = trader({
       discover: async () => [pool({ tokenSymbol: 'OK' })],
-      quoteImpact: async () => 0.004,
+      quoteBuy: async () => ({ tokens: 1_000, impact: 0.004 }),
     });
     ok.t.configure({ minPoolAgeSec: 0, enforceSizeImpact: true, sizeImpactCap: 0.01 });
     ok.t.turnOn();
@@ -466,16 +464,16 @@ describe('token trader engine', () => {
     expect(ok.t.status().positions).toHaveLength(1);
   });
 
-  it('skips the buy when the trade-size quote throws', async () => {
+  it('skips the buy when its quote on the pool throws', async () => {
     const { t } = trader({
       discover: async () => [pool({ tokenSymbol: 'FAIL' })],
-      quoteImpact: async () => { throw new Error('quoter reverted'); },
+      quoteBuy: async () => { throw new Error('quoter reverted'); },
     });
     t.configure({ minPoolAgeSec: 0, risk: 'any', enforceSizeImpact: true });
     t.turnOn();
     await t.tick();
     expect(t.status().positions).toHaveLength(0);
-    expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not be verified/);
+    expect(t.status().feed.map((f) => f.why).join(' | ')).toMatch(/could not quote this buy on the pool \(quoter reverted\)/);
   });
 
   it('the default floor is still 0, including a saved file from before the setting existed', async () => {
@@ -620,18 +618,16 @@ describe('token trader engine', () => {
       },
       positions: [], trades: [], feed: [], cursors: {}, snipesAt: [],
     } as TraderState);
-    let calls = 0;
     const { t } = trader({
       store, discover: async () => [pool()],
-      quoteImpact: async () => { calls++; throw new Error('should not be called'); },
+      quoteBuy: async () => ({ tokens: 1_000, impact: 0.5 }),
     });
     expect(t.status().options.enforceSizeImpact).toBe(false);
     expect(t.status().options.sizeImpactCap).toBe(0.01);
     expect(t.status().options.maxImpact).toBe(0.03);
     t.turnOn();
     await t.tick();
-    expect(calls).toBe(0);
-    expect(t.status().positions).toHaveLength(1);
+    expect(t.status().positions).toHaveLength(1); // the check stays off: a 50% impact is not capped
   });
 
   it('leaves concentration unread when the check is off, and blocks from it when the check is on', async () => {

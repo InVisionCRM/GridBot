@@ -84,7 +84,12 @@ export class Hub {
     const saved = o.custom?.load();
     if (saved && saved.version === 1) {
       this.custom = { version: 1, tokens: saved.tokens ?? [], markets: saved.markets ?? [], pools: saved.pools ?? {} };
-      for (const m of this.custom.markets) if (this.rts.has(m.chainId) && !this.defs.has(m.key)) this.defs.set(m.key, { ...m, custom: true });
+      for (const m of this.custom.markets) {
+        if (!this.rts.has(m.chainId) || this.defs.has(m.key)) continue;
+        // saved before names were made unique: the app's own markets (set above) keep theirs
+        const named = (t: MarketToken) => (t.native ? t : { ...t, symbol: this.nameFor(m.chainId, t.address, t.symbol) });
+        this.defs.set(m.key, { ...m, base: named(m.base), quote: named(m.quote), custom: true });
+      }
       for (const [k, ov] of Object.entries(this.custom.pools ?? {})) {
         const d = this.defs.get(k);
         if (!d || d.custom || !this.rts.get(d.chainId)?.adapters.has(ov.pool.dex)) continue;
@@ -292,6 +297,19 @@ export class Hub {
     throw new Error(`No native price route for ${this.label(key)}`);
   }
 
+  /**
+   * A token's name in this app: its own symbol, unless a different token on the chain already goes by it, then the
+   * symbol and the first 4 hex digits of its address ("DAI·6B17"). Coins are told apart by name across the app (the
+   * Smart trader's books, routes and prices): on PulseChain the fork copy of DAI (0x6B17…, about $0.001) and the bridged
+   * DAI (0xefD7…, $1) both say "DAI", and 4M of the first were booked, priced and swapped as the second (2026-10-30).
+   */
+  nameFor(chainId: number, address: string, symbol: string): string {
+    const cfg = this.rt(chainId).cfg;
+    const taken = symbol === cfg.nativeSymbol && !sameAddr(address, cfg.wrappedNative.address)
+      || this.byChain(chainId).some((m) => [m.base, m.quote].some((t) => !t.native && t.symbol === symbol && !sameAddr(t.address, address)));
+    return taken ? `${symbol}·${address.slice(2, 6).toUpperCase()}` : symbol;
+  }
+
   // ── Custom tokens / markets ───────────────────────────────────────────
   customTokens(chainId?: number) { return this.custom.tokens.filter((t) => chainId == null || t.chainId === chainId); }
   customMarkets() { return this.list().filter((m) => m.custom); }
@@ -327,7 +345,8 @@ export class Hub {
   async inspect(req: InspectRequest): Promise<InspectResult> {
     const rt = this.rt(req.chainId);
     if (!rt.tradable) throw new Error(`${rt.cfg.name}: trading unavailable — ${rt.cfg.trading.reason ?? 'no DEX'}`);
-    const token = await readTokenMeta(rt.reader, rt.cfg.id, req.address);
+    const read = await readTokenMeta(rt.reader, rt.cfg.id, req.address);
+    const token = { ...read, symbol: this.nameFor(rt.cfg.id, read.address, read.symbol) };
     if (sameAddr(token.address, rt.cfg.wrappedNative.address)) throw new Error(`${token.symbol} is the chain's wrapped native coin — use the built-in ${rt.cfg.nativeSymbol} market.`);
     const quoteOptions = this.quoteOptions(rt.cfg.id, token.address);
     const existing = this.list().find((m) => m.chainId === rt.cfg.id && sameAddr(m.base.address, token.address))?.key ?? null;

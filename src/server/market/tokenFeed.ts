@@ -154,7 +154,8 @@ export function createTokenTrader(o: {
       });
     },
     // Called only when the trade-size impact check is on, and only for the size the buy would actually send.
-    quoteImpact: (pool, spend) => quoteImpactOf(o.hub, drafts.get(pool), spend),
+    poolNow: (pool) => poolNowOf(o.hub, drafts.get(pool)),
+    quoteBuy: (pool, spend) => quoteBuyOf(o.hub, drafts.get(pool), spend),
     resolve: (hit) => resolveHit(o.hub, hit),
     mark: positionMarker(o.hub),
     ownerPowers: (pool) => readOwnerPowers(o.hub.rt(pool.chainId).reader, pool.chainId, pool.token),
@@ -426,16 +427,23 @@ export function draftStore() {
 }
 
 /**
- * The price impact of spending `spend` on the market the safety check built: the same quoter, pool reference (app DEX
- * id, V4 pool key, native coin) and decimals the live buy uses. It used to quote through the adapter named by the
- * pool's GeckoTerminal label ('uniswap-v3-robinhood'), which no adapter is called, so the check failed, and skipped the
- * coin, for every pool outside PulseChain and every V4 pool (2026-10-30).
+ * What spending `spend` brings on the market the safety check built (tokens after the token's buy tax) and its price
+ * impact: the same quoter, pool reference (app DEX id, V4 pool key, native coin) and decimals the live buy uses. The
+ * impact used to be quoted through the adapter named by the pool's GeckoTerminal label ('uniswap-v3-robinhood'), which
+ * no adapter is called, so every pool outside PulseChain and every V4 pool failed it (2026-10-30).
  */
-export async function quoteImpactOf(hub: Pick<Hub, 'draftQuoter'>, draft: MarketDef | null, spend: number): Promise<number> {
+export async function quoteBuyOf(hub: Pick<Hub, 'draftQuoter'>, draft: MarketDef | null, spend: number): Promise<{ tokens: number; impact: number }> {
   if (!draft) throw new Error('no safety check result for this pool');
   const q = await hub.draftQuoter(draft).quote('buy', spend, DEFAULT_LIMITS, QUOTE_FROM, null);
-  if (!Number.isFinite(q.priceImpact)) throw new Error('the quote returned no impact');
-  return q.priceImpact;
+  return { tokens: q.quotedOutHuman, impact: q.priceImpact };
+}
+
+/** The pool's price (spend per token) and depth now, read on-chain through the market the safety check built */
+export async function poolNowOf(hub: Pick<Hub, 'draftQuoter'>, draft: MarketDef | null): Promise<{ price: number; quoteReserve: number; tokenReserve: number }> {
+  if (!draft) throw new Error('no safety check result for this pool');
+  const m = await hub.draftQuoter(draft).market();
+  if (!(m.quoteReserve > 0) || !(m.plsReserve > 0)) throw new Error('one side of the pool is empty');
+  return { price: m.quoteReserve / m.plsReserve, quoteReserve: m.quoteReserve, tokenReserve: m.plsReserve };
 }
 
 /**

@@ -487,6 +487,8 @@ export function createApp(o: AppOpts) {
   app.post('/api/router/on', wrap(() => router().turnOn()));
   app.post('/api/router/off', wrap(() => router().turnOff()));
   // After Stop all / STOP chain: new buys and snipes may happen again
+  // Sell one open position now (by hand); the tick it starts sells it
+  app.post('/api/token-trader/positions/:id/sell', wrap((req) => { tt().sellNow(req.params.id); void tt().tick(); return plain(tt().status()); }));
   app.post('/api/token-trader/resume-entries', wrap(() => { tt().resumeEntries(); return plain(tt().status()); }));
 
   // ── Friends' copies: the host's Tools → Friends, and the relay the copies fetch candles through ─────

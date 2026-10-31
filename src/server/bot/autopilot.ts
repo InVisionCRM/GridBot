@@ -394,8 +394,14 @@ export class Autopilot {
   configure(p: { mode: Mode; options: Partial<AutoOptions>; budgets: Budget[] }) {
     if (this.state.on) throw new Error('Turn it off before changing the mode or the budgets.');
     if (this.busy || this.turning) throw new Error('It is busy; try again in a moment.');
-    const busy = this.state.accounts.find((a) => this.holds(a));
-    if (busy) throw new Error(`The ${this.chainName(busy.budget.chainId)} budget still has bots, a swap or coins other than ${busy.budget.coin} to settle. Turn it off with "close its bots" and let it finish first.`);
+    // Live, every coin a budget holds is in the wallet and must be settled first. Paper coins are only its books: once
+    // its bots are closed and no swap is pending they can be dropped (2026-10-30: paper books holding a coin that can't
+    // be swapped back blocked every budget change for good).
+    const paper = this.state.mode === 'paper';
+    const busy = this.state.accounts.find((a) => (paper ? a.bots.length > 0 || a.pending.length > 0 : this.holds(a)));
+    if (busy) throw new Error(paper
+      ? `The ${this.chainName(busy.budget.chainId)} budget still has bots or a swap open. Turn it off with "close its bots" and let it finish first.`
+      : `The ${this.chainName(busy.budget.chainId)} budget still has bots, a swap or coins other than ${busy.budget.coin} to settle. Turn it off with "close its bots" and let it finish first.`);
     if (p.mode !== 'paper' && p.mode !== 'live') throw new Error('Mode must be paper or live.');
     const seen = new Set<number>();
     const budgets = p.budgets.map((b) => {

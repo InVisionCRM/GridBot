@@ -45,7 +45,9 @@ export const TRADER: Obj = (() => {
       { t: AS_OF - 20 * H, side: 'buy', chainId: 1, pool: 'p1', label: 'PEPE/WETH', usd: 60, price: 1e-5, why: 'buy depth ok', pnlUsd: null, spendSym: 'WETH', amount: 0.02563, pnl: null },
       { t: AS_OF - 30 * H, side: 'buy', chainId: 1, pool: 'p2', label: 'MOG/WETH', usd: 60, price: 2e-6, why: 'buy depth ok', pnlUsd: null, spendSym: 'WETH', amount: 0.02563, pnl: null },
     ],
-    positions: [{ id: 'tt-1', chainId: 1, pool: 'p2', label: 'MOG/WETH', source: 'scan', spend: '0xspend', spent: 0.02563, spentUsd: 60, usdPerSpend: 2341.0064, entryTokens: 3e7, tokens: 3e7, entryPrice: 8.5e-10, price: 8.9e-10, feeBps: 30, pnlUsd: 2.8, pnl: 2.8 / 2341.0064, spendSym: 'WETH', exitPlan: 'hold' }],
+    positions: [{ id: 'tt-1', chainId: 1, pool: 'p2', label: 'MOG/WETH', source: 'scan', spend: '0xspend', spent: 0.02563, spentUsd: 60, usdPerSpend: 2341.0064, entryTokens: 3e7, tokens: 3e7, entryPrice: 8.5e-10, price: 8.9e-10, feeBps: 30, pnlUsd: 2.8, pnl: 2.8 / 2341.0064, spendSym: 'WETH', tokenSym: 'MOG', token: '0x' + 'aa'.repeat(20), exitPlan: 'hold',
+      value: 0.02563 + 2.8 / 2341.0064, markedAt: AS_OF - 8_000, marks: [[AS_OF - 60_000, 8.5e-10], [AS_OF - 30_000, 8.7e-10], [AS_OF - 8_000, 8.9e-10]],
+      exits: [{ key: 'stop', label: 'Stop-loss', does: 'sells all at −25%', move: -0.28 }, { key: 'time', label: 'Time stop', does: 'sells all after 6 h unless up +10%', move: null, msLeft: 3 * 3600_000 }] }],
     // the trader's own per-mode ledger: metrics read Generated from it (the log keeps only its newest rows)
     generated: [{ mode: 'paper', coin: { chainId: 1, address: null, symbol: 'WETH', native: true }, amount: 0.00437, proceeds: 0.03, cost: 0.02563, fees: null, taxes: null, gasNative: 0, gasSymbol: 'ETH', gasInAmount: true, closed: 1, basis: 'closed' }],
     feed: [{ t: AS_OF - 3600_000, chainId: 1, pool: 'p3', label: 'WOJ/WETH', verdict: 'skipped', why: "liquidity under the sniper's minimum" }],
