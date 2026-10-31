@@ -157,7 +157,7 @@ export function createTokenTrader(o: {
     poolNow: (pool) => poolNowOf(o.hub, drafts.get(pool)),
     quoteBuy: (pool, spend) => quoteBuyOf(o.hub, drafts.get(pool), spend),
     resolve: (hit) => resolveHit(o.hub, hit),
-    mark: positionMarker(o.hub),
+    mark: positionMarker(o.hub, Date.now, (p) => drafts.get(p)),
     ownerPowers: (pool) => readOwnerPowers(o.hub.rt(pool.chainId).reader, pool.chainId, pool.token),
     // the signer's on-chain balance of the position's token (reconcile after a sell that stopped partway)
     balanceOf: async (p) => {
@@ -258,8 +258,12 @@ export async function liveSwap(
   });
 }
 
-/** The pool and its safety (sell tax, sell simulation) are looked up again this often; price and depth every tick. */
+/** The pool and its safety (sell tax, sell simulation) are checked again this often, in the background; price and depth every tick. */
 export const MARK_DRAFT_EVERY_MS = 10 * 60_000;
+/** A position with no pool route yet (its first check failed) is checked again after this long */
+export const MARK_RETRY_MS = 60_000;
+/** Background safety checks of held pools running at once, per chain (the chain's reader serves 4 requests at a time) */
+export const MARK_CHECKS_PER_CHAIN = 2;
 
 type MarkHub = Pick<Hub, 'inspect' | 'draftQuoter'>;
 
@@ -268,28 +272,57 @@ type MarkHub = Pick<Hub, 'inspect' | 'draftQuoter'>;
  * the stop, take profits and trailing stop never fired and every position waited for the 6 h time stop).
  * Price is the pool mid (quote depth ÷ token depth: V2 reserves, V3/V4 active-range virtual reserves), with both
  * depths for sell sizing. Liquidity is 2 × quote depth in dollars; the first mark sets entryLiq to it, so the
- * liquidity-pulled exit compares like with like. Every MARK_DRAFT_EVERY_MS the safety check runs again: its sell tax
- * replaces the position's, and sellSimOk turns false only on a proven honeypot. A simulation that could not run (an
- * RPC refusing state overrides) changes nothing, so it can't set off a sell-everything.
+ * liquidity-pulled exit compares like with like.
+ *
+ * Price and depth are read every tick through the pool route kept on the position (`market`). The safety check (sell
+ * tax, sell simulation, and a fresh route) runs every MARK_DRAFT_EVERY_MS in the background, MARK_CHECKS_PER_CHAIN at
+ * a time per chain, and its result rides the next read. It used to run inside the read: every 10 min, and on the
+ * first pass after each restart, all positions ran it at once, the exit pass waited for the slowest, and every card's
+ * price aged together (2026-10-31: 75 s after a restart with 24 positions; Kyle's cards read "2m ago · stale").
+ * `seed` is the route the buy's own safety check built, so a new position prices at once.
  */
-export function positionMarker(hub: MarkHub, now: () => number = Date.now) {
-  const drafts = new Map<string, { at: number; draft: MarketDef }>();
+export function positionMarker(hub: MarkHub, now: () => number = Date.now, seed: (p: Position) => MarketDef | null = () => null) {
+  const done = new Map<string, Partial<Position>>();
+  const running = new Set<string>();
+  const failedAt = new Map<string, number>();
+  const slots = new Map<number, { active: number; wait: (() => void)[] }>();
+  const inSlot = async <T>(chainId: number, fn: () => Promise<T>): Promise<T> => {
+    const q = slots.get(chainId) ?? { active: 0, wait: [] };
+    slots.set(chainId, q);
+    if (q.active >= MARK_CHECKS_PER_CHAIN) await new Promise<void>((r) => q.wait.push(r));
+    q.active++;
+    try { return await fn(); } finally { q.active--; q.wait.shift()?.(); }
+  };
+  const check = (p: Position) => {
+    running.add(p.id);
+    void inSlot(p.chainId, () => draftOf(hub, positionPool(p), 'sell')).then((draft) => {
+      const { safety: s, ...route } = draft;
+      const r: Partial<Position> = { market: route, checkedAt: now(), checkNote: s?.simulated ? null : 'the sell simulation did not run; sell tax unchanged' };
+      if (s?.simulated && s.sellTaxPct != null) r.sellTax = s.sellTaxPct;
+      if (s?.honeypot === true) r.sellSimOk = false;
+      done.set(p.id, r);
+      failedAt.delete(p.id);
+    }, (e: unknown) => {
+      failedAt.set(p.id, now());
+      done.set(p.id, { checkedAt: now(), checkNote: `safety check failed: ${String((e as Error)?.message ?? e).slice(0, 140)}` });
+    }).finally(() => running.delete(p.id));
+  };
   return async (p: Position): Promise<Partial<Position> | null> => {
-    const out: Partial<Position> = {};
-    let d = drafts.get(p.id);
-    if (!d || now() - d.at >= MARK_DRAFT_EVERY_MS) {
-      const draft = await draftOf(hub, positionPool(p), 'sell').catch(() => null);
-      if (draft) {
-        d = { at: now(), draft };
-        drafts.set(p.id, d);
-        const s = draft.safety;
-        if (s?.simulated && s.sellTaxPct != null) out.sellTax = s.sellTaxPct;
-        if (s?.honeypot === true) out.sellSimOk = false;
-      }
+    // A finished check is handed over with the next read that returns; a read that throws keeps it for the one after
+    // (it was dropped: TGLN's check built its route, its read reverted, and the check ran again on every pass).
+    const out: Partial<Position> = { ...done.get(p.id) };
+    if (!p.market && !out.market) {
+      const kept = seed(p);
+      if (kept) { const { safety: _s, ...route } = kept; Object.assign(out, { market: route, checkedAt: now(), checkNote: null }); }
     }
-    if (!d) return Object.keys(out).length ? out : null;
-    const m = await hub.draftQuoter(d.draft).market();
-    if (!(m.plsReserve > 0) || !(m.quoteReserve > 0)) return Object.keys(out).length ? out : null;
+    const market = out.market ?? p.market ?? null;
+    const last = out.checkedAt ?? p.checkedAt;
+    const due = market ? last == null || now() - last >= MARK_DRAFT_EVERY_MS : now() - (failedAt.get(p.id) ?? -Infinity) >= MARK_RETRY_MS;
+    if (due && !running.has(p.id)) check(p);
+    if (!market) { done.delete(p.id); return Object.keys(out).length ? out : null; }
+    const m = await hub.draftQuoter(market).market();
+    if (!(m.plsReserve > 0) || !(m.quoteReserve > 0)) throw new Error('the pool reads empty');
+    done.delete(p.id);
     const liq = 2 * m.quoteReserve * p.usdPerSpend;
     return {
       ...out, price: m.quoteReserve / m.plsReserve, quoteReserve: m.quoteReserve, tokenReserve: m.plsReserve, liq,

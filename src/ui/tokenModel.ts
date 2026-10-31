@@ -126,3 +126,43 @@ export function exitTrack(exits: AnyObj[] | null | undefined): ExitTrack | null 
   const time = t && t.ms > 0 ? { frac: Math.max(0, Math.min(1, 1 - Number(t.msLeft) / Number(t.ms))), msLeft: Number(t.msLeft), off: String(t.does).startsWith('off') } : null;
   return { now, x: x(now), lo, hi, marks, time };
 }
+
+export type WatchTone = 'ok' | 'warn' | 'bad';
+export interface PoolWatch {
+  /** One line: what the trader is doing with this position, or what is wrong */
+  status: { tone: WatchTone; text: string };
+  /** The pool's depth in dollars now, the share lost from its peak, and that share over the drop that sells (0..1) */
+  depth: { usd: number; drop: number; frac: number } | null;
+  /** Time since the pool last traded, and that time over the span that sells (0..1) */
+  quiet: { ms: number; frac: number; msLeft: number } | null;
+  /** The last safety check of the pool: how long ago, the sell tax it measured, what went wrong */
+  safety: { ms: number | null; tax: number; note: string | null };
+}
+/** 45s, 12m, 2h 05m */
+export const shortSpan = (ms: number) => (ms < 60_000 ? `${Math.max(0, Math.round(ms / 1000))}s` : ms < 3600_000 ? `${Math.round(ms / 60_000)}m` : `${Math.floor(ms / 3600_000)}h ${Math.round((ms % 3600_000) / 60_000)}m`);
+const awayPct = (x: number) => `${x >= 0 ? '+' : '−'}${Math.abs(x * 100).toFixed(1)}%`;
+
+/**
+ * What the token trader is doing with one open position and what its pool watch sees, from the status fields
+ * (exitPlan, sellNow, readError, routed, checkedAt / checkNote, liq / liqPeak / entryLiq, movedAt, sellTax, exits).
+ */
+export function poolWatch(p: AnyObj, now: number): PoolWatch {
+  const exits: AnyObj[] = p.exits ?? [];
+  const by = new Map(exits.map((e) => [e.key, e]));
+  const drain = by.get('drain'), dead = by.get('dead');
+  const depth = drain && Number(p.liq) > 0 ? { usd: Number(p.liq), drop: Number(drain.drop), frac: Math.min(1, Number(drain.drop) / Number(drain.at)) } : null;
+  const quiet = dead && dead.ms > 0 ? { ms: Number(dead.ms) - Number(dead.msLeft), frac: Math.min(1, 1 - Number(dead.msLeft) / Number(dead.ms)), msLeft: Number(dead.msLeft) } : null;
+  const safety = { ms: p.checkedAt != null ? Math.max(0, now - Number(p.checkedAt)) : null, tax: Number(p.sellTax ?? 0), note: p.checkNote ?? null };
+  const status = ((): PoolWatch['status'] => {
+    if (p.sellNow) return { tone: 'warn', text: 'Selling: you pressed Sell now' };
+    if (p.exitsBlocked) return { tone: 'bad', text: String(p.exitsBlocked) };
+    if (p.readError) return { tone: 'bad', text: `Price read failed (last price kept): ${p.readError}` };
+    if (!p.routed && p.markedAt == null) return { tone: 'warn', text: p.checkNote ? `First pool check failed, trying again: ${p.checkNote}` : 'First pool check running' };
+    if (p.exitPlan && p.exitPlan !== 'hold') return { tone: 'warn', text: `Selling: ${p.exitPlan}` };
+    const near = exits.filter((e) => ['stop', 'trail', 'tp1', 'tp2'].includes(e.key) && e.move != null && !e.done)
+      .sort((a, b) => Math.abs(a.move) - Math.abs(b.move))[0];
+    const name: Record<string, string> = { stop: 'stop-loss', trail: near?.armed ? 'trailing stop' : 'trailing stop arms', tp1: 'take profit 1', tp2: 'take profit 2' };
+    return { tone: 'ok', text: near ? `Holding · next: ${name[near.key]} ${awayPct(near.move)} away` : 'Holding' };
+  })();
+  return { status, depth, quiet, safety };
+}

@@ -13,9 +13,16 @@ export function equityPoints(b: AnyObj): [number, number][] {
   return ((b.equityHist ?? []) as [number, number][]).map(([t, v]) => [t, v * k]);
 }
 
+/**
+ * A bot's line on the Bots tab: its value over the last 48 records. A token-trader position has no value history: its
+ * line is its pool's price since the buy (`marks`, read every tick), the same line its card draws. (2026-10-31: every
+ * token-trader row drew the flat placeholder, 28 of them on Kyle's Bots tab.)
+ */
 export function botSpark(b: AnyObj): number[] {
-  const pts = equityPoints(b).map(([, v]) => v);
-  return pts.length > 1 ? pts.slice(-48) : [0, 0];
+  const pts = b.kind === 'trader' || b.kind === 'sniper'
+    ? ((b.marks ?? []) as [number, number][]).map(([, v]) => v)
+    : equityPoints(b).map(([, v]) => v).slice(-48);
+  return pts.length > 1 ? pts : [0, 0];
 }
 
 /** Latest book value in dollars, or the capital that was assigned when history has not started. */
