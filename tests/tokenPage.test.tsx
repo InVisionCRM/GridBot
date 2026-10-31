@@ -2,7 +2,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { TokenTraderPage } from '../src/ui/TokenTraderPage';
+import { ExitChip, TokenTraderPage } from '../src/ui/TokenTraderPage';
 import { SmartTrader } from '../src/ui/SmartTrader';
 import { DEPTH, STYLES, lookCycle, radarBlips, radarSectors, scorecard, styleOf } from '../src/ui/tokenModel';
 import { normalizeView } from '../src/ui/model';
@@ -74,12 +74,21 @@ describe('the page', () => {
     expect(html).toMatch(/Today&#x27;s funnel/);
     for (const st of ['Careful', 'Balanced', 'Wild']) expect(html).toContain(`<b>${st}</b>`);
     expect(html).toMatch(/How much/);
-    expect(html).toMatch(/Sell now/);
-    expect(html).toMatch(/Stop-loss/);
+    // positions are ticker rows: logo, coin, worth, result and Sell; exits open on a tap
+    expect(html).toMatch(/<ul class="tk-rows">/);
+    expect(html).toMatch(/class="tk-r-main" role="button" tabindex="0" aria-expanded="false"/);
+    expect(html).toMatch(/<button type="button" class="tk-sell">Sell<\/button>/);
     expect(html).toMatch(/Scorecard/);
     expect(html).toMatch(/Advanced/);
     // nothing on the page loops on its own: motion comes from runs, coins and counts
     expect(html).not.toMatch(/tk-flow|tk-cross/);
+  });
+  it('an exit chip says what fires it and how far the price is from it', () => {
+    const chip = (x: Record<string, unknown>) => renderToStaticMarkup(createElement(ExitChip, { x: { does: '', ...x } }));
+    expect(chip({ key: 'stop', move: -0.251 })).toMatch(/<b>Stop −25%<\/b><em>−25.1%<\/em>/);
+    expect(chip({ key: 'trail', armed: false, move: 0.3 })).toMatch(/<b>Trail arms \+30%<\/b><em>\+30.0%<\/em>/);
+    expect(chip({ key: 'tp1', done: true })).toMatch(/<em>taken<\/em>/);
+    expect(chip({ key: 'time', msLeft: 3_420_000 })).toMatch(/<b>Time stop<\/b><em>0h 57m left<\/em>/);
   });
   it('the radar says when the next look is and what the last one found', () => {
     const html = renderToStaticMarkup(createElement(TokenTraderPage, { s: S, nav: () => undefined, seed: { ...TRADER, look: { last: { at: NOW - 10_000, found: 7 }, everyMs: 30_000 } }, now: NOW }));

@@ -334,74 +334,79 @@ function Positions({ s, t, now, busy, run }: { s: AnyObj; t: AnyObj; now: number
   const ps: AnyObj[] = t.positions ?? [];
   return (
     <section className="tk-card">
-      <h3><Icon name="coins" size={16} /> Open positions <span className="muted small">{ps.length ? `${ps.length} open` : 'none open'}</span></h3>
-      {!ps.length && <p className="muted small">Each buy shows here with what it is worth now, its price since the buy, and how far each exit is.</p>}
-      <div className="tk-pos-grid">
-        {ps.map((p) => <PositionCard key={p.id} p={p} s={s} now={now} busy={busy} run={run} />)}
-      </div>
+      <h3><Icon name="coins" size={16} /> Open positions <span className="muted small">{ps.length ? `${ps.length} open · tap one for its exits` : 'none open'}</span></h3>
+      {!ps.length && <p className="muted small">Each buy shows here as a row: its price since the buy, what it is worth and its result.</p>}
+      {ps.length > 0 && (
+        <ul className="tk-rows">
+          <li className="tk-rows-h" aria-hidden="true"><span /><span>Coin</span><span className="tk-r-spark">Since buy</span><span className="tk-r-worth">Worth</span><span>Result</span><span /></li>
+          {ps.map((p) => <PositionRow key={p.id} p={p} s={s} now={now} busy={busy} run={run} />)}
+        </ul>
+      )}
     </section>
   );
 }
 
-/** A price older than this is shown as stale: the trader re-reads every open position each 10 s tick */
+/** A price older than this is stale: the trader re-reads every open position each 10 s tick */
 const STALE_MS = 60_000;
 
-function PositionCard({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: number; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<boolean> }) {
+/** One open position as a ticker row; tapping it opens its exits */
+function PositionRow({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: number; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<boolean> }) {
+  const [open, setOpen] = useState(false);
   const pnl = Number(p.pnl ?? 0), gain = Number(p.pnlPct ?? 0), up = pnl >= 0;
   const sym = p.spendSym ?? '';
   const chain = chainOf(s, p.chainId);
   const blocked = blockedNote(p);
   const stale = p.markedAt == null || now - Number(p.markedAt) > STALE_MS;
-  const sell = () => {
+  const sell = (e: { stopPropagation: () => void }) => {
+    e.stopPropagation();
     if (p.mode === 'live' && !confirm(`Sell all of ${p.tokenSym} now, with real money? It sells through the pool like any exit (split under the impact cap).`)) return;
     void run(() => http(`/api/token-trader/positions/${encodeURIComponent(p.id)}/sell`, 'POST'));
   };
   return (
-    <article className={`tk-pos ${up ? 'up' : 'down'}`} title={`pool fee ${feePct(p.feeBps)}${p.dynamicFee ? ' (dynamic)' : ''} · found ${p.source === 'snipe' ? 'by the sniper' : 'in new and trending pools'}`}>
-      <header>
-        <CoinLogo coin={{ chainId: p.chainId, address: p.token, symbol: p.tokenSym }} chain={chain} size={34} />
-        <span className="tk-pos-id"><b>{p.tokenSym}</b><small>{chain?.name ?? ''} · paid in {sym} · opened {ago(p.openedAt, now)}</small></span>
-        <button type="button" className="tk-sell" disabled={busy || !!p.sellNow} onClick={sell}>{p.sellNow ? 'Selling…' : 'Sell now'}</button>
-      </header>
-      <div className="tk-pos-now">
-        <span><small>Worth now</small><b>{p.value != null ? qty(p.value, sym, 5, false) : '—'}</b></span>
-        <span className={up ? 'pos' : 'neg'}><small>Result</small><b><AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`} /></b><em>{p.pnl != null ? qty(pnl, sym, 5) : ''}</em></span>
+    <li className={`tk-row ${up ? 'up' : 'down'} ${open ? 'open' : ''}`}>
+      <div className="tk-r-main" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(!open)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!open); } }}>
+        <CoinLogo coin={{ chainId: p.chainId, address: p.token, symbol: p.tokenSym }} chain={chain} size={30} />
+        <span className="tk-r-coin"><b>{p.tokenSym}</b><small>{chain?.short ?? ''} · {ago(p.openedAt, now)}<span className="tk-r-wsm"> · {p.value != null ? qty(p.value, sym, 4, false) : '—'}</span></small></span>
+        <Spark marks={p.marks ?? []} entry={Number(p.entryPrice)} up={up} />
+        <span className="tk-r-worth">{p.value != null ? qty(p.value, sym, 4, false) : '—'}</span>
+        <span className={`tk-r-pct ${up ? 'pos' : 'neg'}`} title={p.pnl != null ? qty(pnl, sym, 5) : undefined}>
+          <AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`} />
+          {stale && <i className="tk-r-stale" title={p.markedAt == null ? 'price not read yet' : `price read ${ago(p.markedAt, now)}: stale`} />}
+        </span>
+        <button type="button" className="tk-sell" disabled={busy || !!p.sellNow} onClick={sell}>{p.sellNow ? 'Selling…' : 'Sell'}</button>
       </div>
-      <Spark marks={p.marks ?? []} entry={Number(p.entryPrice)} up={up} />
-      <p className={`tk-fresh ${stale ? 'stale' : ''}`}>{p.markedAt == null ? 'price not read yet' : `price read ${ago(p.markedAt, now)}`}{stale && p.markedAt != null ? ': stale, see the error above' : ''}</p>
-      {blocked && <p className="tk-pos-block neg" role="alert">{blocked}</p>}
-      <ul className="tk-exits">
-        {(p.exits ?? []).map((x: AnyObj) => <ExitRow key={x.key} x={x} />)}
-      </ul>
-    </article>
-  );
-}
-
-/** One exit rule: what it does and how far the price is from it */
-function ExitRow({ x }: { x: AnyObj }) {
-  const away = x.key === 'time'
-    ? (x.does.startsWith('off') ? '—' : x.msLeft > 0 ? `${Math.floor(x.msLeft / 3600_000)}h ${Math.floor((x.msLeft % 3600_000) / 60_000)}m left` : 'now')
-    : x.done ? 'taken' : x.move == null ? '—' : `${x.move >= 0 ? '+' : '−'}${Math.abs(x.move * 100).toFixed(1)}% away`;
-  const near = x.move != null && Math.abs(x.move) < 0.05;
-  return (
-    <li className={`tk-exit is-${x.key} ${x.done ? 'done' : ''} ${near ? 'near' : ''}`}>
-      <b>{x.label}</b><span>{x.does}</span><em>{away}</em>
+      {blocked && <p className="tk-r-block neg" role="alert">{blocked}</p>}
+      {open && (
+        <div className="tk-r-more">
+          {(p.exits ?? []).map((x: AnyObj) => <ExitChip key={x.key} x={x} />)}
+          <span className="tk-r-meta">{p.markedAt == null ? 'price not read yet' : `price read ${ago(p.markedAt, now)}`} · {p.pnl != null ? qty(pnl, sym, 5) : ''} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''}</span>
+        </div>
+      )}
     </li>
   );
 }
 
+/** One exit rule as a chip: what fires it and how far the price is from it */
+export function ExitChip({ x }: { x: AnyObj }) {
+  const label: Record<string, string> = { stop: 'Stop −25%', trail: x.armed ? 'Trailing 20% off peak' : 'Trail arms +30%', tp1: 'Take ⅓ at +50%', tp2: 'Take ⅓ at +100%', time: 'Time stop' };
+  const away = x.key === 'time'
+    ? (x.does.startsWith('off') ? 'off' : `${Math.floor(x.msLeft / 3600_000)}h ${Math.floor((x.msLeft % 3600_000) / 60_000)}m left`)
+    : x.done ? 'taken' : x.move == null ? '—' : `${x.move >= 0 ? '+' : '−'}${Math.abs(x.move * 100).toFixed(1)}%`;
+  return <span className={`tk-chipx is-${x.key} ${x.done ? 'done' : ''}`} title={x.does}><b>{label[x.key] ?? x.label}</b><em>{away}</em></span>;
+}
+
 /** The position's prices since the buy, with the buy price dashed */
 function Spark({ marks, entry, up }: { marks: [number, number][]; entry: number; up: boolean }) {
-  if (marks.length < 2) return <div className="tk-spark empty"><span className="muted small">the chart fills in as its price is read</span></div>;
-  const W = 300, H = 56, ys = [...marks.map((m) => m[1]), entry].filter((v) => Number.isFinite(v) && v > 0);
+  const W = 96, H = 26;
+  if (marks.length < 2) return <svg className="tk-spark empty" viewBox={`0 0 ${W} ${H}`} aria-hidden="true"><line x1="0" x2={W} y1={H / 2} y2={H / 2} className="entry" /></svg>;
+  const ys = [...marks.map((m) => m[1]), entry].filter((v) => Number.isFinite(v) && v > 0);
   const lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || hi * 0.01 || 1;
-  const t0 = marks[0][0], t1 = marks[marks.length - 1][0] || t0 + 1;
-  const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * W, y = (v: number) => H - 4 - ((v - lo) / span) * (H - 8);
+  const t0 = marks[0][0], t1 = marks[marks.length - 1][0];
+  const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * W, y = (v: number) => H - 2 - ((v - lo) / span) * (H - 4);
   const pts = marks.map(([t, v]) => `${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
   return (
     <svg className={`tk-spark ${up ? 'up' : 'down'}`} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-label="price since the buy">
       <line x1="0" x2={W} y1={y(entry)} y2={y(entry)} className="entry" />
-      <polygon points={`0,${H} ${pts} ${W},${H}`} className="area" />
       <polyline points={pts} className="line" />
     </svg>
   );

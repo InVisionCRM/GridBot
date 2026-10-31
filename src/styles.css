@@ -1894,41 +1894,45 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 .tk-more[open] .tk-adv { animation: tk-rise 0.35s both; }
 .tk-adv { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 
-/* open positions: what each is worth, its price since the buy, how far each exit is, and Sell now */
-.tk-pos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
-.tk-pos { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 16px; background: var(--surface-2); border: 1px solid var(--line); animation: tk-rise 0.5s both; transition: border-color 0.4s; min-width: 0; }
-.tk-pos.up { border-color: rgba(92, 208, 141, 0.35); } .tk-pos.down { border-color: rgba(242, 112, 107, 0.3); }
-.tk-pos header { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.tk-pos-id { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-.tk-pos-id b { font: 700 1rem var(--font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tk-pos-id small { color: var(--muted); font-size: 0.74rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tk-sell { appearance: none; flex: none; border: 1px solid var(--line-2); background: var(--bg); color: var(--text); font: 600 0.78rem var(--font); padding: 7px 12px; border-radius: 10px; cursor: pointer; transition: border-color 0.2s, color 0.2s, background 0.2s; }
+/* open positions: one ticker row each (logo, coin, price since the buy, worth, result, Sell); a tap opens its exits */
+.tk-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.tk-rows-h, .tk-r-main { display: grid; grid-template-columns: 30px minmax(0, 1.2fr) 96px minmax(0, 1fr) 92px auto; gap: 12px; align-items: center; }
+.tk-rows-h { padding: 0 10px 6px; font: 600 0.64rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.tk-rows-h > :nth-child(4), .tk-rows-h > :nth-child(5) { text-align: right; }
+.tk-row { border-top: 1px solid var(--line); animation: tk-rise 0.4s both; }
+.tk-r-main { padding: 9px 10px; border-radius: 12px; cursor: pointer; transition: background 0.2s; }
+.tk-r-main:hover, .tk-row.open .tk-r-main { background: var(--surface-2); }
+.tk-r-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tk-r-coin { display: flex; flex-direction: column; min-width: 0; }
+.tk-r-coin b { font: 700 0.92rem var(--font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-r-coin small { font: 400 0.68rem var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-r-wsm { display: none; }
+.tk-spark { display: block; width: 96px; height: 26px; }
+.tk-spark .line { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.tk-spark .entry { stroke: var(--faint); stroke-dasharray: 2 3; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.tk-spark.up .line { stroke: var(--profit); } .tk-spark.down .line { stroke: var(--loss); }
+.tk-r-worth { font: 500 0.8rem var(--mono); color: var(--secondary); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-r-pct { position: relative; font: 700 0.95rem var(--mono); text-align: right; white-space: nowrap; }
+.tk-r-pct.pos { color: var(--profit); } .tk-r-pct.neg { color: var(--loss); }
+.tk-r-stale { position: absolute; top: -2px; right: -8px; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+.tk-sell { appearance: none; border: 1px solid var(--line-2); background: var(--bg); color: var(--text); font: 600 0.74rem var(--font); padding: 6px 12px; border-radius: 9px; cursor: pointer; transition: border-color 0.2s, color 0.2s; }
 .tk-sell:hover:not(:disabled) { border-color: var(--loss); color: var(--loss); }
 .tk-sell:disabled { opacity: 0.6; cursor: default; }
-.tk-pos-now { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.tk-pos-now > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.tk-pos-now small { font: 600 0.66rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-.tk-pos-now b { font: 700 1.15rem var(--mono); letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
-.tk-pos-now .pos b { color: var(--profit); } .tk-pos-now .neg b { color: var(--loss); }
-.tk-pos-now em { font: 400 0.74rem var(--mono); font-style: normal; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tk-spark { display: block; width: 100%; height: 56px; }
-.tk-spark.empty { display: grid; place-items: center; border: 1px dashed var(--line); border-radius: 10px; }
-.tk-spark .line { fill: none; stroke-width: 1.6; vector-effect: non-scaling-stroke; }
-.tk-spark .area { stroke: none; opacity: 0.14; }
-.tk-spark .entry { stroke: var(--muted); stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.7; }
-.tk-spark.up .line { stroke: var(--profit); } .tk-spark.up .area { fill: var(--profit); }
-.tk-spark.down .line { stroke: var(--loss); } .tk-spark.down .area { fill: var(--loss); }
-.tk-fresh { margin: -6px 0 0; font: 400 0.7rem var(--mono); color: var(--muted); }
-.tk-fresh.stale { color: var(--warn); }
-.tk-pos-block { margin: 0; font-size: 0.8rem; }
-.tk-exits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--line); padding-top: 8px; }
-.tk-exit { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; font-size: 0.78rem; }
-.tk-exit b { font: 600 0.76rem var(--font); }
-.tk-exit span { color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tk-exit em { font: 500 0.74rem var(--mono); font-style: normal; color: var(--muted); white-space: nowrap; }
-.tk-exit.is-stop b { color: var(--loss); } .tk-exit.is-trail b { color: var(--warn); } .tk-exit.is-tp1 b, .tk-exit.is-tp2 b { color: var(--profit); }
-.tk-exit.near em { color: var(--text); font-weight: 700; }
-.tk-exit.done { opacity: 0.5; }
+.tk-r-block { margin: 0 10px 8px; font-size: 0.78rem; }
+.tk-r-more { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 10px 12px 52px; animation: tk-rise 0.25s both; }
+.tk-chipx { display: inline-flex; align-items: baseline; gap: 6px; padding: 4px 9px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); font-size: 0.72rem; }
+.tk-chipx b { font: 600 0.72rem var(--font); }
+.tk-chipx em { font: 500 0.7rem var(--mono); font-style: normal; color: var(--muted); }
+.tk-chipx.is-stop b { color: var(--loss); } .tk-chipx.is-trail b { color: var(--warn); } .tk-chipx.is-tp1 b, .tk-chipx.is-tp2 b { color: var(--profit); }
+.tk-chipx.done { opacity: 0.5; }
+.tk-r-meta { flex-basis: 100%; font: 400 0.68rem var(--mono); color: var(--muted); }
+@media (max-width: 600px) {
+  .tk-rows-h { display: none; }
+  .tk-r-main { grid-template-columns: 28px minmax(0, 1fr) auto auto; gap: 10px; }
+  .tk-r-main .tk-spark, .tk-r-main .tk-r-worth { display: none; }
+  .tk-r-wsm { display: inline; }
+  .tk-r-more { padding-left: 10px; }
+}
 
 /* scorecard */
 .tk-split { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 14px; }
@@ -1950,8 +1954,6 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 }
 @media (max-width: 600px) {
   .tk-styles { grid-template-columns: 1fr; }
-  .tk-exit { grid-template-columns: 78px minmax(0, 1fr) auto; gap: 6px; font-size: 0.72rem; }
-  .tk-exit b { font-size: 0.72rem; }
   .tk-amounts { grid-template-columns: 1fr 1fr; }
   .tk-hero { padding: 16px; gap: 14px; }
   .tk-orb { width: 64px; height: 64px; } .tk-orb b { width: 42px; height: 42px; }
