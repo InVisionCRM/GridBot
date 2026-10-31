@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { http } from './api';
-import { ago, qty } from './fmt';
+import { ago, px, qty } from './fmt';
 import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj, type Nav } from './model';
 import { haltText } from './haltText';
@@ -17,7 +17,7 @@ import { useEthUsd } from './units';
 import { CoinLogo } from './Wallet';
 import { VENUES } from '../live/venues';
 import { EthLimit, SpendDetails, TokenAdvanced, blockedNote, feePct, generatedText, modeLabel, offCompletely, startTrader } from './TokenTrader';
-import { STYLES, lookCycle, radarBlips, radarSectors, scorecard, styleOf } from './tokenModel';
+import { STYLES, exitTrack, lookCycle, radarBlips, radarSectors, scorecard, styleOf, type ExitTrack, type TrackMark } from './tokenModel';
 
 /** The two auto traders share the "Auto traders" tile: this switches between their pages. */
 export function TraderSwitch({ at, nav }: { at: 'auto' | 'token'; nav: Nav }) {
@@ -334,65 +334,123 @@ function Positions({ s, t, now, busy, run }: { s: AnyObj; t: AnyObj; now: number
   const ps: AnyObj[] = t.positions ?? [];
   return (
     <section className="tk-card">
-      <h3><Icon name="coins" size={16} /> Open positions <span className="muted small">{ps.length ? `${ps.length} open · tap one for its exits` : 'none open'}</span></h3>
-      {!ps.length && <p className="muted small">Each buy shows here as a row: its price since the buy, what it is worth and its result.</p>}
-      {ps.length > 0 && (
-        <ul className="tk-rows">
-          <li className="tk-rows-h" aria-hidden="true"><span /><span>Coin</span><span className="tk-r-spark">Since buy</span><span className="tk-r-worth">Worth</span><span>Result</span><span /></li>
-          {ps.map((p) => <PositionRow key={p.id} p={p} s={s} now={now} busy={busy} run={run} />)}
-        </ul>
-      )}
+      <h3><Icon name="coins" size={16} /> Open positions <span className="muted small">{ps.length ? `${ps.length} open · flip a card for its numbers` : 'none open'}</span></h3>
+      {!ps.length && <p className="muted small">Each buy shows here as a card: its price since the buy, how far it is from each exit, and what it is worth.</p>}
+      {ps.length > 0 && <div className="tk-cards">{ps.map((p) => <PositionCard key={p.id} p={p} s={s} now={now} busy={busy} run={run} />)}</div>}
     </section>
   );
 }
 
 /** A price older than this is stale: the trader re-reads every open position each 10 s tick */
 const STALE_MS = 60_000;
+const hm = (ms: number) => `${Math.floor(ms / 3600_000)}h ${String(Math.floor((ms % 3600_000) / 60_000)).padStart(2, '0')}m`;
+const signed = (x: number, d = 1) => `${x >= 0 ? '+' : '−'}${Math.abs(x * 100).toFixed(d)}%`;
 
-/** One open position as a ticker row; tapping it opens its exits */
-function PositionRow({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: number; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<boolean> }) {
-  const [open, setOpen] = useState(false);
+/**
+ * One open position as a card. Front: result, chart since the buy, the exit track (stop … last take-profit, with the
+ * result now on it) and the time stop. Back (Flip): the position's numbers. Exits: each rule and how far away it is.
+ */
+function PositionCard({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: number; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<boolean> }) {
+  const [flipped, setFlipped] = useState(false);
+  const [exitsOpen, setExitsOpen] = useState(false);
   const pnl = Number(p.pnl ?? 0), gain = Number(p.pnlPct ?? 0), up = pnl >= 0;
   const sym = p.spendSym ?? '';
   const chain = chainOf(s, p.chainId);
   const blocked = blockedNote(p);
   const stale = p.markedAt == null || now - Number(p.markedAt) > STALE_MS;
-  const sell = (e: { stopPropagation: () => void }) => {
-    e.stopPropagation();
+  const track = exitTrack(p.exits);
+  const sell = () => {
     if (p.mode === 'live' && !confirm(`Sell all of ${p.tokenSym} now, with real money? It sells through the pool like any exit (split under the impact cap).`)) return;
     void run(() => http(`/api/token-trader/positions/${encodeURIComponent(p.id)}/sell`, 'POST'));
   };
+  const read = p.markedAt == null ? 'price not read yet' : `price read ${ago(p.markedAt, now)}`;
   return (
-    <li className={`tk-row ${up ? 'up' : 'down'} ${open ? 'open' : ''}`}>
-      <div className="tk-r-main" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(!open)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!open); } }}>
-        <CoinLogo coin={{ chainId: p.chainId, address: p.token, symbol: p.tokenSym }} chain={chain} size={30} />
-        <span className="tk-r-coin"><b>{p.tokenSym}</b><small>{chain?.short ?? ''} · {ago(p.openedAt, now)}<span className="tk-r-wsm"> · {p.value != null ? qty(p.value, sym, 4, false) : '—'}</span></small></span>
-        <Spark marks={p.marks ?? []} entry={Number(p.entryPrice)} up={up} />
-        <span className="tk-r-worth">{p.value != null ? qty(p.value, sym, 4, false) : '—'}</span>
-        <span className={`tk-r-pct ${up ? 'pos' : 'neg'}`} title={p.pnl != null ? qty(pnl, sym, 5) : undefined}>
-          <AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`} />
-          {stale && <i className="tk-r-stale" title={p.markedAt == null ? 'price not read yet' : `price read ${ago(p.markedAt, now)}: stale`} />}
-        </span>
-        <button type="button" className="tk-sell" disabled={busy || !!p.sellNow} onClick={sell}>{p.sellNow ? 'Selling…' : 'Sell'}</button>
-      </div>
-      {blocked && <p className="tk-r-block neg" role="alert">{blocked}</p>}
-      {open && (
-        <div className="tk-r-more">
-          {(p.exits ?? []).map((x: AnyObj) => <ExitChip key={x.key} x={x} />)}
-          <span className="tk-r-meta">{p.markedAt == null ? 'price not read yet' : `price read ${ago(p.markedAt, now)}`} · {p.pnl != null ? qty(pnl, sym, 5) : ''} · pool fee {feePct(p.feeBps)}{p.dynamicFee ? ' (dynamic)' : ''}</span>
+    <article className={`tk-pc ${up ? 'up' : 'down'} ${flipped ? 'flipped' : ''}`}>
+      <div className="tk-pc-flip">
+        <div className="tk-pc-face tk-pc-front" aria-hidden={flipped}>
+          <header className="tk-pc-top">
+            <CoinLogo coin={{ chainId: p.chainId, address: p.token, symbol: p.tokenSym }} chain={chain} size={38} />
+            <span className="tk-pc-name"><b>{p.tokenSym}</b><small>{chain?.short ?? ''} · held {ago(p.openedAt, now).replace(' ago', '')}{p.source === 'snipe' ? ' · sniped' : ''}</small></span>
+            <button type="button" className="tk-pc-flipbtn" onClick={() => setFlipped(true)} tabIndex={flipped ? -1 : 0}>Flip <span aria-hidden="true">↻</span></button>
+          </header>
+          <div className="tk-pc-result">
+            <span className={`tk-pc-pct ${up ? 'pos' : 'neg'}`}><AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`} /></span>
+            <span className="tk-pc-worth">{p.value != null ? qty(p.value, sym, 4, false) : '—'}<small className={up ? 'pos' : 'neg'}>{p.pnl != null ? qty(pnl, sym, 4) : ''}</small></span>
+          </div>
+          <Spark marks={p.marks ?? []} entry={Number(p.entryPrice)} up={up} />
+          <p className={`tk-pc-read ${stale ? 'stale' : ''}`}><i aria-hidden="true" />{read}{stale ? ' · stale' : ''}</p>
+          {track ? <ExitBar k={track} /> : <p className="muted small">The exit track shows once the price is read.</p>}
+          {track?.time && <TimeBar t={track.time} />}
         </div>
-      )}
-    </li>
+        <div className="tk-pc-face tk-pc-back" aria-hidden={!flipped}>
+          <header className="tk-pc-top">
+            <span className="tk-pc-name"><b>{p.tokenSym}</b><small>{p.label} · {p.mode === 'live' ? 'live' : 'paper'}</small></span>
+            <button type="button" className="tk-pc-flipbtn" onClick={() => setFlipped(false)} tabIndex={flipped ? 0 : -1}>Back <span aria-hidden="true">↺</span></button>
+          </header>
+          <dl className="tk-pc-facts">
+            <div><dt>Spent</dt><dd>{qty(p.spent, sym, 5, false)}</dd></div>
+            <div><dt>Holding</dt><dd>{qty(p.tokens, p.tokenSym, 5, false)}{p.entryTokens > 0 && p.tokens < p.entryTokens ? <small> · {Math.round((p.tokens / p.entryTokens) * 100)}% of the buy</small> : null}</dd></div>
+            <div><dt>Bought at</dt><dd>{px(p.entryPrice)} {sym}</dd></div>
+            <div><dt>Price now</dt><dd>{px(p.price)} {sym}</dd></div>
+            <div><dt>Highest since buy</dt><dd>{p.entryPrice > 0 ? signed(p.peak / p.entryPrice - 1) : '—'} vs the buy</dd></div>
+            <div><dt>Pool fee</dt><dd>{feePct(p.feeBps)}{p.dynamicFee ? ' (changes)' : ''}</dd></div>
+            <div><dt>Sell tax</dt><dd>{(Number(p.sellTax) * 100).toFixed(1)}%</dd></div>
+            {p.liqBase === 'chain' && p.entryLiq > 0 && <div><dt>Pool depth</dt><dd>{Math.round((p.liq / p.entryLiq) * 100)}% of the buy&apos;s</dd></div>}
+            <div><dt>Found by</dt><dd>{p.source === 'snipe' ? 'sniper' : 'scan'} · {ago(p.openedAt, now)}</dd></div>
+          </dl>
+        </div>
+      </div>
+      {blocked && <p className="tk-pc-block neg" role="alert">{blocked}</p>}
+      <div className="tk-pc-acts">
+        <button type="button" className="tk-pc-drop" aria-expanded={exitsOpen} onClick={() => setExitsOpen(!exitsOpen)}>Exits <span className="tk-pc-caret" aria-hidden="true">▾</span></button>
+        <button type="button" className="tk-sell" disabled={busy || !!p.sellNow} onClick={sell}>{p.sellNow ? 'Selling…' : 'Sell now'}</button>
+      </div>
+      {exitsOpen && <ul className="tk-pc-exits">{(p.exits ?? []).map((x: AnyObj) => <ExitLine key={x.key} x={x} />)}</ul>}
+    </article>
   );
 }
 
-/** One exit rule as a chip: what fires it and how far the price is from it */
-export function ExitChip({ x }: { x: AnyObj }) {
-  const label: Record<string, string> = { stop: 'Stop −25%', trail: x.armed ? 'Trailing 20% off peak' : 'Trail arms +30%', tp1: 'Take ⅓ at +50%', tp2: 'Take ⅓ at +100%', time: 'Time stop' };
+/** The exit track: stop on the left, the last take-profit on the right, the result now as a filled bar from the buy */
+function ExitBar({ k }: { k: ExitTrack }) {
+  const zero = Math.max(0, Math.min(100, ((0 - k.lo) / (k.hi - k.lo)) * 100));
+  const up = k.now >= 0;
+  // labels closer than this (percent of the track) to one already placed are left off; the ends go first
+  const shown: TrackMark[] = [];
+  for (const m of [...k.marks].sort((a, b) => Number(b.key === 'stop' || b.key === 'tp2') - Number(a.key === 'stop' || a.key === 'tp2'))) {
+    if (shown.every((o) => Math.abs(o.x - m.x) >= 13)) shown.push(m);
+  }
+  shown.sort((a, b) => a.x - b.x);
+  return (
+    <div className="tk-pc-track" role="img" aria-label={`result ${signed(k.now)}: stop at ${signed(k.lo, 0)}, last take-profit at ${signed(k.hi, 0)}`}>
+      <div className="tk-pc-rail">
+        <i className={`tk-pc-fill ${up ? 'up' : 'down'}`} style={{ left: `${Math.min(zero, k.x)}%`, width: `${Math.abs(k.x - zero)}%` }} />
+        <i className="tk-pc-zero" style={{ left: `${zero}%` }} />
+        {k.marks.map((m) => <i key={m.key} className={`tk-pc-tick is-${m.key} ${m.done ? 'done' : ''}`} style={{ left: `${m.x}%` }} title={`${m.key === 'stop' ? 'stop-loss' : m.key === 'trail' ? 'trailing stop' : 'take a third'} at ${signed(m.at, 0)}`} />)}
+        <b className={`tk-pc-dot ${up ? 'up' : 'down'}`} style={{ left: `${k.x}%` }} />
+      </div>
+      <div className="tk-pc-scale">{shown.map((m) => <span key={m.key} className={`is-${m.key}`} style={{ left: `${m.x}%` }}>{signed(m.at, 0)}</span>)}</div>
+    </div>
+  );
+}
+
+/** The time stop as a bar filling up over its span */
+function TimeBar({ t }: { t: NonNullable<ExitTrack['time']> }) {
+  return (
+    <div className={`tk-pc-time ${t.off ? 'off' : ''}`}>
+      <span>Time stop</span>
+      <span className="tk-pc-timebar"><i style={{ width: `${t.frac * 100}%` }} /></span>
+      <span className="mono">{t.off ? 'off · up enough' : `${hm(t.msLeft)} left`}</span>
+    </div>
+  );
+}
+
+/** One exit rule: what it does and how far the price is from it */
+export function ExitLine({ x }: { x: AnyObj }) {
+  const label: Record<string, string> = { stop: 'Stop-loss', trail: x.armed ? 'Trailing stop' : 'Trailing stop (not armed)', tp1: 'Take profit 1', tp2: 'Take profit 2', time: 'Time stop' };
   const away = x.key === 'time'
-    ? (x.does.startsWith('off') ? 'off' : `${Math.floor(x.msLeft / 3600_000)}h ${Math.floor((x.msLeft % 3600_000) / 60_000)}m left`)
-    : x.done ? 'taken' : x.move == null ? '—' : `${x.move >= 0 ? '+' : '−'}${Math.abs(x.move * 100).toFixed(1)}%`;
-  return <span className={`tk-chipx is-${x.key} ${x.done ? 'done' : ''}`} title={x.does}><b>{label[x.key] ?? x.label}</b><em>{away}</em></span>;
+    ? (String(x.does).startsWith('off') ? 'off' : `${hm(x.msLeft)} left`)
+    : x.done ? 'taken' : x.move == null ? '—' : `${signed(x.move)} away`;
+  return <li className={`tk-pc-exit is-${x.key} ${x.done ? 'done' : ''}`}><i aria-hidden="true" /><span><b>{label[x.key] ?? x.label}</b><small>{x.does}</small></span><em>{away}</em></li>;
 }
 
 /** The position's prices since the buy, with the buy price dashed */
