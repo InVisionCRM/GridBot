@@ -105,7 +105,8 @@ describe('a position keeps its prices and when they were read', () => {
     await t.tick();
     const p = t.status().positions[0];
     expect(p.value).toBeCloseTo(p.spent + p.pnl!, 12);
-    expect(p.exits.map((r) => r.key)).toEqual(['stop', 'trail', 'tp1', 'tp2', 'time']);
+    // the pool watch's drain line shows once a depth is known; its dead-pool line once a price has been read (none here)
+    expect(p.exits.map((r) => r.key)).toEqual(['stop', 'trail', 'tp1', 'tp2', 'time', 'drain']);
   });
 });
 

@@ -36,6 +36,8 @@ export const EXIT = {
   timeStopMinGain: 0.1,
   volDecay: 0.25,
   liqPull: 0.4,
+  /** A pool whose depth hasn't changed (no swaps) for this long is dead: its price can't move, so no other exit fires */
+  deadMs: 2 * 3600_000,
 } as const;
 
 /**
@@ -366,6 +368,10 @@ export interface ExitPos {
   volume: number;
   entryLiq: number;
   liq: number;
+  /** The deepest on-chain liquidity seen since the buy: a drain is measured from here, not only from the entry */
+  liqPeak?: number;
+  /** When the pool's depth last changed (a swap or a liquidity move); null/absent = not watched yet */
+  movedAt?: number | null;
   sellTax: number;
   entrySellTax: number;
   sellSimOk: boolean;
@@ -397,8 +403,10 @@ export function decideExit(p: ExitPos): ExitDecision {
   const all = (why: string): ExitDecision => ({ action: 'sell', frac: left, why });
   if (!p.sellSimOk) return all('sell simulation failed');
   if (p.sellTax > p.entrySellTax + 0.005 || (p.entrySellTax <= TAX_TOLERANCE && p.sellTax > TAX_TOLERANCE)) return all(`sell tax rose to ${(p.sellTax * 100).toFixed(1)}%`);
-  if (p.entryLiq > 0 && p.liq < p.entryLiq * (1 - EXIT.liqPull)) return all(`liquidity down ${((1 - p.liq / p.entryLiq) * 100).toFixed(0)}% from entry`);
+  const liqRef = Math.max(p.entryLiq, p.liqPeak ?? 0);
+  if (liqRef > 0 && p.liq < liqRef * (1 - EXIT.liqPull)) return all(`liquidity down ${((1 - p.liq / liqRef) * 100).toFixed(0)}% from its peak`);
   if (gain <= -EXIT.hardStop) return all(`hard stop ${(gain * 100).toFixed(1)}% from entry`);
+  if (p.movedAt != null && p.now - p.movedAt >= EXIT.deadMs) return all(`no trades in the pool for ${((p.now - p.movedAt) / 3600_000).toFixed(1)} h`);
   const armed = p.peak * keep >= p.entryPrice * (1 + EXIT.trailArm);
   if (armed && p.price <= p.peak * (1 - EXIT.trailGap)) return all(`trailing stop ${((1 - p.price / p.peak) * 100).toFixed(0)}% off the peak`);
   if (!p.tp1Done && gain >= EXIT.tp1) return { action: 'sell', frac: Math.min(left, EXIT.tp1Frac), why: `take profit ${(gain * 100).toFixed(0)}% (sell a third)` };
@@ -412,15 +420,17 @@ export function decideExit(p: ExitPos): ExitDecision {
  * The exit rules of an open position as a person reads them: what each one does and how far the price is from setting
  * it off (the same math as decideExit). `move` = the price change from now that fires it (−0.24 = a 24% fall); null
  * once taken. `at` = the result after costs that fires it (−0.25 for the stop), when it is a fixed level (not an armed
- * trail, which follows the peak). The time stop has `msLeft` and `ms` (its whole span) instead.
+ * trail, which follows the peak). The time stop and the dead-pool exit have `msLeft` and `ms` (the whole span)
+ * instead. The drain exit has `drop` (the depth lost from its peak, 0..1) and `at` (the drop that fires it).
  */
-export interface ExitTarget { key: 'stop' | 'trail' | 'tp1' | 'tp2' | 'time'; label: string; does: string; move: number | null; at?: number; msLeft?: number; ms?: number; done?: boolean; armed?: boolean }
+export interface ExitTarget { key: 'stop' | 'trail' | 'tp1' | 'tp2' | 'time' | 'drain' | 'dead'; label: string; does: string; move: number | null; at?: number; msLeft?: number; ms?: number; drop?: number; done?: boolean; armed?: boolean }
 export function exitTargets(p: ExitPos): ExitTarget[] {
   const keep = (1 - Math.max(0, Math.min(p.exitFee ?? 0, 0.99))) * (1 - Math.max(0, Math.min(p.exitTax ?? 0, 0.99)));
   const at = (gain: number) => (p.price > 0 && keep > 0 ? (p.entryPrice * (1 + gain)) / keep / p.price - 1 : null);
   const armed = p.peak * keep >= p.entryPrice * (1 + EXIT.trailArm);
   const gain = p.entryPrice > 0 ? (p.price * keep) / p.entryPrice - 1 : 0;
   const pct = (x: number) => `${Math.round(x * 100)}%`;
+  const liqRef = Math.max(p.entryLiq, p.liqPeak ?? 0);
   return [
     { key: 'stop', label: 'Stop-loss', does: `sells all at −${pct(EXIT.hardStop)}`, move: at(-EXIT.hardStop), at: -EXIT.hardStop },
     armed
@@ -432,6 +442,8 @@ export function exitTargets(p: ExitPos): ExitTarget[] {
       key: 'time', label: 'Time stop', move: null, msLeft: Math.max(0, p.openedAt + EXIT.timeStopMs - p.now), ms: EXIT.timeStopMs,
       does: gain >= EXIT.timeStopMinGain ? `off: up over +${pct(EXIT.timeStopMinGain)}` : `sells all at ${EXIT.timeStopMs / 3600_000} h if under +${pct(EXIT.timeStopMinGain)}`,
     },
+    ...(liqRef > 0 ? [{ key: 'drain' as const, label: 'Liquidity pulled', does: `sells all if the pool's depth falls ${pct(EXIT.liqPull)} from its peak`, move: null, at: EXIT.liqPull, drop: Math.max(0, 1 - p.liq / liqRef) }] : []),
+    ...(p.movedAt != null ? [{ key: 'dead' as const, label: 'Pool stopped trading', does: `sells all after ${EXIT.deadMs / 3600_000} h with no trades in the pool`, move: null, msLeft: Math.max(0, p.movedAt + EXIT.deadMs - p.now), ms: EXIT.deadMs }] : []),
   ];
 }
 

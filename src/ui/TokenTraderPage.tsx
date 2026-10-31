@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { http } from './api';
-import { ago, px, qty } from './fmt';
+import { ago, px, qty, usd } from './fmt';
 import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj, type Nav } from './model';
 import { haltText } from './haltText';
@@ -17,7 +17,7 @@ import { useEthUsd } from './units';
 import { CoinLogo } from './Wallet';
 import { VENUES } from '../live/venues';
 import { EthLimit, SpendDetails, TokenAdvanced, blockedNote, feePct, generatedText, modeLabel, offCompletely, startTrader } from './TokenTrader';
-import { STYLES, exitTrack, lookCycle, radarBlips, radarSectors, scorecard, styleOf, type ExitTrack, type TrackMark } from './tokenModel';
+import { STYLES, exitTrack, lookCycle, poolWatch, radarBlips, radarSectors, scorecard, shortSpan, styleOf, type ExitTrack, type PoolWatch, type TrackMark } from './tokenModel';
 
 /** The two auto traders share the "Auto traders" tile: this switches between their pages. */
 export function TraderSwitch({ at, nav }: { at: 'auto' | 'token'; nav: Nav }) {
@@ -359,6 +359,7 @@ function PositionCard({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: num
   const blocked = blockedNote(p);
   const stale = p.markedAt == null || now - Number(p.markedAt) > STALE_MS;
   const track = exitTrack(p.exits);
+  const watch = poolWatch(p, now);
   const sell = () => {
     if (p.mode === 'live' && !confirm(`Sell all of ${p.tokenSym} now, with real money? It sells through the pool like any exit (split under the impact cap).`)) return;
     void run(() => http(`/api/token-trader/positions/${encodeURIComponent(p.id)}/sell`, 'POST'));
@@ -377,10 +378,11 @@ function PositionCard({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: num
             <span className={`tk-pc-pct ${up ? 'pos' : 'neg'}`}><AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`} /></span>
             <span className="tk-pc-worth">{p.value != null ? qty(p.value, sym, 4, false) : '—'}<small className={up ? 'pos' : 'neg'}>{p.pnl != null ? qty(pnl, sym, 4) : ''}</small></span>
           </div>
+          <p className={`tk-pc-status ${watch.status.tone}`} role={watch.status.tone === 'bad' ? 'alert' : undefined}><i aria-hidden="true" />{watch.status.text}</p>
           <Spark marks={p.marks ?? []} entry={Number(p.entryPrice)} up={up} />
           <p className={`tk-pc-read ${stale ? 'stale' : ''}`}><i aria-hidden="true" />{read}{stale ? ' · stale' : ''}</p>
           {track ? <ExitBar k={track} /> : <p className="muted small">The exit track shows once the price is read.</p>}
-          {track?.time && <TimeBar t={track.time} />}
+          <PoolMeters w={watch} time={track?.time ?? null} />
         </div>
         <div className="tk-pc-face tk-pc-back" aria-hidden={!flipped}>
           <header className="tk-pc-top">
@@ -433,22 +435,39 @@ function ExitBar({ k }: { k: ExitTrack }) {
   );
 }
 
-/** The time stop as a bar filling up over its span */
-function TimeBar({ t }: { t: NonNullable<ExitTrack['time']> }) {
+/** One watched rule as a bar filling toward the point where it sells */
+function Meter({ label, frac, right, tone, title }: { label: string; frac: number; right: string; tone: 'ok' | 'warn' | 'bad' | 'off'; title: string }) {
   return (
-    <div className={`tk-pc-time ${t.off ? 'off' : ''}`}>
-      <span>Time stop</span>
-      <span className="tk-pc-timebar"><i style={{ width: `${t.frac * 100}%` }} /></span>
-      <span className="mono">{t.off ? 'off · up enough' : `${hm(t.msLeft)} left`}</span>
+    <div className={`tk-pc-meter ${tone}`} title={title}>
+      <span>{label}</span>
+      <span className="tk-pc-meterbar"><i style={{ width: `${Math.max(0, Math.min(1, frac)) * 100}%` }} /></span>
+      <span className="mono">{right}</span>
+    </div>
+  );
+}
+const toneOf = (frac: number): 'ok' | 'warn' | 'bad' => (frac >= 0.75 ? 'bad' : frac >= 0.4 ? 'warn' : 'ok');
+
+/** The pool watch: time stop, the pool's depth against its peak, time since the pool last traded, the last safety check */
+function PoolMeters({ w, time }: { w: PoolWatch; time: ExitTrack['time'] }) {
+  return (
+    <div className="tk-pc-meters">
+      {time && <Meter label="Time stop" frac={time.frac} tone={time.off ? 'off' : toneOf(time.frac)} right={time.off ? 'off · up enough' : `${hm(time.msLeft)} left`} title="Sells all at 6 h if it is under +10%" />}
+      {w.depth && <Meter label="Pool depth" frac={w.depth.frac} tone={toneOf(w.depth.frac)} right={`${usd(w.depth.usd)}${w.depth.drop >= 0.005 ? ` · −${Math.round(w.depth.drop * 100)}% from peak` : ' · at its peak'}`} title="Sells all if the pool's depth falls 40% from the deepest it has been since the buy" />}
+      {w.quiet && <Meter label="Last trade" frac={w.quiet.frac} tone={toneOf(w.quiet.frac)} right={`${shortSpan(w.quiet.ms)} ago`} title={`Sells all if the pool has no trades for 2 h (${shortSpan(w.quiet.msLeft)} left)`} />}
+      <p className={`tk-pc-safety ${w.safety.note ? 'warn' : ''}`}>
+        <i aria-hidden="true" />{w.safety.ms == null ? 'Safety check: not run yet' : `Safety checked ${shortSpan(w.safety.ms)} ago · sell tax ${(w.safety.tax * 100).toFixed(1)}%`}{w.safety.note ? ` · ${w.safety.note}` : ''}
+      </p>
     </div>
   );
 }
 
 /** One exit rule: what it does and how far the price is from it */
 export function ExitLine({ x }: { x: AnyObj }) {
-  const label: Record<string, string> = { stop: 'Stop-loss', trail: x.armed ? 'Trailing stop' : 'Trailing stop (not armed)', tp1: 'Take profit 1', tp2: 'Take profit 2', time: 'Time stop' };
+  const label: Record<string, string> = { stop: 'Stop-loss', trail: x.armed ? 'Trailing stop' : 'Trailing stop (not armed)', tp1: 'Take profit 1', tp2: 'Take profit 2', time: 'Time stop', drain: 'Liquidity pulled', dead: 'Pool stopped trading' };
   const away = x.key === 'time'
     ? (String(x.does).startsWith('off') ? 'off' : `${hm(x.msLeft)} left`)
+    : x.key === 'dead' ? `${hm(x.msLeft)} left`
+    : x.key === 'drain' ? `${Math.round(Number(x.drop) * 100)}% of ${Math.round(Number(x.at) * 100)}% gone`
     : x.done ? 'taken' : x.move == null ? '—' : `${signed(x.move)} away`;
   return <li className={`tk-pc-exit is-${x.key} ${x.done ? 'done' : ''}`}><i aria-hidden="true" /><span><b>{label[x.key] ?? x.label}</b><small>{x.does}</small></span><em>{away}</em></li>;
 }

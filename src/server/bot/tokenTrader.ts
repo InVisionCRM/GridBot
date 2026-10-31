@@ -23,6 +23,7 @@ import { blankPlay, feeTierFromBps, playLeaderboard, type PlayRecord } from '../
 import { MemoryRejects, rejectKey, type RejectSink } from './playRejects';
 import { TOKEN_MAX_POOL_SHARE } from '../../market/poolSize';
 import type { Emit } from './activity';
+import type { MarketDef } from '../../live/markets';
 import type { Store } from './store';
 import type { PoolSniper, SnipeHit } from '../market/sniper';
 import { requestHalt, systemHalt, type Halt } from './audit';
@@ -161,6 +162,19 @@ export interface Position {
   /** Its prices since the buy, [time, price] (the last MARKS_KEPT reads), and when the last one was read */
   marks?: [number, number][];
   markedAt?: number;
+  /** Why the last price read failed (its last price is kept); null once a read works */
+  readError?: string | null;
+  /**
+   * The pool route the last safety check built (quoter, pool reference, decimals). Price reads use it every tick and it
+   * is saved, so a restart prices at once instead of waiting for a safety check per position.
+   */
+  market?: MarketDef | null;
+  /** When the last safety check of this position's pool finished, and why it measured nothing when it didn't */
+  checkedAt?: number;
+  checkNote?: string | null;
+  /** Pool watch: the deepest on-chain liquidity seen since the buy, and when the pool's depth last changed */
+  liqPeak?: number;
+  movedAt?: number;
   /** Sell it all on the next exit pass: asked for by hand (Sell now). Stays until it is sold. */
   sellNow?: number;
   /**
@@ -377,6 +391,19 @@ function nativeToSpend(pool: FreshPool): number | null {
   if (native && token === native && pool.price > 0) return pool.price;
   if (wrapped && token === wrapped && pool.price > 0) return pool.price;
   return null;
+}
+
+/**
+ * When the price in `marks` last changed: the time of the first read at the newest price (all equal: the oldest read).
+ * Starts the pool watch of a position that has no movedAt yet (2026-10-31: .AI, UDFO, MQC and RAD had 85+ reads at one
+ * price, hours without a trade, and the watch would have started its 2 h clock from zero).
+ */
+export function lastMove(marks: [number, number][] | undefined): number | undefined {
+  if (!marks?.length) return undefined;
+  const now = marks[marks.length - 1][1];
+  let i = marks.length - 1;
+  while (i > 0 && marks[i - 1][1] === now) i--;
+  return marks[i][0];
 }
 
 export class TokenTrader {
@@ -661,8 +688,10 @@ export class TokenTrader {
       // the same open result in the spend coin (display only)
       const pnl = p.usdPerSpend > 0 ? pnlUsd / p.usdPerSpend : null;
       const share = p.entryTokens > 0 ? p.tokens / p.entryTokens : 0;
+      // the pool route is the server's (quoter internals); the page gets whether there is one
+      const { market, ...pub } = p;
       return {
-        ...p, pnlUsd, pnl, spendSym: this.spendSymbol(p), tokenSym: p.label.split('/')[0].trim(), pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p),
+        ...pub, routed: !!market, pnlUsd, pnl, spendSym: this.spendSymbol(p), tokenSym: p.label.split('/')[0].trim(), pnlPct: cost > 0 ? pnlUsd / cost : null, exitPlan: this.plan(p),
         /** What it is worth now in its spend coin (what it cost, plus its open result) */
         value: pnl == null ? null : p.spent * share + pnl,
         exits: exitTargets(this.exitOf(p)),
@@ -1438,7 +1467,7 @@ export class TokenTrader {
   private exitOf(p: Position) {
     return {
       entryPrice: p.entryPrice, price: p.price, peak: p.peak, openedAt: p.openedAt, now: this.now(),
-      entryVolume: p.entryVolume, volume: p.volume, entryLiq: p.entryLiq, liq: p.liq,
+      entryVolume: p.entryVolume, volume: p.volume, entryLiq: p.entryLiq, liq: p.liq, liqPeak: p.liqPeak, movedAt: p.movedAt ?? null,
       sellTax: p.sellTax, entrySellTax: p.entrySellTax, sellSimOk: p.sellSimOk,
       tp1Done: p.tp1Done, tp2Done: p.tp2Done, remainingFrac: p.entryTokens > 0 ? p.tokens / p.entryTokens : 0,
       exitFee: p.feeBps / 10_000, exitTax: p.entrySellTax,
@@ -1530,13 +1559,23 @@ export class TokenTrader {
         // throw here failed the whole tick, and a failed exit pass skips entries: 2026-10-30, a thin V4 pool's quote
         // reverted on each tick and the trader bought nothing more)
         const r = await read;
-        if ('e' in r) this.lastError = `${p.label}: price read failed, last price kept (${(r.e as Error).message.slice(0, 120)})`;
+        if ('e' in r) {
+          p.readError = (r.e as Error).message.slice(0, 160);
+          this.lastError = `${p.label}: price read failed, last price kept (${p.readError.slice(0, 120)})`;
+        }
         const m = 'm' in r ? r.m : null;
         if (m) {
+          const depth = [p.quoteReserve, p.tokenReserve];
           Object.assign(p, m);
           if (m.price != null) {
             p.markedAt = this.now();
+            p.readError = null;
             p.marks = [...(p.marks ?? []), [p.markedAt, p.price] as [number, number]].slice(-MARKS_KEPT);
+            // Pool watch: any change in the pool's depth is a trade (or a liquidity move); none for EXIT.deadMs is a dead
+            // pool. A position from before the watch starts from its saved prices: the last time the price changed.
+            if (p.movedAt == null) p.movedAt = lastMove(p.marks);
+            else if (m.quoteReserve !== depth[0] || m.tokenReserve !== depth[1]) p.movedAt = p.markedAt;
+            if (p.liqBase === 'chain') p.liqPeak = Math.max(p.liqPeak ?? 0, p.liq);
           }
           if (Object.prototype.hasOwnProperty.call(m, 'feeBps')) this.noteFeeReread(p.id);
         }

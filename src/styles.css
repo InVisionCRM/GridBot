@@ -1942,10 +1942,23 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 .tk-pc-scale span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
 .tk-pc-scale span:first-child { transform: none; } .tk-pc-scale span:last-child { transform: translateX(-100%); }
 .tk-pc-scale .is-stop { color: var(--loss); } .tk-pc-scale .is-trail { color: var(--warn); } .tk-pc-scale .is-tp1, .tk-pc-scale .is-tp2 { color: var(--profit); }
-.tk-pc-time { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; font: 500 0.68rem var(--mono); color: var(--muted); }
-.tk-pc-timebar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
-.tk-pc-timebar i { display: block; height: 100%; background: var(--warn); transition: width 1s linear; }
-.tk-pc-time.off .tk-pc-timebar i { background: var(--faint); }
+/* pool watch: one line on what the trader is doing, then a meter per watched rule */
+.tk-pc-status { margin: 0; display: flex; align-items: flex-start; gap: 8px; padding: 7px 10px; border-radius: 10px; font: 600 0.74rem var(--font); line-height: 1.35; background: rgba(92, 208, 141, 0.08); color: var(--profit); overflow-wrap: anywhere; }
+.tk-pc-status i { flex: none; width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+.tk-pc-status.warn { background: rgba(245, 184, 65, 0.1); color: var(--warn); }
+.tk-pc-status.bad { background: rgba(242, 112, 107, 0.1); color: var(--loss); }
+.tk-pc-meters { display: flex; flex-direction: column; gap: 7px; }
+.tk-pc-meter { display: grid; grid-template-columns: 74px minmax(0, 1fr) auto; gap: 8px; align-items: center; font: 500 0.68rem var(--mono); color: var(--muted); }
+.tk-pc-meter > span:last-child { white-space: nowrap; color: var(--secondary); }
+.tk-pc-meterbar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.tk-pc-meterbar i { display: block; height: 100%; border-radius: inherit; background: var(--profit); transition: width 1s linear, background 0.4s; }
+.tk-pc-meter.warn .tk-pc-meterbar i { background: var(--warn); }
+.tk-pc-meter.bad .tk-pc-meterbar i { background: var(--loss); }
+.tk-pc-meter.bad > span:last-child { color: var(--loss); }
+.tk-pc-meter.off .tk-pc-meterbar i { background: var(--faint); }
+.tk-pc-safety { margin: 0; display: flex; align-items: center; gap: 6px; font: 400 0.66rem var(--mono); color: var(--faint); overflow-wrap: anywhere; }
+.tk-pc-safety i { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--profit); }
+.tk-pc-safety.warn { color: var(--warn); } .tk-pc-safety.warn i { background: var(--warn); }
 /* back */
 .tk-pc-facts { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
 .tk-pc-facts div { min-width: 0; }
@@ -1963,7 +1976,7 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 @keyframes tk-drop { from { opacity: 0; transform: translateY(-6px); } }
 .tk-pc-exit { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 2px; border-bottom: 1px solid var(--line); }
 .tk-pc-exit > i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.tk-pc-exit.is-stop > i { background: var(--loss); } .tk-pc-exit.is-trail > i { background: var(--warn); } .tk-pc-exit.is-tp1 > i, .tk-pc-exit.is-tp2 > i { background: var(--profit); } .tk-pc-exit.is-time > i { background: var(--hold); }
+.tk-pc-exit.is-stop > i { background: var(--loss); } .tk-pc-exit.is-trail > i { background: var(--warn); } .tk-pc-exit.is-tp1 > i, .tk-pc-exit.is-tp2 > i { background: var(--profit); } .tk-pc-exit.is-time > i { background: var(--hold); } .tk-pc-exit.is-drain > i, .tk-pc-exit.is-dead > i { background: var(--loss); }
 .tk-pc-exit span { display: flex; flex-direction: column; min-width: 0; }
 .tk-pc-exit b { font: 600 0.78rem var(--font); }
 .tk-pc-exit small { font-size: 0.7rem; color: var(--muted); }
