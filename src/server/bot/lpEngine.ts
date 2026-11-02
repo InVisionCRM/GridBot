@@ -1155,13 +1155,30 @@ export class LpEngine {
       return this.exited(s, fees, principal, v);
     }
     const me = await (this.executor as LiveExecutor).address();
-    const exp = pool.rawAmounts(pool.coinsFor(Number(p.liquidity), p.tickLower, p.tickUpper, v), v);
+    const L = await this.chainLiquidity(pool, p);
+    const exp = pool.rawAmounts(pool.coinsFor(Number(L), p.tickLower, p.tickUpper, v), v);
     const k = 1 - this.state.limits.slippageBps / 10_000;
     const data = exitData({
-      tokenId: BigInt(p.id), liquidity: BigInt(p.liquidity), min0: BigInt(Math.floor(exp.a0 * k)), min1: BigInt(Math.floor(exp.a1 * k)),
+      tokenId: BigInt(p.id), liquidity: L, min0: BigInt(Math.floor(exp.a0 * k)), min1: BigInt(Math.floor(exp.a1 * k)),
       deadline: this.deadline(), to: me, nativeOther: this.nativeOther(pool),
     });
     await this.send(s, { to: pool.npm, data, value: 0n });
+  }
+  /**
+   * A live position's liquidity as the position manager holds it. The exit removes exactly this: the burn at the end
+   * of the multicall reverts "Not cleared" if any is left. The saved figure can be short of it: on 2026-11-02 an
+   * increase was mined after the app was stopped mid-send, so it was never recorded (ETH/USDG #1528085: 650,132,082,236
+   * short), and every move after that reverted. A difference is corrected here and reported.
+   */
+  private async chainLiquidity(pool: LpPool, p: LpPosition): Promise<bigint> {
+    const r = await readCall<unknown[]>(pool.reader, pool.npm, V3_NPM, 'positions', [BigInt(p.id)]);
+    const L = r[7] as bigint;
+    if (L.toString() !== p.liquidity) {
+      this.ev('info', `Liquidity ${this.label}: the position holds ${L} liquidity on-chain, the bot had ${p.liquidity} saved; using the on-chain figure`, { level: 'warn' });
+      p.liquidity = L.toString();
+      this.save();
+    }
+    return L;
   }
   private deadline() { return BigInt(Math.floor(this.now() / 1000) + this.state.limits.deadlineMinutes * 60); }
   /** The non-native token when one side of the market is the native coin (null when both are ERC-20s). */

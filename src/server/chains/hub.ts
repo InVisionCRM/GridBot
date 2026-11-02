@@ -109,6 +109,8 @@ export class Hub {
   get legacyChainId() { return this.o.legacyNet.chainId; }
   get defaultKey() { return this.o.legacyNet.defaultQuote; }
   runtimes(): ChainRuntime[] { return [...this.rts.values()]; }
+  /** Shutdown: every chain's gate stops taking transactions; resolves once the ones being sent are done. */
+  closeGates(): Promise<void> { return Promise.all(this.runtimes().map((r) => r.gate.close())).then(() => undefined); }
   rt(chainId: number): ChainRuntime {
     const r = this.rts.get(Number(chainId));
     if (!r) throw new Error(`Chain ${chainId} is not configured`);

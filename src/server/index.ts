@@ -258,15 +258,23 @@ let autopilotTimer: ReturnType<typeof setInterval> | null = null;
 let tokenTimer: ReturnType<typeof setInterval> | null = null;
 let walletTimer: ReturnType<typeof setInterval> | null = null;
 let pushTimer: ReturnType<typeof setInterval> | null = null;
+let stopping = false;
 const shutdown = () => {
+  // A second Ctrl-C while a transaction is still being sent exits at once: its hash may then not be saved.
+  if (stopping) { log.warn('stopped before the transaction being sent was saved'); process.exit(1); }
+  stopping = true;
   if (autopilotTimer) clearInterval(autopilotTimer);
   if (tokenTimer) clearInterval(tokenTimer);
   if (walletTimer) clearInterval(walletTimer);
   if (pushTimer) clearInterval(pushTimer);
   bot.stopLoop(); sync.stop(); dailyScan?.stop(); candles.flush(); server.close();
-  try { bot.flush(); } catch { /* logged by the store */ }
-  if (friends instanceof FriendsHost) friends.stop();
-  process.exit(0);
+  // Wait for a transaction being sent to come back with its hash, so the bot that sent it saves it before the exit.
+  if (hub.runtimes().some((r) => r.gate.busy)) log.info('stopping: waiting for the transaction being sent');
+  void hub.closeGates().then(() => {
+    try { bot.flush(); } catch { /* logged by the store */ }
+    if (friends instanceof FriendsHost) friends.stop();
+    process.exit(0);
+  });
 };
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
