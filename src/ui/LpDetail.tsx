@@ -129,9 +129,9 @@ function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boo
           <span className="muted small">{waitingText(b.owed?.quote, q, gen)}</span>
         </div>
         <div>
-          <span className="k"><L tip="With compounding on, fees are collected and added back into this range once they are worth the multiple × the estimated gas. Off, they roll in on the next range move or when the bot closes.">Compound at</L></span>
+          <span className="k"><L tip="With compounding on, fees are collected and added back into this range once they are worth √(2 × the gas of a compound × the position's value): the point where the gas and the fees lost by waiting balance. Off, they roll in on the next range move or when the bot closes.">Compound at</L></span>
           <b>{compoundOn ? (need != null && Number.isFinite(need) ? qty(need, q, 4, false) : '…') : 'off'}</b>
-          <span className="muted small">{compoundOn ? `${b.config.compound.gasMultiple ?? 10}× gas` : 'rolls in on a move'}</span>
+          <span className="muted small">{compoundOn ? 'sized to the position' : 'rolls in on a move'}</span>
         </div>
       </div>
       <div className="lp-actions">

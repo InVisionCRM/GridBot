@@ -24,9 +24,10 @@ import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { feesOwed } from '../../live/v3Liquidity';
+import { GAS_UNITS_RT } from '../../live/economics';
 import { gasInBase, LP_BAND, LP_GAS, LP_INCREASE_GAS, LP_MIN_SWAP_SHARE } from '../../market/lp';
 import {
-  checkCompoundPolicy, checkRangePolicy, compoundPolicy, decideCompound, decideRangeMove, effectiveBand, feePace, rangePolicy,
+  checkRangePolicy, compoundPolicy, decideCompound, decideRangeMove, effectiveBand, feePace, rangePolicy,
   type LpCompoundPolicy, type LpRangePolicy, type RangeWait,
 } from '../../market/lpPolicy';
 import { atr } from '../../market/indicators';
@@ -440,7 +441,7 @@ export class LpEngine {
     }
     if (profits.mode === 'send' && this.signer && sameAddr(await this.signer.getAddress(), profits.to)) throw new Error('That is the bot\'s own wallet: fees already stay there when reinvested.');
     const range = p.range ? checkRangePolicy(p.range) : undefined;
-    const compound = p.compound ? checkCompoundPolicy(p.compound) : undefined;
+    const compound = p.compound ? compoundPolicy(p.compound) : undefined;
     const stoppedBy = p.guard?.();
     if (stoppedBy) {
       this.state.halt = { ...stoppedBy, at: this.now() };
@@ -598,7 +599,7 @@ export class LpEngine {
       c.bandPct = next.bandPct;
     }
     if (next.range) c.range = checkRangePolicy({ ...c.range, ...next.range });
-    if (next.compound) c.compound = checkCompoundPolicy({ ...c.compound, ...next.compound });
+    if (next.compound) c.compound = compoundPolicy({ ...c.compound, ...next.compound });
     this.save();
   }
   /** Why a manual compound or move must not start. A tick in flight counts: it may be about to write `step`. */
@@ -610,7 +611,7 @@ export class LpEngine {
     return `It is busy ${what}. Try again in a minute.`;
   }
   /**
-   * Collect waiting fees and add them back into this range, now. Ignores the gas multiple.
+   * Collect waiting fees and add them back into this range, now. Ignores the size rule.
    * Refused while a step runs or a tick is in flight, while paused, while fees are set to be sent out, and when nothing is waiting.
    */
   async compoundNow() {
@@ -988,6 +989,15 @@ export class LpEngine {
 
   private gasQuote(units: number, v: PoolView, snap: { gasPricePls: number; extraPlsPerSwap?: number }) {
     return gasInBase(units, snap) * v.price;
+  }
+  /**
+   * One compound's gas, in quote: the collect, the increase and, with exact approvals, an approve per token that is
+   * not the native coin (live sends one before every increase: 2026-11-02, ETH/USDG on Robinhood, collect 199,355 +
+   * approve 40,921 + increase 271,157 gas). Each transaction pays its own L1 part.
+   */
+  private compoundGas(pool: LpPool, v: PoolView, snap: { gasPricePls: number; extraPlsPerSwap?: number }) {
+    const approvals = this.d.approval === 'max' ? 0 : [pool.def.base, pool.def.quote].filter((t) => !t.native).length;
+    return (gasInBase(LP_GAS.v3.close, snap) + gasInBase(LP_INCREASE_GAS, snap) + approvals * gasInBase(GAS_UNITS_RT.approve, snap)) * v.price;
   }
   /**
    * Native coin kept out of the position, in native units. Spending the native coin (its amount is native): the gas
@@ -1433,8 +1443,8 @@ export class LpEngine {
   }
 
   /**
-   * Reinvest mode, and only when compounding is enabled: once waiting fees are worth gasMultiple × the
-   * collect-and-add gas, collect them and add them back into the same range. Disabled (the default) returns
+   * Reinvest mode, and only when compounding is enabled: once waiting fees reach √(2 × gas × position value)
+   * (decideCompound), collect them and add them back into the same range. Disabled (the default) returns
    * before any quote, so a tick does the same work as before.
    */
   private async maybeCompound(pool: LpPool, v: PoolView) {
@@ -1444,9 +1454,9 @@ export class LpEngine {
     const o = await this.owed(pool, p);
     const fees = pool.coinsFromRaw(o.raw0, o.raw1, v);
     const snap = await this.hub.quoter(this.state.market).market();
-    const gas = this.gasQuote(LP_GAS.v3.close + LP_INCREASE_GAS, v, snap);
+    const held = pool.coinsFor(Number(p.liquidity), p.tickLower, p.tickUpper, v);
     const worth = fees.base * v.price + fees.quote;
-    const gate = decideCompound(worth, gas, pol);
+    const gate = decideCompound(worth, this.compoundGas(pool, v, snap), held.base * v.price + held.quote, pol);
     if (this.hold) this.hold = { ...this.hold, compoundNeed: gate.need, feesWaiting: worth };
     if (!gate.compound) return;
     if (!(Math.floor(pool.fund(fees, p.tickLower, p.tickUpper, v).L) > 0)) return;
@@ -1514,7 +1524,7 @@ export class LpEngine {
     if (p.putIn) p.putIn = { base: p.putIn.base + used.base, quote: p.putIn.quote + used.quote };
     this.addIdle({ base: Math.max(0, fees.base - used.base), quote: Math.max(0, fees.quote - used.quote) });
     const snap = await this.hub.quoter(this.state.market).market();
-    this.state.totals.gas += this.gasQuote(LP_GAS.v3.close + LP_INCREASE_GAS, v, snap);
+    this.addGas(this.compoundGas(pool, v, snap), v);
     this.state.step = null;
     this.ev('alert', `Liquidity ${this.label}: compounded ${worth.toPrecision(5)} ${this.quoteSym} of fees back into the position`, { level: 'success', notify: true });
   }

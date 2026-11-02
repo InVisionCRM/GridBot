@@ -14,11 +14,10 @@ export interface PolicyDraft {
   /** Percent of the centre-to-edge distance. 20 = warn in the outer 20%. 0 = off. */
   nearEdgePct: string;
   compound: boolean;
-  gasMultiple: string;
 }
 
 export const EMPTY_POLICY: PolicyDraft = {
-  dwellMin: '0', cooldownMin: '0', bufferPct: '0', atrMult: '0', atrPeriod: '14', costCheck: false, feeHorizonH: '24', nearEdgePct: '0', compound: false, gasMultiple: '10',
+  dwellMin: '0', cooldownMin: '0', bufferPct: '0', atrMult: '0', atrPeriod: '14', costCheck: false, feeHorizonH: '24', nearEdgePct: '0', compound: false,
 };
 
 export function draftFrom(range?: Partial<LpRangePolicy> | null, compound?: Partial<LpCompoundPolicy> | null): PolicyDraft {
@@ -32,7 +31,6 @@ export function draftFrom(range?: Partial<LpRangePolicy> | null, compound?: Part
     feeHorizonH: String(range?.feeHorizonH ?? 24),
     nearEdgePct: String(+((range?.nearEdgeFrac ?? 0) * 100).toPrecision(6)),
     compound: compound?.enabled === true,
-    gasMultiple: String(compound?.gasMultiple ?? 10),
   };
 }
 
@@ -48,7 +46,7 @@ export function payloadFrom(d: PolicyDraft): { range: LpRangePolicy; compound: L
       feeHorizonH: Number(d.feeHorizonH) || 24,
       nearEdgeFrac: (Number(d.nearEdgePct) || 0) / 100,
     },
-    compound: { enabled: d.compound, gasMultiple: Number(d.gasMultiple) || 10 },
+    compound: { enabled: d.compound },
   };
 }
 
@@ -104,12 +102,10 @@ export function LpPolicyFields({ d, set, onPreset }: {
           <input value={d.feeHorizonH} inputMode="decimal" aria-label="Fee horizon hours" onChange={(e) => set({ ...d, feeHorizonH: num(e.target.value) })} /></label>
         <label><L tip="Warn once when the price is inside but this close to leaving, measured from the centre to the edge. 20 warns in the outer 20%. 0 sends no warning.">Near-edge warning (%)</L>
           <input value={d.nearEdgePct} inputMode="decimal" aria-label="Near-edge warning" onChange={(e) => set({ ...d, nearEdgePct: num(e.target.value) })} /></label>
-        <label><L tip="Collect waiting fees and add them back into this same range once they are worth this many times the collect-and-add gas. 10 is the suggested multiple. Off, fees wait until the range moves or the bot closes.">Compound at × gas</L>
-          <input value={d.gasMultiple} inputMode="decimal" aria-label="Compound gas multiple" onChange={(e) => set({ ...d, gasMultiple: num(e.target.value) })} /></label>
       </div>
       <label className="check follow">
         <input type="checkbox" checked={d.compound} onChange={(e) => set({ ...d, compound: e.target.checked })} />
-        <span><b>Compound fees into the position</b> <span className="muted">Only while profits are set to reinvest. Sending fees out is unchanged.</span></span>
+        <span><b>Compound fees into the position</b> <span className="muted">Waits until the fees are worth √(2 × gas × the position's value): about 10 USDG on a 2,250 USDG position with 0.023 USDG gas. Only while profits are set to reinvest. Sending fees out is unchanged.</span></span>
       </label>
     </div>
   );
