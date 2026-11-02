@@ -24,7 +24,7 @@ describe('replay with an explicit default policy matches a replay with no policy
     const explicit = replayLp(minutes(ticks), POOL, {
       ...opts,
       range: { ...DEFAULT_RANGE_POLICY },
-      compound: { enabled: false, gasMultiple: 10 },
+      compound: { enabled: false },
       gasCompound: 0.01,
     });
     expect(explicit.moves).toBe(legacy.moves);
@@ -74,13 +74,13 @@ describe('replay gates', () => {
     expect(cooled.moveLoss).toBeLessThan(now.moveLoss);
   });
 
-  it('compounds once waiting fees cover the gas multiple, without counting a move', () => {
+  it('compounds once waiting fees reach √(2 × gas × position value), without counting a move', () => {
     // Fees in both coins: an in-range position can only add liquidity when both sides are present.
     const rows = minutes(repeat(T, 30), 1e-9).map((m) => ({ ...m, f0: 1e-9 }));
     const off = replayLp(rows, POOL, { ...BASE, bandPct: 0.05, rerange: false });
     const on = replayLp(rows, POOL, {
       ...BASE, bandPct: 0.05, rerange: false, gasCompound: 0.01,
-      compound: { enabled: true, gasMultiple: 10 },
+      compound: { enabled: true },
     });
     expect(off.compounds).toBe(0);
     expect(off.moves).toBe(0);
@@ -88,6 +88,10 @@ describe('replay gates', () => {
     expect(on.compounds).toBeGreaterThan(0);
     expect(on.gas).toBeCloseTo(on.compounds * 0.01, 9);
     expect(on.fees).toBeGreaterThan(off.fees); // added liquidity earns more afterwards
+    // dearer gas waits for more fees: fewer compounds
+    const dear = replayLp(rows, POOL, { ...BASE, bandPct: 0.05, rerange: false, gasCompound: 0.04, compound: { enabled: true } });
+    expect(dear.compounds).toBeGreaterThan(0);
+    expect(dear.compounds).toBeLessThan(on.compounds);
   });
 });
 

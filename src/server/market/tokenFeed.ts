@@ -320,9 +320,20 @@ export function positionMarker(hub: MarkHub, now: () => number = Date.now, seed:
     const due = market ? last == null || now() - last >= MARK_DRAFT_EVERY_MS : now() - (failedAt.get(p.id) ?? -Infinity) >= MARK_RETRY_MS;
     if (due && !running.has(p.id)) check(p);
     if (!market) { done.delete(p.id); return Object.keys(out).length ? out : null; }
-    const m = await hub.draftQuoter(market).market();
-    if (!(m.plsReserve > 0) || !(m.quoteReserve > 0)) throw new Error('the pool reads empty');
+    const q = hub.draftQuoter(market);
+    // A pool no swap can go through (no liquidity at its price, or a side at 0) is empty: nothing can be sold, and its
+    // quoter reverts. It is told from a read that failed by the pool's own depth; any other failure stays a read error.
+    const empty = (d: { quoteReserve: number; plsReserve: number }) => !(d.quoteReserve > 0) || !(d.plsReserve > 0);
+    let m: Awaited<ReturnType<typeof q.market>>;
+    try {
+      m = await q.market();
+    } catch (e) {
+      if (!empty(await q.depth())) throw e;
+      done.delete(p.id);
+      return { ...out, emptyPool: true, liq: 0 };
+    }
     done.delete(p.id);
+    if (empty(m)) return { ...out, emptyPool: true, liq: 0 };
     const liq = 2 * m.quoteReserve * p.usdPerSpend;
     return {
       ...out, price: m.quoteReserve / m.plsReserve, quoteReserve: m.quoteReserve, tokenReserve: m.plsReserve, liq,

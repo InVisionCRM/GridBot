@@ -298,7 +298,7 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
 
     if (comp!.enabled) {
       const worth = val(owed, p);
-      const gate = decideCompound(worth, o.gasCompound ?? 0, comp!);
+      const gate = decideCompound(worth, o.gasCompound ?? 0, val(held(pos.L, pos.tl, pos.tu, m.c), p), comp!);
       if (gate.compound) {
         const raw = rawOfCoins(owed, pool);
         const Ladd = liquidityForAmounts(sqrtPriceAt(m.c), sqrtPriceAt(pos.tl), sqrtPriceAt(pos.tu), raw.a0, raw.a1);

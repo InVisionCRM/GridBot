@@ -146,7 +146,7 @@ const awayPct = (x: number) => `${x >= 0 ? '+' : '−'}${Math.abs(x * 100).toFix
  * What the token trader is doing with one open position and what its pool watch sees, from the status fields
  * (exitPlan, sellNow, readError, routed, checkedAt / checkNote, liq / liqPeak / entryLiq, movedAt, sellTax, exits).
  */
-export function poolWatch(p: AnyObj, now: number): PoolWatch {
+export function poolWatch(p: AnyObj, now: number, runMode?: string): PoolWatch {
   const exits: AnyObj[] = p.exits ?? [];
   const by = new Map(exits.map((e) => [e.key, e]));
   const drain = by.get('drain'), dead = by.get('dead');
@@ -154,6 +154,8 @@ export function poolWatch(p: AnyObj, now: number): PoolWatch {
   const quiet = dead && dead.ms > 0 ? { ms: Number(dead.ms) - Number(dead.msLeft), frac: Math.min(1, 1 - Number(dead.msLeft) / Number(dead.ms)), msLeft: Number(dead.msLeft) } : null;
   const safety = { ms: p.checkedAt != null ? Math.max(0, now - Number(p.checkedAt)) : null, tax: Number(p.sellTax ?? 0), note: p.checkNote ?? null };
   const status = ((): PoolWatch['status'] => {
+    // Off completely runs no exit at all: every other line would promise something that isn't happening
+    if (runMode === 'full') return { tone: 'bad', text: 'Token trader is off completely: no exit runs on this position' };
     if (p.sellNow) return { tone: 'warn', text: 'Selling: you pressed Sell now' };
     if (p.exitsBlocked) return { tone: 'bad', text: String(p.exitsBlocked) };
     if (p.readError) return { tone: 'bad', text: `Price read failed (last price kept): ${p.readError}` };

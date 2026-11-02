@@ -46,10 +46,8 @@ export interface LpRangePolicy {
 }
 
 export interface LpCompoundPolicy {
-  /** Collect uncollected fees and add them back into the same range. */
+  /** Collect uncollected fees and add them back into the same range, at the size `decideCompound` sets. */
   enabled: boolean;
-  /** Fees must be worth at least this many times the estimated collect-and-add gas. */
-  gasMultiple: number;
 }
 
 export const DEFAULT_RANGE_POLICY: LpRangePolicy = {
@@ -65,7 +63,6 @@ export const DEFAULT_RANGE_POLICY: LpRangePolicy = {
 
 export const DEFAULT_COMPOUND_POLICY: LpCompoundPolicy = {
   enabled: false,
-  gasMultiple: 10,
 };
 
 /**
@@ -136,8 +133,9 @@ export function rangePolicy(p?: Partial<LpRangePolicy> | null): LpRangePolicy {
   return { ...DEFAULT_RANGE_POLICY, ...(p ?? {}) };
 }
 
+/** Only `enabled`: a bot saved with the old `gasMultiple` loses it here. */
 export function compoundPolicy(p?: Partial<LpCompoundPolicy> | null): LpCompoundPolicy {
-  return { ...DEFAULT_COMPOUND_POLICY, ...(p ?? {}) };
+  return { enabled: p?.enabled === true };
 }
 
 function finite(v: unknown, fallback: number): number {
@@ -167,13 +165,6 @@ export function checkRangePolicy(p?: Partial<LpRangePolicy> | null): LpRangePoli
     dwellMin, cooldownMin, bufferPct, atrMult, atrPeriod, costCheck: d.costCheck === true,
     feeHorizonH, nearEdgeFrac,
   };
-}
-
-export function checkCompoundPolicy(p?: Partial<LpCompoundPolicy> | null): LpCompoundPolicy {
-  const d = compoundPolicy(p ?? {});
-  const gasMultiple = finite(d.gasMultiple, NaN);
-  if (!(gasMultiple >= 1 && gasMultiple <= 1_000_000)) throw new Error('Compound multiple must be between 1 and 1000000.');
-  return { enabled: d.enabled === true, gasMultiple };
 }
 
 /** 1 at the centre, 0 on an edge, negative once the price has left the range. */
@@ -253,10 +244,19 @@ export interface CompoundDecision {
   need: number;
 }
 
-/** Collect and re-add only when enabled and waiting fees cover `gasMultiple` × gas. */
-export function decideCompound(feesQuote: number, gasQuote: number, policy: LpCompoundPolicy): CompoundDecision {
+/**
+ * Collect and re-add once the waiting fees reach √(2 × gas × position value), all in quote.
+ *
+ * Fees build at about P·r per unit of time (P the position's value, r its fee rate). Compounding every T costs G/T
+ * in gas; waiting T leaves on average P·r·T/2 out of the position, which misses P·r²·T/2 of fees per unit of time.
+ * The sum is least at T = √(2G / (P·r²)), when the fees waiting are P·r·T = √(2·G·P): the rate cancels out.
+ * A fixed multiple of gas ignores the position's size (Kyle's ETH/USDG on Robinhood, 2026-10-31 to 11-02: gas
+ * about 0.023 USDG, so 10 × gas compounded at 0.23 USDG, 317 times in 49 h; the gas was 7.37 USDG of 87.74 collected,
+ * and a range move adds the fees back anyway). At 2,250 USDG this waits for about 10 USDG.
+ */
+export function decideCompound(feesQuote: number, gasQuote: number, positionQuote: number, policy: LpCompoundPolicy): CompoundDecision {
   if (!policy.enabled) return { compound: false, need: Infinity };
-  const need = policy.gasMultiple * gasQuote;
-  const compound = feesQuote > 0 && gasQuote >= 0 && Number.isFinite(need) && feesQuote >= need;
-  return { compound, need };
+  if (!(gasQuote >= 0) || !(positionQuote >= 0)) throw new Error(`compound: gas ${gasQuote} and position value ${positionQuote} must be numbers of at least 0`);
+  const need = Math.sqrt(2 * gasQuote * positionQuote);
+  return { compound: feesQuote > 0 && feesQuote >= need, need };
 }

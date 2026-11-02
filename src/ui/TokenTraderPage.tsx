@@ -336,7 +336,7 @@ function Positions({ s, t, now, busy, run }: { s: AnyObj; t: AnyObj; now: number
     <section className="tk-card">
       <h3><Icon name="coins" size={16} /> Open positions <span className="muted small">{ps.length ? `${ps.length} open · flip a card for its numbers` : 'none open'}</span></h3>
       {!ps.length && <p className="muted small">Each buy shows here as a card: its price since the buy, how far it is from each exit, and what it is worth.</p>}
-      {ps.length > 0 && <div className="tk-cards">{ps.map((p) => <PositionCard key={p.id} p={p} s={s} now={now} busy={busy} run={run} />)}</div>}
+      {ps.length > 0 && <div className="tk-cards">{ps.map((p) => <PositionCard key={p.id} p={p} s={s} now={now} busy={busy} run={run} runMode={t.runMode} />)}</div>}
     </section>
   );
 }
@@ -350,7 +350,7 @@ const signed = (x: number, d = 1) => `${x >= 0 ? '+' : '−'}${Math.abs(x * 100)
  * One open position as a card. Front: result, chart since the buy, the exit track (stop … last take-profit, with the
  * result now on it) and the time stop. Back (Flip): the position's numbers. Exits: each rule and how far away it is.
  */
-function PositionCard({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: number; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<boolean> }) {
+function PositionCard({ p, s, now, busy, run, runMode }: { p: AnyObj; s: AnyObj; now: number; busy: boolean; run: (fn: () => Promise<AnyObj | void>) => Promise<boolean>; runMode: string }) {
   const [flipped, setFlipped] = useState(false);
   const [exitsOpen, setExitsOpen] = useState(false);
   const pnl = Number(p.pnl ?? 0), gain = Number(p.pnlPct ?? 0), up = pnl >= 0;
@@ -359,7 +359,7 @@ function PositionCard({ p, s, now, busy, run }: { p: AnyObj; s: AnyObj; now: num
   const blocked = blockedNote(p);
   const stale = p.markedAt == null || now - Number(p.markedAt) > STALE_MS;
   const track = exitTrack(p.exits);
-  const watch = poolWatch(p, now);
+  const watch = poolWatch(p, now, runMode);
   const sell = () => {
     if (p.mode === 'live' && !confirm(`Sell all of ${p.tokenSym} now, with real money? It sells through the pool like any exit (split under the impact cap).`)) return;
     void run(() => http(`/api/token-trader/positions/${encodeURIComponent(p.id)}/sell`, 'POST'));

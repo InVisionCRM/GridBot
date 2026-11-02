@@ -645,6 +645,30 @@ export function tokenMetrics(t: Obj, now = Date.now()): BotMetrics {
   return finish({ ...base, ...dollars, k: 1, symbol: 'USD', generated, px, ...tokenParts(by) }, now);
 }
 
+/**
+ * One open token-trader position, in its spend coin: the Bots tab row (every column there reads `metrics`; the rows had
+ * none, so each showed a dash: Kyle, 2026-10-31). `g` is the position's own Generated (TokenTrader.posGenerated: its
+ * sells so far less its buy fee and, for a native spend coin, gas). The same figures as tokenMetrics' one-coin case.
+ */
+export function positionMetrics(p: Obj, g: Obj, now = Date.now()): BotMetrics {
+  const mode: 'live' | 'paper' = p.mode === 'live' ? 'live' : 'paper';
+  const s = spendSym(p) ?? 'spend';
+  const k = num(p.usdPerSpend);
+  const left = (num(p.entryTokens) ?? 0) > 0 ? (num(p.tokens) ?? 0) / p.entryTokens : 0;
+  const o = { cost: (num(p.spent) ?? 0) * left, pnl: num(p.pnl) ?? 0 };
+  const l = {
+    amount: num(g.amount) ?? 0, proceeds: num(g.proceeds) ?? 0, cost: num(g.cost) ?? 0, fees: num(g.fees) ?? 0, taxes: num(g.taxes) ?? 0,
+    gas: g.gasInAmount ? num(g.gasNative) ?? 0 : 0,
+  };
+  return finish({
+    kind: 'token', id: String(p.id), mode, status: 'running', startedAt: num(p.openedAt) ?? null,
+    feesEarned: null, feesCollected: null, feesUncollected: null, swapCost: null, moveCount: null, fillCount: null, range: null, taxes: null,
+    capitalIn: l.cost + o.cost, currentValue: o.cost + o.pnl, paidOut: l.proceeds, extraCost: l.gas, gas: l.gas || null,
+    realized: l.amount, unrealized: o.pnl, k: k != null && k > 0 ? k : null, symbol: s, generated: { [s]: l.amount }, px: { [s]: k != null && k > 0 ? k : null },
+    dollarsMade: l.amount, ...tokenParts({ [s]: l }), capitalSource: 'token-buys', capitalCoins: { [s]: l.cost + o.cost }, rebalanceLoss: null,
+  }, now);
+}
+
 function tokenDollars(trades: Obj[], positions: Obj[]) {
   const bought = trades.filter((x) => x.side === 'buy').reduce((s, x) => s + (num(x.usd) ?? 0), 0);
   const sold = trades.filter((x) => x.side === 'sell').reduce((s, x) => s + (num(x.usd) ?? 0), 0);

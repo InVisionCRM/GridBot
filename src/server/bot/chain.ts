@@ -371,6 +371,23 @@ export class Quoter {
     try { return await this.ctx.l1Fee(to, data, gasPrice); } catch { return { wei: 0n, separate: false }; }
   }
 
+  /**
+   * The pool's own depth, read from the pool (no quote): V2 reserves; V3 / V4 the active range's virtual reserves (both
+   * 0 when no liquidity covers the price). market() asks the quoter first, and a quoter reverts on a pool no swap can
+   * go through ("Unexpected error" on a Base V3 pool with liquidity 0, 2026-10-31), so this is how such a pool is told
+   * from a read that failed.
+   */
+  async depth(): Promise<{ quoteReserve: number; plsReserve: number }> {
+    await this.ensureDecimals();
+    const { base, quote, pool } = this.def;
+    const st = await this.adapter.state(pool, quote.address, base.address);
+    const quoteIs0 = st.token0.toLowerCase() === quote.address.toLowerCase();
+    return {
+      quoteReserve: fromUnits(quoteIs0 ? st.reserve0 : st.reserve1, quote.decimals),
+      plsReserve: fromUnits(quoteIs0 ? st.reserve1 : st.reserve0, base.decimals),
+    };
+  }
+
   /** Spot, pool depth, fee and gas (in base units) for the cost gate, start gate and backtests. */
   async market(): Promise<MarketSnapshot> {
     await this.ensureDecimals();

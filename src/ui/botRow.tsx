@@ -39,7 +39,8 @@ function pairOf(b: AnyObj): { base: string; quote: string; title: string } {
   if (b.kind === 'lp') return { base, quote, title: lpName(b) };
   if (b.kind === 'trader' || b.kind === 'sniper') {
     const name = String(b.label || b.name || '');
-    return { base: String(b.token || b.base || name), quote: String(b.spend || quote), title: name || 'Token trader' };
+    // the coins' names (tokenSym / spendSym): token and spend are addresses, which printed as the unit and logo letter
+    return { base: String(b.tokenSym || name.split('/')[0] || name), quote: String(b.spendSym || quote), title: name || 'Token trader' };
   }
   const name = String(b.name ?? '');
   return { base: base || name.split('/')[0] || name, quote, title: name || `${base}/${quote}` };

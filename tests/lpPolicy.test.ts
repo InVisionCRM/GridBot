@@ -4,8 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { atr } from '../src/market/indicators';
 import { EMPTY_POLICY, LpPolicyFields, optionalPayload } from '../src/ui/LpPolicyFields';
 import {
-  DEFAULT_COMPOUND_POLICY, DEFAULT_RANGE_POLICY, LP_PRESET_A, LP_PRESET_B, checkCompoundPolicy, checkRangePolicy,
-  decideCompound, decideRangeMove, effectiveBand, feePace, toEdgeFrac,
+  DEFAULT_COMPOUND_POLICY, DEFAULT_RANGE_POLICY, LP_PRESET_A, LP_PRESET_B, checkRangePolicy, compoundPolicy,
+  decideCompound, decideRangeMove, effectiveBand, feePace, toEdgeFrac, type LpCompoundPolicy,
 } from '../src/market/lpPolicy';
 
 /**
@@ -158,14 +158,30 @@ describe('effectiveBand and fee pace', () => {
 
 describe('decideCompound', () => {
   it('is off by default, whatever the fees are', () => {
-    expect(decideCompound(1e9, 1, DEFAULT_COMPOUND_POLICY)).toEqual({ compound: false, need: Infinity });
+    expect(decideCompound(1e9, 1, 1e6, DEFAULT_COMPOUND_POLICY)).toEqual({ compound: false, need: Infinity });
   });
 
-  it('compounds at the multiple and not below it', () => {
-    const on = { enabled: true, gasMultiple: 10 };
-    expect(decideCompound(100, 10, on)).toMatchObject({ compound: true, need: 100 });
-    expect(decideCompound(99.99, 10, on).compound).toBe(false);
-    expect(decideCompound(0, 10, on).compound).toBe(false);
+  it('waits for √(2 × gas × position value): Kyle\'s ETH/USDG (0.023 USDG gas, 2,250 USDG) waits for about 10 USDG, not 0.23', () => {
+    const on = { enabled: true };
+    const need = Math.sqrt(2 * 0.023 * 2250);
+    expect(need).toBeCloseTo(10.17, 2);
+    // 0.23 USDG is what "10 × gas" compounded at: 317 times in 49 h on Robinhood
+    expect(decideCompound(0.23, 0.023, 2250, on)).toEqual({ compound: false, need });
+    expect(decideCompound(need - 1e-9, 0.023, 2250, on).compound).toBe(false);
+    expect(decideCompound(need, 0.023, 2250, on).compound).toBe(true);
+    expect(decideCompound(0, 0, 2250, on).compound).toBe(false);
+  });
+
+  it('a bigger position or dearer gas waits for more fees', () => {
+    const on = { enabled: true };
+    expect(decideCompound(1, 1, 400, on).need).toBe(Math.sqrt(800));
+    expect(decideCompound(1, 1, 1600, on).need).toBe(Math.sqrt(3200));
+    expect(decideCompound(1, 4, 400, on).need).toBe(Math.sqrt(3200));
+  });
+
+  it('a gas or position value that is not a number is an error, not a compound', () => {
+    expect(() => decideCompound(1, NaN, 100, { enabled: true })).toThrow(/gas NaN/);
+    expect(() => decideCompound(1, 1, NaN, { enabled: true })).toThrow(/position value NaN/);
   });
 });
 
@@ -215,11 +231,12 @@ describe('cooldown and the named presets', () => {
 describe('policy checks', () => {
   it('fills defaults for an empty edit and rejects a bad one', () => {
     expect(checkRangePolicy({})).toEqual(DEFAULT_RANGE_POLICY);
-    expect(checkCompoundPolicy({})).toEqual(DEFAULT_COMPOUND_POLICY);
+    expect(compoundPolicy({})).toEqual(DEFAULT_COMPOUND_POLICY);
     expect(checkRangePolicy({ dwellMin: 30 }).cooldownMin).toBe(0);
     expect(() => checkRangePolicy({ dwellMin: -1 })).toThrow(/Dwell/);
     expect(() => checkRangePolicy({ cooldownMin: 20_000 })).toThrow(/Cooldown/);
     expect(() => checkRangePolicy({ bufferPct: 0.2 })).toThrow(/buffer/);
-    expect(() => checkCompoundPolicy({ gasMultiple: 0 })).toThrow(/multiple/);
+    // a bot saved with the old gas multiple keeps only on/off
+    expect(compoundPolicy({ enabled: true, gasMultiple: 10 } as Partial<LpCompoundPolicy>)).toEqual({ enabled: true });
   });
 });

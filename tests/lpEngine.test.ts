@@ -12,6 +12,8 @@ import { LpPool } from '../src/server/lp/lpPool';
 import { MultiDexMock, type Tok } from './helpers/multiDex';
 import { ERC20, V3_NPM } from '../src/server/dex/abis';
 import { ExecError, type ReceiptLike } from '../src/server/bot/chain';
+import { gasInBase, LP_GAS, LP_INCREASE_GAS } from '../src/market/lp';
+import { GAS_UNITS_RT } from '../src/live/economics';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/server/app';
@@ -1358,24 +1360,34 @@ describe('LP range gates and compounding (off unless set)', () => {
     expect(quiet.lp.status().position).toEqual(before);
   });
 
-  it('compounds fees into the position once they clear the gas multiple, and not before', async () => {
-    const { lp, m, pool } = await open(undefined, { compound: { enabled: true, gasMultiple: 1_000_000 }, rerange: false });
+  it('compounds once waiting fees reach √(2 × gas × position value), and not before; paper books the gas in coins too', async () => {
+    const { lp, m, pool, hub } = await open(undefined, { compound: { enabled: true }, rerange: false });
     const L0 = lp.status().position!.liquidity;
-    // Small enough that 1_000_000 × the mock's gas still exceeds it, and large enough to add liquidity later.
-    m.addFees(pool, Q128 / 10n ** 9n, Q128 / 10n ** 9n);
+    const step = Q128 / 10n ** 9n;
+    m.addFees(pool, step, step);
     await lp.tick();
     const mid = lp.status();
-    const worth = mid.owed!.base * mid.price! + mid.owed!.quote;
-    expect(mid.hold?.compoundNeed).toBeGreaterThan(worth);
+    const price = mid.price!;
+    const worth = mid.owed!.base * price + mid.owed!.quote;
+    const need = mid.hold!.compoundNeed as number;
+    // the gas of one compound: collect + increase + one exact approve (DAI; PLS is native)
+    const snap = await hub.quoter(lp.state.market).market();
+    const gas = (gasInBase(LP_GAS.v3.close, snap) + gasInBase(LP_INCREASE_GAS, snap) + gasInBase(GAS_UNITS_RT.approve, snap)) * price;
+    const held = mid.coins!.base * price + mid.coins!.quote;
+    expect(need).toBeCloseTo(Math.sqrt(2 * gas * held), 9);
+    expect(worth).toBeLessThan(need);
     expect(mid.position!.liquidity).toBe(L0);
-    expect(mid.reranges).toBe(0);
-    const one = (mid.hold!.compoundNeed as number) / 1_000_000;
-    lp.setPolicy({ compound: { enabled: true, gasMultiple: Math.max(1, worth / one / 2) } });
+
+    m.addFees(pool, step * BigInt(Math.ceil(need / worth)), step * BigInt(Math.ceil(need / worth)));
+    const gasBefore = lp.state.totals.gas, coinsBefore = lp.state.totals.gasCoins ?? { base: 0, quote: 0 };
     await lp.tick();
     const done = lp.status();
     expect(done.owed!.base + done.owed!.quote).toBeCloseTo(0, 12);
     expect(BigInt(done.position!.liquidity) > BigInt(L0)).toBe(true);
     expect(done.reranges).toBe(0);
     expect(done.pnl!.fees).toBeGreaterThan(0);
+    expect(lp.state.totals.gas - gasBefore).toBeCloseTo(gas, 12);
+    // PLS is native: the gas is charged to the base side in coins
+    expect(lp.state.totals.gasCoins!.base - coinsBefore.base).toBeCloseTo(gas / price, 9);
   });
 });

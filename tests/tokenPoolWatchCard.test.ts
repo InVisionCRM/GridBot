@@ -17,6 +17,10 @@ describe('the status line says what the trader is doing', () => {
   it('holding: names the nearest exit and how far it is', () => {
     expect(poolWatch(pos(), NOW).status).toEqual({ tone: 'ok', text: 'Holding · next: trailing stop arms +18.2% away' });
   });
+  it('off completely: no exit runs, and the card says so before anything else', () => {
+    expect(poolWatch(pos({ exitPlan: 'no trades in the pool for 2.0 h' }), NOW, 'full').status).toEqual({ tone: 'bad', text: 'Token trader is off completely: no exit runs on this position' });
+    expect(poolWatch(pos(), NOW, 'exits').status.text).toBe('Holding · next: trailing stop arms +18.2% away');
+  });
   it('a read that failed, a first pool check, a sell under way and Sell now each say so', () => {
     expect(poolWatch(pos({ readError: 'execution reverted' }), NOW).status).toEqual({ tone: 'bad', text: 'Price read failed (last price kept): execution reverted' });
     expect(poolWatch(pos({ routed: false, markedAt: null }), NOW).status).toEqual({ tone: 'warn', text: 'First pool check running' });

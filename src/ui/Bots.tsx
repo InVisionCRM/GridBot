@@ -37,7 +37,8 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
     .map((p) => {
       const trades = ((trader?.trades ?? []) as AnyObj[]).filter((t) => t.pool === p.pool && t.chainId === p.chainId);
       return {
-        ...p, kind: p.source === 'snipe' ? 'sniper' : 'trader', name: p.label, label: p.label, base: p.token, quote: p.spend,
+        // quoteSym: the spend coin's name for its figures (quote is its address, which the row printed as the unit)
+        ...p, kind: p.source === 'snipe' ? 'sniper' : 'trader', name: p.label, label: p.label, base: p.token, quote: p.spend, quoteSym: p.spendSym,
         status: 'running', startedAt: p.openedAt, usdPerQuote: typeof p.usdPerSpend === 'number' && p.usdPerSpend > 0 ? p.usdPerSpend : 1,
         moveCount: trades.length, lastMoveAt: trades.reduce((m: number, t: AnyObj) => Math.max(m, t.t || 0), 0) || null,
       };
