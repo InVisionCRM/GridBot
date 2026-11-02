@@ -408,8 +408,20 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     };
     const receipts = new Map<string, ReceiptLike>();
     let approved = false;
+    // the position manager's liquidity per token id, as the mined receipts leave it (IncreaseLiquidity adds, DecreaseLiquidity removes)
+    const chainL = new Map<bigint, bigint>();
     const call = m.call.bind(m);
-    m.call = async (tx) => (approved && tx.data.startsWith(ERC20.getFunction('allowance')!.selector) ? ERC20.encodeFunctionResult('allowance', [2n ** 255n]) : call(tx));
+    const POSITIONS = V3_NPM.getFunction('positions')!.selector;
+    m.call = async (tx) => {
+      if (approved && tx.data.startsWith(ERC20.getFunction('allowance')!.selector)) return ERC20.encodeFunctionResult('allowance', [2n ** 255n]);
+      if (tx.to === NPM && tx.data.startsWith(POSITIONS)) {
+        const [id] = V3_NPM.decodeFunctionData('positions', tx.data) as unknown as [bigint];
+        const L = chainL.get(id);
+        if (L == null) throw new Error('Invalid token ID');
+        return V3_NPM.encodeFunctionResult('positions', [0n, ME, WPLS.address, DAI.address, 2500, -100, 100, L, 0n, 0n, 0n, 0n]);
+      }
+      return call(tx);
+    };
     m.getTransactionReceipt = async (h: string) => receipts.get(h) ?? null;
     const signer = { getAddress: async () => ME, sendTransaction: async () => { throw new Error('use the scripted executor'); } };
     const hub = new Hub({ runtimes: [new ChainRuntime(CH, m, signer as never)], markets: [...legacyMarkets(NET), def], legacyNet: NET });
@@ -426,9 +438,17 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
       txFate: async (): Promise<string> => 'wait',
     };
     const make = () => { const e = new LpEngine({ net: NET, store, log: new Logger(true), hub, now: () => 1_800_000_000_000 }); (e as unknown as { executor: unknown }).executor = exec; return e; };
-    const ok = (hash: string, logs: ReceiptLike['logs'] = []) => receipts.set(hash, { status: 1, gasUsed: 100_000n, gasPrice: 10n ** 9n, logs });
+    const ok = (hash: string, logs: ReceiptLike['logs'] = []) => {
+      for (const l of logs) {
+        if (l.address !== NPM) continue;
+        const e = V3_NPM.parseLog(l);
+        if (e?.name === 'IncreaseLiquidity') chainL.set(e.args[0] as bigint, (chainL.get(e.args[0] as bigint) ?? 0n) + (e.args[1] as bigint));
+        if (e?.name === 'DecreaseLiquidity') chainL.set(e.args[0] as bigint, (chainL.get(e.args[0] as bigint) ?? 0n) - (e.args[1] as bigint));
+      }
+      return receipts.set(hash, { status: 1, gasUsed: 100_000n, gasPrice: 10n ** 9n, logs });
+    };
     const ev = (name: 'IncreaseLiquidity' | 'DecreaseLiquidity' | 'Collect', args: unknown[]) => ({ address: NPM, ...V3_NPM.encodeEventLog(name, args) });
-    return { m, hub, signer, make, sent, receipts, ok, ev, approve: () => { approved = true; } };
+    return { m, hub, signer, make, sent, receipts, ok, ev, chainL, approve: () => { approved = true; } };
   }
 
   it('approve → mint: each sent once, nothing resent while unmined, position from the receipt; a restart resumes by hash', async () => {
@@ -593,6 +613,29 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(s.totals.fees).toBeCloseTo(10 * PRICE + 0.01, 9);
     expect(s.totals.feeCoins.base).toBeCloseTo(10, 9);
     expect(s.totals.feeCoins.quote).toBeCloseTo(0.01, 9);
+  });
+
+  it('close removes the liquidity the position holds on-chain, not a saved figure that fell short ("Not cleared", 2026-11-02)', async () => {
+    const w = live();
+    const e = w.make();
+    const msgs: string[] = [];
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    (e as unknown as { d: { emit?: (x: { msg: string }) => void } }).d.emit = (x) => msgs.push(x.msg);
+    w.approve();
+    await e.tick();
+    w.ok(w.sent[0].hash, [w.ev('IncreaseLiquidity', [5n, 10n ** 20n, 10n ** 21n, 3n * 10n ** 16n])]);
+    await e.tick();
+    expect(e.status().position!.liquidity).toBe((10n ** 20n).toString());
+    // an increase mined on-chain that the bot never recorded (the app was stopped while it was being sent)
+    w.chainL.set(5n, 10n ** 20n + 650_132_082_236n);
+    e.close();
+    await e.tick();
+    const [calls] = V3_NPM.decodeFunctionData('multicall', w.sent[1].data) as unknown as [string[]];
+    const dec = V3_NPM.decodeFunctionData('decreaseLiquidity', calls[0])[0] as { liquidity: bigint };
+    expect(dec.liquidity).toBe(10n ** 20n + 650_132_082_236n); // all of it: the burn after it needs the position empty
+    expect(e.status().position!.liquidity).toBe((10n ** 20n + 650_132_082_236n).toString());
+    expect(msgs.some((m) => /holds 100000000650132082236 liquidity on-chain, the bot had 100000000000000000000 saved/.test(m))).toBe(true);
   });
 
   it('Pause during a close whose exit is being sent: the exit is kept by hash and settles; the position is not left behind (a039)', async () => {
