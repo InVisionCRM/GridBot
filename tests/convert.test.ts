@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { Hub } from '../src/server/chains/hub';
-import { Converter, PLAN_TTL_MS, type Allocation, type Plan } from '../src/server/convert/converter';
+import { Converter, PLAN_TTL_MS, type Allocation, type Plan, type Pick } from '../src/server/convert/converter';
+
+/** All of each coin the plan can convert (the amount box left at its start). */
+const all = (p: Plan, ids: string[]): Pick[] => ids.map((id) => ({ id, amount: p.rows.find((r) => r.coin.id === id)?.amount ?? 1 }));
 import { findRoute, namedLikeSite, type RouteMarket } from '../src/market/convertRoute';
 import { NATIVE } from '../src/live/swapMath';
 import { MockChain, NET, ME } from './helpers/mockChain';
@@ -135,7 +138,7 @@ describe('Converter: running it', () => {
     const { cv, chain } = setup();
     const p = await cv.plan({ chainId: 369, target: DAI });
     const dai0 = chain.bal('DAI');
-    cv.run(p.id, [NATIVE, HEX, WPLS]);
+    cv.run(p.id, all(p, [NATIVE, HEX, WPLS]));
     const job = await finished(cv);
     expect(job.rows.map((r) => [r.coin.symbol, r.status])).toEqual([['PLS', 'done'], ['WPLS', 'done'], ['HEX', 'done']]);
     expect(chain.sent.map((s) => s.method)).toEqual([
@@ -161,7 +164,7 @@ describe('Converter: running it', () => {
     const { cv, chain } = setup({ allocations: alloc });
     const p = await cv.plan({ chainId: 369, target: DAI });
     alloc.push({ chainId: 369, address: HEX, native: false, allocated: 5_000 });
-    cv.run(p.id, [HEX]);
+    cv.run(p.id, all(p, [HEX]));
     const job = await finished(cv);
     expect(job.rows[0]).toMatchObject({ status: 'failed', error: expect.stringMatching(/used by a bot/) });
     expect(chain.sent).toEqual([]);
@@ -171,7 +174,7 @@ describe('Converter: running it', () => {
     const { cv, chain } = setup();
     const p = await cv.plan({ chainId: 369, target: DAI });
     chain.onSend = () => cv.stop();
-    cv.run(p.id, [NATIVE, HEX]);
+    cv.run(p.id, all(p, [NATIVE, HEX]));
     const job = await finished(cv);
     expect(job.rows.map((r) => r.status)).toEqual(['done', 'stopped']);
     expect(chain.bal('HEX')).toBe(5_000n * 10n ** 8n);
@@ -183,7 +186,7 @@ describe('Converter: running it', () => {
     const pa = await a.cv.plan({ chainId: 369, target: DAI });
     const dai0 = a.chain.bal('DAI');
     a.chain.onSend = () => a.cv.stop();
-    a.cv.run(pa.id, [WPLS, HEX]);
+    a.cv.run(pa.id, all(pa, [WPLS, HEX]));
     const ja = await finished(a.cv);
     expect(ja.rows.map((r) => [r.coin.symbol, r.status])).toEqual([['WPLS', 'done'], ['HEX', 'stopped']]);
     expect(a.chain.sent.map((s) => s.method)).toEqual(['withdraw', 'swapExactETHForTokens']);
@@ -193,11 +196,38 @@ describe('Converter: running it', () => {
     const b = setup();
     const pb = await b.cv.plan({ chainId: 369, target: DAI });
     b.chain.onSend = () => b.cv.stop();
-    b.cv.run(pb.id, [HEX]);
+    b.cv.run(pb.id, all(pb, [HEX]));
     const jb = await finished(b.cv);
     expect(jb.rows[0].status).toBe('done');
     expect(b.chain.sent.map((s) => s.method)).toEqual(['approve', 'swapExactTokensForETH', 'swapExactETHForTokens']);
     expect(b.chain.bal('HEX')).toBe(0n);
+  });
+
+  it('converts only the amount chosen: 1,000 of 5,000 HEX goes, the rest stays (Kyle: "add amount box")', async () => {
+    const { cv, chain } = setup();
+    const p = await cv.plan({ chainId: 369, target: DAI });
+    const hex = p.rows.find((r) => r.coin.id === HEX)!;
+    expect(hex.amount).toBe(5_000);
+    const dai0 = chain.bal('DAI');
+    cv.run(p.id, [{ id: HEX, amount: 1_000 }]);
+    const job = await finished(cv);
+    expect(job.rows[0]).toMatchObject({ status: 'done', amount: 1_000 });
+    expect(chain.bal('HEX')).toBe(4_000n * 10n ** 8n);
+    // a fifth of the plan's quote for all of it, or a little more: a smaller swap moves the price less
+    expect(job.rows[0].out!).toBeGreaterThanOrEqual(hex.out! / 5);
+    expect(Number(chain.bal('DAI') - dai0) / 1e18).toBeCloseTo(job.rows[0].out!, 9);
+  });
+
+  it('refuses an amount above what can be converted, 0 or not a number, and one worth less than twice its gas', async () => {
+    const { cv, chain } = setup();
+    const p = await cv.plan({ chainId: 369, target: DAI });
+    const hex = p.rows.find((r) => r.coin.id === HEX)!;
+    expect(() => cv.run(p.id, [{ id: HEX, amount: hex.amount + 1 }])).toThrow(/HEX: 5,001 is more than the 5,000 you can convert/);
+    expect(() => cv.run(p.id, [{ id: HEX, amount: 0 }])).toThrow(/HEX: enter an amount above 0/);
+    expect(() => cv.run(p.id, [{ id: HEX, amount: NaN }])).toThrow(/HEX: enter an amount above 0/);
+    expect(() => cv.run(p.id, [{ id: HEX, amount: hex.amount * 1e-9 }])).toThrow(/less than twice the gas it would cost/);
+    expect(cv.job()).toBeNull();
+    expect(chain.sent).toEqual([]);
   });
 
   it('refuses a stale or unknown plan, nothing chosen, and a second run at once', async () => {
@@ -205,13 +235,13 @@ describe('Converter: running it', () => {
     const { hub, chain } = setup();
     const cv = new Converter({ hub, allocations: () => [], approval: 'exact', fetchJson: async () => ({ items: [], next_page_params: null }), now: () => t, pollMs: 1 });
     const p = await cv.plan({ chainId: 369, target: DAI });
-    expect(() => cv.run('cv-other', [NATIVE])).toThrow(/plan is gone/);
-    expect(() => cv.run(p.id, [TKN])).toThrow(/Nothing chosen/);
+    expect(() => cv.run('cv-other', all(p, [NATIVE]))).toThrow(/plan is gone/);
+    expect(() => cv.run(p.id, all(p, [TKN]))).toThrow(/Nothing chosen/);
     t += PLAN_TTL_MS + 1;
-    expect(() => cv.run(p.id, [NATIVE])).toThrow(/10 minutes old/);
+    expect(() => cv.run(p.id, all(p, [NATIVE]))).toThrow(/10 minutes old/);
     t -= PLAN_TTL_MS + 1;
-    chain.onSend = () => { expect(() => cv.run(p.id, [HEX])).toThrow(/already running/); };
-    cv.run(p.id, [NATIVE]);
+    chain.onSend = () => { expect(() => cv.run(p.id, all(p, [HEX]))).toThrow(/already running/); };
+    cv.run(p.id, all(p, [NATIVE]));
     await finished(cv);
   });
 });
