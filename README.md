@@ -168,6 +168,7 @@ What doesn't change:
 **Live starts need a fresh, completed safety check** (grid, preset, trend, liquidity; `Hub.liveCheck`). Paper starts are unchanged and don't check.
 
 - Up to **3 tries**, 1 s then 2 s apart. Each try already rotates across the chain's RPCs, and is cut off after 20 s (a hung RPC can't hold the start). The page shows **Checking safety…** meanwhile.
+- A check reads only the market's own pool, never every pool of the pair. CASHCAT has 825 Uniswap V4 pools on Robinhood: reading them all was 3,340 calls and 45 s a try, so every live start timed out three times (2026-11-03). Reading its one pool, the same check is 32 calls and about 1.2 s. With no pool given (Add custom token), every pool is listed so the deepest can be picked; picking one checks that pool alone, and the list stays.
 - A try *doesn't complete* when it throws, returns no report, or its simulation doesn't run. A real honeypot or `paused()` found by an inconclusive run counts as completed.
 - **Completed and passing:** the bot starts.
 - **Completed and failing** (honeypot, tax over the cap, paused, thin pool, …): refused with the reasons, API `400 {code: 'SAFETY_BLOCKED'}`. There is **no** Start anyway.

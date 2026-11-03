@@ -28,7 +28,15 @@ export interface DiscoveredPool extends PoolRef {
 
 export async function discoverPools(
   rt: ChainRuntime, base: MarketToken, quote: MarketToken,
-  o: { refQuote: number; quoteUsd: number | null; onlyKind?: 'v4' },
+  o: {
+    refQuote: number; quoteUsd: number | null; onlyKind?: 'v4';
+    /**
+     * Read only this pool (address, or a V4 pool id). A re-check of a market's own pool: CASHCAT has 825 V4 pools on
+     * Robinhood, and reading each one (2 × getSlot0, getLiquidity, a quote) was 3,300 calls, 45 s, past the live
+     * start's 20 s per try (2026-11-03).
+     */
+    only?: string;
+  },
 ): Promise<DiscoveredPool[]> {
   const out: DiscoveredPool[] = [];
   await Promise.all([...rt.adapters.values()].map(async (ad) => {
@@ -45,6 +53,7 @@ export async function discoverPools(
       if (ad.kind === 'v4' && e instanceof V4ScanError) { pools = e.pools; scanError = e.message; }
       else return;
     }
+    if (o.only) pools = pools.filter((p) => sameAddr(p.address, o.only!));
     if (scanError && pools.length === 0) {
       out.push({
         dex: ad.cfg.id, kind: ad.kind, address: '', feeBps: 0, dexName: ad.cfg.name,
