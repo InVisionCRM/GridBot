@@ -245,3 +245,57 @@ describe('Converter: running it', () => {
     await finished(cv);
   });
 });
+
+describe('Converter.swap: one coin and an amount into any coin (the Swap page)', () => {
+  it('PLS → HEX: one row, the amount asked for, and run() sends it; the PLS spent is that amount', async () => {
+    const { cv, chain } = setup();
+    const hex0 = chain.bal('HEX'), pls0 = chain.pls;
+    const p = await cv.swap({ chainId: 369, from: 'native', to: HEX, amount: 1_000_000 });
+    expect(p.rows).toHaveLength(1);
+    expect(p.rows[0]).toMatchObject({ amount: 1_000_000, ok: true });
+    expect(p.target.symbol).toBe('HEX');
+    expect(p.rows[0].out!).toBeGreaterThan(0);
+    cv.run(p.id, [{ id: NATIVE, amount: 1_000_000 }]);
+    const job = await finished(cv);
+    expect(job.rows[0]).toMatchObject({ status: 'done', amount: 1_000_000 });
+    expect(chain.bal('HEX')).toBeGreaterThan(hex0);
+    expect(Number(pls0 - chain.pls) / 1e18).toBeCloseTo(1_000_000, 0);
+  });
+
+  it("'max' is the balance less what bots use (and, for the chain's coin, what's kept for gas); more than that is refused", async () => {
+    const { cv } = setup({ allocations: [{ chainId: 369, address: DAI, native: false, allocated: 5 }] });
+    const p = await cv.swap({ chainId: 369, from: DAI, to: HEX, amount: 'max' });
+    expect(p.rows[0]).toMatchObject({ balance: 20, bots: 5, amount: 15 });
+    expect(p.rows[0].steps.length).toBe(2); // DAI → PLS → HEX
+    await expect(cv.swap({ chainId: 369, from: DAI, to: HEX, amount: 16 })).rejects.toThrow(/at most 15 DAI.*less 5 your bots use/);
+    const n = await cv.swap({ chainId: 369, from: 'native', to: DAI, amount: 'max' });
+    expect(n.rows[0].keep).toBeGreaterThan(0);
+    expect(n.rows[0].amount).toBeCloseTo(10_000_000 - n.rows[0].keep, 6);
+  });
+
+  it('refuses the same coin twice, 0, a coin named like a website, and a coin with no pool to buy it on', async () => {
+    const { cv } = setup();
+    await expect(cv.swap({ chainId: 369, from: DAI, to: DAI, amount: 1 })).rejects.toThrow(/two different coins/);
+    await expect(cv.swap({ chainId: 369, from: 'native', to: HEX, amount: 0 })).rejects.toThrow(/above 0/);
+    await expect(cv.swap({ chainId: 369, from: 'native', to: TKN, amount: 1 })).rejects.toThrow(/No pool for it/);
+  });
+});
+
+describe('Converter.swap: the coin the app does not know', () => {
+  it('is safety-checked on its pool with the coin paid with (the pool the swap trades), after the balance check', async () => {
+    const { cv, hub } = setup();
+    const asked: { address: string; quote?: string }[] = [];
+    const inspect = hub.inspect.bind(hub);
+    hub.inspect = async (req) => { asked.push({ address: req.address, quote: req.quote }); return inspect(req); };
+    // over the balance: refused before any safety check (that can take 20 s)
+    await expect(cv.swap({ chainId: 369, from: 'native', to: TKN, amount: 1e12 })).rejects.toThrow(/at most/);
+    expect(asked).toEqual([]);
+    // paid with PLS: checked against WPLS, the pool a PLS swap uses
+    await expect(cv.swap({ chainId: 369, from: 'native', to: TKN, amount: 1 })).rejects.toThrow(/No pool for it/);
+    expect(asked.map((a) => [a.address.toLowerCase(), a.quote?.toLowerCase()])).toEqual([[TKN, WPLS]]);
+    // paid with DAI: checked against DAI
+    asked.length = 0;
+    await expect(cv.swap({ chainId: 369, from: DAI, to: TKN, amount: 1 })).rejects.toThrow(/No pool for it/);
+    expect(asked[0].quote?.toLowerCase()).toBe(DAI);
+  });
+});

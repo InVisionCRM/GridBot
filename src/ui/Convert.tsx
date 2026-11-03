@@ -8,15 +8,15 @@ import { L, Tip } from './Tip';
 import { explorerTx } from './chains';
 import type { AnyObj } from './model';
 
-interface Coin { id: string; address: string | null; symbol: string; name: string; decimals: number; tracked: boolean }
-interface PlanRow { coin: Coin; balance: number; bots: number; keep: number; amount: number; steps: string[]; out: number | null; impact: number | null; gasNative: number | null; ok: boolean; why: string | null }
+export interface Coin { id: string; address: string | null; symbol: string; name: string; decimals: number; tracked: boolean }
+export interface PlanRow { coin: Coin; balance: number; bots: number; keep: number; amount: number; steps: string[]; out: number | null; impact: number | null; gasNative: number | null; ok: boolean; why: string | null }
 interface Unreadable { address: string; symbol: string; name: string; why: string }
-interface Plan { id: string; chainId: number; owner: string; at: number; target: Coin; targetBalance: number; keepNative: number; maxImpact: number; listedBy: 'explorer' | 'markets'; rows: PlanRow[]; unreadable: Unreadable[] }
-interface JobRow { coin: Coin; amount: number; status: 'waiting' | 'running' | 'done' | 'failed' | 'stopped'; steps: { label: string; hash: string | null; out: number | null }[]; out: number | null; error: string | null }
-interface Job { id: string; chainId: number; target: Coin; startedAt: number; finishedAt: number | null; stopping: boolean; rows: JobRow[] }
+export interface Plan { id: string; chainId: number; owner: string; at: number; target: Coin; targetBalance: number; keepNative: number; maxImpact: number; listedBy: 'explorer' | 'markets'; rows: PlanRow[]; unreadable: Unreadable[] }
+export interface JobRow { coin: Coin; amount: number; status: 'waiting' | 'running' | 'done' | 'failed' | 'stopped'; steps: { label: string; hash: string | null; out: number | null }[]; out: number | null; error: string | null }
+export interface Job { id: string; chainId: number; target: Coin; startedAt: number; finishedAt: number | null; stopping: boolean; rows: JobRow[] }
 
-const amt = (x: number | null | undefined) => (x == null ? '—' : Math.abs(x) >= 1 ? x.toLocaleString(undefined, { maximumFractionDigits: 4 }) : x === 0 ? '0' : x.toPrecision(4));
-const STATUS: Record<JobRow['status'], string> = { waiting: 'waiting', running: 'converting…', done: 'done', failed: 'failed', stopped: 'stopped' };
+export const amt = (x: number | null | undefined) => (x == null ? '—' : Math.abs(x) >= 1 ? x.toLocaleString(undefined, { maximumFractionDigits: 4 }) : x === 0 ? '0' : x.toPrecision(4));
+export const STATUS: Record<JobRow['status'], string> = { waiting: 'waiting', running: 'converting…', done: 'done', failed: 'failed', stopped: 'stopped' };
 
 export function Convert({ s }: { s: AnyObj }) {
   const chains: AnyObj[] = useMemo(() => (s.chains ?? []).filter((c: AnyObj) => c.tradable && c.status === 'live'), [s.chains]);

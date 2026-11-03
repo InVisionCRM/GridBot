@@ -423,6 +423,11 @@ export function createApp(o: AppOpts) {
     if (!Array.isArray(b.coins)) throw new Error('coins required');
     return { job: cv().run(String(b.planId ?? ''), b.coins.map((c: { id?: unknown; amount?: unknown }) => ({ id: String(c?.id ?? ''), amount: Number(c?.amount) }))) };
   }));
+  // Swap page: one coin and an amount ('max' = all you can) into any coin, a token address included
+  app.post('/api/convert/swap', wrap((req) => {
+    const b = req.body ?? {};
+    return cv().swap({ chainId: Number(b.chainId), from: String(b.from ?? ''), to: String(b.to ?? ''), amount: b.amount === 'max' ? 'max' : Number(b.amount), maxImpact: num(b.maxImpact) });
+  }));
   app.get('/api/convert/job', wrap(() => ({ job: cv().job() })));
   app.post('/api/convert/stop', wrap(() => { cv().stop(); return { ok: true }; }));
 

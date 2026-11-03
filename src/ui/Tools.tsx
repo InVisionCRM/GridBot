@@ -1,6 +1,6 @@
 /**
  * Tools pages. Charts, Backtest and the Market list are one "Charts & tools" page with its own tabs (More's tile);
- * History (analytics), Convert (from the Wallet), System and Friends are single pages with no tab bar.
+ * History (analytics), Convert (from the Wallet), Swap, System and Friends are single pages with no tab bar.
  */
 import { useEffect, useState } from 'react';
 import { http } from './api';
@@ -8,6 +8,7 @@ import { Chart } from './Chart';
 import { Backtest } from './Backtest';
 import { Analytics, MarketPanels } from './Analytics';
 import { Markets } from './Markets';
+import { Swap } from './Swap';
 import { lbl, marketsOf, useChainFilter } from './chains';
 import type { Ticks } from './useStream';
 import { TOOL_TABS, type AnyObj, type Nav, type ToolTab, type View } from './model';
@@ -57,6 +58,7 @@ export function Tools({ s, view, ticks, nav, act, busy, ver }: {
       {tab === 'analytics' && <Analytics key={view.analytics ?? 'live'} status={s} initial={view.analytics ?? 'live'} />}
       {tab === 'markets' && <Markets status={s} act={act} busy={busy} />}
       {tab === 'convert' && <Convert s={s} />}
+      {tab === 'swap' && <Swap s={s} />}
       {tab === 'system' && <SystemTab ver={ver} copy={!!s.copy} />}
       {tab === 'friends' && !s.copy && <Friends />}
     </main>

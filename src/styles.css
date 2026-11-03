@@ -318,6 +318,14 @@ tr.muted-row td { color: var(--muted); }
 .convert td.txt { overflow-wrap: anywhere; }
 /* the amount box sits in a table cell: sized to a number, so "You get" stays on screen on a phone */
 .convert-table .pair-pick input { width: 9em; min-width: 0; }
+/* Swap: the quote as four figures, then the route and the button */
+.swap-quote { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; }
+.swap-figs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.swap-figs > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.swap-figs .k { color: var(--muted); font-size: 0.75rem; }
+.swap-figs b { font-family: var(--mono); font-weight: 500; font-size: 1.05rem; overflow-wrap: anywhere; }
+.swap .swap-quote .btn.primary { align-self: flex-start; }
+@media (max-width: 560px) { .swap-figs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .convert-table .narrow-hide { display: none; } .convert-table .pair-pick input { width: 6.5em; } }
 .replay .coin-line { display: block; white-space: nowrap; }
 @media (max-width: 560px) { .replay-table .narrow-hide { display: none; } }
