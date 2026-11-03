@@ -280,6 +280,37 @@ describe('V4 adapter', () => {
     expect(forNative.find((p) => p.address === wethId)?.error).toMatch(/does not match/);
     expect(forNative.find((p) => p.address === NATIVE_POOL_ID)?.refOut).toBeGreaterThan(0);
   });
+
+  it('discovery quotes only a V4 pool worth quoting: an empty pool and one with a refused hook cost no quote (CASHCAT: 574 of 640 empty)', async () => {
+    const sqrt = 1908495653441889301188931688731428n;
+    const pool = (n: number, hooks: string): PoolRef => {
+      const id = '0x' + n.toString(16).padStart(2, '0').repeat(32);
+      return { dex: 'uniswap-v4', kind: 'v4', address: id, feeBps: 30, v4: { currency0: WETH, currency1: NATIVE_KEY.currency1, fee: 3000, tickSpacing: 60, hooks, poolId: id, dynamicFee: false } };
+    };
+    const live = pool(1, ZERO), empty = pool(2, ZERO), hooked = pool(3, UNLISTED);
+    let quotes = 0;
+    const ad = new V4Adapter({
+      call: async (tx) => {
+        const sel = tx.data.slice(0, 10);
+        if (sel === V4_STATE_VIEW.getFunction('getSlot0')!.selector) return V4_STATE_VIEW.encodeFunctionResult('getSlot0', [sqrt, 201799n, 0n, 3000n]);
+        if (sel === V4_STATE_VIEW.getFunction('getLiquidity')!.selector) {
+          const [id] = V4_STATE_VIEW.decodeFunctionData('getLiquidity', tx.data) as unknown as [string];
+          return V4_STATE_VIEW.encodeFunctionResult('getLiquidity', [id === empty.address ? 0n : 10n ** 22n]);
+        }
+        if (sel === V4_QUOTER.getFunction('quoteExactInputSingle')!.selector) { quotes++; return V4_QUOTER.encodeFunctionResult('quoteExactInputSingle', [5n * 10n ** 23n, 40_000n]); }
+        throw new Error(`unexpected ${sel}`);
+      },
+    }, cfg, WETH);
+    ad.findPools = async () => [live, empty, hooked];
+    const rt = { adapters: new Map([[cfg.id, ad]]) } as unknown as ChainRuntime;
+    const out = await discoverPools(rt, { address: NATIVE_KEY.currency1, symbol: 'TOK', decimals: 18 }, { address: WETH, symbol: 'WETH', decimals: 18 }, { refQuote: 0.001, quoteUsd: null });
+    const row = (p: PoolRef) => out.find((x) => x.address === p.address)!;
+    expect(row(live).refOut).toBeGreaterThan(0);
+    expect(row(empty)).toMatchObject({ refOut: null, error: 'no liquidity at the current price' });
+    expect(row(hooked).refOut).toBeNull();
+    expect(row(hooked).error).toMatch(/hook/i);
+    expect(quotes).toBe(1);
+  });
 });
 
 describe('V4 safety classification', () => {

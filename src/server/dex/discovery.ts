@@ -4,6 +4,7 @@ import { fromUnits, NATIVE, toUnits } from '../../live/swapMath';
 import { midPrice } from '../../live/v3Math';
 import type { ChainRuntime } from '../chains/runtime';
 import { V4_CURRENCY_MISMATCH, V4ScanError, v4PoolMatches } from './v4';
+import { assessHook } from './v4Hooks';
 import { sameAddr, ZERO } from './types';
 
 export interface DiscoveredPool extends PoolRef {
@@ -79,7 +80,12 @@ export async function discoverPools(
           row.address = st.pool.address;
           if (scanError) row.partial = scanError;
           // A WETH market must not quote an address(0) pool, and a native market must not quote a WETH pool.
+          // Nothing to quote in an empty pool, or through a hook the app won't trade: known without a call. CASHCAT on
+          // Robinhood: 574 of its 640 V4 pools had no liquidity, 150 a hook (2026-11-03).
+          const hook = assessHook(p.v4?.hooks, ad.cfg.hookAllowlist);
           if (!v4PoolMatches(p, base, quote)) row.error = V4_CURRENCY_MISMATCH;
+          else if (!hook.allowed) row.error = hook.reason ?? 'V4 hook rejected';
+          else if (st.liquidity === 0n) row.error = 'no liquidity at the current price';
           else {
             const qIn = quote.native ? NATIVE : quote.address;
             const qOut = base.native ? NATIVE : base.address;
