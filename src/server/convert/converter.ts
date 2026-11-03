@@ -69,7 +69,10 @@ export interface JobRow {
 export interface Job { id: string; chainId: number; target: Coin; startedAt: number; finishedAt: number | null; stopping: boolean; rows: JobRow[] }
 
 interface Route { unwrap: boolean; hops: Hop[] }
-interface Kept { plan: Plan; routes: Map<CoinId, Route>; drafts: Map<string, MarketDef>; limits: SafetyLimits }
+interface Kept { plan: Plan; routes: Map<CoinId, Route>; drafts: Map<string, MarketDef>; limits: SafetyLimits; perNative: number }
+
+/** One coin to convert and how much of it: up to the plan's amount (the balance less what bots use and gas kept). */
+export interface Pick { id: CoinId; amount: number }
 
 export interface ConverterDeps {
   hub: Hub;
@@ -227,7 +230,7 @@ export class Converter {
       listedBy: cfg.tokenApi ? 'explorer' : 'markets', rows,
       unreadable: unreadable.map((u) => (namedLikeSite(u.symbol, u.name) ? { ...u, why: SITE_WHY } : u)),
     };
-    this.kept = { plan, routes, drafts, limits };
+    this.kept = { plan, routes, drafts, limits, perNative };
     return plan;
   }
 
@@ -248,17 +251,30 @@ export class Converter {
   /** Finish the coin being converted (one whose first transaction is out goes all the way to the target), then stop. */
   stop() { if (this.current && !this.current.finishedAt) this.current.stopping = true; }
 
-  /** Convert the chosen coins of the last plan; runs in the background (see job()). */
-  run(planId: string, coins: CoinId[]): Job {
+  /**
+   * Convert the chosen amounts of the last plan's coins; runs in the background (see job()). Each amount is above 0
+   * and at most the plan's amount for that coin, and its share of the plan's quote is worth twice its gas (the plan's
+   * rule for a whole coin). A smaller swap moves the price less, so that share is what it at least returns.
+   */
+  run(planId: string, picks: Pick[]): Job {
     const k = this.kept;
     if (!k || k.plan.id !== planId) throw new Error('That plan is gone: check again.');
     if (this.now() - k.plan.at > PLAN_TTL_MS) throw new Error('That plan is more than 10 minutes old: check again.');
     if (this.current && !this.current.finishedAt) throw new Error('A conversion is already running.');
-    const rows = k.plan.rows.filter((r) => r.ok && coins.includes(r.coin.id));
+    const rows = k.plan.rows.filter((r) => r.ok && picks.some((x) => x.id === r.coin.id));
     if (!rows.length) throw new Error('Nothing chosen to convert.');
+    const target = k.plan.target.symbol;
+    const amounts = rows.map((r) => {
+      const a = picks.find((x) => x.id === r.coin.id)!.amount;
+      if (!(Number.isFinite(a) && a > 0)) throw new Error(`${r.coin.symbol}: enter an amount above 0.`);
+      if (a > r.amount) throw new Error(`${r.coin.symbol}: ${num(a)} is more than the ${num(r.amount)} you can convert (your balance less what bots use${r.keep ? ' and what is kept for gas' : ''}).`);
+      const out = r.out! * (a / r.amount), gas = r.gasNative! * k.perNative;
+      if (out < 2 * gas) throw new Error(`${r.coin.symbol}: ${num(a)} is worth about ${num(out)} ${target}, less than twice the gas it would cost (≈${num(gas)} ${target}).`);
+      return a;
+    });
     const job: Job = {
       id: `job-${this.now().toString(36)}`, chainId: k.plan.chainId, target: k.plan.target, startedAt: this.now(), finishedAt: null, stopping: false,
-      rows: rows.map((r) => ({ coin: r.coin, amount: r.amount, status: 'waiting', steps: r.steps.map((label) => ({ label, hash: null, out: null })), out: null, error: null })),
+      rows: rows.map((r, i) => ({ coin: r.coin, amount: amounts[i], status: 'waiting', steps: r.steps.map((label) => ({ label, hash: null, out: null })), out: null, error: null })),
     };
     this.current = job;
     void this.execute(job, k).finally(() => { job.finishedAt = this.now(); });

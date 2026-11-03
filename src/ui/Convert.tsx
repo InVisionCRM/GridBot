@@ -28,6 +28,8 @@ export function Convert({ s }: { s: AnyObj }) {
   const [impact, setImpact] = useState('3');
   const [plan, setPlan] = useState<Plan | null>(null);
   const [pick, setPick] = useState<Set<string>>(new Set());
+  /** How much of each coin to convert, as typed; starts at all of it (the plan's amount). */
+  const [amounts, setAmounts] = useState<Record<string, string>>({});
   const [checking, setChecking] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
@@ -57,17 +59,29 @@ export function Convert({ s }: { s: AnyObj }) {
       });
       setPlan(p);
       setPick(new Set(p.rows.filter((r) => r.ok).map((r) => r.coin.id)));
+      setAmounts(Object.fromEntries(p.rows.filter((r) => r.ok).map((r) => [r.coin.id, String(r.amount)])));
       if (!keep.trim()) setKeep(String(p.keepNative));
     } catch (e) { setErr((e as Error).message); } finally { setChecking(false); }
   };
   const chosen = plan ? plan.rows.filter((r) => r.ok && pick.has(r.coin.id)) : [];
-  const total = chosen.reduce((a, r) => a + (r.out ?? 0), 0), gas = chosen.reduce((a, r) => a + (r.gasNative ?? 0), 0);
+  const amountOf = (r: PlanRow) => Number(amounts[r.coin.id]);
+  /** Why a typed amount can't be converted, or null */
+  const amountWhy = (r: PlanRow) => {
+    const a = amountOf(r);
+    if (!(Number.isFinite(a) && a > 0)) return 'Enter an amount above 0.';
+    if (a > r.amount) return `At most ${amt(r.amount)}.`;
+    return null;
+  };
+  /** The plan's quote is for all of it; a part gets its share, or a little more (a smaller swap moves the price less). */
+  const outOf = (r: PlanRow) => (amountWhy(r) ? null : (r.out ?? 0) * (amountOf(r) / r.amount));
+  const total = chosen.reduce((a, r) => a + (outOf(r) ?? 0), 0), gas = chosen.reduce((a, r) => a + (r.gasNative ?? 0), 0);
+  const blocked = chosen.some((r) => amountWhy(r));
   const run = async () => {
-    if (!plan || !chain) return;
-    const list = chosen.map((r) => `${amt(r.amount)} ${r.coin.symbol}`).join(', ');
+    if (!plan || !chain || blocked) return;
+    const list = chosen.map((r) => `${amt(amountOf(r))} ${r.coin.symbol}`).join(', ');
     if (!confirm(`Convert ${list} into ${plan.target.symbol} on ${chain.name}?\n\nThis sends real transactions from ${plan.owner}, one coin at a time. You should get about ${amt(total)} ${plan.target.symbol}.`)) return;
     try {
-      const r = await http<{ job: Job }>('/api/convert/run', 'POST', { planId: plan.id, coins: chosen.map((x) => x.coin.id) });
+      const r = await http<{ job: Job }>('/api/convert/run', 'POST', { planId: plan.id, coins: chosen.map((x) => ({ id: x.coin.id, amount: amountOf(x) })) });
       setJob(r.job); setPlan(null);
     } catch (e) { setErr((e as Error).message); }
   };
@@ -103,8 +117,8 @@ export function Convert({ s }: { s: AnyObj }) {
               <th>Coin <Tip>Under each coin: its swaps in order (a coin with no direct pool goes through the chain's own coin; wrapped {chain?.nativeSymbol} is unwrapped first), or why it's left alone.</Tip></th>
               <th className="narrow-hide">Have</th>
               <th className="narrow-hide">Bots use <Tip>Coins your live bots rely on (a grid's coins, a liquidity bot's spare coins). They stay put.</Tip></th>
-              <th className="narrow-hide">Converting</th>
-              <th>You get ≈ <Tip>From a live quote now, after pool fees and price impact. The real amount can differ by the slippage allowance.</Tip></th>
+              <th>Converting <Tip>How much of it to convert. It starts at all you can (what you have, less what bots use and what's kept for gas); type less to keep the rest.</Tip></th>
+              <th>You get ≈ <Tip>From a live quote now, after pool fees and price impact. For part of a coin it is that part's share of the quote for all of it; a smaller swap moves the price less, so you get about this or a little more. The real amount can differ by the slippage allowance.</Tip></th>
               <th className="narrow-hide">Impact</th>
             </tr></thead>
             <tbody>{plan.rows.map((r) => (
@@ -116,8 +130,17 @@ export function Convert({ s }: { s: AnyObj }) {
                 </td>
                 <td className="narrow-hide">{amt(r.balance)}</td>
                 <td className="narrow-hide">{r.bots ? amt(r.bots) : '—'}</td>
-                <td className="narrow-hide">{r.ok ? amt(r.amount) : '—'}</td>
-                <td>{r.ok ? amt(r.out) : '—'}</td>
+                <td onClick={(e) => e.stopPropagation()}>{r.ok ? (
+                  <>
+                    <span className="pair-pick">
+                      <input value={amounts[r.coin.id] ?? ''} inputMode="decimal" aria-label={`Amount of ${r.coin.symbol} to convert`} disabled={running}
+                        onChange={(e) => setAmounts((m) => ({ ...m, [r.coin.id]: e.target.value.replace(/[^\d.]/g, '') }))} />
+                      <button type="button" className="btn small-btn" disabled={running} title="All you can convert" onClick={() => setAmounts((m) => ({ ...m, [r.coin.id]: String(r.amount) }))}>Max</button>
+                    </span>
+                    {pick.has(r.coin.id) && amountWhy(r) && <div className="small neg">{amountWhy(r)}</div>}
+                  </>
+                ) : '—'}</td>
+                <td>{r.ok ? amt(outOf(r)) : '—'}</td>
                 <td className="narrow-hide">{r.ok && r.impact != null ? `${(r.impact * 100).toFixed(2)}%` : '—'}</td>
               </tr>
             ))}{plan.unreadable.map((u) => (
@@ -133,7 +156,7 @@ export function Convert({ s }: { s: AnyObj }) {
           </table></div>
           <div className="convert-go">
             <span className="small">{chosen.length ? <>≈ <b>{amt(total)} {plan.target.symbol}</b> from {chosen.length} coin{chosen.length === 1 ? '' : 's'}, about {amt(gas)} {chain?.nativeSymbol} of gas.</> : 'Nothing chosen.'}</span>
-            <button type="button" className="btn primary" disabled={!chosen.length || running} onClick={run}>Convert {chosen.length} coin{chosen.length === 1 ? '' : 's'} to {plan.target.symbol}</button>
+            <button type="button" className="btn primary" disabled={!chosen.length || running || blocked} onClick={run}>Convert {chosen.length} coin{chosen.length === 1 ? '' : 's'} to {plan.target.symbol}</button>
           </div>
         </>
       )}

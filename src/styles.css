@@ -316,7 +316,9 @@ tr.muted-row td { color: var(--muted); }
 .convert-job { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
 /* a long unbroken word (an address in an error, an airdrop's symbol) wraps instead of widening the table past a phone */
 .convert td.txt { overflow-wrap: anywhere; }
-@media (max-width: 560px) { .convert-table .narrow-hide { display: none; } }
+/* the amount box sits in a table cell: sized to a number, so "You get" stays on screen on a phone */
+.convert-table .pair-pick input { width: 9em; min-width: 0; }
+@media (max-width: 560px) { .convert-table .narrow-hide { display: none; } .convert-table .pair-pick input { width: 6.5em; } }
 .replay .coin-line { display: block; white-space: nowrap; }
 @media (max-width: 560px) { .replay-table .narrow-hide { display: none; } }
 tr.failed-row td { opacity: 0.5; }

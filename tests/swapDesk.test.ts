@@ -283,7 +283,7 @@ describe('swap desk rules', () => {
     const plan = await cv.plan({ chainId: NET.chainId, target: NATIVE });
     const coin = plan.rows.find((r) => r.ok && r.amount > 0 && r.coin.symbol === 'DAI');
     expect(coin).toBeTruthy();
-    cv.run(plan.id, [coin!.coin.id]);
+    cv.run(plan.id, [{ id: coin!.coin.id, amount: coin!.amount }]);
     const held = cv.reservations();
     expect(held.some((r) => r.source === 'converter' && r.amount > 0 && r.chainId === NET.chainId)).toBe(true);
     for (let i = 0; i < 400 && !cv.job()?.finishedAt; i++) await new Promise((r) => setTimeout(r, 5));

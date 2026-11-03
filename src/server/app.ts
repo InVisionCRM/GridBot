@@ -421,7 +421,7 @@ export function createApp(o: AppOpts) {
   app.post('/api/convert/run', wrap((req) => {
     const b = req.body ?? {};
     if (!Array.isArray(b.coins)) throw new Error('coins required');
-    return { job: cv().run(String(b.planId ?? ''), b.coins.map(String)) };
+    return { job: cv().run(String(b.planId ?? ''), b.coins.map((c: { id?: unknown; amount?: unknown }) => ({ id: String(c?.id ?? ''), amount: Number(c?.amount) }))) };
   }));
   app.get('/api/convert/job', wrap(() => ({ job: cv().job() })));
   app.post('/api/convert/stop', wrap(() => { cv().stop(); return { ok: true }; }));
