@@ -24,6 +24,7 @@ import type { Emit } from '../bot/activity';
 import { WRAPPED } from '../dex/abis';
 import type { FetchJson } from '../fetchJson';
 import { holdings, type Coin, type Unreadable } from './holdings';
+import { readTokenMeta } from '../dex/tokens';
 import { noKey } from '../words';
 import type { ReservedBalance } from '../swap/holds';
 
@@ -140,12 +141,7 @@ export class Converter {
     const from = unwrap ? NATIVE : c.id;
     let hops = findRoute(from, target.id, markets);
     if (!hops && !c.tracked) {
-      const r = await this.d.hub.inspect({ chainId, address: c.address! });
-      if (!r.draft) throw new Error('No pool for it on a DEX this app trades.');
-      if (!r.safety?.liveAllowed) throw new Error(`Failed the safety check (${r.safety?.risk ?? 'unknown'} risk)${r.safety?.reasons.length ? `: ${r.safety.reasons.join(' ')}` : ''}`);
-      const key = `convert:${c.id}`;
-      drafts.set(key, { ...r.draft, key });
-      markets.push({ key, base: c.id, quote: r.draft.quote.native ? NATIVE : r.draft.quote.address.toLowerCase() });
+      await this.addDraft(chainId, c, markets, drafts);
       hops = findRoute(from, target.id, markets);
     }
     if (!hops) throw new Error(`No route to ${target.symbol} through this app's markets.`);
@@ -154,6 +150,25 @@ export class Converter {
       if (s && !s.liveAllowed) throw new Error(`Its market failed the safety check (${s.risk} risk): ${s.reasons.join(' ')}`);
     }
     return { unwrap, hops };
+  }
+
+  /** A coin this app has no market for: its best pool after the safety check (as adding a market), or an error. */
+  private async addDraft(chainId: number, c: Coin, markets: RouteMarket[], drafts: Map<string, MarketDef>, quote?: string) {
+    const r = await this.d.hub.inspect({ chainId, address: c.address!, quote });
+    if (!r.draft) throw new Error('No pool for it on a DEX this app trades.');
+    if (!r.safety?.liveAllowed) throw new Error(`Failed the safety check (${r.safety?.risk ?? 'unknown'} risk)${r.safety?.reasons.length ? `: ${r.safety.reasons.join(' ')}` : ''}`);
+    const key = `convert:${c.id}`;
+    drafts.set(key, { ...r.draft, key });
+    markets.push({ key, base: c.id, quote: r.draft.quote.native ? NATIVE : r.draft.quote.address.toLowerCase() });
+  }
+
+  /** 'native', a coin of this app's markets, or any token address (read on-chain). */
+  private async coin(chainId: number, s: string): Promise<Coin> {
+    const id = s === 'native' ? NATIVE : s.trim().toLowerCase();
+    const known = this.targets(chainId).find((c) => c.id === id);
+    if (known) return known;
+    const m = await readTokenMeta(this.d.hub.rt(chainId).reader, chainId, s);
+    return { id: m.address.toLowerCase(), address: m.address, symbol: m.symbol, name: m.name, decimals: m.decimals, tracked: false };
   }
 
   private sym(chainId: number, id: CoinId, drafts: Map<string, MarketDef>): string {
@@ -199,36 +214,90 @@ export class Converter {
     const fee = await rt.reader.getFeeData();
     const gasPrice = fromUnits(fee.maxFeePerGas ?? fee.gasPrice ?? 0n, 18);
     const rows: PlanRow[] = [];
+    const ctx = { chainId: q.chainId, target, markets, drafts, routes, limits, owner, gasPrice, perNative, maxImpact };
     for (const h of held) {
       if (h.id === target.id) continue;
       const used = bots.get(h.id) ?? 0, keep = h.id === NATIVE ? keepNative : 0;
       const amount = Math.max(0, h.balance - used - keep);
       const row: PlanRow = { coin: h, balance: h.balance, bots: used, keep, amount, steps: [], out: null, impact: null, gasNative: null, ok: false, why: null };
       rows.push(row);
-      if (namedLikeSite(h.symbol, h.name)) { row.why = SITE_WHY; continue; }
-      if (!(amount > 0)) { row.why = used > 0 ? 'Your live bots use all of it.' : 'All of it is kept for gas.'; continue; }
-      try {
-        const r = await this.route(q.chainId, h, target, markets, drafts);
-        row.steps = this.labels(q.chainId, r, drafts);
-        let amt = amount, gas = r.unwrap ? UNWRAP_GAS * gasPrice : 0, impact = 0;
-        for (const hop of r.hops) {
-          const qr = this.quoter(hop.key, drafts), tin = qr.tokenIn(hop.side);
-          const qt = await qr.quote(hop.side, amt, limits, owner, tin === NATIVE ? null : await qr.allowance(owner, tin));
-          if (qt.block) throw new Error(qt.block);
-          impact = Math.max(impact, qt.priceImpact); gas += qt.gasNativeEstimate; amt = qt.quotedOutHuman;
-        }
-        Object.assign(row, { out: amt, impact, gasNative: gas });
-        routes.set(h.id, r);
-        if (impact > maxImpact) row.why = `Would move the price ${(impact * 100).toFixed(2)}% (your cap is ${(maxImpact * 100).toFixed(1)}%).`;
-        else if (amt < 2 * gas * perNative) row.why = `Worth about ${num(amt)} ${target.symbol}, less than twice the gas it would cost (≈${num(gas * perNative)} ${target.symbol}).`;
-        else row.ok = true;
-      } catch (e) { row.why = msg(e); }
+      await this.fill(row, ctx);
     }
     const plan: Plan = {
       id: `cv-${this.now().toString(36)}`, chainId: q.chainId, owner, at: this.now(), target,
       targetBalance: held.find((h) => h.id === target.id)?.balance ?? 0, keepNative, maxImpact,
       listedBy: cfg.tokenApi ? 'explorer' : 'markets', rows,
       unreadable: unreadable.map((u) => (namedLikeSite(u.symbol, u.name) ? { ...u, why: SITE_WHY } : u)),
+    };
+    this.kept = { plan, routes, drafts, limits, perNative };
+    return plan;
+  }
+
+  /** Route and quote one row, or say why it's left alone (shared by plan and swap). */
+  private async fill(row: PlanRow, x: { chainId: number; target: Coin; markets: RouteMarket[]; drafts: Map<string, MarketDef>; routes: Map<CoinId, Route>; limits: SafetyLimits; owner: string; gasPrice: number; perNative: number; maxImpact: number }) {
+    const h = row.coin;
+    if (namedLikeSite(h.symbol, h.name)) { row.why = SITE_WHY; return; }
+    if (!(row.amount > 0)) { row.why = row.bots > 0 ? 'Your live bots use all of it.' : 'All of it is kept for gas.'; return; }
+    try {
+      const r = await this.route(x.chainId, h, x.target, x.markets, x.drafts);
+      row.steps = this.labels(x.chainId, r, x.drafts);
+      let amt = row.amount, gas = r.unwrap ? UNWRAP_GAS * x.gasPrice : 0, impact = 0;
+      for (const hop of r.hops) {
+        const qr = this.quoter(hop.key, x.drafts), tin = qr.tokenIn(hop.side);
+        const qt = await qr.quote(hop.side, amt, x.limits, x.owner, tin === NATIVE ? null : await qr.allowance(x.owner, tin));
+        if (qt.block) throw new Error(qt.block);
+        impact = Math.max(impact, qt.priceImpact); gas += qt.gasNativeEstimate; amt = qt.quotedOutHuman;
+      }
+      Object.assign(row, { out: amt, impact, gasNative: gas });
+      x.routes.set(h.id, r);
+      if (impact > x.maxImpact) row.why = `Would move the price ${(impact * 100).toFixed(2)}% (your cap is ${(x.maxImpact * 100).toFixed(1)}%).`;
+      else if (amt < 2 * gas * x.perNative) row.why = `Worth about ${num(amt)} ${x.target.symbol}, less than twice the gas it would cost (≈${num(gas * x.perNative)} ${x.target.symbol}).`;
+      else row.ok = true;
+    } catch (e) { row.why = msg(e); }
+  }
+
+  /**
+   * Swap page: one coin (the chain's own coin, or any token you hold), an amount or all you can, into any coin: one
+   * of this app's markets or a token address. A coin the app has no market for gets the safety check first, as adding
+   * a market does; one that fails it is refused (Kyle, 2026-11-03: "I could have just bought a couple cashcat").
+   * The plan has one row; run() sends it the way it sends a conversion.
+   */
+  async swap(q: { chainId: number; from: string; to: string; amount: number | 'max'; maxImpact?: number }, ownerOverride?: string): Promise<Plan> {
+    const hub = this.d.hub, rt = hub.rt(q.chainId), cfg = rt.cfg;
+    const maxImpact = q.maxImpact ?? DEFAULT_LIMITS.maxPriceImpact;
+    if (!(maxImpact > 0 && maxImpact < 1)) throw new Error('max price impact must be between 0 and 100%');
+    const owner = ownerOverride ?? await this.owner(q.chainId);
+    const limits: SafetyLimits = { ...DEFAULT_LIMITS, maxPriceImpact: maxImpact };
+    const [from, target] = await Promise.all([this.coin(q.chainId, q.from), this.coin(q.chainId, q.to)]);
+    if (from.id === target.id) throw new Error('Pick two different coins.');
+    for (const c of [from, target]) if (namedLikeSite(c.symbol, c.name)) throw new Error(`${c.symbol}: ${SITE_WHY}`);
+    const markets = this.markets(q.chainId), drafts = new Map<string, MarketDef>(), routes = new Map<CoinId, Route>();
+    // the balance first: it's one read, the safety check below can take 20 s
+    const read = (c: Coin) => (c.address ? rt.tokenBalance(owner, c.address) : rt.reader.getBalance(owner)).then((raw) => fromUnits(raw, c.decimals));
+    const [balance, targetBalance] = await Promise.all([read(from), read(target)]);
+    const used = this.botsUse(q.chainId).get(from.id) ?? 0, keep = from.id === NATIVE ? 2 * cfg.lowGasNative : 0;
+    const free = Math.max(0, balance - used - keep);
+    const amount = q.amount === 'max' ? free : q.amount;
+    if (!(Number.isFinite(amount) && amount > 0)) throw new Error(q.amount === 'max' ? `No ${from.symbol} free to swap (balance ${num(balance)}${used ? `, bots use ${num(used)}` : ''}${keep ? `, ${num(keep)} kept for gas` : ''}).` : 'Enter an amount above 0.');
+    if (amount > free) throw new Error(`You can swap at most ${num(free)} ${from.symbol}: your balance ${num(balance)}${used ? `, less ${num(used)} your bots use` : ''}${keep ? `, less ${num(keep)} kept for gas` : ''}.`);
+    // A coin the app doesn't know is checked on its pool with the other side of the swap when that side can quote a
+    // market (the chain's coin, WETH, a stable): the pool this swap trades. Unpaired, the check takes the deepest pool
+    // of any pairing, which may not be it (CASHCAT, 2026-11-03: a V4 pool whose simulated buy reverted, while its
+    // CASHCAT/WETH V3 pool, the one an ETH swap uses, passes).
+    const pairWith = (c: Coin) => {
+      const a = c.id === NATIVE ? cfg.wrappedNative.address : c.address!;
+      return hub.quoteOptions(q.chainId, '').some((o) => o.address.toLowerCase() === a.toLowerCase()) ? a : undefined;
+    };
+    if (!target.tracked) await this.addDraft(q.chainId, target, markets, drafts, pairWith(from));
+    if (!from.tracked) await this.addDraft(q.chainId, from, markets, drafts, pairWith(target));
+    const fee = await rt.reader.getFeeData();
+    const gasPrice = fromUnits(fee.maxFeePerGas ?? fee.gasPrice ?? 0n, 18);
+    const perNative = await this.targetPerNative(q.chainId, target, markets, drafts);
+    const row: PlanRow = { coin: from, balance, bots: used, keep, amount, steps: [], out: null, impact: null, gasNative: null, ok: false, why: null };
+    await this.fill(row, { chainId: q.chainId, target, markets, drafts, routes, limits, owner, gasPrice, perNative, maxImpact });
+    const plan: Plan = {
+      id: `cv-${this.now().toString(36)}`, chainId: q.chainId, owner, at: this.now(), target, targetBalance,
+      keepNative: keep, maxImpact, listedBy: 'markets', rows: [row], unreadable: [],
     };
     this.kept = { plan, routes, drafts, limits, perNative };
     return plan;

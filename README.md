@@ -230,6 +230,17 @@ Swaps what the wallet holds on one chain (all of each coin, or the amount you ty
 - **API.** `GET /api/convert/targets?chainId=` · `POST /api/convert/plan {chainId, target, keepNative?, maxImpact?}` · `POST /api/convert/run {planId, coins: [{id, amount}]}` · `GET /api/convert/job` · `POST /api/convert/stop`.
 - **Checked.** `tests/convert.test.ts`: part of a coin (1,000 of 5,000 HEX: the rest stays, at least its share of the quote) and the amounts refused; routes, scam names, bots' coins, the impact cap, dust; a full run on the mock chain (unwrap, approve, both swaps, nonces in order); explorer decimals that disagree with the chain; a listed coin that reverts; a bot that takes a coin after the plan; Stop between coins and in the middle of one (on an unwrap, on an approve). Read-only against the real PulseChain wallet: the plan listed 10 coins, 7 were convertible, the website-named airdrop was skipped and two dust coins were skipped; the check took about 50 s.
 
+## Swap (More → Swap)
+
+One coin you hold into any coin on the same chain: pick the coins, or paste a token's address (Kyle, 2026-11-03: "I could have just bought a couple cashcat"). `Converter.swap` plans it as a one-coin conversion and **Swap** sends it through the same runner as Convert: the chain's transaction queue and nonce, approvals, a fresh quote and the price-impact cap just before each swap.
+
+- **Amount.** Up to your balance, less what live bots use and, for the chain's own coin, what's kept for gas (twice the low-gas warning). **Max** fills in all of that. More is refused with the numbers, before anything else is read.
+- **A coin the app doesn't know** gets the safety check first (honeypot, taxes, a buy-transfer-sell simulation), on its pool with the coin you pay with when that coin can quote a market (the chain's coin, WETH, a stable): the pool the swap trades. One that fails is refused; one named like a website is never touched.
+- **Route.** Straight through one pool, or two swaps through a coin both sides trade against (the chain's own coin first).
+- **API.** `POST /api/convert/swap {chainId, from, to, amount | 'max', maxImpact?}` returns a one-row plan; `POST /api/convert/run {planId, coins: [{id, amount}]}` sends it; `GET /api/convert/job` follows it.
+- **Checked.** `tests/convert.test.ts`: PLS → HEX sends exactly the amount; Max and the over-balance refusal; same coin, 0, no pool; the unknown coin is checked against the coin paid with, after the balance. Against Robinhood, read-only for Kyle's wallet: 0.01 ETH → about 215.6 CASHCAT through the Uniswap V3 pool (the CASHCAT address pasted), 11 s with its safety check; 50 ETH refused in under 1 s with the real limit.
+- **Known:** USDG → CASHCAT is refused today. CASHCAT's deepest USDG pool is Uniswap V4 (about $4 M, no hook), and the safety simulation's buy on it quotes 0 and "reverts". That looks like the V4 simulation, not the coin; swap through ETH meanwhile.
+
 ## Smart trader (its own tab)
 
 Give it an amount on a chain and turn it on; it runs that money as grid and liquidity bots, in paper or live (`src/server/bot/autopilot.ts`, decisions in `src/market/autopilot.ts`, state in `data/autopilot.json`).

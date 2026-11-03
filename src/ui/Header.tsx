@@ -82,7 +82,8 @@ function DeskMenu({ s, nav, onGuide, onActivity, close }: { s: AnyObj; nav: Nav;
           <button type="button" className="mega-link" onClick={() => jump({ v: 'opps' })}>Opportunities<small>Best this week, full list</small></button>
           <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'chart' })}>Charts<small>Candles for a pair</small></button>
           <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'analytics' })}>Analytics<small>What the bots made</small></button>
-          <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'convert' })}>Convert<small>Swap a coin you hold</small></button>
+          <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'swap' })}>Swap<small>Buy or sell any coin</small></button>
+          <button type="button" className="mega-link" onClick={() => jump({ v: 'tools', tab: 'convert' })}>Convert<small>Many coins into one</small></button>
           <button type="button" className="mega-link" onClick={() => jump({ v: 'alerts' })}>Alerts<small>Lock screen and this tab</small></button>
           <button type="button" className="mega-link" onClick={() => { close(); onGuide(); }}>Guide<small>What each bot does</small></button>
           <button type="button" className="mega-link" onClick={() => { close(); onActivity(); }}>Activity<small>Trades and stops</small></button>
