@@ -4,6 +4,7 @@ import { fromUnits, NATIVE, toUnits } from '../../live/swapMath';
 import { midPrice } from '../../live/v3Math';
 import type { ChainRuntime } from '../chains/runtime';
 import { V4_CURRENCY_MISMATCH, V4ScanError, v4PoolMatches } from './v4';
+import { assessHook } from './v4Hooks';
 import { sameAddr, ZERO } from './types';
 
 export interface DiscoveredPool extends PoolRef {
@@ -28,7 +29,15 @@ export interface DiscoveredPool extends PoolRef {
 
 export async function discoverPools(
   rt: ChainRuntime, base: MarketToken, quote: MarketToken,
-  o: { refQuote: number; quoteUsd: number | null; onlyKind?: 'v4' },
+  o: {
+    refQuote: number; quoteUsd: number | null; onlyKind?: 'v4';
+    /**
+     * Read only this pool (address, or a V4 pool id). A re-check of a market's own pool: CASHCAT has 825 V4 pools on
+     * Robinhood, and reading each one (2 × getSlot0, getLiquidity, a quote) was 3,300 calls, 45 s, past the live
+     * start's 20 s per try (2026-11-03).
+     */
+    only?: string;
+  },
 ): Promise<DiscoveredPool[]> {
   const out: DiscoveredPool[] = [];
   await Promise.all([...rt.adapters.values()].map(async (ad) => {
@@ -45,6 +54,7 @@ export async function discoverPools(
       if (ad.kind === 'v4' && e instanceof V4ScanError) { pools = e.pools; scanError = e.message; }
       else return;
     }
+    if (o.only) pools = pools.filter((p) => sameAddr(p.address, o.only!));
     if (scanError && pools.length === 0) {
       out.push({
         dex: ad.cfg.id, kind: ad.kind, address: '', feeBps: 0, dexName: ad.cfg.name,
@@ -70,7 +80,12 @@ export async function discoverPools(
           row.address = st.pool.address;
           if (scanError) row.partial = scanError;
           // A WETH market must not quote an address(0) pool, and a native market must not quote a WETH pool.
+          // Nothing to quote in an empty pool, or through a hook the app won't trade: known without a call. CASHCAT on
+          // Robinhood: 574 of its 640 V4 pools had no liquidity, 150 a hook (2026-11-03).
+          const hook = assessHook(p.v4?.hooks, ad.cfg.hookAllowlist);
           if (!v4PoolMatches(p, base, quote)) row.error = V4_CURRENCY_MISMATCH;
+          else if (!hook.allowed) row.error = hook.reason ?? 'V4 hook rejected';
+          else if (st.liquidity === 0n) row.error = 'no liquidity at the current price';
           else {
             const qIn = quote.native ? NATIVE : quote.address;
             const qOut = base.native ? NATIVE : base.address;

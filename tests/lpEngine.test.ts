@@ -638,6 +638,32 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     expect(msgs.some((m) => /holds 100000000650132082236 liquidity on-chain, the bot had 100000000000000000000 saved/.test(m))).toBe(true);
   });
 
+  it('a deposit never asks for more of a token than the wallet holds or allowed ("STF", CASHCAT 2026-11-03: 1,304,170 wei over)', async () => {
+    const w = live();
+    const e = w.make();
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
+    w.approve();
+    // the wallet holds a hair less DAI than the bot's floating-point idle says, as on Kyle's wallet
+    let walletDai = 0n;
+    const call = w.m.call.bind(w.m);
+    w.m.call = async (tx) => {
+      if (tx.to.toLowerCase() === DAI.address.toLowerCase() && tx.data.startsWith(ERC20.getFunction('balanceOf')!.selector)) {
+        walletDai = BigInt(Math.floor(e.state.idle.quote * 1e18)) - 1_304_170n;
+        return ERC20.encodeFunctionResult('balanceOf', [walletDai]);
+      }
+      return call(tx);
+    };
+    await e.tick();
+    const mint = w.sent.find((x) => x.to === NPM)!;
+    const [calls] = V3_NPM.decodeFunctionData('multicall', mint.data) as unknown as [string[]];
+    const m = (V3_NPM.decodeFunctionData('mint', calls[0]) as unknown as [{ token1: string; amount1Desired: bigint; amount1Min: bigint }])[0];
+    expect(m.token1.toLowerCase()).toBe(DAI.address.toLowerCase()); // WPLS < DAI: DAI is token1
+    expect(walletDai).toBeGreaterThan(0n);
+    expect(m.amount1Desired).toBe(walletDai); // capped at what the position manager can take, not 1,304,170 wei over
+    expect(m.amount1Min <= m.amount1Desired).toBe(true);
+  });
+
   it('Pause during a close whose exit is being sent: the exit is kept by hash and settles; the position is not left behind (a039)', async () => {
     const w = live();
     const e = w.make();

@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { NETWORKS } from '../src/live/networks';
 import { CHAINS, chainByKey } from '../src/live/chains';
 import { defaultMarkets, legacyMarkets, type MarketDef } from '../src/live/markets';
-import { ERC20, PAIR, V3_POOL } from '../src/server/dex/abis';
+import { ERC20, PAIR, V3_POOL, V4_STATE_VIEW } from '../src/server/dex/abis';
 import { ChainRuntime } from '../src/server/chains/runtime';
 import { Hub, type CustomFile } from '../src/server/chains/hub';
 import { withMulticall, type MulticallReader } from '../src/server/chains/multicall';
@@ -85,6 +85,30 @@ describe('withMulticall: same answers as direct reads', () => {
     expect(r.status === 'rejected' ? (r.reason as Error).message : 'ok').toBe(direct);
     expect(ok.status).toBe('fulfilled');
     expect(b.mc.direct).toBe(1);
+  });
+
+  it('V4 StateView getSlot0 / getLiquidity are batched like V3 pool state (CASHCAT: 1,280 reads went out one by one)', async () => {
+    const stateView = '0x00000000000000000000000000000000000057a7';
+    const inner = {
+      call: async (tx: { to: string; data: string }) => {
+        const sel = tx.data.slice(0, 10);
+        if (sel === V4_STATE_VIEW.getFunction('getSlot0')!.selector) return V4_STATE_VIEW.encodeFunctionResult('getSlot0', [2n ** 96n, 0n, 0n, 3000n]);
+        if (sel === V4_STATE_VIEW.getFunction('getLiquidity')!.selector) return V4_STATE_VIEW.encodeFunctionResult('getLiquidity', [10n ** 18n]);
+        throw new Error(`unexpected ${sel}`);
+      },
+      getBalance: async () => 0n,
+    };
+    const node = mc3Node(inner);
+    const reader = withMulticall(node as unknown as RuntimeReader);
+    const ids = Array.from({ length: 4 }, (_, i) => '0x' + String(i + 1).padStart(2, '0').repeat(32));
+    const out = await Promise.all(ids.flatMap((id) => [
+      reader.call({ to: stateView, data: V4_STATE_VIEW.encodeFunctionData('getSlot0', [id]) }),
+      reader.call({ to: stateView, data: V4_STATE_VIEW.encodeFunctionData('getLiquidity', [id]) }),
+    ]));
+    expect(V4_STATE_VIEW.decodeFunctionResult('getLiquidity', out[1])[0]).toBe(10n ** 18n);
+    // 8 reads: 1 code check + 1 aggregate3, not 8 requests
+    expect(node.counts.requests).toBe(2);
+    expect((reader as MulticallReader<RuntimeReader>).multicall).toMatchObject({ batched: 8, direct: 0 });
   });
 
   it('not batched: calls with from, unknown selectors, balanceOf on a token outside the trusted list', async () => {

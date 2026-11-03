@@ -5,7 +5,7 @@
  *
  * Same answers as direct reads:
  * - Only allow-listed reads are batched: DEX contract views (V2 router getAmountsOut, pair reserves, factories, V3 pool
- *   state, QuoterV2 quotes, position manager views) and ERC-20 balanceOf / decimals on the chain's built-in coins.
+ *   state, V4 StateView slot0 / liquidity, QuoterV2 quotes, position manager views) and ERC-20 balanceOf / decimals on the chain's built-in coins.
  *   A call with `from`, any other selector (token metadata, the safety probe, Arbitrum's NodeInterface precompile,
  *   which contracts can't call) and balanceOf on a custom token go direct: those views don't depend on who asks, a
  *   custom token's code might, so it is never read through Multicall3.
@@ -18,7 +18,7 @@
  * runs again.
  */
 import { Interface } from 'ethers';
-import { ERC20, ERC721_ENUM, FACTORY, PAIR, ROUTER, V3_FACTORY, V3_NPM, V3_POOL, V3_POOL_FEES, V3_POOL_LP, V3_QUOTER } from '../dex/abis';
+import { ERC20, ERC721_ENUM, FACTORY, PAIR, ROUTER, V3_FACTORY, V3_NPM, V3_POOL, V3_POOL_FEES, V3_POOL_LP, V3_QUOTER, V4_STATE_VIEW } from '../dex/abis';
 import type { RuntimeReader } from './runtime';
 
 /** Same address on Ethereum, PulseChain (forked Ethereum's state) and Robinhood Chain (eth_getCode checked 2026-10-27). */
@@ -36,6 +36,9 @@ const DEX_SELECTORS = new Set([
   ...sel(V3_FACTORY, 'getPool'), ...sel(V3_POOL, 'slot0', 'liquidity', 'fee'), ...sel(V3_POOL_FEES, 'slot0'),
   ...sel(V3_POOL_LP, 'tickSpacing', 'feeGrowthGlobal0X128', 'feeGrowthGlobal1X128', 'ticks'),
   ...sel(V3_QUOTER, 'quoteExactInputSingle', 'quoteExactInput'),
+  // V4 pool state (StateView reads the PoolManager's storage). Unbatched, listing CASHCAT's 640 V4 pools on Robinhood
+  // was 1,280 requests on their own (2026-11-03).
+  ...sel(V4_STATE_VIEW, 'getSlot0', 'getLiquidity'),
   ...sel(V3_NPM, 'positions', 'ownerOf'), ...sel(ERC721_ENUM, 'tokenOfOwnerByIndex'),
 ]);
 /** ERC-20 reads batched only on tokens in `trusted` (the chain's built-in coins). */

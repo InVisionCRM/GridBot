@@ -174,6 +174,21 @@ describe('Pool discovery + best-pool selection across PulseX V1 / V2 / 9mm', () 
     expect(r.draft!.quote.address.toLowerCase()).toBe(hub.def('HEX~').quote.address.toLowerCase());
   });
 
+  it('a given pool is the only one read: a re-check never reads the pair\'s other pools (CASHCAT: 825 V4 pools, 45 s)', async () => {
+    const { hub, m, pools } = world();
+    const read = new Set<string>();
+    const call = m.call.bind(m);
+    m.call = async (tx) => { read.add(String(tx.to).toLowerCase()); return call(tx); };
+    const r = await hub.inspect({ chainId: 369, address: MEME.address, quote: WPLS.address, pool: pools.memeV1 });
+    expect(r.pools.map((p) => p.address)).toEqual([pools.memeV1]);
+    expect(r.chosen!.dex).toBe('pulsex-v1');
+    expect(r.safety).not.toBeNull();
+    expect(read.has(pools.meme9.toLowerCase())).toBe(false); // the deeper 9mm V3 pool is never read
+    // no pool given: every pool is listed and the deepest chosen, as before
+    const all = await hub.inspect({ chainId: 369, address: MEME.address, quote: WPLS.address });
+    expect(all.pools.map((p) => p.address).sort()).toEqual([pools.memeV1, pools.meme9].sort());
+  });
+
   it('a pool already added is refused as a duplicate, even when its coin also trades on another pool', async () => {
     const { hub, pools } = world();
     const a = await hub.addMarket({ chainId: 369, address: MEME.address, quote: WPLS.address, pool: pools.memeV1 });

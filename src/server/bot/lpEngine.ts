@@ -1181,6 +1181,24 @@ export class LpEngine {
     return L;
   }
   private deadline() { return BigInt(Math.floor(this.now() / 1000) + this.state.limits.deadlineMinutes * 60); }
+  /**
+   * A deposit's token amounts, capped at what the position manager can take: each ERC-20's balance and allowance
+   * on-chain. The amounts are worked out in floating point (about 16 digits); 9,031.98 CASHCAT is 22 digits in wei and
+   * came out 1,304,170 wei over the balance, so every mint reverted "STF" (2026-11-03). The native coin is paid with the
+   * tx value from what the gas reserve leaves, so it isn't capped here.
+   */
+  private async pullable(pool: LpPool, me: string, tokens: [string, string], raw: { a0: bigint; a1: bigint }, native: 0 | 1 | null): Promise<{ a0: bigint; a1: bigint }> {
+    const cap = async (i: 0 | 1, want: bigint) => {
+      if (native === i || want === 0n) return want;
+      const [[bal], [allowed]] = await Promise.all([
+        readCall<[bigint]>(pool.reader, tokens[i], ERC20, 'balanceOf', [me]),
+        readCall<[bigint]>(pool.reader, tokens[i], ERC20, 'allowance', [me, pool.npm]),
+      ]);
+      return [want, bal, allowed].reduce((a, b) => (b < a ? b : a));
+    };
+    const [a0, a1] = await Promise.all([cap(0, raw.a0), cap(1, raw.a1)]);
+    return { a0, a1 };
+  }
   /** The non-native token when one side of the market is the native coin (null when both are ERC-20s). */
   private nativeOther(pool: LpPool) { return pool.def.base.native ? pool.quoteAddr : pool.def.quote.native ? pool.baseAddr : null; }
 
@@ -1440,9 +1458,11 @@ export class LpEngine {
     const want = pool.rawAmounts(have, v), min = pool.rawAmounts(used, v), k = 1 - this.state.limits.slippageBps / 10_000;
     const [token0, token1] = v.baseIs0 ? [pool.baseAddr, pool.quoteAddr] : [pool.quoteAddr, pool.baseAddr];
     const nativeIs0 = pool.def.base.native ? v.baseIs0 : pool.def.quote.native ? !v.baseIs0 : null;
+    const native = nativeIs0 == null ? null : nativeIs0 ? 0 : 1;
+    const amt = await this.pullable(pool, me, [token0, token1], { a0: BigInt(Math.floor(want.a0)), a1: BigInt(Math.floor(want.a1)) }, native);
     const tx = mintTx({
       token0, token1, fee: pool.fee, tickLower: range.tickLower, tickUpper: range.tickUpper,
-      amount0: BigInt(Math.floor(want.a0)), amount1: BigInt(Math.floor(want.a1)), min0: BigInt(Math.floor(min.a0 * k)), min1: BigInt(Math.floor(min.a1 * k)),
+      amount0: amt.a0, amount1: amt.a1, min0: BigInt(Math.floor(min.a0 * k)), min1: BigInt(Math.floor(min.a1 * k)),
       recipient: me, deadline: this.deadline(), native: nativeIs0 == null ? null : nativeIs0 ? 0 : 1,
     });
     await this.send(s, { to: pool.npm, ...tx });
@@ -1573,8 +1593,10 @@ export class LpEngine {
     const rawWant = pool.rawAmounts(have, v), min = pool.rawAmounts(pool.coinsFor(Math.floor(L), p.tickLower, p.tickUpper, v), v);
     const k = 1 - this.state.limits.slippageBps / 10_000;
     const nativeIs0 = pool.def.base.native ? v.baseIs0 : pool.def.quote.native ? !v.baseIs0 : null;
+    const me = await (this.executor as LiveExecutor).address();
+    const amt = await this.pullable(pool, me, v.baseIs0 ? [pool.baseAddr, pool.quoteAddr] : [pool.quoteAddr, pool.baseAddr], { a0: BigInt(Math.floor(rawWant.a0)), a1: BigInt(Math.floor(rawWant.a1)) }, nativeIs0 == null ? null : nativeIs0 ? 0 : 1);
     const tx = increaseTx({
-      tokenId: BigInt(p.id), amount0: BigInt(Math.floor(rawWant.a0)), amount1: BigInt(Math.floor(rawWant.a1)),
+      tokenId: BigInt(p.id), amount0: amt.a0, amount1: amt.a1,
       min0: BigInt(Math.floor(min.a0 * k)), min1: BigInt(Math.floor(min.a1 * k)), deadline: this.deadline(),
       native: nativeIs0 == null ? null : nativeIs0 ? 0 : 1,
     });

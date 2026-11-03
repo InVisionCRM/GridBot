@@ -136,7 +136,8 @@ export function Markets({ status: s, act, busy }: { status: AnyObj; act: (fn: ()
     setLoading(true); setErr(null);
     try {
       const r = await http('/api/tokens/inspect', 'POST', { chainId: cid, address: f.address.trim(), quote: f.quote || undefined, pool: pool ?? (f.pool || undefined) });
-      setRes(r);
+      // A pool picked from the list is checked on its own; the list stays the one the first look-up found.
+      setRes(pool && res ? { ...r, pools: res.pools } : r);
       if (pool) setF((x) => ({ ...x, pool }));
     } catch (e) { setErr((e as Error).message); setRes(null); } finally { setLoading(false); }
   };

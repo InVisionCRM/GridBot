@@ -360,7 +360,8 @@ export class Hub {
     for (const q of candidates) {
       const usd = await this.quoteTokenUsd(rt.cfg.id, q);
       const quoteTok = { address: q.address, symbol: q.symbol, decimals: await this.decimalsOf(rt, q.address) };
-      const disc = { refQuote: usd ? 1000 / usd : 1000, quoteUsd: usd };
+      // A given pool is the only one read (a re-check, a pool picked in a list): every pool of the pair isn't needed.
+      const disc = { refQuote: usd ? 1000 / usd : 1000, quoteUsd: usd, only: req.pool };
       const pools = await discoverPools(rt, base, quoteTok, disc);
       // A wrapped quote is either currency on V4. Search address(0) as well, and keep a pool's quoting row.
       if (sameAddr(q.address, rt.cfg.wrappedNative.address)) {
