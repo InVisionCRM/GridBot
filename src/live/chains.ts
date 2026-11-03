@@ -224,7 +224,10 @@ export const CHAINS: ChainConfig[] = [
     id: 4663, key: 'robinhood', envSlug: 'ROBINHOOD', name: 'Robinhood Chain', short: 'HOOD', color: '#ccff00', nativeSymbol: 'ETH',
     wrappedNative: { symbol: 'WETH', name: 'Wrapped Ether', address: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73', decimals: 18, kind: 'wrapped' },
     stables: [{ symbol: 'USDG', name: 'Global Dollar (Paxos)', address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', decimals: 6, kind: 'stable', note: 'Upgradeable proxy (Paxos-issued stablecoin)' }],
-    rpcs: ['https://rpc.mainnet.chain.robinhood.com'],
+    // OrbitFlare first (Kyle, 2026-11-03): his license lets his IP in with no key. Robinhood's public RPC is rate-limited
+    // (it answered his app 429 until ethers gave up: "exceeded maximum retry limit"). Elsewhere OrbitFlare answers 401
+    // "missing API key", and the reader moves on to the public RPC and leaves OrbitFlare out for 30 s, doubling to 10 min.
+    rpcs: ['https://robinhood.rpc.orbitflare.com', 'https://rpc.mainnet.chain.robinhood.com'],
     explorer: 'https://robinhoodchain.blockscout.com', geckoSlug: 'robinhood', screener: 'robinhood', status: 'live', trading: { enabled: true },
     dexes: [
       uniV3('https://developers.uniswap.org/docs/protocols/v3/deployments/v3-robinhood-deployments', 'uniswap-v3-robinhood', {
