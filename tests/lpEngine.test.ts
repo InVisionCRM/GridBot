@@ -81,6 +81,61 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s.poolShare).toBeCloseTo(Number(L) / Number(poolL + L), 12);
   });
 
+  it("measures the fees the pool paid between readings (for its volume), not across a gap where the bot was down", async () => {
+    const { lp, m, pool, at } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.tick();
+    expect(lp.status().poolFees).toBe(0);
+    const d = Q128 / 10n ** 6n;
+    m.addFees(pool, d, d);
+    at(60_000);
+    await lp.tick();
+    const poolL = BigInt(Math.round(Math.sqrt(1e10 * 1e18 * 3e5 * 1e18)));
+    const each = Number(poolL * d / Q128) / 1e18; // per token, human (both 18 decimals): the pool's active liquidity × growth
+    const once = each * lp.status().price! + each;
+    expect(lp.status().poolFees).toBeCloseTo(once, 9);
+    // down for 11 minutes: the counters grew, but the liquidity in between is unknown, so nothing is counted
+    m.addFees(pool, d, d);
+    at(60_000 + 11 * 60_000);
+    await lp.tick();
+    expect(lp.status().poolFees).toBeCloseTo(once, 9);
+    // the next reading a minute later counts again from there
+    m.addFees(pool, d, d);
+    at(60_000 + 12 * 60_000);
+    await lp.tick();
+    expect(lp.status().poolFees).toBeCloseTo(2 * once, 9);
+    // a sample every 5 minutes: [ms, fees, fees base, fees quote, the pool's fees so far, price]; the last is the 11-minute one
+    const last = lp.status().feeHist.at(-1)!;
+    expect(last).toHaveLength(6);
+    expect(last[0]).toBe(1_800_000_000_000 + 60_000 + 11 * 60_000);
+    expect(last[4]).toBeCloseTo(once, 9);
+    expect(last[5]).toBe(lp.status().price);
+  });
+
+  it('logs each finished step, newest first: who asked, the range it opened, its gas + swap cost and the fees it collected', async () => {
+    const { lp, m, pool } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.tick();
+    let done = lp.status().done;
+    expect(done).toHaveLength(1);
+    const p0 = lp.status().position!, t0 = { ...lp.status().totals }; // a copy: status hands out the live totals
+    expect(done[0]).toMatchObject({ action: 'open', asked: true, lower: p0.lower, upper: p0.upper, fees: { base: 0, quote: 0 } });
+    expect(done[0].cost).toBeCloseTo(t0.gas + t0.swapCost, 12);
+    m.addFees(pool, STEP, STEP);
+    await lp.tick();
+    m.movePrice(pool, 1.2); // out of range: the bot moves it
+    await lp.tick();
+    const t1 = lp.status().totals, p1 = lp.status().position!;
+    done = lp.status().done;
+    expect(done.map((x: { action: string }) => x.action)).toEqual(['rerange', 'open']);
+    expect(done[0]).toMatchObject({ asked: false, lower: p1.lower, upper: p1.upper });
+    expect(done[0].cost).toBeCloseTo(t1.gas + t1.swapCost - (t0.gas + t0.swapCost), 12);
+    expect(done[0].fees.base + done[0].fees.quote).toBeGreaterThan(0); // the exit collected the fees the first range earned
+    await lp.move();
+    await lp.tick();
+    expect(lp.status().done[0]).toMatchObject({ action: 'rerange', asked: true });
+  });
+
   it('a stale RPC answer with lower fee counters earns nothing, and fees resume from the highest reading (not ~2^128 × L)', async () => {
     const { lp, m, pool } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
@@ -1192,7 +1247,7 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       // the earlier move rule's tally and moves-per-day list are dropped
       const kept = again.store.load()!.lps.find((x) => x.id === old.id) as unknown as Record<string, unknown>;
       expect('missed' in kept || 'moves' in kept).toBe(false);
-      expect(Object.keys(kept.seen as object)).toEqual(['g0', 'g1']);
+      expect('out' in (kept.seen as object)).toBe(false); // the pre-5 key is dropped (a reading adds its time and liquidity)
     } finally { await again.close(); }
   });
 

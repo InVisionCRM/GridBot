@@ -17,7 +17,12 @@ const FX = JSON.parse(readFileSync(new URL('./fixtures/real-2026-10-27.json', im
 const H = 3_600_000;
 const src = (f: string) => readFileSync(new URL(`../src/ui/${f}`, import.meta.url), 'utf8');
 /** The top KPI strip of a page's source. */
-const strip = (f: string) => { const s = src(f); const i = s.indexOf('<div className="kpi-row detail-stats"'); return s.slice(i, s.indexOf('\n      </div>\n', i)); };
+const strip = (f: string) => {
+  const s = src(f);
+  // the LP page's strip is its Hero (the Bone & Ink cards); the grid and trend pages keep the kpi row
+  if (s.includes('data-testid="top-strip"') && s.includes('className="lpb-hero"')) { const i = s.indexOf('className="lpb-hero"'); return s.slice(i, s.indexOf('\n    </div>\n  );', i)); }
+  const i = s.indexOf('<div className="kpi-row detail-stats"'); return s.slice(i, s.indexOf('\n      </div>\n', i));
+};
 
 describe('one headline per bot page', () => {
   for (const page of ['LpDetail.tsx', 'GridDetail.tsx', 'TrendDetail.tsx']) {
