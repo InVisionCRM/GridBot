@@ -754,6 +754,10 @@ export class MultiBot {
     return { ok: true, closing: !!e.state.closing, archived: e.state.archivedAt != null };
   }
   setLpRerange(id: string, enabled: boolean) { this.lp(id).setRerange(enabled); }
+  /** The smart trader's pool-share cap on one of its liquidity bots (a bot you start has none). */
+  setLpMaxPoolShare(id: string, share: number) { this.lp(id).setMaxPoolShare(share); }
+  /** The cap a liquidity bot has (undefined: none) */
+  lpMaxPoolShare(id: string): number | undefined { return this.lp(id).state.config?.maxPoolShare; }
   setLpPolicy(id: string, p: { range?: Partial<LpRangePolicy>; compound?: Partial<LpCompoundPolicy>; bandPct?: number }) { this.lp(id).setPolicy(p); }
   compoundLp(id: string) { return this.lp(id).compoundNow(); }
   /** Move a liquidity bot's range to the price now, at a new width or the same one; it starts on the next tick. */
