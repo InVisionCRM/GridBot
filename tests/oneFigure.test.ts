@@ -34,6 +34,7 @@ vi.mock('../src/ui/Chart', async (orig) => {
   };
 });
 import { gridMetrics, lpMetrics, trendMetrics } from '../src/metrics/botMetrics';
+import { lpDay } from '../src/metrics/lpDay';
 import { BotRow } from '../src/ui/botRow';
 import { DeskTable } from '../src/ui/DeskTable';
 import { deskItems, sortItems } from '../src/ui/deskTableModel';
@@ -100,8 +101,32 @@ const trend = {
   moveCount: 7, lastMoveAt: NOW - 2.3 * H, stats: { winRate: 0.5714 }, position: null, signals: [], trades: [],
   pnl: { realized: 61.5, unrealized: -4.2, returnPct: 0.0573, fees: 3.1, gas: 0.2 }, equityHist: [[NOW - 5 * D, 1_000], [NOW, 1_057.3]],
 };
-/** The same bots with the server's metrics (botMetrics at NOW), as /api/status sends them. */
-const withM = (b: Obj): Obj => ({ ...b, metrics: b.kind === 'lp' ? lpMetrics(b as never, NOW) : b.kind === 'grid' ? gridMetrics(b as never, NOW) : trendMetrics(b as never, NOW) });
+/**
+ * The NVDA bot's last two days as the server keeps them (lpEngine): a fee sample every 5 minutes (fees, per coin, the
+ * pool's LP fees, price), and its finished steps: the open, two range moves and a compound. Its page then draws fees by
+ * hour, today's moves and the pool card, and every figure on them is checked once like the rest.
+ */
+(() => {
+  const hist: number[][] = [], t0 = NOW - 2 * D;
+  for (let t = t0; t <= NOW - 5 * 60_000; t += 5 * 60_000) {
+    const k = (t - t0) / (2 * D), wobble = 1 + 0.3 * Math.sin(t / 7_000_000);
+    hist.push([t, 400 * k * wobble, 1 * k, 200 * k, 30_000 * k, 210 + 8 * k + Math.sin(t / 3_000_000)]);
+  }
+  Object.assign(nvdaLp, {
+    feeHist: hist, poolFees: 30_400, lpFeeRate: { rate: 0.0005 },
+    done: [
+      { t: NOW - 3 * H, action: 'compound', asked: false, lower: null, upper: null, cost: 0.0731, fees: { base: 0.0912, quote: 17.43 } },
+      { t: NOW - 19 * H, action: 'rerange', asked: false, lower: 196.2, upper: 240.12, cost: 0.6114, fees: { base: 0.2203, quote: 41.92 } },
+      { t: NOW - 2.5 * D, action: 'rerange', asked: true, lower: 187.5, upper: 229.2, cost: 0.5531, fees: { base: 0.1834, quote: 33.07 } },
+      { t: NOW - 3.2 * D, action: 'open', asked: true, lower: 180.1, upper: 220.1, cost: 1.0121, fees: { base: 0, quote: 0 } },
+    ],
+  });
+})();
+/** The same bots with the server's metrics (botMetrics at NOW) and an LP's day (lpDay), as /api/status sends them. */
+const withM = (b: Obj): Obj => ({
+  ...b, metrics: b.kind === 'lp' ? lpMetrics(b as never, NOW) : b.kind === 'grid' ? gridMetrics(b as never, NOW) : trendMetrics(b as never, NOW),
+  ...(b.kind === 'lp' ? { day: lpDay(b, NOW) } : {}),
+});
 const s: Obj = { ...s0, grids: [withM(grid)], trends: [withM(trend)], lps: [withM(stonkd), withM(nvdaLp)] };
 const bots: Obj[] = [{ ...s.grids[0], kind: 'grid' }, { ...s.trends[0], kind: 'trend' }, s.lps[0], s.lps[1]];
 
@@ -209,6 +234,16 @@ const home = () => deskHtml();
 
 beforeAll(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
 afterAll(() => { vi.useRealTimers(); });
+
+describe('the NVDA page draws its day (fixture sanity)', () => {
+  it('fees by hour, today\'s moves and the pool card are on the page', () => {
+    const html = lpPage('lp-nvda');
+    expect(html).toMatch(/data-testid="fees-by-hour"/);
+    expect(html).toMatch(/data-testid="day-moves"/);
+    expect(html).toMatch(/added the fees back into the position/);
+    expect(textOf(html)).toMatch(/Pool · last 24 h i ≈/);
+  });
+});
 
 describe('figure finder (self-check)', () => {
   it('reads the same figure twice and tells different ones apart', () => {
@@ -478,10 +513,13 @@ describe('Holdings (the Wallet page): dollars first with each coin under them (K
 
 describe('Value over time is collapsed and closed by default; the chart is drawn only when opened (Kyle, #73)', () => {
   const closedSection = /<details class="card net-details value-details"><summary>Details: value over time/;
-  const pages: [string, () => string][] = [
-    ['LP page lp-stonkd', () => lpPage('lp-stonkd')], ['LP page lp-nvda', () => lpPage('lp-nvda')],
-    ['Grid page', () => gridPage()], ['Trend page', () => trendPage()],
-  ];
+  const pages: [string, () => string][] = [['Grid page', () => gridPage()], ['Trend page', () => trendPage()]];
+  // Kyle 2026-11-04: the liquidity page drops it ("pointless"): its day is in fees by hour, today's moves and start → now
+  for (const id of ['lp-stonkd', 'lp-nvda']) {
+    it(`LP page ${id}: no value-over-time section`, () => {
+      expect(lpPage(id)).not.toMatch(/value-details|Details: value over time|eq-chart/);
+    });
+  }
   for (const [name, page] of pages) {
     it(`${name}: the section is there, closed, and the chart and its values are not rendered`, () => {
       const html = page();

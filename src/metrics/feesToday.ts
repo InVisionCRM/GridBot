@@ -43,7 +43,7 @@ export function lpFeesToday(b: Obj, dayStart: number): { quote: number; points: 
   const nowFees = typeof b.pnl?.fees === 'number' && Number.isFinite(b.pnl.fees) ? (b.pnl.fees as number) : null;
   if (nowFees == null) return null;
   const hist = ((b.feeHist ?? []) as [number, number][]).filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
-  const before = hist.filter(([t]) => t < dayStart);
+  const before = hist.filter(([t]) => t <= dayStart); // a sample taken at midnight is the value at midnight
   let base: number;
   if (before.length) base = before[before.length - 1][1];
   else if (typeof b.startedAt === 'number' && b.startedAt >= dayStart) base = 0;

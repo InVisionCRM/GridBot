@@ -6,6 +6,7 @@
  */
 import { gridMetrics, lpMetrics, trendMetrics, type BotMetrics } from '../../metrics/botMetrics';
 import { feesToday } from '../../metrics/feesToday';
+import { lpDay } from '../../metrics/lpDay';
 import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { LiveNetwork } from '../../live/networks';
 import { Hub, SafetyBlocked, SafetyIncomplete, type StartAnywayInfo } from '../chains/hub';
@@ -1878,7 +1879,7 @@ export class MultiBot {
     });
     const lps = this.multi.lps.map((t) => {
       const st = (this.lpEngines.get(t.id) ?? this.attachLp(t.id)).status();
-      return { ...st, metrics: lpMetrics(st, asOf(st)) };
+      return { ...st, metrics: lpMetrics(st, asOf(st)), day: lpDay(st, now) };
     });
     const aggregate = liveAggregate(grids, trends, lps);
     return {
