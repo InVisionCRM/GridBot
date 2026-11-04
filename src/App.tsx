@@ -26,6 +26,8 @@ import { normalizeView, type View } from './ui/model';
 import { Header } from './ui/Header';
 import { Holdings, useHoldings } from './ui/Holdings';
 import { ShowUsdCtx } from './ui/money';
+import { ask } from './ui/Confirm';
+import { Ticker } from './ui/Ticker';
 
 function loadView(): View {
   try {
@@ -128,10 +130,10 @@ export default function App() {
   if (!s) return <div className="app"><p className="muted" style={{ paddingTop: 24 }}>{err ?? streamErr ?? 'Connecting to the bot server…'}</p></div>;
 
   const sel = chain === 'all' ? null : chainOf(s, chain);
-  const stopAll = () => {
+  const stopAll = async () => {
     if (scrolling.current) return;
     const what = sel ? `every bot on ${sel.name}` : 'every bot on every chain';
-    if (!confirm(`Stop ${what}? They keep their coins. This does not sell.`)) return;
+    if (!(await ask({ title: `Stop ${what}`, body: 'They keep their coins. This does not sell.', action: 'Stop them', danger: true }))) return;
     void act(() => (sel ? http(`/api/chains/${sel.id}/stop`, 'POST', undefined, 'header-chain-stop') : botApi('stop-all', 'POST', undefined, 'header-stop-all')));
   };
   return (
@@ -142,6 +144,7 @@ export default function App() {
           connected={connected} ver={ver.v} holdings={holdings.data} onActivity={() => setDrawer(true)} onGuide={() => setGuide(true)}
         />
 
+        {view.v !== 'home' && <Ticker events={events} skipBot={'id' in view ? view.id : null} />}
         {!s?.copy && <TokenTraderChoiceBanner />}
         {rpcAlerts(s).map((c) => (
           <div key={`rpc-${c.id}`} className="banner error" role="alert">

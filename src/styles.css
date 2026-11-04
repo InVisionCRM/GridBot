@@ -1496,8 +1496,6 @@ body.dk-on { overflow: hidden; }
 .dk-mode button.on { background: var(--surface-2); color: var(--text); }
 .dk-chip { font: 600 0.7rem var(--font); color: var(--muted); border: 1px solid var(--line); padding: 2px 8px; border-radius: 999px; }
 .dk-big { font: 800 clamp(2.4rem, 5.2vw, 3.9rem)/1 var(--font); letter-spacing: -0.035em; font-variant-numeric: tabular-nums; }
-.dk-big.bump { animation: dk-bump 0.6s; }
-@keyframes dk-bump { 40% { transform: scale(1.03); text-shadow: 0 0 26px rgba(92, 208, 141, 0.55); } }
 .dk-units { display: flex; flex-wrap: wrap; gap: 4px 14px; font: 500 0.84rem var(--mono); }
 .dk-hero-sub { display: flex; gap: 14px; font-size: 0.8rem; color: var(--muted); }
 .dk-hero-actions { display: flex; gap: 8px; margin-top: auto; padding-top: 6px; }
@@ -1660,7 +1658,7 @@ body.dk-on { overflow: hidden; }
   .dk-hero-sub { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .dk-pane, .dk-big.bump, .dk-stage-row.hit, .dk-live-dot, .dk-tip { animation: none; }
+  .dk-pane, .dk-stage-row.hit, .dk-live-dot, .dk-tip { animation: none; }
   .dk-sheet-wrap, .dk-px, .dk-bar i { transition: none; }
 }
 
@@ -2055,11 +2053,12 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 
 /* rolling digits: the figure is one transparent run of text (it sizes the slot and is what gets read or copied); a
    layer over it with no text draws each character: digits as a CSS column 0–9 that slides, the rest from data-ch */
-.roll { position: relative; display: inline-block; white-space: pre; }
+.roll { position: relative; display: inline-block; white-space: pre; font-variant-numeric: tabular-nums; }
 .roll-txt { color: transparent; }
 .roll-over { position: absolute; inset: 0; display: flex; align-items: center; white-space: pre; pointer-events: none; }
-.roll-d, .roll-c { position: relative; display: inline-block; width: 1ch; height: 1em; line-height: 1em; overflow: hidden; }
+.roll-d, .roll-c { position: relative; display: inline-block; height: 1em; line-height: 1em; overflow: hidden; }
 .roll-c::before { content: attr(data-ch); }
+.roll-d::before { content: attr(data-ch); visibility: hidden; }
 .roll-col { position: absolute; left: 0; top: 0; line-height: 1em; transition: transform 0.9s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .roll-col::before { content: '0\A 1\A 2\A 3\A 4\A 5\A 6\A 7\A 8\A 9'; white-space: pre; }
 @media (prefers-reduced-motion: reduce) { .roll-col { transition: none; } .lpb-card, .lpb-bar, .lpb-wf-b { animation: none !important; } }
@@ -2131,3 +2130,132 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
   .lpb-wf { gap: 4px; } .lpb-wf-v { font-size: 0.56rem; } .lpb-wf-n { font-size: 0.52rem; }
   .lpb-row { grid-template-columns: 44px minmax(0, 1fr) auto; } .lpb-row .lpb-pill { display: none; }
 }
+
+/* ── The confirmation sheet (Confirm.tsx): what will happen, a preview, and hold-to-confirm for real money ─────── */
+.ask-scrim { position: fixed; inset: 0; z-index: 200; background: rgba(4, 6, 8, 0.62); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; padding: 16px; animation: ask-fade 0.18s ease-out; }
+.ask { width: min(460px, 100%); background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 18px; padding: 18px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55); animation: ask-up 0.32s cubic-bezier(0.2, 1.2, 0.4, 1) both; }
+.ask h3 { font-size: 1.05rem; }
+.ask-body { color: var(--secondary); font-size: 0.88rem; line-height: 1.5; white-space: pre-line; }
+.ask-rows { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
+.ask-row { display: flex; justify-content: space-between; gap: 12px; font: 0.8rem/1.45 var(--mono); }
+.ask-row span { color: var(--muted); }
+.ask-row b { font-weight: 500; text-align: right; }
+.ask-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+.ask-note { font: 0.72rem var(--mono); color: var(--muted); }
+.hold-btn { position: relative; overflow: hidden; flex: 1 1 220px; appearance: none; border: 1px solid var(--profit); background: rgba(92, 208, 141, 0.08); color: var(--profit); border-radius: 12px; padding: 11px 16px; font: 600 0.92rem var(--font); cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: none; }
+.hold-btn i { position: absolute; inset: 0; background: rgba(92, 208, 141, 0.3); transform: scaleX(var(--p, 0)); transform-origin: left; }
+.hold-btn span { position: relative; }
+.hold-btn.danger { border-color: var(--loss-line); background: rgba(242, 112, 107, 0.07); color: var(--loss); }
+.hold-btn.danger i { background: rgba(242, 112, 107, 0.3); }
+.hold-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@keyframes ask-fade { from { opacity: 0; } }
+@keyframes ask-up { from { opacity: 0; transform: translateY(24px) scale(0.98); } }
+@media (max-width: 640px) { .ask-scrim { align-items: flex-end; padding: 0; } .ask { border-radius: 20px 20px 0 0; padding-bottom: calc(18px + env(safe-area-inset-bottom)); } }
+
+/* ── Live figures (motion.tsx AnimatedNumber / Flash): roll, glow on change, a chip with the change ──────────── */
+/* the chip sits in the top-right corner of the card the figure is in (its nearest positioned box), one per card, so it
+   never covers the figure or its label */
+.live-fig { display: inline-block; }
+.live-chip { position: absolute; top: 10px; right: 12px; z-index: 2; font: 500 11px/1 var(--mono); padding: 3px 8px; border-radius: 999px; white-space: nowrap; pointer-events: none; animation: live-chip 2.4s ease forwards; letter-spacing: 0; }
+.live-chip.up { color: var(--profit); background: var(--up-bg); }
+.live-chip.down { color: var(--loss); background: var(--down-bg); }
+@keyframes live-chip { 0% { opacity: 0; transform: translateY(6px); } 12% { opacity: 1; transform: none; } 75% { opacity: 1; } 100% { opacity: 0; transform: translateY(-8px); } }
+.flash-fig { display: inline-block; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) { .live-chip { animation: none; display: none; } }
+
+/* ── Reveal on load: a page's sections rise in one after another when it opens (mount only; updates don't replay) ── */
+main.stack > *, .kpi-row > .kpi, .lpb-hero > .lpb-card { animation: page-rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+main.stack > :nth-child(2), .kpi-row > .kpi:nth-child(2), .lpb-hero > :nth-child(2) { animation-delay: 0.05s; }
+main.stack > :nth-child(3), .kpi-row > .kpi:nth-child(3), .lpb-hero > :nth-child(3) { animation-delay: 0.1s; }
+main.stack > :nth-child(4), .kpi-row > .kpi:nth-child(4), .lpb-hero > :nth-child(4) { animation-delay: 0.15s; }
+main.stack > :nth-child(5), .kpi-row > .kpi:nth-child(5), .lpb-hero > :nth-child(5) { animation-delay: 0.2s; }
+main.stack > :nth-child(n+6) { animation-delay: 0.25s; }
+@keyframes page-rise { from { opacity: 0; transform: translateY(10px); } }
+@media (prefers-reduced-motion: reduce) { main.stack > *, .kpi-row > .kpi, .lpb-hero > .lpb-card { animation: none; } }
+
+/* ── Transaction in flight (TxProgress.tsx) and the moving border on anything busy ────────────────────────────── */
+.busy-ring { position: relative; border-radius: var(--radius); padding: 1.5px; overflow: hidden; isolation: isolate; }
+.busy-ring::before { content: ''; position: absolute; inset: -60%; z-index: -1; background: conic-gradient(from 0deg, transparent 0 68%, var(--warn) 80%, transparent 92%); animation: busy-spin 2.6s linear infinite; }
+.busy-ring::after { content: ''; position: absolute; inset: 1.5px; z-index: -1; border-radius: calc(var(--radius) - 1px); background: var(--card); }
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+.tx-card { padding: 12px 14px; display: grid; gap: 10px; }
+.tx-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.tx-steps { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 0; }
+.tx-step-wrap { display: inline-flex; align-items: center; }
+.tx-bar { width: 26px; height: 2px; margin: 0 6px; background: var(--line-2); }
+.tx-bar.done { background: var(--profit); }
+.tx-step { display: inline-flex; align-items: center; gap: 6px; font: 0.78rem var(--mono); color: var(--faint); }
+.tx-dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line-2); display: grid; place-items: center; font-size: 10px; }
+.tx-step.done { color: var(--profit); } .tx-step.done .tx-dot { background: var(--profit); border-color: var(--profit); color: var(--on-profit); }
+.tx-step.now { color: var(--warn); } .tx-step.now .tx-dot { border-color: var(--warn); border-top-color: transparent; animation: busy-spin 0.8s linear infinite; }
+.tx-foot { display: flex; justify-content: space-between; gap: 10px; font-size: 0.8rem; }
+/* a busy bot's row: the same light, drawn as an outline that runs round it */
+.bot-block.busy { position: relative; }
+.bot-block.busy::after { content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; padding: 1.5px; background: conic-gradient(from var(--busy-a, 0deg), transparent 0 70%, var(--warn) 82%, transparent 94%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; animation: busy-a 2.6s linear infinite; }
+@property --busy-a { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+@keyframes busy-a { to { --busy-a: 360deg; } }
+@media (prefers-reduced-motion: reduce) { .busy-ring::before, .bot-block.busy::after, .tx-step.now .tx-dot { animation: none; } }
+
+/* ── Spotlight cards (spotlight.ts): a mint light under the mouse on the headline cards and their border ───────── */
+.dk-hero, .kpi-row > .kpi, .lpb-hero > .lpb-card, .tk-hero { position: relative; }
+.kpi-row > .kpi::after, .lpb-hero > .lpb-card::after, .dk-hero::after, .tk-hero::after {
+  content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; opacity: 0; transition: opacity 0.25s;
+  background: radial-gradient(240px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(92, 208, 141, 0.11), transparent 60%);
+  box-shadow: inset 0 0 0 1px rgba(92, 208, 141, 0.0);
+}
+.kpi-row > .kpi::before, .lpb-hero > .lpb-card::before, .dk-hero::before, .tk-hero::before {
+  content: ''; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none; opacity: 0; transition: opacity 0.25s;
+  background: radial-gradient(180px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(92, 208, 141, 0.85), transparent 60%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
+}
+@media (hover: hover) {
+  .kpi-row > .kpi:hover::after, .lpb-hero > .lpb-card:hover::after, .dk-hero:hover::after, .tk-hero:hover::after,
+  .kpi-row > .kpi:hover::before, .lpb-hero > .lpb-card:hover::before, .dk-hero:hover::before, .tk-hero:hover::before { opacity: 1; }
+}
+
+/* ── 30-day calendar, today by bot, level heat (DayCharts.tsx) ───────────────────────────────────────────────── */
+.cal { display: grid; grid-template-columns: repeat(15, minmax(0, 1fr)); gap: 4px; max-width: 520px; }
+.cal-d { appearance: none; border: 0; padding: 0; aspect-ratio: 1; border-radius: 4px; background: var(--line); cursor: pointer; animation: page-rise 0.4s both; transition: transform 0.12s; }
+.cal-d:hover, .cal-d.on, .cal-d:focus-visible { transform: scale(1.12); outline: 1px solid var(--text); outline-offset: 1px; }
+.cal-d.today { box-shadow: inset 0 0 0 1px var(--profit); }
+.cal-d.zero, .cal-legend .zero { background: #2f3439; }
+.cal-d.l1, .cal-legend .l1 { background: #1f4a35; } .cal-d.l2, .cal-legend .l2 { background: #2f7a52; }
+.cal-d.l3, .cal-legend .l3 { background: #3f9a68; } .cal-d.l4, .cal-legend .l4 { background: var(--profit); }
+.cal-d.loss, .cal-legend .loss { background: #7a3330; } .cal-d.none, .cal-legend .none { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.cal-foot { min-height: 1.6em; font: 0.76rem/1.5 var(--mono); }
+.cal-legend { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); flex-wrap: wrap; }
+.cal-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.cal-tip b { font-family: var(--font); font-weight: 600; margin-right: 6px; }
+.tbb { display: flex; flex-direction: column; gap: 8px; height: 100%; min-height: 180px; }
+.tbb-bars { flex: 1; display: flex; align-items: flex-end; gap: 3px; min-height: 140px; }
+.tbb-col { appearance: none; border: 0; padding: 0; background: none; flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column-reverse; gap: 1px; cursor: pointer; border-radius: 3px 3px 0 0; }
+.tbb-col span { display: block; border-radius: 2px 2px 0 0; transform-origin: bottom; animation: lpb-grow 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.tbb-col:hover, .tbb-col.on { background: rgba(255, 255, 255, 0.04); }
+.tbb-col.future { cursor: default; border: 1px dashed var(--line); border-bottom: 0; height: 30%; align-self: flex-end; }
+.tbb-foot { min-height: 1.6em; font: 0.76rem/1.5 var(--mono); }
+.tbb-tip, .tbb-keys { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+.tbb-tip i, .tbb-keys i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+.heat { display: grid; gap: 4px; }
+.heat-row { display: grid; grid-template-columns: 34px minmax(0, 1fr) 90px; gap: 8px; align-items: center; font: 0.74rem var(--mono); }
+.heat-n { color: var(--muted); }
+.heat-track { height: 12px; border-radius: 3px; background: var(--line); position: relative; overflow: hidden; }
+.heat-track b { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: #1f4a35; transform-origin: left; animation: heat-in 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.heat-track b.warm { background: #2f7a52; } .heat-track b.hot { background: var(--profit); }
+.heat-row.here .heat-track { box-shadow: 0 0 0 1px var(--warn); }
+.heat-c em { color: var(--warn); font-style: normal; }
+@keyframes heat-in { from { transform: scaleX(0); } }
+
+/* ── Live ticker (Ticker.tsx) ─────────────────────────────────────────────────────────────────────────────────── */
+.ticker { overflow: hidden; white-space: nowrap; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); padding: 6px 0; font: 0.76rem var(--mono); -webkit-mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
+.ticker-run { display: inline-flex; animation: ticker-go linear infinite; }
+.ticker:hover .ticker-run { animation-play-state: paused; }
+.ticker-set { display: inline-flex; }
+.tick-ev { padding: 0 18px; color: var(--secondary); }
+.tick-ev + .tick-ev::before { content: '·'; margin-right: 18px; color: var(--faint); }
+@keyframes ticker-go { to { transform: translateX(-50%); } }
+@media (prefers-reduced-motion: reduce) { .ticker-run { animation: none; } }
+/* Home's big figure: the chip sits just right of it (the figure is its own box there) */
+.dk-big .live-fig { position: relative; }
+.dk-big .live-chip { top: 50%; margin-top: -9px; right: auto; left: calc(100% + 12px); }
+/* the set-aside notice at the top of the liquidity position card */
+.lpb-aside { margin-top: 10px; padding: 8px 10px; border-left: 3px solid var(--warn); background: var(--warn-bg); border-radius: 6px; font-size: 0.8rem; line-height: 1.45; color: var(--secondary); }

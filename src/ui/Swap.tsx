@@ -10,6 +10,7 @@ import { L } from './Tip';
 import { explorerTx } from './chains';
 import type { AnyObj } from './model';
 import { amt, STATUS, type Coin, type Job, type Plan } from './Convert';
+import { ask } from './Confirm';
 
 const OTHER = 'other';
 const ADDR = /^0x[0-9a-fA-F]{40}$/;
@@ -76,7 +77,16 @@ export function Swap({ s }: { s: AnyObj }) {
   const row = plan?.rows[0] ?? null;
   const go = async () => {
     if (!plan || !row?.ok || !chain) return;
-    if (!confirm(`Swap ${amt(row.amount)} ${row.coin.symbol} for about ${amt(row.out)} ${plan.target.symbol} on ${chain.name}?\n\nThis sends real transactions from ${plan.owner}.`)) return;
+    if (!(await ask({
+      title: `Swap ${row.coin.symbol} for ${plan.target.symbol}`, body: `This sends real transactions on ${chain.name} from ${plan.owner}. The quote is taken again just before sending.`,
+      rows: [
+        { k: 'you pay', v: `${amt(row.amount)} ${row.coin.symbol}` },
+        { k: 'you get, about', v: `${amt(row.out)} ${plan.target.symbol}`, tone: 'pos' },
+        ...(row.impact != null ? [{ k: 'price impact', v: `${(row.impact * 100).toFixed(2)}%` }] : []),
+        ...(row.gasNative != null ? [{ k: 'gas, about', v: `${amt(row.gasNative)} ${chain.nativeSymbol}`, tone: 'neg' as const }] : []),
+      ],
+      action: 'Swap', money: true,
+    }))) return;
     try {
       const r = await http<{ job: Job }>('/api/convert/run', 'POST', { planId: plan.id, coins: [{ id: row.coin.id, amount: row.amount }] });
       setJob(r.job); setPlan(null);

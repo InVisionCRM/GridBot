@@ -8,6 +8,7 @@ import { http } from './api';
 import { ago, dur } from './fmt';
 import { Copy } from './System';
 import type { AnyObj } from './model';
+import { ask } from './Confirm';
 
 type On = { on: true; port: number; host: { name: string; address: string | null }; invites: AnyObj[]; friends: AnyObj[] };
 type View = { on: false; off: string } | On;
@@ -60,9 +61,9 @@ function On({ v, busy, run }: { v: On; busy: boolean; run: (fn: () => Promise<un
     setLink({ label: `Invite for ${friend.trim()}`, url: r.link });
     setFriend('');
   });
-  const act = (f: AnyObj, what: 'start' | 'stop' | 'restart' | 'reset' | 'remove') => {
-    if (what === 'stop' && !window.confirm(`Stop ${f.name}'s copy? Their bots stop until you start it again. Coins stay where they are (in their account, or in a liquidity position).`)) return;
-    if (what === 'remove' && !window.confirm(`Remove ${f.name}? Their copy, bots, history and saved key are deleted from this computer. Their coins stay in their own account.`)) return;
+  const act = async (f: AnyObj, what: 'start' | 'stop' | 'restart' | 'reset' | 'remove') => {
+    if (what === 'stop' && !(await ask({ title: `Stop ${f.name}'s copy`, body: 'Their bots stop until you start it again. Coins stay where they are (in their account, or in a liquidity position).', action: 'Stop it', danger: true }))) return;
+    if (what === 'remove' && !(await ask({ title: `Remove ${f.name}`, body: 'Their copy, bots, history and saved key are deleted from this computer. Their coins stay in their own account.', action: 'Remove', danger: true }))) return;
     void run(async () => {
       if (what === 'remove') return http(`/api/friends/${f.id}`, 'DELETE');
       const r = await http<{ link?: string }>(`/api/friends/${f.id}/${what}`, 'POST');

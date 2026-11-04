@@ -81,6 +81,29 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s.poolShare).toBeCloseTo(Number(L) / Number(poolL + L), 12);
   });
 
+  it('coins set aside for the 10% pool-share cap go back in at the next re-open when the pool has room (Kyle 2026-11-04: CASHCAT/ETH)', async () => {
+    const { lp, m, pool } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    // a thin pool when it opens: most of the 1000 DAI would be over 10% of the active liquidity, so it is set aside
+    const p = m.v3ByAddr(pool);
+    p.r0 /= 1000n; p.r1 /= 1000n;
+    await lp.tick();
+    const first = lp.status();
+    const parked = first.aside.base * first.price! + first.aside.quote;
+    expect(parked).toBeGreaterThan(500);
+    expect(first.value!).toBeGreaterThan(990); // set aside is still the bot's money (in Value)
+    // the pool deepens (the same price, 1000× the liquidity), then the price leaves the range and it moves
+    p.r0 *= 1000n; p.r1 *= 1000n;
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    const s = lp.status();
+    expect(s.reranges).toBe(1);
+    // nothing is held back any more: the parked coins went into the new position with the rest
+    expect(s.aside).toEqual({ base: 0, quote: 0 });
+    const inPosition = s.coins!.base * s.price! + s.coins!.quote;
+    expect(inPosition).toBeGreaterThan(0.95 * s.value!);
+  });
+
   it("measures the fees the pool paid between readings (for its volume), not across a gap where the bot was down", async () => {
     const { lp, m, pool, at } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });

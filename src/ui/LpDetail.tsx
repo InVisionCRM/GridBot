@@ -1,13 +1,13 @@
 /** One liquidity bot: range vs price, fees earned in each coin, what it cost, its coins and pool share, settings, its own log. */
 import { useEffect, useState } from 'react';
 import { botApi } from './api';
-import { StatusDot } from './motion';
+import { AnimatedNumber, StatusDot } from './motion';
 import { Chart } from './Chart';
 import { StatTable } from './StatTable';
 import { MoneyDetails, type DetailRow } from './MoneyDetails';
 import { ago, bagFixed, cls, dur, num, pct, pctShown, px, qty } from './fmt';
 import { LP_BAND } from '../market/lp';
-import { ChainBadge, DexTag, chainOf, explorerTx } from './chains';
+import { ChainBadge, DexTag, chainOf } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
 import { isAddress, ProfitsField, profitsBody, type ProfitsChoice } from './NewBot';
@@ -17,14 +17,16 @@ import { lpName, type AnyObj, type Nav } from './model';
 import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useSafetyChecking } from './SafetyChecking';
 import { botFacts, metricsOf, unitsText } from './deskStats';
-import { Roll } from './Roll';
+import { ask, type AskRow } from './Confirm';
 import { DayMoves, FeesByHour, PositionWeight, StartToNow } from './LpDayCards';
 import type { LpDay, LpDone } from '../metrics/lpDay';
+import { TxProgress } from './TxProgress';
+import { Calendar } from './DayCharts';
+import type { DayResult } from '../metrics/daily';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
 const ACTION: Record<string, string> = { open: 'Opening', rerange: 'Moving the range', close: 'Closing', send: 'Sending fees', compound: 'Compounding fees' };
-const STAGE: Record<string, string> = { exit: 'taking the position out', swap: "swapping to the range's mix", approve: 'approving the position manager', mint: 'opening the position', collect: 'collecting the fees', increase: 'adding the fees to the position' };
 
 /** Out of range: when the range moves, or why it doesn't. */
 function moveNote(b: AnyObj): string {
@@ -43,6 +45,21 @@ function moveNote(b: AnyObj): string {
 
 const WIDTHS = [0.01, 0.02, 0.05, 0.08, 0.12, 0.2];
 
+/** The confirmation's preview: the fees waiting in the position, collected by the step (live readings only). */
+function feeRows(b: AnyObj): AskRow[] {
+  const o = b.owed as { base: number; quote: number } | null;
+  if (!o || !(o.base > 0 || o.quote > 0)) return [];
+  return [{ k: 'fees collected', v: `${qty(o.base, b.base, 5)} + ${qty(o.quote, b.quote, 5)}`, tone: 'pos' }];
+}
+/** Closing: what goes back to the wallet, coin by coin (the position, its fees, and the coins outside it). */
+function closeRows(b: AnyObj): AskRow[] {
+  const sum = (k: 'base' | 'quote') => (b.coins?.[k] ?? 0) + (b.owed?.[k] ?? 0) + (b.idle?.[k] ?? 0) + (b.aside?.[k] ?? 0);
+  return [
+    { k: 'back to your wallet, about', v: `${qty(sum('base'), b.base, 6, false)} + ${qty(sum('quote'), b.quote, 6, false)}` },
+    ...feeRows(b).map((r) => ({ ...r, k: 'of which fees' })),
+  ];
+}
+
 /** Auto-move on or off, and a move now: to the price at the same width, or at a new one. */
 function RangeControls({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boolean }) {
   const cur: number = b.config.bandPct;
@@ -50,7 +67,16 @@ function RangeControls({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: b
   const band = Number(w) / 100, ok = band >= LP_BAND.min && band <= LP_BAND.max, same = ok && Math.abs(band - cur) < 1e-9;
   const why = b.status !== 'running' ? 'Resume it first' : b.step ? 'Busy with a step' : !ok ? `Range must be ±${LP_BAND.min * 100}% to ±${LP_BAND.max * 100}%` : '';
   const move = () => act(async () => {
-    if (b.mode === 'live' && !confirm(`${same ? 'Move the range to the price' : `Change the range to ±${+(band * 100).toFixed(2)}%`}? The position is taken out and opened again around ${px(b.price)}: gas, a swap to the new mix, and the coin mix it has now becomes final.`)) return;
+    if (b.mode === 'live' && !(await ask({
+      title: same ? `Move ${lpName(b)} to the price` : `Change ${lpName(b)} to ±${+(band * 100).toFixed(2)}%`,
+      body: 'The position is taken out and opened again around the price: gas, a swap to the new mix, and the coin mix it has now becomes final.',
+      rows: [
+        { k: 'range now', v: `${px(b.position.lower)} – ${px(b.position.upper)}` },
+        { k: 'new range', v: `±${+(band * 100).toFixed(2)}% around ${px(b.price)}` },
+        ...feeRows(b),
+      ],
+      action: same ? 'Move the range' : 'Change the range', money: true,
+    }))) return;
     await botApi(`lps/${b.id}/move`, 'POST', { bandPct: band });
   });
   return (
@@ -101,12 +127,19 @@ function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boo
   const outFor = b.outSince ? Math.max(0, Math.round((Date.now() - b.outSince) / 60_000)) : 0;
   const widen = b.hold?.suggestedBand as number | undefined;
   const compound = () => act(async () => {
-    if (b.mode === 'live' && !confirm(`Add the waiting fees back into the ${lpName(b)} position? It collects them and increases this range. Gas applies.`)) return;
+    if (b.mode === 'live' && !(await ask({
+      title: `Compound ${lpName(b)}`, body: 'The waiting fees are collected and added back into this range. Gas applies.',
+      rows: feeRows(b), action: 'Compound the fees', money: true,
+    }))) return;
     await botApi(`lps/${b.id}/compound`, 'POST');
   });
   const doWiden = () => act(async () => {
     if (widen == null) return;
-    if (b.mode === 'live' && !confirm(`Widen the range to ±${(widen * 100).toFixed(1)}% around ${px(price)}? The position is taken out and opened again.`)) return;
+    if (b.mode === 'live' && !(await ask({
+      title: `Widen ${lpName(b)} to ±${(widen * 100).toFixed(1)}%`, body: 'The position is taken out and opened again, wider, around the price.',
+      rows: [{ k: 'range now', v: `${px(pos.lower)} – ${px(pos.upper)}` }, { k: 'new range', v: `±${(widen * 100).toFixed(1)}% around ${px(price)}` }, ...feeRows(b)],
+      action: 'Widen the range', money: true,
+    }))) return;
     await botApi(`lps/${b.id}/move`, 'POST', { bandPct: widen });
   });
   return (
@@ -284,23 +317,23 @@ function Hero({ b }: { b: AnyObj }) {
       </div>
       <div className="lpb-card lead">
         <span className="lpb-label"><L tip={m?.calc ?? 'Generated'}>Generated</L></span>
-        {m?.generated ? Object.entries(m.generated).map(([sym, u], i) => <div key={sym} className={`lpb-big ${i ? 'second' : ''} ${cls(u)}`}><Roll text={qty(u, sym, 5)} /></div>) : <div className="lpb-big">—</div>}
+        {m?.generated ? Object.entries(m.generated).map(([sym, u], i) => <div key={sym} className={`lpb-big ${i ? 'second' : ''} ${cls(u)}`}><AnimatedNumber value={u} format={(x) => qty(x, sym, 5)} chip={false} /></div>) : <div className="lpb-big">—</div>}
         <span className="lpb-sub">since the start: fees − gas − swap fees, per coin</span>
       </div>
       <div className="lpb-card">
         <span className="lpb-label">Today</span>
-        <div className="lpb-big">{today != null ? <Roll text={qty(today, q, 5)} /> : '—'}</div>
+        <div className="lpb-big"><AnimatedNumber value={today} format={(x) => qty(x, q, 5)} /></div>
         <span className="lpb-sub">fees since midnight</span>
         {vsY != null && pctShown(vsY, 2) !== '—' && <span className={`lpb-delta ${vsY < 0 ? 'down' : ''}`}>{vsY >= 0 ? '▲' : '▼'} {pctShown(vsY, 2, true)} vs yesterday by now</span>}
       </div>
       <div className="lpb-card">
         <span className="lpb-label"><L tip={f.calc ?? 'APR'}>APR</L></span>
-        <div className={`lpb-big ${cls(apr)}`}>{apr != null ? <Roll text={pctShown(apr, 2, true)} /> : '—'}</div>
+        <div className={`lpb-big ${cls(apr)}`}><AnimatedNumber value={apr} format={(x) => pctShown(x, 2, true)} chip={false} /></div>
         <span className="lpb-sub">{apr != null ? "a year at Generated's pace so far" : f.estHint.d365 ?? 'shows after a day'}</span>
       </div>
       <div className="lpb-card">
         <span className="lpb-label"><L tip="Read from the pool's own fee counters at every check: the fees it paid its liquidity providers, divided by its fee rate to them, is what traded. Only while this bot runs.">Pool · last {pool && pool.hours < 23.9 ? `${pool.hours.toFixed(1)} h` : '24 h'}</L></span>
-        <div className="lpb-big">{pool?.volume != null ? <Roll text={`≈ ${qty(pool.volume, q, 3, false)}`} /> : pool ? <Roll text={qty(pool.lpFees, q, 4, false)} /> : '—'}</div>
+        <div className="lpb-big">{pool?.volume != null ? <AnimatedNumber value={pool.volume} format={(x) => `≈ ${qty(x, q, 3, false)}`} chip={false} /> : <AnimatedNumber value={pool?.lpFees} format={(x) => qty(x, q, 4, false)} chip={false} />}</div>
         <span className="lpb-sub">{pool?.volume != null ? 'traded in the pool' : pool ? `paid to its liquidity providers${pool.volumeError ? ` (volume: ${pool.volumeError})` : ''}` : 'measured from the next hour of readings'}</span>
         {pool?.share != null && <span className="lpb-sub">your fees: {pctShown(pool.share, 2)} of what it paid</span>}
       </div>
@@ -320,11 +353,17 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const pos = b.position, step = b.step;
   const running = b.status === 'running', closed = b.status === 'closed';
   const closing = !!b.closing || step?.action === 'close';
-  const close = () => {
-    if (b.mode === 'live' && !confirm(`Take the ${lpName(b)} position out? The coins go back to your wallet as ${base} and ${q}. The same price-impact and slippage limits still apply.`)) return;
-    act(() => botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close'));
-  };
-  const remove = () => act(async () => { if (confirm(`Remove the ${lpName(b)} liquidity bot and its history?`)) { await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' }); } });
+  const close = () => act(async () => {
+    if (b.mode === 'live' && !(await ask({
+      title: `Close ${lpName(b)}`, body: 'The position is taken out and the coins go back to your wallet. The same price-impact and slippage limits still apply.',
+      rows: closeRows(b), action: 'Close the position', money: true, danger: true,
+    }))) return;
+    await botApi(`lps/${b.id}/close`, 'POST', undefined, 'row-close');
+  });
+  const remove = () => act(async () => {
+    if (!(await ask({ title: `Remove ${lpName(b)}`, body: 'The bot and its history are removed. Nothing is sent.', action: 'Remove', danger: true }))) return;
+    await botApi(`lps/${b.id}`, 'DELETE'); nav({ v: 'home' });
+  });
 
   return (
     <main className="stack lpb">
@@ -352,7 +391,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <div className="notices">
         {b.lastError && <div className="banner error"><span className="grow">{b.lastError}</span></div>}
-        {step && <div className="banner info"><span className="grow"><b>{ACTION[step.action]}:</b> {STAGE[step.stage]}{step.hash ? <> · <a href={explorerTx(s, b.chainId, step.hash)} target="_blank" rel="noreferrer">{step.hash.slice(0, 12)}…</a> waiting to confirm</> : '…'}</span></div>}
+        <TxProgress b={b} s={s} />
         {b.status === 'stopped' && pos && <div className="banner"><span className="grow"><b>Paused with the position open.</b> It keeps earning fees while the price is inside the range, but the range won't move and fees aren't sent until you resume.</span></div>}
         {pos && b.inRange === false && !step && <div className="banner"><span className="grow"><b>The price is outside the range</b>, so the position isn't earning. {moveNote(b)}</span></div>}
       </div>
@@ -369,13 +408,14 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
         <div className="lpb-card" data-testid="position-card">
           <h3 className="lpb-label">{pos ? (b.inRange ? 'Position · in range, earning' : 'Position · out of range') : closed ? 'Closed' : 'No position open'}</h3>
+          {/* first in the card: the coins below are the position only, and the set-aside part is still the bot's (Kyle 2026-11-04) */}
+          {(b.aside?.base > 0 || b.aside?.quote > 0) && <p className="lpb-aside">Set aside: {num(b.aside.base, 6)} {base} + {num(b.aside.quote, 6)} {q}, in your wallet and still this bot's. It was kept out so the position stays under 10% of the pool's trading liquidity; the next range move puts it back in if the pool has room, and it comes back to you when the bot closes. The coins below are what is in the position.</p>}
           {pos ? <>
             <RangeHealth b={b} act={act} busy={busy} />
             {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
             <p className="muted small">{openedText(b, pos)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{+((b.config?.bandPct ?? 0) * 100).toFixed(2)}% wide</p>
           </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
           {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
-          {(b.aside?.base > 0 || b.aside?.quote > 0) && <p className="muted small">Set aside: {num(b.aside.base, 6)} {base} + {num(b.aside.quote, 6)} {q} (kept out so the position stays under 10% of the pool's active liquidity; it is counted in Value and goes back to your wallet when the bot closes)</p>}
         </div>
       </div>
 
@@ -387,6 +427,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
         <div className="lpb-col">
           <GeneratedPace b={b} />
+          <Calendar days={(b.daily ?? []) as DayResult[]} />
           <LpSettings key={`${b.profits?.mode}-${b.profits?.to ?? ''}`} b={b} act={act} busy={busy} />
         </div>
       </div>

@@ -11,6 +11,9 @@ import { botView, gridName, lpName, quoteSym, rangeState, type AnyObj, type Nav 
 import { botSpark } from './series';
 import { StatTable } from './StatTable';
 import { MoneyDetails } from './MoneyDetails';
+import { ask } from './Confirm';
+import { Flash } from './motion';
+import { txOf } from './TxProgress';
 
 /** Every bot on the chain filter, the closed (archived) ones included: what they earned stays earned. */
 export function allBots(s: AnyObj, chain: number | 'all'): AnyObj[] {
@@ -161,9 +164,9 @@ export function useRowActions() {
     void botApi(path, 'POST', undefined, running ? 'row-stop' : undefined).then(() => refresh()).catch((e: Error) => setErr(e.message))
       .finally(() => { if (check) setChecking((n) => n - 1); });
   };
-  const close = (b: AnyObj) => {
+  const close = async (b: AnyObj) => {
     const name = pairOf(b).title;
-    if (b.mode === 'live' && !confirm(`Close ${name}? It sells or withdraws on-chain. The same price-impact and slippage limits still apply.`)) return;
+    if (b.mode === 'live' && !(await ask({ title: `Close ${name}`, body: 'It sells or withdraws on-chain and stops. The same price-impact and slippage limits still apply.', action: 'Close the bot', money: true, danger: true }))) return;
     setErr(null);
     void botApi(`${stem(b)}/${b.id}/close`, 'POST', undefined, 'row-close').then(() => refresh()).catch((e: Error) => setErr(e.message));
   };
@@ -281,7 +284,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
   const go = () => (isTrader(b) ? nav({ v: 'token' }) : expandable ? onToggle?.() : nav(botView(b.kind, b.id)));
   if (columns) {
     return (
-      <div className={`bot-block${open ? ' open' : ''}`}>
+      <div className={`bot-block${open ? ' open' : ''}${txOf(b) ? ' busy' : ''}`}>
         <div className="desk-row">
           <button type="button" className="desk-pair" onClick={go} aria-expanded={expandable ? !!open : undefined}>
             <span className="pair-marks">
@@ -300,11 +303,11 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
           <span className="desk-spark"><Sparkline points={botSpark(b)} width={112} height={32} /></span>
           <span className="desk-range"><BotRange b={b} fills={fills} /></span>
           {metrics && <span className="desk-inv" title="Invested: what was put into this bot at the start, in its quote coin">{bagFixed(invested)}<small className="inv-label"> invested</small></span>}
-          <span className="desk-val">{value == null ? '—' : qty(value, pair.quote, 5, false)}</span>
+          <span className="desk-val"><Flash v={value}>{value == null ? '—' : qty(value, pair.quote, 5, false)}</Flash></span>
           {metrics && facts ? <>
             <span className="desk-gen" title={m?.calc ?? undefined}>
               {/* one coin per line: a two-coin figure never breaks inside an amount */}
-              <b className={cls(gen.usd)}>{gen.text.split(' · ').map((part, i, all) => <span key={i} className="coin-line">{part}{i < all.length - 1 ? ' ·' : ''}</span>)}</b>
+              <Flash v={gen.text}><b className={cls(gen.usd)}>{gen.text.split(' · ').map((part, i, all) => <span key={i} className="coin-line">{part}{i < all.length - 1 ? ' ·' : ''}</span>)}</b></Flash>
             </span>
             <span className="desk-pnl" title={m?.calc ?? undefined}>
               <b className={cls(pnl.quote)}>{money}</b>
@@ -330,7 +333,7 @@ export function BotRow({ s, b, nav, pause, close, expandable, open, onToggle, co
     );
   }
   return (
-    <div className={`bot-block${open ? ' open' : ''}`}>
+    <div className={`bot-block${open ? ' open' : ''}${txOf(b) ? ' busy' : ''}`}>
       <div className="bot-row">
         <button type="button" className="bot-main" onClick={() => (expandable ? onToggle?.() : nav(botView(b.kind, b.id)))} aria-expanded={expandable ? !!open : undefined}>
           <span className="pair-marks">

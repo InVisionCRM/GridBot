@@ -22,6 +22,10 @@ import { LiveLevels, livePrice } from './live';
 import { L, Tip } from './Tip';
 import { overrideText, showHalt } from './haltText';
 import { SafetyChecking, heldForSafety, useLiveStart, useSafetyChecking } from './SafetyChecking';
+import { ask } from './Confirm';
+import { TxProgress } from './TxProgress';
+import { Calendar, LevelHeat } from './DayCharts';
+import type { DayResult } from '../metrics/daily';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -58,8 +62,12 @@ function ChangeRange({ s, g, act, busy }: { s: AnyObj; g: AnyObj; act: Props['ac
   const funds = spendFunds(s, g.stable, +amount || 0, reserveCfg(g.limits));
   const problem = fundsProblem(funds, +amount || 0, g.mode);
   const live = useLiveStart(act, busy);
-  const restart = () => {
-    if (g.mode === 'live' && !confirm(`Restart this LIVE grid with the new range? It signs real swaps.`)) return;
+  const restart = async () => {
+    if (g.mode === 'live' && !(await ask({
+      title: 'Restart this live grid', body: 'It restarts with the new range and signs real swaps.',
+      rows: [{ k: 'new range', v: `${px(+lower)} – ${px(+upper)}` }, { k: 'levels', v: `${+count}` }, { k: 'amount', v: `${humanAmount(+amount)} ${q}` }],
+      action: 'Restart the grid', money: true,
+    }))) return;
     live.run(g.mode === 'live', (extra, from) => botApi(`grids/${g.id}/start`, 'POST', { mode: g.mode, stable: g.stable, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalQuote: +amount, ...extra }, from));
   };
   const coin = (x: number, sign = false) => `${sign && x > 0 ? '+' : ''}${humanAmount(x)} ${q}`;
@@ -249,11 +257,17 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const earned: number | null = m?.generated?.[q] ?? m?.quote.realized ?? null, open: number | null = m?.quote.unrealized ?? null, held: number = g.pnl.plsHeld;
   const running = g.status === 'running';
   const closing = !!g.closing;
-  const remove = () => act(async () => { if (confirm(`Remove the ${gridName(g)} grid and its history? ${g.base} it still holds stays in your wallet.`)) { await botApi(`grids/${g.id}`, 'DELETE'); nav({ v: 'home' }); } });
-  const doClose = () => {
-    if (g.mode === 'live' && !confirm(`Close ${gridName(g)}? It sells what it holds, with the same price-impact and slippage limits.`)) return;
-    act(() => botApi(`grids/${g.id}/close`, 'POST', undefined, 'row-close'));
-  };
+  const remove = () => act(async () => {
+    if (!(await ask({ title: `Remove ${gridName(g)}`, body: `The grid and its history are removed. ${g.base} it still holds stays in your wallet. Nothing is sent.`, action: 'Remove', danger: true }))) return;
+    await botApi(`grids/${g.id}`, 'DELETE'); nav({ v: 'home' });
+  });
+  const doClose = () => act(async () => {
+    if (g.mode === 'live' && !(await ask({
+      title: `Close ${gridName(g)}`, body: 'It sells what it holds, with the same price-impact and slippage limits, and stops.',
+      rows: held > 0 ? [{ k: 'it sells', v: qty(held, g.base, 6, false) }] : [], action: 'Close the grid', money: true, danger: true,
+    }))) return;
+    await botApi(`grids/${g.id}/close`, 'POST', undefined, 'row-close');
+  });
 
   return (
     <main className="stack">
@@ -283,6 +297,7 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
       <div className="notices">
         {g.available === false && <div className="banner error"><span className="grow">This market isn't available on the running server (its chain may be turned off {s.copy ? `by ${s.copy.host}` : 'in .env'}).</span></div>}
         {g.lastError && <div className="banner error"><span className="grow">{g.lastError}</span></div>}
+        <TxProgress b={g} s={s} />
         {g.spacingWarn && <div className="banner"><span className="grow">{g.spacingWarn}</span></div>}
         {running && rs === 'above' && <div className="banner"><span className="grow"><b>Price is above the range.</b> Every level has sold, so the grid waits in {q}. {g.recenter?.enabled ? 'Follow the price up is on, so the range moves up on its own (see below).' : 'Stop it and change the range, or turn on Follow the price up.'}</span></div>}
         {running && rs === 'below' && <div className="banner"><span className="grow"><b>Price is below the range.</b> Every level has bought, so the grid holds {g.base} until the price recovers. Stop it and change the range to keep trading.</span></div>}
@@ -317,6 +332,11 @@ export function GridDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         ['Holding', <>{num(held, held < 10 ? 6 : 2)} {g.base}, bought for {lv.buyEcho(qty(g.pnl.costQuote, q, 5, false))}, worth {qty(held * (g.price ?? 0), q, 5, false)} now</>, `The ${g.base} the grid bought and hasn't sold yet. It sells one level up.`],
         [`Open positions, ${q}`, open == null ? '—' : qty(open, q, 5), `What those coins are worth now minus what they cost. It moves with the price until they sell, so it is not in Generated.`],
       ] : [['Holding', 'nothing waiting to sell']]} />
+
+      <div className="split">
+        <LevelHeat g={g} />
+        <Calendar days={(g.daily ?? []) as DayResult[]} />
+      </div>
 
       {g.config && (
         <div className="card">

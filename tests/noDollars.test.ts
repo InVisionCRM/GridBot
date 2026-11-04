@@ -96,7 +96,7 @@ describe('token trader in the coins it spends', () => {
     expect(TRADER.metrics.quote.symbol).toBe('WETH');
     expect(TRADER.spendTotals.WETH.bought).toBeCloseTo(0.05126, 12);
     const html = render(createElement(TokenTraderPage, { s: S, nav: () => undefined, seed: TRADER, now: 1_800_000_000_000 }));
-    expect(html).toMatch(/data-testid="tt-generated">\+0\.00437 WETH/);
+    expect(/data-testid="tt-generated">([\s\S]*?)<\/b>/.exec(html)![1].replace(/<[^>]+>/g, '')).toMatch(/^\+0\.00437 WETH/);
   });
 });
 
@@ -115,7 +115,7 @@ describe('the home: every dollar figure sits beside its coins (Kyle 2026-10-30)'
     it(signer ? 'with a wallet' : 'paper only', () => {
       const html = home(signer);
       // the big figure has the coins line right under it
-      const big = /data-testid="dk-big">([^<]*)</.exec(html)![1];
+      const big = /data-testid="dk-big">([\s\S]*?)<\/div>/.exec(html)![1].replace(/<[^>]+>/g, '');
       const units = /data-testid="dk-units">([\s\S]*?)<\/div>/.exec(html)![1].replace(/<[^>]+>/g, ' ');
       if (big !== '—') expect(units).toMatch(/[\d.,]+ [A-Z]/);
       // each card that shows dollars shows its coins too

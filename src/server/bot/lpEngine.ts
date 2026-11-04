@@ -156,7 +156,7 @@ export interface LpState {
   idle: Coins;
   /**
    * Capital that could not enter without taking too much of the pool or crossing the price-impact cap.
-   * It stays out of the next swap. Old saves omit it.
+   * It stays out of this open's swap and position, and is checked against the cap again at the next open. Old saves omit it.
    */
   aside?: Coins;
   step: LpStep | null;
@@ -1110,7 +1110,14 @@ export class LpEngine {
     this.ev('info', `Liquidity ${this.label}: ${msg}`, { level: 'warn' });
   }
 
-  /** Hold coins out of the next swap. They fold back into idle when the bot closes. */
+  /** The coins set aside, back with the idle coins (each open re-checks them against the cap). */
+  private unpark() {
+    const a = this.state.aside;
+    if (!a || !(a.base > 0 || a.quote > 0)) return;
+    this.addIdle(a);
+    this.state.aside = { base: 0, quote: 0 };
+  }
+  /** Hold coins out of this open's swap and position. They come back at the next open (unpark) or when the bot closes. */
   private park(c: Coins) {
     if (!(c.base > 0 || c.quote > 0)) return;
     const a = this.state.aside ?? { base: 0, quote: 0 };
@@ -1357,6 +1364,10 @@ export class LpEngine {
       const band = s.rangeBand ?? this.bandFor(v);
       s.range = pool.ticksFor(v.price * (1 - band), v.price * (1 + band), v);
     }
+    // Coins set aside at an earlier open get another look at every open: back with the rest, so the cap below keeps
+    // out only what is over 10% of the active liquidity now. Kept apart for good, they sat in the wallet once the
+    // pool had room (Kyle's CASHCAT/ETH, 2026-11-04: 1.41 ETH + 3,501 CASHCAT out while the position was 6.4%).
+    this.unpark();
     this.parkOversize(pool, v, s.range.tickLower, s.range.tickUpper);
     const share = pool.baseShare(s.range.tickLower, s.range.tickUpper, v);
     const idle = this.state.idle, value = idle.base * v.price + idle.quote;

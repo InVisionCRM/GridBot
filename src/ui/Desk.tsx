@@ -1,7 +1,7 @@
 /**
  * Home: one screen, nothing to scroll. On top, what the bots generated (a big dollar figure with the coins under it)
- * and the profits banked over time, always moving. Below, the board: Money flow, Price ladder and Kill funnel as tabs
- * (keys 1, 2, 3), with Next payday and the live river beside them. On a phone the five are one tap apart.
+ * and the profits banked over time, always moving. Below, the board: Money flow, Price ladder, Kill funnel,
+ * Day by day and Today by hour (keys 1–5), with Next payday and the live river beside them. On a phone all seven are one tap apart.
  * Every card opens a drawer; new profits pop one up. Data: deskModel.ts (status payloads only).
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
@@ -12,17 +12,19 @@ import { ALMOST, amountsText, bankedCurve, bankedItems, funnelOf, ladders, openI
 import { ago, qty, usd } from './fmt';
 import type { HoldingsSnapshot } from '../live/holdingsMath';
 import type { AnyObj, Nav } from './model';
-import { useCount, useReducedMotion } from './motion';
+import { AnimatedNumber, Flash, useReducedMotion } from './motion';
 import { DeskSheet, type SheetOf } from './DeskSheet';
+import { Calendar, sumDays, TodayByBot } from './DayCharts';
+import type { DayResult } from '../metrics/daily';
 import { smoothPath } from './smooth';
 import type { ActivityEvent } from './useStream';
 
-type Tab = 'flow' | 'ladder' | 'funnel';
+type Tab = 'flow' | 'ladder' | 'funnel' | 'calendar' | 'hours';
 type PhoneTab = Tab | 'payday' | 'river';
 type Range = '1H' | '1D' | '1W' | '1M' | 'ALL';
 const RANGE_MS: Record<Range, number | null> = { '1H': 3_600_000, '1D': 86_400_000, '1W': 7 * 86_400_000, '1M': 30 * 86_400_000, ALL: null };
-const TABS: { k: Tab; label: string }[] = [{ k: 'flow', label: 'Money flow' }, { k: 'ladder', label: 'Price ladder' }, { k: 'funnel', label: 'Kill funnel' }];
-const PHONE_TABS: { k: PhoneTab; label: string }[] = [{ k: 'flow', label: 'Flow' }, { k: 'payday', label: 'Next' }, { k: 'river', label: 'Live' }, { k: 'ladder', label: 'Ladder' }, { k: 'funnel', label: 'Funnel' }];
+const TABS: { k: Tab; label: string }[] = [{ k: 'flow', label: 'Money flow' }, { k: 'ladder', label: 'Price ladder' }, { k: 'funnel', label: 'Kill funnel' }, { k: 'calendar', label: 'Day by day' }, { k: 'hours', label: 'Today by hour' }];
+const PHONE_TABS: { k: PhoneTab; label: string }[] = [{ k: 'flow', label: 'Flow' }, { k: 'payday', label: 'Next' }, { k: 'river', label: 'Live' }, { k: 'ladder', label: 'Ladder' }, { k: 'funnel', label: 'Funnel' }, { k: 'calendar', label: 'Days' }, { k: 'hours', label: 'Hours' }];
 /** A card's height (styles.css .dk-cardi): lists fit as many as the space holds */
 const CARD_H = 82;
 const AV = ['#5CD08D', '#5B8DEF', '#F5B841', '#F2706B', '#9B8CF2', '#E94BD1', '#4FC1D9'];
@@ -142,11 +144,11 @@ export function Desk({ s, nav, act, busy, holdings, events }: { s: AnyObj; nav: 
     if (best && !sheet && Date.now() - lastMoment.current > 15_000) { lastMoment.current = Date.now(); setSheet({ kind: 'moment', item: best }); }
   }, [banked]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 1 / 2 / 3 switch the board
+  // 1 – 5 switch the board
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       if (sheet || e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.metaKey || e.ctrlKey) return;
-      const t = ({ 1: 'flow', 2: 'ladder', 3: 'funnel' } as Record<string, Tab>)[e.key];
+      const t = ({ 1: 'flow', 2: 'ladder', 3: 'funnel', 4: 'calendar', 5: 'hours' } as Record<string, Tab>)[e.key];
       if (t) { setTab(t); setPhoneTab(t); }
     };
     addEventListener('keydown', on);
@@ -159,7 +161,10 @@ export function Desk({ s, nav, act, busy, holdings, events }: { s: AnyObj; nav: 
   const funnelView = <FunnelBoard funnel={funnel} held={open.filter((o) => o.kind === 'token')} on={!!trader?.on} onOpen={openBot} onSetup={() => nav({ v: 'token' })} />;
   const payday = <Payday open={open} onOpen={openBot} />;
   const river = <River events={events} />;
-  const boards: Record<Tab, ReactNode> = { flow, ladder, funnel: funnelView };
+  const ofMode = ever.filter((b) => (b.mode === 'live' ? 'live' : 'paper') === mode);
+  const calendar = <Calendar days={sumDays(ofMode.map((b) => (b.daily ?? []) as DayResult[]))} title={`Day by day · ${mode}`} hint="Generated each day by the grid, trend and liquidity bots, the last month · hover or tap a day" />;
+  const hours = <TodayByBot bots={ofMode} />;
+  const boards: Record<Tab, ReactNode> = { flow, ladder, funnel: funnelView, calendar, hours };
 
   return (
     <div className="dk" ref={root}>
@@ -203,15 +208,11 @@ function Hero({ mode, setMode, genUsd, genUnits, running, banked, range, setRang
   mode: Mode; setMode: ((m: Mode) => void) | null; genUsd: number | null; genUnits: Record<string, number> | null; running: number; banked: BankedItem[];
   range: Range; setRange: (r: Range) => void; onNew: () => void; onWallet: () => void; onBanked: (b: BankedItem) => void;
 }) {
-  const shown = useCount(genUsd, 700);
   const now = Date.now(), win = RANGE_MS[range];
   // the start of the range, to the minute (the chart's own clock moves the right edge)
   const from = Math.floor((win == null ? Math.min(now - 86_400_000, ...banked.map((b) => b.t)) : now - win) / 60_000) * 60_000;
   const curve = useMemo(() => bankedCurve(banked, from), [banked, from]);
   const inRange = curve.length ? curve[curve.length - 1].v : 0;
-  const [bump, setBump] = useState(0);
-  const lastTop = useRef<string | null>(null);
-  useEffect(() => { const k = banked[0]?.key ?? null; if (lastTop.current && k !== lastTop.current) setBump((n) => n + 1); lastTop.current = k; }, [banked]);
   const units = Object.entries(genUnits ?? {}).filter(([, v]) => v !== 0);
   const today = banked.filter((b) => b.t >= now - 86_400_000).length;
   return (
@@ -226,8 +227,9 @@ function Hero({ mode, setMode, genUsd, genUnits, running, banked, range, setRang
             </span>
           ) : <span className="dk-chip">{mode === 'live' ? 'Live' : 'Paper'}</span>}
         </div>
-        <div key={bump} className={`dk-big ${genUsd != null && genUsd < 0 ? 'neg' : 'pos'} ${bump ? 'bump' : ''}`} data-testid="dk-big">{shown == null ? '—' : usd(shown, true)}</div>
-        <div className="dk-units" data-testid="dk-units">{units.length ? units.map(([sym, v]) => <span key={sym} className={v >= 0 ? 'pos' : 'neg'}>{qty(v, sym, 5)}</span>) : <span className="muted">nothing generated yet</span>}</div>
+        {/* rolls to each new value, glows and floats the change (motion.tsx) */}
+        <div className={`dk-big ${genUsd != null && genUsd < 0 ? 'neg' : 'pos'}`} data-testid="dk-big"><AnimatedNumber value={genUsd} format={(x) => usd(x, true)} /></div>
+        <div className="dk-units" data-testid="dk-units">{units.length ? units.map(([sym, v]) => <Flash key={sym} v={v} className={v >= 0 ? 'pos' : 'neg'}>{qty(v, sym, 5)}</Flash>) : <span className="muted">nothing generated yet</span>}</div>
         <div className="dk-hero-sub"><span>{running} running</span><span>{today === 1 ? '1 profit' : `${today} profits`} banked today</span></div>
         <div className="dk-hero-actions">
           <button type="button" className="dk-btn primary" onClick={onNew}>New bot</button>
@@ -376,7 +378,7 @@ function Card({ k, sym, title, sub, value, usdV, close, glow, onClick }: { k: st
     <button type="button" className={`dk-cardi ${glow ? 'glow' : ''} ${close != null && close >= ALMOST ? 'almost' : ''}`} data-flip={k} onClick={onClick}>
       <span className="dk-av" style={{ background: avColor(sym) }}>{sym.replace('$', '').slice(0, 1)}</span>
       <span className="dk-ct">{title}</span>
-      <span className={`dk-cv ${neg ? 'neg' : 'pos'}`}>{value}</span>
+      <Flash v={value} className={`dk-cv ${neg ? 'neg' : 'pos'}`}>{value}</Flash>
       <span className="dk-cu">{usdV == null ? '' : usd(usdV, true)}</span>
       <span className="dk-cs">{sub}</span>
       {close != null && <span className="dk-bar"><i style={{ width: `${Math.round(close * 100)}%` }} /></span>}
