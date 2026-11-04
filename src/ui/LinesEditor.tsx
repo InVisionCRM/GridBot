@@ -12,6 +12,7 @@ import { defaultRule, lineColor, lineDashed } from './lines';
 import { Tip } from './Tip';
 import type { Ticks } from './useStream';
 import type { AnyObj } from './model';
+import { ask } from './Confirm';
 
 const newId = () => `ln-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
@@ -52,7 +53,7 @@ export function LinesEditor({ s, ticks = null, pair, tf, lines, onChange, busy =
         {/* One button, as wide as its longer label, and the note on its own line: the bar keeps its height whatever the
             state, so the chart never shifts under the pointer between clicks. */}
         <button type="button" className="btn small-btn lines-act" disabled={!mode && (busy || !shown.length)}
-          onClick={() => (mode ? setMode(null) : confirm('Remove every line?') && commit([]))}>
+          onClick={() => { if (mode) setMode(null); else void ask({ title: 'Remove every line?', body: 'The bot stops trading on them once you save.', action: 'Remove every line', danger: true }).then((ok) => { if (ok) commit([]); }); }}>
           <span className={mode ? '' : 'off'}>Cancel</span><span className={mode ? 'off' : ''}>Clear all</span>
         </button>
         <span className="lines-msg muted small">{full ? `${MAX_LINES} lines is the most` : buys ? '' : 'Draw at least one line that buys.'}</span>

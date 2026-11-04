@@ -19,6 +19,7 @@ import { LinesEditor } from './LinesEditor';
 import { LpReplay } from './LpReplay';
 import { GridReplay } from './GridReplay';
 import { coinFunds, errMsg, floorSig, spendFunds, type AnyObj, type BotKind, type Funds, type GridPrefill, type LpPrefill, type Nav, type TrendPrefill } from './model';
+import { ask } from './Confirm';
 
 interface Common { s: AnyObj; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -215,11 +216,13 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
     return () => clearTimeout(t);
   }, [tab, presetId, pair, amountsKey]);
 
-  const confirmLive = (what: string) => mode !== 'live' || confirm(`Start a LIVE ${what}? It signs real swaps from ${chainOf(s, m.chainId)?.address ?? s.address}.`);
+  const confirmLive = async (what: string) => mode !== 'live' || ask({
+    title: `Start a live ${what}`, body: `It signs real swaps from ${chainOf(s, m.chainId)?.address ?? s.address}.`, action: 'Start it', money: true,
+  });
 
   const live = useLiveStart(act, busy);
-  const startCustom = () => {
-    if (!confirmLive(`grid on ${m.label}`)) return;
+  const startCustom = async () => {
+    if (!(await confirmLive(`grid on ${m.label}`))) return;
     live.run(mode === 'live', async (extra, from) => {
       const r = await botApi('grids', 'POST', {
         mode, stable: pair, lowerPrice: +lower, upperPrice: +upper, gridCount: +count, totalCapitalQuote: +amount,
@@ -229,8 +232,8 @@ function GridForm({ s, nav, act, busy, prefill }: Common & { prefill?: GridPrefi
     });
   };
   const legQuoteNative = !!legs?.some((l) => mk(s, l.quote).quoteNative);
-  const startPreset = () => {
-    if (!confirmLive(`${preset.name} preset`)) return;
+  const startPreset = async () => {
+    if (!(await confirmLive(`${preset.name} preset`))) return;
     live.run(mode === 'live', async (extra, from) => {
       const r = await botApi(`presets/${presetId}/start`, 'POST', {
         mode, quote: pair, amounts: JSON.parse(amountsKey), limits: limitsBody(limits, legQuoteNative), recenter: follow, profits: profitsBody(profits), ...extra,
@@ -346,8 +349,8 @@ function TrendForm({ s, nav, act, busy, prefill }: Common & { prefill?: TrendPre
   const funds = spendFunds(s, pair, +amount || 0, parseGasRes(limits.gasRes) ?? DEFAULT_GAS_RESERVE);
   const noBuyLine = cfg.strategy === 'lines' && !cfg.lines.some((l) => l.rule.startsWith('buy')) ? 'Draw at least one line that buys.' : null;
   const live = useLiveStart(act, busy);
-  const start = () => {
-    if (mode === 'live' && !confirm(`Start a LIVE trend bot on ${m.label} (${tf})? It signs real swaps from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
+  const start = async () => {
+    if (mode === 'live' && !(await ask({ title: `Start a live trend bot on ${m.label}`, body: `${tf} candles, ${amount} ${m.quote} to trade with. It signs real swaps from ${chainOf(s, m.chainId)?.address ?? s.address}.`, action: 'Start it', money: true }))) return;
     live.run(mode === 'live', async (extra, from) => {
       const r = await botApi('trends', 'POST', { mode, quote: pair, tf, cfg, capital: +amount, name: name || undefined, limits: limitsBody(limits, !!m.quoteNative), ...extra }, from);
       nav({ v: 'trend', id: r.id });
@@ -438,8 +441,12 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const plan = spot && bandOk && q + a > 0 ? swapPlan(spot, b, q, a) : null;
   const impact = Number(limits.impact) / 100, impactOk = impact > 0 && impact < 1;
   const live = useLiveStart(act, busy);
-  const start = () => {
-    if (mode === 'live' && !confirm(`Start a LIVE liquidity position on ${m.label}? It signs real transactions from ${chainOf(s, m.chainId)?.address ?? s.address}.`)) return;
+  const start = async () => {
+    if (mode === 'live' && !(await ask({
+      title: `Start a live liquidity position on ${m.label}`, body: `It signs real transactions from ${chainOf(s, m.chainId)?.address ?? s.address}.`,
+      rows: [{ k: 'range', v: `±${+(b * 100).toFixed(2)}% around the price` }, { k: 'put in', v: `${q} ${m.quote}${a > 0 ? ` + ${a} ${m.base}` : ''}` }],
+      action: 'Start it', money: true,
+    }))) return;
     live.run(mode === 'live', async (extra, from) => {
       const r = await botApi('lps', 'POST', {
         mode, market: pair, bandPct: b, capital: q, baseAmount: a, rerange, ...optionalPayload(policy), profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative), ...extra,

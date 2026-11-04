@@ -19,6 +19,10 @@ import { quoteSym, type AnyObj, type Nav } from './model';
 import { Amt } from './money';
 import { metricsOf } from './deskStats';
 import { L } from './Tip';
+import { ask } from './Confirm';
+import { TxProgress } from './TxProgress';
+import { Calendar } from './DayCharts';
+import type { DayResult } from '../metrics/daily';
 
 interface Props { s: AnyObj; id: string; events: ActivityEvent[]; ticks: Ticks | null; nav: Nav; act: (fn: () => Promise<unknown>) => void; busy: boolean }
 
@@ -54,12 +58,19 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
   const closing = !!t.closing;
   const pos = t.position;
   const stratLabel = STRATEGIES.find((x) => x.id === t.cfg.strategy)?.label ?? t.cfg.strategy;
-  const remove = () => act(async () => { if (confirm(`Remove ${t.name} and its history?`)) { await botApi(`trends/${t.id}`, 'DELETE'); nav({ v: 'home' }); } });
-  const closePos = () => { if (confirm(`Sell ${t.name}'s ${base} at market now?`)) act(() => botApi(`trends/${t.id}/sell`, 'POST')); };
-  const doClose = () => {
-    if (t.mode === 'live' && !confirm(`Close ${t.name}? It sells the open trade, with the same price-impact and slippage limits.`)) return;
-    act(() => botApi(`trends/${t.id}/close`, 'POST', undefined, 'row-close'));
-  };
+  const remove = () => act(async () => {
+    if (!(await ask({ title: `Remove ${t.name}`, body: 'The bot and its history are removed. Nothing is sent.', action: 'Remove', danger: true }))) return;
+    await botApi(`trends/${t.id}`, 'DELETE'); nav({ v: 'home' });
+  });
+  const sellRows = () => (pos ? [{ k: 'it sells', v: `${num(pos.pls, pos.pls < 10 ? 6 : 2)} ${base}` }, { k: 'bought at', v: px(pos.entryPrice) }] : []);
+  const closePos = () => act(async () => {
+    if (!(await ask({ title: `Sell ${t.name}'s ${base} now`, body: 'The open trade is sold at market, with the same price-impact and slippage limits.', rows: sellRows(), action: 'Sell now', money: t.mode === 'live', danger: true }))) return;
+    await botApi(`trends/${t.id}/sell`, 'POST');
+  });
+  const doClose = () => act(async () => {
+    if (t.mode === 'live' && !(await ask({ title: `Close ${t.name}`, body: 'It sells the open trade, with the same price-impact and slippage limits, and stops.', rows: sellRows(), action: 'Close the bot', money: true, danger: true }))) return;
+    await botApi(`trends/${t.id}/close`, 'POST', undefined, 'row-close');
+  });
 
   return (
     <main className="stack">
@@ -89,6 +100,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <div className="notices">
         {t.lastError && <div className="banner error"><span className="grow">{t.lastError}</span></div>}
+        <TxProgress b={t} s={s} />
         {!running && pos && <div className="banner"><span className="grow"><b>Stopped while holding {base}.</b> The stop-loss and take-profit are not watched until you resume.</span></div>}
       </div>
 
@@ -99,6 +111,7 @@ export function TrendDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         <div className="kpi"><span>Fees + gas</span><div className="kpi-v"><Amt v={-(t.pnl.fees + t.pnl.gas)} sym={q} k={k} sig={4} /></div><span className="sub">paid so far</span></div>
       </div>
       <MoneyDetails b={t} hide={t.position ? ['Open positions'] : []} />
+      <Calendar days={(t.daily ?? []) as DayResult[]} />
 
       <div className="split wide-left">
         <div className="card">

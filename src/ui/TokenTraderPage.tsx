@@ -11,13 +11,15 @@ import { ChainBadge, chainOf } from './chains';
 import { errMsg, type AnyObj, type Nav } from './model';
 import { haltText } from './haltText';
 import { MoneyDetails } from './MoneyDetails';
-import { AnimatedNumber } from './motion';
+import { AnimatedNumber, Flash } from './motion';
+import { Roll } from './Roll';
 import { Icon, type IconName } from './icons';
 import { useEthUsd } from './units';
 import { CoinLogo } from './Wallet';
 import { VENUES } from '../live/venues';
 import { EthLimit, SpendDetails, TokenAdvanced, blockedNote, feePct, generatedText, modeLabel, offCompletely, startTrader } from './TokenTrader';
 import { STYLES, exitTrack, lookCycle, poolWatch, radarBlips, radarSectors, scorecard, shortSpan, styleOf, type ExitTrack, type PoolWatch, type TrackMark } from './tokenModel';
+import { ask } from './Confirm';
 
 /** The two auto traders share the "Auto traders" tile: this switches between their pages. */
 export function TraderSwitch({ at, nav }: { at: 'auto' | 'token'; nav: Nav }) {
@@ -106,7 +108,7 @@ function Hero({ t, busy, run, ethUsd, save }: { t: AnyObj; busy: boolean; run: (
         <span className={`tk-mode ${on ? (o.mode === 'live' ? 'live' : 'on') : ''}`}>{modeLabel(t, o)}</span>
         {t.metrics && (
           <p className="tk-gen" title={t.metrics.calc}>
-            Generated <b className={(t.metrics.generatedUsd ?? 0) >= 0 ? 'pos' : 'neg'} data-testid="tt-generated">{generatedText(t.metrics, ethUsd)}</b>
+            Generated <b className={(t.metrics.generatedUsd ?? 0) >= 0 ? 'pos' : 'neg'} data-testid="tt-generated"><Flash v={generatedText(t.metrics, ethUsd)}><Roll text={generatedText(t.metrics, ethUsd)} /></Flash></b>
             <span className="muted"> from closed sells · {t.metrics.fillCount ?? 0} trades</span>
           </p>
         )}
@@ -249,7 +251,7 @@ function StageCount({ n, out }: { n: number; out: boolean }) {
   return (
     <span className="tk-stage-n">
       {bump && <i key={bump.at} className="tk-stage-hit" aria-hidden="true" onAnimationEnd={() => setBump(null)} />}
-      <AnimatedNumber value={n} format={(x) => Math.round(x).toLocaleString()} />{out ? <small> out</small> : null}
+      <AnimatedNumber value={n} format={(x) => Math.round(x).toLocaleString()} chip={false} />{out ? <small> out</small> : null}
       {bump && <em key={`+${bump.at}`} className="tk-bump">+{bump.by}</em>}
     </span>
   );
@@ -360,8 +362,12 @@ function PositionCard({ p, s, now, busy, run, runMode }: { p: AnyObj; s: AnyObj;
   const stale = p.markedAt == null || now - Number(p.markedAt) > STALE_MS;
   const track = exitTrack(p.exits);
   const watch = poolWatch(p, now, runMode);
-  const sell = () => {
-    if (p.mode === 'live' && !confirm(`Sell all of ${p.tokenSym} now, with real money? It sells through the pool like any exit (split under the impact cap).`)) return;
+  const sell = async () => {
+    if (p.mode === 'live' && !(await ask({
+      title: `Sell all of ${p.tokenSym} now`, body: 'It sells through the pool like any exit (split under the impact cap).',
+      rows: [{ k: 'it sells', v: qty(p.tokens, p.tokenSym, 5, false) }, ...(p.value != null ? [{ k: 'worth now, about', v: qty(p.value, sym, 4, false) }] : [])],
+      action: 'Sell now', money: true, danger: true,
+    }))) return;
     void run(() => http(`/api/token-trader/positions/${encodeURIComponent(p.id)}/sell`, 'POST'));
   };
   const read = p.markedAt == null ? 'price not read yet' : `price read ${ago(p.markedAt, now)}`;
@@ -375,7 +381,7 @@ function PositionCard({ p, s, now, busy, run, runMode }: { p: AnyObj; s: AnyObj;
             <button type="button" className="tk-pc-flipbtn" onClick={() => setFlipped(true)} tabIndex={flipped ? -1 : 0}>Flip <span aria-hidden="true">↻</span></button>
           </header>
           <div className="tk-pc-result">
-            <span className={`tk-pc-pct ${up ? 'pos' : 'neg'}`}><AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`} /></span>
+            <span className={`tk-pc-pct ${up ? 'pos' : 'neg'}`}><AnimatedNumber value={gain * 100} format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`} chip={false} /></span>
             <span className="tk-pc-worth">{p.value != null ? qty(p.value, sym, 4, false) : '—'}<small className={up ? 'pos' : 'neg'}>{p.pnl != null ? qty(pnl, sym, 4) : ''}</small></span>
           </div>
           <p className={`tk-pc-status ${watch.status.tone}`} role={watch.status.tone === 'bad' ? 'alert' : undefined}><i aria-hidden="true" />{watch.status.text}</p>

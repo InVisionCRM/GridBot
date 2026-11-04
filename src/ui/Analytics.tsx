@@ -135,7 +135,7 @@ export function ModeAnalytics({ s, mode, seed }: { s: AnyObj; mode: 'live' | 'pa
     // an unknown change (no snapshot that far back, or a bot without a price yet) is a dash, never the realized figure
     const v: number | null = p.equityChange;
     const unpriced = tot?.unpriced ? ` · ${tot.unpriced} without a price yet` : '';
-    return <>{v == null ? '—' : <AnimatedNumber value={v} format={(x) => inEth(x, ethUsd, true)} className={cls(v)} />}<small className="muted"> from trades {inEth(p.realized, ethUsd, true)}{p.partial ? ' · partial' : ''}{unpriced}</small></>;
+    return <>{v == null ? '—' : <AnimatedNumber value={v} format={(x) => inEth(x, ethUsd, true)} className={cls(v)} chip={false} />}<small className="muted"> from trades {inEth(p.realized, ethUsd, true)}{p.partial ? ' · partial' : ''}{unpriced}</small></>;
   };
 
   return (

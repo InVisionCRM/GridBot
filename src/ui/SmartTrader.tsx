@@ -12,6 +12,7 @@ import { L } from './Tip';
 import { useOpportunities } from './Opportunities';
 import { TraderSwitch } from './TokenTraderPage';
 import { haltText } from './haltText';
+import { ask } from './Confirm';
 
 type Risk = 'safe' | 'medium' | 'any';
 interface Opts { grid: boolean; lp: boolean; newTokens: boolean; risk: Risk; slots: number; stopLossPct: number }
@@ -91,8 +92,11 @@ function Setup({ s, a, busy, run }: { s: AnyObj; a: AnyObj; busy: boolean; run: 
   const liveBlocked = rows.some((r) => !chainOf(s, r.chainId)?.hasSigner);
   const set = (i: number, r: Partial<BudgetRow>) => setRows(rows.map((x, j) => (j === i ? { ...x, ...r } : x)));
   // Asked before anything is saved: cancelling leaves the settings as they were
-  const start = () => {
-    if (mode === 'live' && !confirm(`Turn the smart trader on with real money? It opens, closes and swaps on its own, up to the budgets you set (${rows.map((r) => `${r.amount} ${r.coin}`).join(', ')}).`)) return;
+  const start = async () => {
+    if (mode === 'live' && !(await ask({
+      title: 'Turn the smart trader on with real money', body: 'It opens, closes and swaps on its own, up to the budgets you set.',
+      rows: rows.map((r) => ({ k: `budget on ${chainOf(s, r.chainId)?.name ?? r.chainId}`, v: `${r.amount} ${r.coin}` })), action: 'Turn it on', money: true,
+    }))) return;
     return run(async () => {
       await http('/api/autopilot', 'PUT', { mode, options: opts, budgets: rows.map((r) => ({ chainId: r.chainId, coin: r.coin, amount: Number(r.amount) })) });
       return http('/api/autopilot/on', 'POST');
@@ -243,14 +247,14 @@ function OnControls({ a, busy, run }: { a: AnyObj; busy: boolean; run: (fn: () =
           <button type="button" className="btn" disabled={busy} title="It stops deciding; its bots keep running as they are."
             onClick={() => void run(() => http('/api/autopilot/off', 'POST', { sell: false }))}>Turn off, keep its bots</button>
           <button type="button" className="btn danger" disabled={busy}
-            onClick={() => { if (confirm('Turn off and close every bot it runs back to its coin?')) void run(() => http('/api/autopilot/off', 'POST', { sell: true })); }}>Turn off, close its bots</button>
+            onClick={() => void ask({ title: 'Turn off and close its bots', body: 'Every bot it runs is closed back to its coin.', action: 'Close its bots', money: a.mode === 'live', danger: true }).then((ok) => { if (ok) void run(() => http('/api/autopilot/off', 'POST', { sell: true })); })}>Turn off, close its bots</button>
         </> : <>
           {a.closeAll && a.accounts.some((x: AnyObj) => x.bots.length || x.pending)
             ? <span className="small muted">Closing its bots back to their coins; it can be turned on again once they are back.</span>
             : <>
               <button type="button" className="btn primary" disabled={busy} onClick={() => void run(() => http('/api/autopilot/on', 'POST'))}>Turn on again</button>
               <button type="button" className="btn danger" disabled={busy}
-                onClick={() => { if (confirm('Close every bot it ran back to its coin?')) void run(() => http('/api/autopilot/off', 'POST', { sell: true })); }}>Close its bots</button>
+                onClick={() => void ask({ title: 'Close its bots', body: 'Every bot it ran is closed back to its coin.', action: 'Close its bots', money: a.mode === 'live', danger: true }).then((ok) => { if (ok) void run(() => http('/api/autopilot/off', 'POST', { sell: true })); })}>Close its bots</button>
             </>}
         </>}
       </div>

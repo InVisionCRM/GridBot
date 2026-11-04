@@ -107,7 +107,9 @@ export function DayMoves({ day, all, base, quote }: { day: LpDay; all: LpDone[];
       {day.moves.length ? (
         <div className="lpb-list">
           {day.moves.map((d) => {
-            const i = all.indexOf(d), older = all.slice(i + 1).find((o) => o.lower != null);
+            // the step before it in the bot's log (matched by time and action: day.moves and done are separate copies)
+            const i = all.findIndex((o) => o.t === d.t && o.action === d.action);
+            const older = i < 0 ? undefined : all.slice(i + 1).find((o) => o.lower != null);
             const got = d.fees.base > 0 || d.fees.quote > 0;
             return (
               <div key={`${d.t}-${d.action}`} className="lpb-row">
@@ -190,8 +192,9 @@ export function PositionWeight({ b }: { b: AnyObj }) {
     <div className="lpb-weight" data-testid="position-weight">
       <div className="lpb-wbar">
         {/* one percent: the other side is the rest (two halves would print 50% twice) */}
-        <div className="b" style={{ flexBasis: `${wb * 100}%` }}>{Math.round(wb * 100)}% {b.base}</div>
-        <div className="q" style={{ flexBasis: `${(1 - wb) * 100}%` }}>{b.quote}</div>
+        {/* a side too thin for its label stays unlabelled (the coins are listed under the bar) */}
+        <div className="b" style={{ flexBasis: `${wb * 100}%` }}>{wb >= 0.18 ? `${Math.round(wb * 100)}% ${b.base}` : ''}</div>
+        <div className="q" style={{ flexBasis: `${(1 - wb) * 100}%` }}>{1 - wb >= 0.12 ? b.quote : ''}</div>
       </div>
       <div className="lpb-kv">
         <span>{qty(c.base, b.base, 6, false)}</span><span className="muted">worth ≈ {qty(vb, b.quote, 4, false)}</span>

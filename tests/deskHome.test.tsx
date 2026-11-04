@@ -29,7 +29,8 @@ const S: Obj = {
 const noop = () => {};
 const page = (s: Obj, events: Obj[] = []) => renderToStaticMarkup(h(Desk, { s, nav: noop, act: noop, busy: false, holdings: null, events: events as never }));
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ');
-const big = (html: string) => /data-testid="dk-big">([^<]*)</.exec(html)![1];
+/** The headline's text (the figure is inside its rolling-digits wrapper, motion.tsx AnimatedNumber; the roll layer has no text) */
+const big = (html: string) => /data-testid="dk-big">([\s\S]*?)<\/div>/.exec(html)![1].replace(/<[^>]+>/g, '');
 
 describe('home headline', () => {
   it('is the live bots\' Generated: a dollar figure, with the coins under it', () => {

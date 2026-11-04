@@ -4,6 +4,7 @@
  */
 import { useState, type ReactNode } from 'react';
 import { offersStartAnyway } from './api';
+import { ask } from './Confirm';
 
 export function SafetyChecking({ what = 'Checking safety…' }: { what?: string }) {
   return (
@@ -47,9 +48,12 @@ export function useLiveStart(act: (fn: () => Promise<unknown>) => void, busy: bo
       throw e;
     }
   });
-  const anyway = () => {
+  const anyway = async () => {
     const b = blocked;
-    if (!b || !confirm(`${b.msg}\n\nStart anyway? It starts LIVE on the last known safety report, without a fresh check. Who pressed it (this computer, the phone or a friend copy), when, and why the check was blocked are recorded on the bot.`)) return;
+    if (!b || !(await ask({
+      title: 'Start anyway?', body: `${b.msg}\n\nIt starts LIVE on the last known safety report, without a fresh check. Who pressed it (this computer, the phone or a friend copy), when, and why the check was blocked are recorded on the bot.`,
+      action: 'Start anyway', money: true, danger: true,
+    }))) return;
     act(async () => { await chk.run(true, () => b.send({ startAnyway: true }, 'start-anyway')); setBlocked(null); });
   };
   const banner: ReactNode = <>

@@ -5,7 +5,9 @@
  * the activity bus.
  */
 import { gridMetrics, lpMetrics, trendMetrics, type BotMetrics } from '../../metrics/botMetrics';
-import { feesToday } from '../../metrics/feesToday';
+import { feesToday, localDayStart } from '../../metrics/feesToday';
+import { levelHeat, lpHours, tradeHours } from '../../metrics/todayHours';
+import { dailyOf, dayKey, noteDaily, type DailyBook } from '../../metrics/daily';
 import { lpDay } from '../../metrics/lpDay';
 import { DEFAULT_LIMITS, type SafetyLimits } from '../../live/limits';
 import type { LiveNetwork } from '../../live/networks';
@@ -73,6 +75,8 @@ export interface MultiState {
   alerts: Alert[];
   /** Per mode, every ≥60 s: [t, equityUsd, realizedUsd, capitalUsd] (capital lets period changes leave out bots added or removed) */
   portfolio: Record<Mode, PortfolioSnap[]>;
+  /** Each bot's Generated at its first reading of each local day (metrics/daily.ts). Saves before it existed omit it. */
+  daily?: DailyBook;
 }
 type PortfolioSnap = [number, number, number, number];
 
@@ -147,6 +151,7 @@ function migrate(raw: unknown, net: LiveNetwork): MultiState {
       alerts: Array.isArray(o.alerts) ? (o.alerts as Alert[]) : [],
       // Before version 4 one history summed paper and live bots; it can't be split, so both start over.
       portfolio: o.version === 4 ? (o.portfolio as MultiState['portfolio']) : { live: [], paper: [] },
+      daily: (o.daily as DailyBook | undefined) ?? {},
     };
   }
   const g = upgradeQuoteNames(o) as unknown as BotState; // v1 single grid
@@ -1145,6 +1150,7 @@ export class MultiBot {
       this.checkRpcHealth();
       try { await this.taxWatch.tick(); } catch { /* never abort the poll loop */ }
       this.snapshotPortfolio();
+      this.snapshotDaily();
       this.activity.emit('status');
     } finally {
       this.ticking = false;
@@ -1351,6 +1357,23 @@ export class MultiBot {
   /** Each bot's metrics, as on its page (src/metrics/botMetrics.ts) */
   private metricsById(st = this.status()) {
     return new Map([...st.grids, ...st.trends, ...st.lps].map((b) => [b.id, b.metrics as BotMetrics | null] as const));
+  }
+
+  /** A bot's last DAILY_SHOWN days of Generated, today's up to now (metrics/daily.ts) */
+  private dailyFor(id: string, m: BotMetrics | null) {
+    return dailyOf(this.multi.daily?.[id], { generated: m?.generated ?? null, generatedUsd: m?.generatedUsd ?? null });
+  }
+  /** Today's Generated snapshot of each bot not yet read today (the 30-day calendar). */
+  private snapshotDaily() {
+    const k = dayKey(this.now()), book = this.multi.daily ?? {};
+    // most ticks: every bot already has today's snapshot, and the status isn't built
+    if ([...this.multi.grids, ...this.multi.trends, ...this.multi.lps].every((b) => book[b.id]?.[k])) return;
+    const st = this.status();
+    const bots = [...st.grids, ...st.trends, ...st.lps].map((b) => {
+      const m = b.metrics as BotMetrics | null;
+      return { id: String(b.id), generated: m?.generated ?? null, generatedUsd: m?.generatedUsd ?? null };
+    });
+    if (noteDaily((this.multi.daily ??= {}), bots, this.now())) this.persist();
   }
 
   private snapshotPortfolio() {
@@ -1867,19 +1890,27 @@ export class MultiBot {
     // actually ticks (the v2 stream sends no patch for a clock that moved), and a stopped bot's rates stop at its
     // last reading. A bot with no reading yet uses the current minute.
     const asOf = (b: { priceAt?: number | null }) => (typeof b.priceAt === 'number' && b.priceAt > 0 && b.priceAt <= now ? b.priceAt : Math.floor(now / 60_000) * 60_000);
+    const dayStart = localDayStart(now);
     const grids = this.multi.grids.map((g) => {
-      const st = (this.engines.get(g.id) ?? this.attach(g.id)).status();
+      const e = this.engines.get(g.id) ?? this.attach(g.id);
+      const st = e.status();
       const out = { ...st, kind: 'grid' as const, usdPerQuote: this.usdPerQuote(st.stable) };
-      return { ...out, metrics: gridMetrics(out, asOf(st)) };
+      const m = gridMetrics(out, asOf(st));
+      const fills = e.modeTrades();
+      return { ...out, metrics: m, daily: this.dailyFor(st.id, m), todayHours: tradeHours(fills, dayStart, now), levelHeat: levelHeat(fills, dayStart) };
     });
     const trends = this.multi.trends.map((t) => {
-      const st = (this.trendEngines.get(t.id) ?? this.attachTrend(t.id)).status();
+      const e = this.trendEngines.get(t.id) ?? this.attachTrend(t.id);
+      const st = e.status();
       const out = { ...st, usdPerQuote: this.usdPerQuote(st.quote) };
-      return { ...out, metrics: trendMetrics(out, asOf(st)) };
+      const m = trendMetrics(out, asOf(st));
+      return { ...out, metrics: m, daily: this.dailyFor(st.id, m), todayHours: tradeHours(e.modeTrades(), dayStart, now) };
     });
     const lps = this.multi.lps.map((t) => {
       const st = (this.lpEngines.get(t.id) ?? this.attachLp(t.id)).status();
-      return { ...st, metrics: lpMetrics(st, asOf(st)), day: lpDay(st, now) };
+      const m = lpMetrics(st, asOf(st));
+      const day = lpDay(st, now);
+      return { ...st, metrics: m, day, daily: this.dailyFor(st.id, m), todayHours: day ? lpHours(day) : [] };
     });
     const aggregate = liveAggregate(grids, trends, lps);
     return {

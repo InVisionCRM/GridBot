@@ -7,6 +7,7 @@ import { DeskTable } from './DeskTable';
 import { RefreshCtx, chains, useChainFilter } from './chains';
 import type { AnyObj, Nav } from './model';
 import { SafetyChecking } from './SafetyChecking';
+import { ask } from './Confirm';
 
 export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: boolean; onStopAll: () => void }) {
   const { chain } = useChainFilter();
@@ -48,9 +49,13 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
   const closable = bots.filter((b) => !isClosing(b));
   const canClear = bots.some((b) => b.status !== 'running' && !isClosing(b));
 
-  const closeAll = () => {
+  const closeAll = async () => {
     if (!closable.length) return;
-    if (!confirm(`Close ${closable.length} bot${closable.length === 1 ? '' : 's'}? Paper bots leave now. Live bots sell or withdraw on-chain, with the same safety limits.`)) return;
+    const lives = closable.filter((b) => b.mode === 'live').length;
+    if (!(await ask({
+      title: `Close ${closable.length} bot${closable.length === 1 ? '' : 's'}`, body: 'Paper bots leave now. Live bots sell or withdraw on-chain, with the same safety limits.',
+      rows: [{ k: 'live', v: `${lives}` }, { k: 'paper', v: `${closable.length - lives}` }], action: 'Close them', money: lives > 0, danger: true,
+    }))) return;
     setHide((cur) => { const n = new Set(cur); for (const b of closable) if (b.mode !== 'live') n.add(b.id); return n; });
     setPend((cur) => { const n = new Set(cur); for (const b of closable) if (b.mode === 'live') n.add(b.id); return n; });
     setRowErr(null);
@@ -59,10 +64,14 @@ export function Bots({ s, nav, busy, onStopAll }: { s: AnyObj; nav: Nav; busy: b
     });
   };
   /** Every paper bot (all chains, closed ones too), the token trader's paper positions and history, the Smart trader's paper books */
-  const resetPaper = () => {
+  const resetPaper = async () => {
     const paperBots = [...s.grids, ...(s.trends ?? []), ...(s.lps ?? [])].filter((b: AnyObj) => b.mode !== 'live').length;
     const paperPositions = ((trader?.positions ?? []) as AnyObj[]).filter((p) => p.mode !== 'live').length;
-    if (!confirm(`Reset paper on every chain? This removes ${paperBots} paper bot${paperBots === 1 ? '' : 's'} (closed ones too), the token trader's ${paperPositions} paper position${paperPositions === 1 ? '' : 's'} and its paper trades and Generated, and the Smart trader's paper books (its budgets and settings stay). Live bots, live positions and live history are not touched. This can't be undone.`)) return;
+    if (!(await ask({
+      title: 'Reset paper on every chain',
+      body: `This removes ${paperBots} paper bot${paperBots === 1 ? '' : 's'} (closed ones too), the token trader's ${paperPositions} paper position${paperPositions === 1 ? '' : 's'} and its paper trades and Generated, and the Smart trader's paper books (its budgets and settings stay). Live bots, live positions and live history are not touched. This can't be undone.`,
+      action: 'Reset paper', danger: true,
+    }))) return;
     setRowErr(null);
     setResetNote(null);
     void http<AnyObj>('/api/paper/reset', 'POST').then((r) => {

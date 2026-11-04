@@ -7,6 +7,7 @@ import { http } from './api';
 import { L, Tip } from './Tip';
 import { explorerTx } from './chains';
 import type { AnyObj } from './model';
+import { ask } from './Confirm';
 
 export interface Coin { id: string; address: string | null; symbol: string; name: string; decimals: number; tracked: boolean }
 export interface PlanRow { coin: Coin; balance: number; bots: number; keep: number; amount: number; steps: string[]; out: number | null; impact: number | null; gasNative: number | null; ok: boolean; why: string | null }
@@ -79,7 +80,11 @@ export function Convert({ s }: { s: AnyObj }) {
   const run = async () => {
     if (!plan || !chain || blocked) return;
     const list = chosen.map((r) => `${amt(amountOf(r))} ${r.coin.symbol}`).join(', ');
-    if (!confirm(`Convert ${list} into ${plan.target.symbol} on ${chain.name}?\n\nThis sends real transactions from ${plan.owner}, one coin at a time. You should get about ${amt(total)} ${plan.target.symbol}.`)) return;
+    if (!(await ask({
+      title: `Convert into ${plan.target.symbol}`, body: `This sends real transactions on ${chain.name} from ${plan.owner}, one coin at a time.`,
+      rows: [{ k: 'you pay', v: list }, { k: 'you get, about', v: `${amt(total)} ${plan.target.symbol}`, tone: 'pos' }],
+      action: 'Convert', money: true,
+    }))) return;
     try {
       const r = await http<{ job: Job }>('/api/convert/run', 'POST', { planId: plan.id, coins: chosen.map((x) => ({ id: x.coin.id, amount: amountOf(x) })) });
       setJob(r.job); setPlan(null);

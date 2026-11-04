@@ -12,6 +12,7 @@ import { unitsText } from './deskStats';
 import { ENFORCED_LIQUIDITY_FLOOR_USD, shownMinLiquidityUsd } from '../market/liquidityFloor';
 import { coinNum, ethToUsd, inEth, usdToEth, useEthUsd } from './units';
 import { VENUES } from '../live/venues';
+import { ask } from './Confirm';
 
 /**
  * A limit the server keeps in dollars, typed and shown in ETH (units.tsx: which ETH price). Saved on blur as
@@ -44,8 +45,8 @@ export function runExitsConfirmText(n: number): string {
  * "Keep fully off" changes nothing and needs no confirm. null = cancelled (nothing posted).
  */
 export async function pickChoice(mode: 'exits' | 'full', livePositions: number,
-  d: { confirm: (msg: string) => boolean; post: (mode: 'exits' | 'full') => Promise<AnyObj> }): Promise<AnyObj | null> {
-  if (mode === 'exits' && !d.confirm(runExitsConfirmText(livePositions))) return null;
+  d: { confirm: (msg: string) => boolean | Promise<boolean>; post: (mode: 'exits' | 'full') => Promise<AnyObj> }): Promise<AnyObj | null> {
+  if (mode === 'exits' && !(await d.confirm(runExitsConfirmText(livePositions)))) return null;
   return d.post(mode);
 }
 
@@ -64,7 +65,7 @@ export function TokenTraderChoiceBanner() {
   const pick = async (mode: 'exits' | 'full') => {
     setBusy(true);
     try {
-      const x = await pickChoice(mode, c.livePositions, { confirm: (m) => confirm(m), post: (m) => http('/api/token-trader/off', 'POST', { mode: m }) });
+      const x = await pickChoice(mode, c.livePositions, { confirm: (m) => ask({ title: 'Run exits now', body: m, action: 'Run exits', money: true, danger: true }), post: (m) => http('/api/token-trader/off', 'POST', { mode: m }) });
       if (x) { setC(x?.pendingChoice ?? null); setErr(null); }
     } catch (e) { setErr(errMsg(e)); } finally { setBusy(false); }
   };
@@ -204,12 +205,19 @@ export function modeLabel(t: AnyObj, o: AnyObj): string {
 
 export async function offCompletely(t: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<unknown>) {
   const n = t.positions?.length ?? 0;
-  if (!confirm(`Turn the token trader off completely? Nothing will run: no buys, no snipes and no exits.${n ? ` The stop-losses and take-profits of its ${n} open position(s) will NOT be watched until you turn it on or back to "Off for new buys".` : ''}`)) return;
+  if (!(await ask({
+    title: 'Turn the token trader off completely', body: `Nothing will run: no buys, no snipes and no exits.${n ? ` The stop-losses and take-profits of its ${n} open position(s) will NOT be watched until you turn it on or back to "Off for new buys".` : ''}`,
+    action: 'Turn it off completely', danger: true,
+  }))) return;
   await run(() => http('/api/token-trader/off', 'POST', { mode: 'full' }));
 }
 
 export async function startTrader(o: AnyObj, run: (fn: () => Promise<AnyObj>) => Promise<unknown>, ethUsd: number | null) {
-  if (o.mode === 'live' && !confirm(`Turn the token trader on with real money? Up to ${inEth(o.perTradeUsd, ethUsd)} a trade and ${inEth(o.totalUsd, ethUsd)} open. The sniper is ${o.sniper.on ? 'on' : 'off'}.`)) return;
+  if (o.mode === 'live' && !(await ask({
+    title: 'Turn the token trader on with real money', body: 'It buys and sells on its own, within these limits.',
+    rows: [{ k: 'per trade, up to', v: inEth(o.perTradeUsd, ethUsd) }, { k: 'open at once, up to', v: inEth(o.totalUsd, ethUsd) }, { k: 'sniper', v: o.sniper.on ? 'on' : 'off' }],
+    action: 'Turn it on', money: true,
+  }))) return;
   await run(() => http('/api/token-trader/on', 'POST'));
 }
 
