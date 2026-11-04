@@ -359,30 +359,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
 
       <Hero b={b} />
 
-      <div className="lpb-main">
-        <div className="lpb-col">
-          {day ? <FeesByHour day={day} base={base} quote={q} startedAt={typeof b.startedAt === 'number' ? b.startedAt : null} /> : null}
-          {day ? <DayMoves day={day} all={(b.done ?? []) as LpDone[]} base={base} quote={q} /> : null}
-          <StartToNow b={b} quote={q} />
-        </div>
-        <div className="lpb-col">
-          <div className="lpb-card" data-testid="position-card">
-            <h3 className="lpb-label">{pos ? (b.inRange ? 'Position · in range, earning' : 'Position · out of range') : closed ? 'Closed' : 'No position open'}</h3>
-            {pos ? <>
-              <RangeHealth b={b} act={act} busy={busy} />
-              {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
-              <p className="muted small">{openedText(b, pos)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{+((b.config?.bandPct ?? 0) * 100).toFixed(2)}% wide</p>
-            </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
-            {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
-            {(b.aside?.base > 0 || b.aside?.quote > 0) && <p className="muted small">Set aside: {num(b.aside.base, 6)} {base} + {num(b.aside.quote, 6)} {q} (kept out so the position stays under 10% of the pool's active liquidity; it is counted in Value and goes back to your wallet when the bot closes)</p>}
-          </div>
-          <GeneratedPace b={b} />
-          <LpSettings key={`${b.profits?.mode}-${b.profits?.to ?? ''}`} b={b} act={act} busy={busy} />
-        </div>
-      </div>
-
-      <MoneyDetails b={b} breakdown={lpBreakdown(b)} hide={['Deposit', 'Value now', 'Price change', 'Open positions']} note="fees earned − costs = Generated, total P&L, price change" />
-
+      {/* the price chart and the position first, side by side, as before the day cards (Kyle 2026-11-04) */}
       <div className="split wide-left">
         <div className="lpb-card">
           <h3 className="lpb-label">Price and range</h3>
@@ -390,8 +367,33 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <p className="muted small">The amber lines are the position's range. It earns fees while the price is between them.</p>
           <StatTable b={b} s={s} hide={[...(metricsOf(b)?.generatedRate.d1 ? LP_SHOWN_ELSEWHERE : LP_SHOWN_ELSEWHERE.filter((k) => k !== 'Age')), 'APR']} />
         </div>
-        <div className="lpb-card"><h3 className="lpb-label">Log</h3><BotLog events={events} botId={b.id} /></div>
+        <div className="lpb-card" data-testid="position-card">
+          <h3 className="lpb-label">{pos ? (b.inRange ? 'Position · in range, earning' : 'Position · out of range') : closed ? 'Closed' : 'No position open'}</h3>
+          {pos ? <>
+            <RangeHealth b={b} act={act} busy={busy} />
+            {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
+            <p className="muted small">{openedText(b, pos)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{+((b.config?.bandPct ?? 0) * 100).toFixed(2)}% wide</p>
+          </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
+          {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
+          {(b.aside?.base > 0 || b.aside?.quote > 0) && <p className="muted small">Set aside: {num(b.aside.base, 6)} {base} + {num(b.aside.quote, 6)} {q} (kept out so the position stays under 10% of the pool's active liquidity; it is counted in Value and goes back to your wallet when the bot closes)</p>}
+        </div>
       </div>
+
+      <div className="lpb-main">
+        <div className="lpb-col">
+          {day ? <FeesByHour day={day} base={base} quote={q} startedAt={typeof b.startedAt === 'number' ? b.startedAt : null} /> : null}
+          {day ? <DayMoves day={day} all={(b.done ?? []) as LpDone[]} base={base} quote={q} /> : null}
+          <StartToNow b={b} quote={q} />
+        </div>
+        <div className="lpb-col">
+          <GeneratedPace b={b} />
+          <LpSettings key={`${b.profits?.mode}-${b.profits?.to ?? ''}`} b={b} act={act} busy={busy} />
+        </div>
+      </div>
+
+      <MoneyDetails b={b} breakdown={lpBreakdown(b)} hide={['Deposit', 'Value now', 'Price change', 'Open positions']} note="fees earned − costs = Generated, total P&L, price change" />
+
+      <div className="lpb-card"><h3 className="lpb-label">Log</h3><BotLog events={events} botId={b.id} /></div>
     </main>
   );
 }
