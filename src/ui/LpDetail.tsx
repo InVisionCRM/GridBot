@@ -408,13 +408,14 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
         <div className="lpb-card" data-testid="position-card">
           <h3 className="lpb-label">{pos ? (b.inRange ? 'Position · in range, earning' : 'Position · out of range') : closed ? 'Closed' : 'No position open'}</h3>
+          {/* first in the card: the coins below are the position only, and the set-aside part is still the bot's (Kyle 2026-11-04) */}
+          {(b.aside?.base > 0 || b.aside?.quote > 0) && <p className="lpb-aside">Set aside: {num(b.aside.base, 6)} {base} + {num(b.aside.quote, 6)} {q}, in your wallet and still this bot's. It was kept out so the position stays under 10% of the pool's trading liquidity; the next range move puts it back in if the pool has room, and it comes back to you when the bot closes. The coins below are what is in the position.</p>}
           {pos ? <>
             <RangeHealth b={b} act={act} busy={busy} />
             {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
             <p className="muted small">{openedText(b, pos)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{+((b.config?.bandPct ?? 0) * 100).toFixed(2)}% wide</p>
           </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
           {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
-          {(b.aside?.base > 0 || b.aside?.quote > 0) && <p className="muted small">Set aside: {num(b.aside.base, 6)} {base} + {num(b.aside.quote, 6)} {q} (kept out so the position stays under 10% of the pool's active liquidity; it is counted in Value and goes back to your wallet when the bot closes)</p>}
         </div>
       </div>
 
