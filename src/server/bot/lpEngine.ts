@@ -31,7 +31,6 @@ import {
   type LpCompoundPolicy, type LpRangePolicy, type RangeWait,
 } from '../../market/lpPolicy';
 import { atr } from '../../market/indicators';
-import { DEFAULT_MAX_POOL_SHARE } from '../../market/poolSize';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
 import { fromUnits } from '../../live/swapMath';
@@ -148,6 +147,12 @@ export interface LpState {
   config: {
     bandPct: number; capital: number; baseAmount: number; rerange: boolean;
     range?: LpRangePolicy; compound?: LpCompoundPolicy;
+    /**
+     * Only the smart trader's bots have it (it sizes them itself): at each open, coins that would take the position past
+     * this share of the pool's active liquidity are set aside. A bot you start has none: it is the size you chose
+     * (Kyle 2026-11-04); the swap's price-impact cap still applies to every bot.
+     */
+    maxPoolShare?: number;
   } | null;
   limits: SafetyLimits;
   profits: ProfitMode;
@@ -155,8 +160,9 @@ export interface LpState {
   /** The bot's coins outside the position (leftovers of the mix, coins between steps) */
   idle: Coins;
   /**
-   * Capital that could not enter without taking too much of the pool or crossing the price-impact cap.
-   * It stays out of this open's swap and position, and is checked against the cap again at the next open. Old saves omit it.
+   * Capital that could not enter without taking more than config.maxPoolShare of the pool (smart trader bots; bots saved
+   * before 2026-11-04 had the cap too). It stays out of this open's swap and position and goes back in at the next open,
+   * where the cap, if the bot has one, is checked again. Old saves omit it.
    */
   aside?: Coins;
   step: LpStep | null;
@@ -225,6 +231,8 @@ export interface LpStartParams {
   range?: Partial<LpRangePolicy>;
   /** Omit to leave fees in the position until a move or a close. */
   compound?: Partial<LpCompoundPolicy>;
+  /** The smart trader's bots only: the most of the pool's active liquidity the position may be (0–1). Omit for no cap. */
+  maxPoolShare?: number;
   profits?: ProfitMode;
   limits?: Partial<SafetyLimits>;
   /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
@@ -468,6 +476,7 @@ export class LpEngine {
     if (profits.mode === 'send' && this.signer && sameAddr(await this.signer.getAddress(), profits.to)) throw new Error('That is the bot\'s own wallet: fees already stay there when reinvested.');
     const range = p.range ? checkRangePolicy(p.range) : undefined;
     const compound = p.compound ? compoundPolicy(p.compound) : undefined;
+    if (p.maxPoolShare !== undefined && !(p.maxPoolShare > 0 && p.maxPoolShare < 1)) throw new Error('Max pool share must be between 0 and 1.');
     const stoppedBy = p.guard?.();
     if (stoppedBy) {
       this.state.halt = { ...stoppedBy, at: this.now() };
@@ -478,7 +487,7 @@ export class LpEngine {
     this.state = {
       ...this.state, status: 'running', config: {
         bandPct: p.bandPct, capital: p.capital, baseAmount, rerange: p.rerange ?? true,
-        ...(range ? { range } : {}), ...(compound ? { compound } : {}),
+        ...(range ? { range } : {}), ...(compound ? { compound } : {}), ...(p.maxPoolShare !== undefined ? { maxPoolShare: p.maxPoolShare } : {}),
       },
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },
       step: { action: 'open', stage: 'swap', tries: 0, asked: true }, outSince: null, lastRerangeAt: null, reranges: 0, seen: null,
@@ -614,6 +623,13 @@ export class LpEngine {
   setRerange(enabled: boolean) {
     if (!this.state.config) throw new Error('Start it first.');
     this.state.config.rerange = enabled;
+    this.save();
+  }
+  /** The smart trader's cap on a bot it opened before the cap was a per-bot setting (2026-11-04). Saved. */
+  setMaxPoolShare(share: number) {
+    if (!this.state.config) throw new Error('Start it first.');
+    if (!(share > 0 && share < 1)) throw new Error('Max pool share must be between 0 and 1.');
+    this.state.config.maxPoolShare = share;
     this.save();
   }
   /** Replace the optional gates. Omitted side is left as saved. Absent fields inside a side use the defaults. */
@@ -1126,10 +1142,13 @@ export class LpEngine {
   }
 
   /**
-   * A deposit bigger than 10% of the active range is cut back. Reported USD liquidity counts out-of-range
-   * liquidity, so the cap uses the active liquidity the pool reports now.
+   * Smart trader bots (config.maxPoolShare): a deposit bigger than that share of the active range is cut back. Reported
+   * USD liquidity counts out-of-range liquidity, so the cap uses the active liquidity the pool reports now. Bots
+   * without it are never cut back here.
    */
   private parkOversize(pool: LpPool, v: PoolView, tickLower: number, tickUpper: number) {
+    const cap = this.state.config?.maxPoolShare;
+    if (cap === undefined) return;
     const poolL = Number(v.liquidity);
     if (!(poolL > 0)) return;
     const active = pool.coinsFor(poolL, tickLower, tickUpper, v);
@@ -1137,12 +1156,12 @@ export class LpEngine {
     if (!(activeQuote > 0) || !Number.isFinite(activeQuote)) return;
     const idle = this.state.idle;
     const value = idle.base * v.price + idle.quote;
-    const maxValue = (DEFAULT_MAX_POOL_SHARE / (1 - DEFAULT_MAX_POOL_SHARE)) * activeQuote;
+    const maxValue = (cap / (1 - cap)) * activeQuote;
     if (!(value > maxValue * 1.02)) return;
     const keep = maxValue / value;
     const drop = { base: idle.base * (1 - keep), quote: idle.quote * (1 - keep) };
     this.park(drop);
-    this.noteOnce(`set aside ${drop.quote.toPrecision(4)} ${this.quoteSym} + ${drop.base.toPrecision(4)} ${this.baseSym}: more than ${(DEFAULT_MAX_POOL_SHARE * 100).toFixed(0)}% of the pool's active liquidity`);
+    this.noteOnce(`set aside ${drop.quote.toPrecision(4)} ${this.quoteSym} + ${drop.base.toPrecision(4)} ${this.baseSym}: more than ${+(cap * 100).toFixed(2)}% of the pool's active liquidity`);
   }
 
   /**
@@ -1364,9 +1383,9 @@ export class LpEngine {
       const band = s.rangeBand ?? this.bandFor(v);
       s.range = pool.ticksFor(v.price * (1 - band), v.price * (1 + band), v);
     }
-    // Coins set aside at an earlier open get another look at every open: back with the rest, so the cap below keeps
-    // out only what is over 10% of the active liquidity now. Kept apart for good, they sat in the wallet once the
-    // pool had room (Kyle's CASHCAT/ETH, 2026-11-04: 1.41 ETH + 3,501 CASHCAT out while the position was 6.4%).
+    // Coins set aside at an earlier open go back in at every open, so a smart trader bot's cap below keeps out only what
+    // is over its share of the active liquidity now, and a bot without a cap puts it all back. Kept apart for good,
+    // they sat in the wallet (Kyle's CASHCAT/ETH, 2026-11-04: 1.41 ETH + 3,501 CASHCAT out while the position was 6.4%).
     this.unpark();
     this.parkOversize(pool, v, s.range.tickLower, s.range.tickUpper);
     const share = pool.baseShare(s.range.tickLower, s.range.tickUpper, v);
@@ -1510,12 +1529,28 @@ export class LpEngine {
     s.stage = next;
   }
 
+  /**
+   * The coins it can use make no position in this range: the swap to the range's mix was left out because even 1% of
+   * the bot's value would move the price past the price-impact cap (a pool far too thin for the amount), or the wallet
+   * holds less than the bot's coins. Stopped once with the reason, not an error on every tick.
+   */
+  private cannotFund(): never {
+    const i = this.state.idle, cap = (this.state.limits.maxPriceImpact * 100).toFixed(2);
+    const msg = `can't open the position: ${i.base.toPrecision(4)} ${this.baseSym} + ${i.quote.toPrecision(4)} ${this.quoteSym} make no position in this range, `
+      + `and swapping to the range's mix would move the price more than the ${cap}% price-impact cap (the pool is too thin for this amount), or the wallet holds less. `
+      + 'Stopped: close it to have the coins back, or resume once the pool is deeper.';
+    this.state.halt = systemHalt('error', msg, this.now());
+    this.state.status = 'stopped';
+    this.save();
+    throw new Error(msg);
+  }
+
   /** Open the position with the idle coins (what the range can take; the rest stays idle). */
   private async mint(pool: LpPool, v: PoolView, s: LpStep) {
     const range = s.range!;
     if (this.state.mode === 'paper') {
       const { L, used } = pool.fund(this.state.idle, range.tickLower, range.tickUpper, v);
-      if (!(L > 0)) throw new Error('nothing to put in the position');
+      if (!(L > 0)) this.cannotFund();
       const snap = await this.hub.quoter(this.state.market).market();
       this.addGas(this.gasQuote(LP_GAS.v3.open, v, snap), v);
       const inRange = v.tick >= range.tickLower && v.tick < range.tickUpper;
@@ -1536,7 +1571,7 @@ export class LpEngine {
       quote: Math.min(this.state.idle.quote, pool.def.quote.native ? Math.max(0, bal.stable - keep) : bal.stable),
     };
     const { L, used } = pool.fund(have, range.tickLower, range.tickUpper, v);
-    if (!(L > 0)) throw new Error('nothing to put in the position');
+    if (!(L > 0)) this.cannotFund();
     const want = pool.rawAmounts(have, v), min = pool.rawAmounts(used, v), k = 1 - this.state.limits.slippageBps / 10_000;
     const [token0, token1] = v.baseIs0 ? [pool.baseAddr, pool.quoteAddr] : [pool.quoteAddr, pool.baseAddr];
     const nativeIs0 = pool.def.base.native ? v.baseIs0 : pool.def.quote.native ? !v.baseIs0 : null;

@@ -176,6 +176,10 @@ export class Autopilot {
     this.state = upgrade(raw);
     // Version 1 kept its swaps' gas apart; it now comes out of the account's own coin of the chain
     if (raw && raw.version !== 2) for (const a of this.state.accounts) if (this.chainOn(a.budget.chainId)) this.add(a, this.nativeSym(a.budget.chainId), -a.gasNative);
+    // Its liquidity bots opened before the pool-share cap became a per-bot setting (2026-11-04) keep the cap they had
+    for (const a of this.state.accounts) for (const b of a.bots) {
+      if (b.kind === 'lp' && d.bot.hasBot('lp', b.id) && d.bot.lpMaxPoolShare(b.id) === undefined && !d.bot.botCashedOut('lp', b.id)) d.bot.setLpMaxPoolShare(b.id, DEFAULT_MAX_POOL_SHARE);
+    }
     d.bot.holdings = () => this.holdings();
     d.bot.stopHooks.push((chainId, halt) => this.kill(chainId, halt));
   }
@@ -803,7 +807,7 @@ export class Autopilot {
       try {
         id = c.how === 'grid'
           ? await bot.add({ mode, stable: market, lowerPrice: price! * (1 - c.o.grid!.bandPct), upperPrice: price! * (1 + c.o.grid!.bandPct), gridCount: c.o.grid!.gridCount, totalCapitalQuote: amount, recenter: true })
-          : await bot.addLp({ mode, market, bandPct: c.o.lp!.bandPct, capital: amount, rerange: true });
+          : await bot.addLp({ mode, market, bandPct: c.o.lp!.bandPct, capital: amount, rerange: true, maxPoolShare: DEFAULT_MAX_POOL_SHARE });
       } catch (e) { this.add(a, spend, amount + reserve); throw e; }
       a.bots.push({
         id, kind: c.how, pool: poolId({ ...c.o, key: market }, c.how), pair: c.pair, label: c.label, market, spend, capital: amount, reserve,

@@ -81,9 +81,61 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s.poolShare).toBeCloseTo(Number(L) / Number(poolL + L), 12);
   });
 
-  it('coins set aside for the 10% pool-share cap go back in at the next re-open when the pool has room (Kyle 2026-11-04: CASHCAT/ETH)', async () => {
+  it("a bot you start is never cut back to a share of the pool: a thin pool sets nothing aside (Kyle 2026-11-04)", async () => {
     const { lp, m, pool } = world();
     await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    const p = m.v3ByAddr(pool);
+    p.r0 /= 1000n; p.r1 /= 1000n;
+    await lp.tick();
+    const s = lp.status();
+    expect(s.config!.maxPoolShare).toBeUndefined();
+    expect(s.aside).toEqual({ base: 0, quote: 0 });
+    // this pool is so thin that even a 1% swap moves the price past the 3% cap: it stops once, saying why, and keeps the coins
+    expect(s.position).toBeNull();
+    expect(lp.state.status).toBe('stopped');
+    expect(lp.state.halt!.detail).toMatch(/too thin for this amount/);
+    expect(lp.state.idle).toEqual({ base: 0, quote: 1000 });
+  });
+
+  it('a bot you start in a pool it is a large share of opens with everything (no 10% cut)', async () => {
+    const { lp, m, pool } = world();
+    // 10× thinner: the position is about 24% of the active liquidity (the old cap held it to 10%), and the swap to the
+    // mix fits the price-impact cap, so everything goes in
+    const p = m.v3ByAddr(pool);
+    p.r0 /= 10n; p.r1 /= 10n;
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.tick();
+    const s = lp.status();
+    expect(s.aside).toEqual({ base: 0, quote: 0 });
+    expect(s.poolShare!).toBeGreaterThan(0.1);
+    const inPosition = s.coins!.base * s.price! + s.coins!.quote;
+    expect(inPosition).toBeGreaterThan(0.98 * s.value!);
+  });
+
+  it('coins an older version set aside (no cap on the bot) all go back in at the next move', async () => {
+    const { lp, m, pool } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 600 });
+    await lp.tick();
+    // what a bot saved before 2026-11-04 looks like: 400 DAI set aside, no cap in its config
+    lp.state.aside = { base: 0, quote: 400 };
+    m.movePrice(pool, 1.2);
+    await lp.tick();
+    const s = lp.status();
+    expect(s.reranges).toBe(1);
+    expect(s.aside).toEqual({ base: 0, quote: 0 });
+    const inPosition = s.coins!.base * s.price! + s.coins!.quote;
+    expect(inPosition).toBeGreaterThan(0.95 * s.value!);
+    expect(s.value!).toBeGreaterThan(900);
+  });
+
+  it('rejects a pool-share cap outside 0–1', async () => {
+    const { lp } = world();
+    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, maxPoolShare: 1 })).rejects.toThrow(/between 0 and 1/);
+  });
+
+  it("a smart trader bot's coins set aside for its pool-share cap go back in at the next re-open when the pool has room (Kyle 2026-11-04: CASHCAT/ETH)", async () => {
+    const { lp, m, pool } = world();
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, maxPoolShare: 0.1 });
     // a thin pool when it opens: most of the 1000 DAI would be over 10% of the active liquidity, so it is set aside
     const p = m.v3ByAddr(pool);
     p.r0 /= 1000n; p.r1 /= 1000n;
