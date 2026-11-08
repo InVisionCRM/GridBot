@@ -1,38 +1,8 @@
 /**
- * The Token trader page's figures (pure): the three styles, the scorecard of closed sells, the radar's blips and the
- * discovery cycle. A position's exit distances come from the server (market/tokenTrader.ts exitTargets).
+ * The Token trader page's figures (pure): the scorecard of closed sells, the radar's blips and the discovery cycle
+ * (the three strategies are market/tokenStrategy.ts). A position's exit distances come from the server (market/tokenTrader.ts exitTargets).
  */
 import type { AnyObj } from './model';
-
-export type StyleId = 'careful' | 'balanced' | 'wild';
-type Patch = {
-  risk: 'safe' | 'medium' | 'any'; enforceWashAndAge: boolean; enforceOwnerPowers: boolean;
-  enforceLiquidityFloor: boolean; enforceHolderCheck: boolean; enforceSizeImpact: boolean;
-};
-export interface Style { id: StyleId; name: string; line: string; patch: Patch }
-
-/** One click sets the risk level and the optional checks together. Anything else set by hand shows as Custom. */
-export const STYLES: Style[] = [
-  {
-    id: 'careful', name: 'Careful', line: 'Low-risk coins only, every extra check on: pool age and wash volume, owner powers, holders, the liquidity floor, impact at the real size.',
-    patch: { risk: 'safe', enforceWashAndAge: true, enforceOwnerPowers: true, enforceLiquidityFloor: true, enforceHolderCheck: true, enforceSizeImpact: true },
-  },
-  {
-    id: 'balanced', name: 'Balanced', line: 'Also coins with a tax (launcher pools) or an upgradeable contract. Age, wash, owner and impact checks stay on; no holder check (it reads too few holders on most new launcher coins) and no liquidity floor.',
-    patch: { risk: 'medium', enforceWashAndAge: true, enforceOwnerPowers: true, enforceLiquidityFloor: false, enforceHolderCheck: false, enforceSizeImpact: true },
-  },
-  {
-    id: 'wild', name: 'Wild', line: 'Anything the safety check lets trade, brand-new pools included. The extra checks are off; honeypots and sell-blocked coins are still refused.',
-    patch: { risk: 'any', enforceWashAndAge: false, enforceOwnerPowers: false, enforceLiquidityFloor: false, enforceHolderCheck: false, enforceSizeImpact: false },
-  },
-];
-
-/** The style these options match exactly, or null (set by hand: Custom). */
-export function styleOf(o: AnyObj | null | undefined): StyleId | null {
-  if (!o) return null;
-  const hit = STYLES.find((s) => (Object.keys(s.patch) as (keyof Patch)[]).every((k) => (o[k] ?? false) === s.patch[k]));
-  return hit?.id ?? null;
-}
 
 export interface Scorecard { sells: number; wins: number; winRate: number | null; best: AnyObj | null; worst: AnyObj | null }
 /** Closed sells with a result: how many won, the best and the worst (by their result in dollars, shown in coins) */

@@ -4,7 +4,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ExitLine, TokenTraderPage } from '../src/ui/TokenTraderPage';
 import { SmartTrader } from '../src/ui/SmartTrader';
-import { DEPTH, STYLES, lookCycle, radarBlips, radarSectors, scorecard, styleOf } from '../src/ui/tokenModel';
+import { DEPTH, lookCycle, radarBlips, radarSectors, scorecard } from '../src/ui/tokenModel';
+import { TOKEN_STRATEGIES as STYLES, tokenStrategyOf as styleOf } from '../src/market/tokenStrategy';
 import { normalizeView } from '../src/ui/model';
 import { S, TRADER } from './helpers/unitsScreens';
 

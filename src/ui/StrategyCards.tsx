@@ -82,7 +82,7 @@ export function OrderFields({ o, set, base, quote, stepPct, spot }: { o: OneSide
 
 /* ── the moving pictures: price over time, left to right; the band is the position ── */
 
-function Captions({ lines }: { lines: string[] }) {
+export function Captions({ lines }: { lines: string[] }) {
   return <g className="sx-cap">{lines.map((t, i) => <text key={i} x="10" y="16" className={`c${i + 1}`}>{t}</text>)}</g>;
 }
 
