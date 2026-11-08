@@ -2031,6 +2031,9 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 .lpb { gap: 14px; }
 .lpb-card { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; animation: lpb-rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .lpb-card.lead { border-color: var(--profit); box-shadow: 0 0 0 1px rgba(92, 208, 141, 0.15), 0 0 24px rgba(92, 208, 141, 0.08); }
+.lpb-card.lead.neg { border-color: var(--loss); box-shadow: 0 0 0 1px rgba(242, 112, 107, 0.18), 0 0 24px rgba(242, 112, 107, 0.1); }
+.lpb-sub.lpb-parts { white-space: normal; }
+.warn-text { color: var(--warn); }
 .lpb-label { display: block; font: 500 0.72rem/1.3 var(--font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0; }
 .lpb-hint { font: 0.7rem/1.5 var(--mono); color: var(--muted); margin-top: 2px; }
 .lpb-sub { display: block; font: 0.74rem/1.45 var(--mono); color: var(--muted); margin-top: 4px; }
@@ -2259,3 +2262,62 @@ main.stack > :nth-child(n+6) { animation-delay: 0.25s; }
 .dk-big .live-chip { top: 50%; margin-top: -9px; right: auto; left: calc(100% + 12px); }
 /* the set-aside notice at the top of the liquidity position card */
 .lpb-aside { margin-top: 10px; padding: 8px 10px; border-left: 3px solid var(--warn); background: var(--warn-bg); border-radius: 6px; font-size: 0.8rem; line-height: 1.45; color: var(--secondary); }
+
+/* ── New bot → Liquidity: the three strategy cards and their moving pictures (StrategyCards.tsx, 2026-11-08) ── */
+.strat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.strat-card { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.strat-card.on { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(92, 208, 141, 0.18); }
+.strat-card h3 { margin: 0; font-size: 0.98rem; }
+.strat-card p { margin: 0; font-size: 0.84rem; line-height: 1.45; color: var(--secondary); }
+.strat-card .strat-risk { color: var(--warn); }
+.strat-pic { border-radius: 10px; background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+.order-fields { display: grid; gap: 8px; margin: 8px 0; }
+.sx { width: 100%; height: auto; display: block; }
+.sx text { font: 500 10px/1 var(--mono); fill: var(--secondary); }
+.sx .sx-lbl { fill: var(--muted); font-size: 9px; }
+.sx-band { fill: rgba(245, 184, 65, 0.10); stroke: var(--warn); stroke-dasharray: 4 3; }
+.sx-price { fill: none; stroke: var(--text); stroke-width: 1.6; stroke-linecap: round; stroke-dasharray: 430; stroke-dashoffset: 430; animation: sx-draw 10s linear infinite; }
+.sx-fees { fill: var(--profit); transform-origin: 10px 0; transform: scaleX(0); animation: sx-fees 10s linear infinite; }
+.sx-cap text { opacity: 0; animation-duration: 10s; animation-timing-function: steps(1); animation-iteration-count: infinite; }
+.sx-cap .c1 { animation-name: sx-c1; } .sx-cap .c2 { animation-name: sx-c2; } .sx-cap .c3 { animation-name: sx-c3; } .sx-cap .c4 { animation-name: sx-c4; }
+@keyframes sx-draw { to { stroke-dashoffset: 0; } }
+@keyframes sx-fees { 0% { transform: scaleX(0); } 55% { transform: scaleX(0.55); } 78% { transform: scaleX(0.55); } 100% { transform: scaleX(1); } }
+@keyframes sx-c1 { 0%, 54% { opacity: 1; } 55%, 100% { opacity: 0; } }
+@keyframes sx-c2 { 0%, 54% { opacity: 0; } 55%, 77% { opacity: 1; } 78%, 100% { opacity: 0; } }
+@keyframes sx-c3 { 0%, 77% { opacity: 0; } 78%, 100% { opacity: 1; } }
+@keyframes sx-c4 { 0%, 100% { opacity: 0; } }
+/* orders: a 12 s loop, four captions; the buy order turns into the coin it bought as the price falls through it, then a sell order above */
+.sx-o .sx-price { stroke-dasharray: 360; stroke-dashoffset: 360; animation-duration: 12s; }
+.sx-o .sx-cap text { animation-duration: 12s; }
+.sx-o .sx-cap .c1 { animation-name: sx-o1; } .sx-o .sx-cap .c2 { animation-name: sx-o2; } .sx-o .sx-cap .c3 { animation-name: sx-o3; } .sx-o .sx-cap .c4 { animation-name: sx-o4; }
+@keyframes sx-o1 { 0%, 34% { opacity: 1; } 35%, 100% { opacity: 0; } }
+@keyframes sx-o2 { 0%, 34% { opacity: 0; } 35%, 59% { opacity: 1; } 60%, 100% { opacity: 0; } }
+@keyframes sx-o3 { 0%, 59% { opacity: 0; } 60%, 79% { opacity: 1; } 80%, 100% { opacity: 0; } }
+@keyframes sx-o4 { 0%, 79% { opacity: 0; } 80%, 100% { opacity: 1; } }
+.sx-buy { fill: rgba(91, 141, 239, 0.22); stroke: var(--hold); }
+.sx-got { fill: rgba(245, 184, 65, 0.55); }
+.sx-sell { fill: rgba(245, 184, 65, 0.22); stroke: var(--warn); }
+.sx-sold { fill: rgba(91, 141, 239, 0.6); }
+.sx-fill1 { transform-origin: 10px 0; transform: scaleX(0); animation: sx-fill1 12s linear infinite; }
+.sx-fill2 { transform-origin: 170px 0; transform: scaleX(0); animation: sx-fill2 12s linear infinite; }
+.sx-sell-g { opacity: 0; animation: sx-sellg 12s steps(1) infinite; }
+@keyframes sx-fill1 { 0%, 36% { transform: scaleX(0); } 58%, 100% { transform: scaleX(1); } }
+@keyframes sx-fill2 { 0%, 76% { transform: scaleX(0); } 94%, 100% { transform: scaleX(1); } }
+@keyframes sx-sellg { 0%, 59% { opacity: 0; } 60%, 100% { opacity: 1; } }
+/* stable: the fee bar grows until the depeg; the stop line shows then */
+.sx-s .sx-price { stroke-dasharray: 330; stroke-dashoffset: 330; }
+.sx-s .sx-fees { animation-name: sx-fees-s; }
+@keyframes sx-fees-s { 0% { transform: scaleX(0); } 78% { transform: scaleX(1); } 100% { transform: scaleX(1); } }
+.sx-s .sx-cap .c1 { animation-name: sx-s1; } .sx-s .sx-cap .c2 { animation-name: sx-s2; }
+@keyframes sx-s1 { 0%, 77% { opacity: 1; } 78%, 100% { opacity: 0; } }
+@keyframes sx-s2 { 0%, 77% { opacity: 0; } 78%, 100% { opacity: 1; } }
+.sx-stop { opacity: 0; animation: sx-stop 10s steps(1) infinite; }
+.sx-stop line { stroke: var(--loss); stroke-width: 1.5; stroke-dasharray: 3 3; }
+.sx-stop text { fill: var(--loss); }
+@keyframes sx-stop { 0%, 81% { opacity: 0; } 82%, 100% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .sx * { animation: none !important; }
+  .sx-price { stroke-dashoffset: 0 !important; }
+  .sx-fees, .sx-fill1, .sx-fill2 { transform: none !important; }
+  .sx-sell-g, .sx-stop, .sx-cap .c1 { opacity: 1 !important; }
+}

@@ -75,9 +75,12 @@ export function repeats(parts: string[]): string[] {
 
 const page = { s: S, events: [], ticks: { prices: {} }, nav: noop, act: noop, busy: false };
 
-/** Kyle's rules: crypto units only (no dollars, even with the "$" switch on), no Realized / Unrealized labels. */
+/**
+ * Kyle's rules: crypto units only (no dollars, even with the "$" switch on), no Realized / Unrealized labels. The one
+ * dollar figure allowed: beside a liquidity bot's Result, on the line with its share of what was put in (2026-11-08).
+ */
 export function dollarsOrRealized(html: string): string[] {
-  const text = html.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&amp;/g, '&');
+  const text = html.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&amp;/g, '&').replace(/of what you put in · [−+]?\$[\d,.]+/g, 'of what you put in');
   const attrs = [...html.matchAll(/title="([^"]*)"/g)].map((m) => m[1]);
   return [text, ...attrs].flatMap((t) => t.match(/\$\s?\d|\bUSD\b|[Dd]ollar|\b[Uu]nrealized\b|\b[Rr]ealized\b/g) ?? []);
 }
@@ -88,7 +91,7 @@ describe('no number twice on a bot page', () => {
       it(`LP ${lp.id} (${lp.status}${usd ? ', $ on' : ''})`, () => {
         const html = render(createElement(LpDetail, { ...page, id: lp.id } as never), usd);
         const parts = ['top-strip', 'money-details', 'generated-pace', 'stat-table', 'position-card'].map((id) => region(html, id));
-        expect(parts[0]).toMatch(/>Generated</);
+        expect(parts[0]).toMatch(/>(Generated|Result)</); // liquidity pages lead with Result (2026-11-08)
         expect(parts[0]).not.toMatch(/Fees earned|Costs/);
         expect(parts[1]).toMatch(/^<details/);
         expect(repeats(parts)).toEqual([]);

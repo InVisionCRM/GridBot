@@ -33,6 +33,7 @@ import { isWorthRange, type WalletHistory } from './holdings/history';
 import type { Logos } from './holdings/logos';
 import { requestStore, type HaltOrigin } from './bot/audit';
 import type { LpCompoundPolicy, LpRangePolicy } from '../market/lpPolicy';
+import type { LpStrategyId, OneSided } from '../market/lpStrategy';
 import { redact } from './bot/logger';
 import { replayDays } from './lp/replay';
 import type { ReplayDays } from './lp/poolHistory';
@@ -362,6 +363,9 @@ export function createApp(o: AppOpts) {
       mode: b.mode === 'live' ? 'live' : 'paper', market: String(b.market ?? ''), bandPct: Number(b.bandPct), capital: Number(b.capital ?? 0),
       baseAmount: b.baseAmount == null ? undefined : Number(b.baseAmount),
       rerange: typeof b.rerange === 'boolean' ? b.rerange : undefined,
+      lossLimitPct: b.lossLimitPct == null ? undefined : Number(b.lossLimitPct),
+      strategy: typeof b.strategy === 'string' ? b.strategy as LpStrategyId : undefined,
+      oneSided: b.oneSided && typeof b.oneSided === 'object' ? b.oneSided as Partial<OneSided> : undefined,
       range: b.range && typeof b.range === 'object' ? b.range as Partial<LpRangePolicy> : undefined,
       compound: b.compound && typeof b.compound === 'object' ? b.compound as Partial<LpCompoundPolicy> : undefined,
       profits: profitsBody(b.profits), limits: b.limits ? limitsBody(b.limits) : undefined,
@@ -380,6 +384,7 @@ export function createApp(o: AppOpts) {
       ...(b.range && typeof b.range === 'object' ? { range: b.range as Partial<LpRangePolicy> } : {}),
       ...(b.compound && typeof b.compound === 'object' ? { compound: b.compound as Partial<LpCompoundPolicy> } : {}),
       ...(b.bandPct == null ? {} : { bandPct: Number(b.bandPct) }),
+      ...(b.lossLimitPct == null ? {} : { lossLimitPct: Number(b.lossLimitPct) }),
     });
     return { ok: true };
   }));

@@ -5,9 +5,10 @@
  * Computed on the server from the bot's status (lpEngine.status()): `feeHist` samples every 5 minutes
  * [ms, fees, fees base, fees quote, the pool's LP fees so far, price] (older samples hold only the first two), `done`
  * (finished steps, newest first), `poolFees` and `lpFeeRate` (the pool's fee rate to liquidity providers).
- * "Today" starts at local midnight, the same day Home's fees-today uses (lpFeesToday): its `today` figure is that one.
+ * "Today" starts at local midnight, the same day Home uses (lpResultToday): its `today` figure is that one, the day's
+ * result (fees less gas, swaps and what the moves locked in), not fees alone (Kyle 2026-11-08).
  */
-import { localDayStart, lpFeesToday } from './feesToday';
+import { localDayStart, lpResultToday } from './feesToday';
 type Obj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const H = 3_600_000;
@@ -34,7 +35,7 @@ export interface LpDone { t: number; action: 'open' | 'rerange' | 'close' | 'sen
 export interface LpDay {
   dayStart: number;
   hours: LpHour[];
-  /** Fees earned since midnight (Home's figure) and yesterday from midnight to this time of day */
+  /** The result since midnight (fees − gas − swaps − what the moves locked in; Home's figure) and yesterday's from midnight to this time of day */
   today: number | null;
   yesterdayByNow: number | null;
   /** The pool over the last `hours` hours (up to 24): its LP fees, its trading volume, this bot's share of those fees */
@@ -71,6 +72,9 @@ export function lpDay(b: Obj, now: number): LpDay | null {
   const hist = ((b.feeHist ?? []) as number[][]).filter((r) => Array.isArray(r) && num(r[0]) != null).sort((x, y) => x[0] - y[0]);
   const col = (i: number) => hist.map((r) => [r[0], r.length > i ? num(r[i]) : null] as [number, number | null]);
   const fees = reader(col(1), num(b.pnl.fees), startedAt, now);
+  const costNow = [b.pnl.gas, b.pnl.swapCost, b.pnl.moveLoss].every((x: unknown) => num(x) != null) ? b.pnl.gas + b.pnl.swapCost + b.pnl.moveLoss : null;
+  const cost = reader(col(6), costNow, startedAt, now);
+  const result = (t: number) => diff(fees(t), cost(t));
   const feeBase = reader(col(2), num(b.pnl.feeCoins?.base), startedAt, now);
   const feeQuote = reader(col(3), num(b.pnl.feeCoins?.quote), startedAt, now);
   // the pool's fees were measured from the first reading on: before that sample nothing is known, even after the start
@@ -103,10 +107,10 @@ export function lpDay(b: Obj, now: number): LpDay | null {
     });
   }
 
-  const today = lpFeesToday(b, dayStart)?.quote ?? null;
+  const today = lpResultToday(b, dayStart)?.quote ?? null;
   const yStart = localDayStart(dayStart - 12 * H);
   // only a bot that ran all of yesterday morning compares: one started since would read as a slow yesterday
-  const yesterdayByNow = startedAt != null && startedAt <= yStart ? diff(fees(yStart + (now - dayStart)), fees(yStart)) : null;
+  const yesterdayByNow = startedAt != null && startedAt <= yStart ? diff(result(yStart + (now - dayStart)), result(yStart)) : null;
 
   let poolDay: LpDay['pool'] = null;
   if (firstPool != null) {

@@ -27,9 +27,9 @@ const BASE: CandleMarket = {
 describe('candle replay uses the bot clock', () => {
   it('moves on the first close outside, and a longer dwell does not', () => {
     const bars = [flat(0, 100), flat(3600, 110), flat(7200, 110)];
-    const now = replayCandles(bars, BASE, { label: 'now', bandPct: 0.01, rerange: true });
+    const now = replayCandles(bars, BASE, { label: 'now', bandPct: 0.01, rerange: true, range: { costCheck: false } });
     const dwell = replayCandles(bars, BASE, {
-      label: 'dwell', bandPct: 0.01, rerange: true, range: { dwellMin: 180 },
+      label: 'dwell', bandPct: 0.01, rerange: true, range: { dwellMin: 180, costCheck: false },
     });
     expect(now.moves).toBe(1);
     expect(now.moveLoss).toBeGreaterThan(0);
@@ -39,9 +39,9 @@ describe('candle replay uses the bot clock', () => {
 
   it('a cooldown holds the second move; dwell 0 does not', () => {
     const bars = [flat(0, 100), flat(3600, 110), ...Array.from({ length: 8 }, (_, i) => flat(7200 + i * 3600, 120))];
-    const now = replayCandles(bars, BASE, { label: 'now', bandPct: 0.01, rerange: true });
+    const now = replayCandles(bars, BASE, { label: 'now', bandPct: 0.01, rerange: true, range: { costCheck: false } });
     const cooled = replayCandles(bars, BASE, {
-      label: 'cool', bandPct: 0.01, rerange: true, range: { cooldownMin: 24 * 60 },
+      label: 'cool', bandPct: 0.01, rerange: true, range: { cooldownMin: 24 * 60, costCheck: false },
     });
     expect(now.moves).toBe(2);
     expect(cooled.moves).toBe(1);

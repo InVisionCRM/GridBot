@@ -40,7 +40,12 @@ export const HEADLINE: Headline = 'generated';
  * range-move loss (the coin mix a move locks in) is not a cost here: Generated is units earned, and that loss is shown
  * on its own (`quote.rebalanceLoss`), like the coins' own price change.
  */
-export interface CoinBreakdown { earned: number; gasSwap: number; taxes: number; bridge: number; generated: number }
+export interface CoinBreakdown {
+  earned: number; gasSwap: number; taxes: number; bridge: number;
+  /** Liquidity bots: what the range moves locked in, charged in this coin (the one each exit left too much of). 0 for other bots. */
+  moves: number;
+  generated: number;
+}
 /**
  * What `earned` is. lpFees: LP fees collected + still owed. tradeProfit: closed round trips' profit before gas, pool
  * fees and token taxes (Generated + those costs). `itemized` false: a part of the costs is not known here (a token
@@ -52,11 +57,21 @@ export type CapitalSource = 'config' | 'legacy-config' | 'start-value' | 'trend-
 
 type Needs = { d1: string | null; d7: string | null; d30: string | null; d365: string | null };
 
+/**
+ * A liquidity bot's result against holding the coins put in, both at today's price (Kyle 2026-11-08; the same arithmetic
+ * as LpEngine.pnl(), done here from the raw parts so a payload from an older server shows it too):
+ *  net = fees − gas − swapCost − moveLoss (the bot's trading, each event at its own price), hold = what holding the deposit
+ *  is worth now, result = equity − hold, carry = result − net (the mix carried between events), price = hold − start.
+ */
+export interface LpResult { result: number; hold: number; net: number; carry: number; price: number; fees: number; gas: number; swapCost: number; moveLoss: number }
+
 export interface BotMetrics {
   botId: string;
   mode: 'live' | 'paper';
   kind: MetricsKind;
   status: string | null;
+  /** Liquidity bots: the result against holding the coins put in (the page's headline). Null for other bots, or without a reading. */
+  lpResult: LpResult | null;
   startedAt: number | null;
   ageSec: number | null;
   headline: Headline;
@@ -204,7 +219,7 @@ export function ageMs(startedAt: number | null | undefined, now: number): number
 
 const RATES = 'The day, 7d and 365d estimates are Generated ÷ age in days × 1, 7 or 365, per coin, and APR (Generated ÷ capital in, annualized) scales it the same way: linear, not compounded; all of them show after a day.';
 const GENERATED_CALC: Record<MetricsKind, string> = {
-  lp: 'Generated = fees collected + fees still in the position, per coin, minus costs: gas (charged to the native coin) and swap fees (in the coin swapped in). The coin mix a range move locks in is not a cost here: it is shown on its own, inside Price change.',
+  lp: 'Generated = fees collected + fees still in the position, per coin, minus every cost of the bot\'s own trades: gas (charged to the native coin), swap fees (in the coin swapped in) and what each range move locked in (the coins a position gave back against the coins it took in, at that move\'s price, charged to the coin the exit left too much of). The coins\' own price change is not in it.',
   grid: 'Generated = profit from completed buy → sell round trips after pool fees, gas and token taxes, in the coin the grid accrues it in: the quote coin it spends. The coin it "stacks" is inventory, shown under Open positions. A close / stop cash-out sale is not a round trip; its result is in Price change.',
   trend: 'Generated = profit from closed trades after pool fees and gas, in the quote coin. An open trade is under Open positions.',
   token: 'Generated = profit from closed sells, per coin the trades spend (WETH, PLS, …). Open positions are not in it.',
@@ -212,7 +227,7 @@ const GENERATED_CALC: Record<MetricsKind, string> = {
 const TOTAL_CALC: Record<MetricsKind, string> = {
   grid: 'Total P&L = coins held at today\'s price + profits paid out − capital in. Price change = Total P&L − Generated.',
   trend: 'Total P&L = cash + position at today\'s price − capital in. Price change = Total P&L − Generated.',
-  lp: 'Total P&L = position + waiting fees + idle coins at today\'s price + fees sent out − gas − start value. Price change = Total P&L − Generated (impermanent loss not yet locked in + the coins\' market move).',
+  lp: 'Total P&L = position + waiting fees + idle coins at today\'s price + fees sent out − gas − start value. Price change = Total P&L − Generated: what the coins\' own price did to what was put in, plus the mix the bot carried between its moves at today\'s price.',
   token: 'Total P&L = open positions at what a sell would get now + sale proceeds − buys. Price change = Total P&L − Generated.',
 };
 
@@ -226,9 +241,10 @@ interface Core {
   /** units per token, and each token's dollar price now (mid) */
   generated: Record<string, number> | null; px: Record<string, number | null>;
   dollarsMade: number | null; rebalanceLoss: number | null; taxes: number | null;
+  lpResult?: LpResult | null;
   bridge?: BotMetrics['bridgeCosts']; inTransitUsd?: number | null;
   /** Per-coin parts before bridge costs (finish adds bridge and checks nothing else is left over). */
-  parts?: Record<string, Omit<CoinBreakdown, 'bridge' | 'generated'>> | null; basis?: BreakdownBasis | null;
+  parts?: Record<string, Omit<CoinBreakdown, 'bridge' | 'generated' | 'moves'> & { moves?: number }> | null; basis?: BreakdownBasis | null;
   capitalSource?: CapitalSource;
   /** What was put in, per coin (units): a liquidity bot funded with both coins lists both. Null when unknown. */
   capitalCoins?: Record<string, number> | null;
@@ -258,8 +274,8 @@ function breakdownOf(generated: Record<string, number> | null, parts: Core['part
   const out: Record<string, CoinBreakdown> = {};
   for (const sym of new Set([...Object.keys(generated), ...Object.keys(parts ?? {}), ...Object.keys(bridge?.units ?? {})])) {
     const p = parts?.[sym], br = bridge?.units[sym] ?? 0;
-    const gasSwap = p?.gasSwap ?? 0, taxes = p?.taxes ?? 0;
-    out[sym] = { earned: p?.earned ?? (generated[sym] ?? 0) + gasSwap + taxes + br, gasSwap, taxes, bridge: br, generated: generated[sym] ?? 0 };
+    const gasSwap = p?.gasSwap ?? 0, taxes = p?.taxes ?? 0, moves = p?.moves ?? 0;
+    out[sym] = { earned: p?.earned ?? (generated[sym] ?? 0) + gasSwap + taxes + moves + br, gasSwap, taxes, moves, bridge: br, generated: generated[sym] ?? 0 };
   }
   return out;
 }
@@ -296,6 +312,7 @@ function finish(c: Core, now: number): BotMetrics {
     botId: c.id, mode: c.mode, kind: c.kind, status: c.status, startedAt: c.startedAt, ageSec: age == null ? null : Math.floor(age / 1000),
     headline: HEADLINE,
     generated: c.generated, generatedUsd: genUsd,
+    lpResult: c.lpResult ?? null,
     generatedRate: { d1: rateOf(DAY_MS), d7: rateOf(7 * DAY_MS), d30: rateOf(30 * DAY_MS), d365: rateOf(365 * DAY_MS), needs },
     capitalInUsd: capUsd, currentValueUsd: usd(c.currentValue), paidOutUsd: usd(c.paidOut),
     realizedUsd: usd(c.realized), unrealizedUsd: usd(c.unrealized),
@@ -446,14 +463,14 @@ export function lpGenerated(b: Obj): { generated: Record<string, number> | null;
     const got = coinsOf(c);
     return got ?? { base: 0, quote: num(total) ?? 0 };
   };
-  const g = cost(t.gasCoins, t.gas), sw = cost(t.swapCoins, t.swapCost);
-  const side = (k: keyof Coins) => ({ earned: fees[k], gasSwap: g[k] + sw[k], taxes: 0 });
+  const g = cost(t.gasCoins, t.gas), sw = cost(t.swapCoins, t.swapCost), mv = cost(t.moveCoins, t.moveLoss);
+  const side = (k: keyof Coins) => ({ earned: fees[k], gasSwap: g[k] + sw[k], moves: mv[k], taxes: 0 });
   const parts = { [baseSym]: side('base'), [quoteSym]: side('quote') };
   return {
-    // the same arithmetic as each line of the breakdown: earned − (gas + swap fees)
-    generated: Object.fromEntries(Object.entries(parts).map(([s, p]) => [s, p.earned - p.gasSwap])),
+    // the same arithmetic as each line of the breakdown: earned − (gas + swap fees) − what the range moves locked in
+    generated: Object.fromEntries(Object.entries(parts).map(([s, p]) => [s, p.earned - p.gasSwap - p.moves])),
     px, parts,
-    basis: { earned: 'lpFees', itemized: true, note: 'Fees collected + still owed, per coin; costs in the coin they were paid in (an older state without per-coin costs: all in the quote coin).' },
+    basis: { earned: 'lpFees', itemized: true, note: 'Fees collected + still owed, per coin; gas, swap fees and what the range moves locked in, each in the coin it was charged in (an older state without per-coin costs: all in the quote coin).' },
   };
 }
 
@@ -480,8 +497,18 @@ function closedLpPnl(b: Obj): Obj | null {
   if (!idle || price == null || start == null) return null;
   const fees = num(t.fees) ?? 0, gas = num(t.gas) ?? 0, swapCost = num(t.swapCost) ?? 0, moveLoss = num(t.moveLoss) ?? 0, sent = num(t.sent) ?? 0;
   const value = idle.base * price + idle.quote;
-  const net = fees - gas - swapCost, equity = value + sent - gas;
-  return { equity, value, fees, gas, swapCost, moveLoss, net, price: equity - start - net, feeCoins: t.feeCoins };
+  const net = fees - gas - swapCost - moveLoss, equity = value + sent - gas;
+  const hold = (num(b.config?.capital) ?? 0) + (num(b.config?.baseAmount) ?? 0) * price, result = equity - hold;
+  return { equity, value, fees, gas, swapCost, moveLoss, net, hold, result, carry: result - net, price: hold - start, feeCoins: t.feeCoins };
+}
+
+/** See LpResult. Null until the bot has a reading (pnl) and a price; every part comes from the payload's raw figures. */
+function lpResultOf(b: Obj, p: Obj | null, start: number | null): LpResult | null {
+  const price = num(b.price), capital = num(b.config?.capital), equity = num(p?.equity);
+  const fees = num(p?.fees), gas = num(p?.gas), swapCost = num(p?.swapCost), moveLoss = num(p?.moveLoss) ?? num(b.totals?.moveLoss);
+  if (price == null || capital == null || equity == null || fees == null || gas == null || swapCost == null || moveLoss == null || start == null) return null;
+  const hold = capital + (num(b.config?.baseAmount) ?? 0) * price, net = fees - gas - swapCost - moveLoss, result = equity - hold;
+  return { result, hold, net, carry: result - net, price: hold - start, fees, gas, swapCost, moveLoss };
 }
 
 /** What a liquidity bot was given, per coin: config.capital in the quote coin and config.baseAmount in the base coin. */
@@ -506,18 +533,19 @@ export function lpMetrics(b: Obj, now = Date.now()): BotMetrics {
   const owed = b.owed && price != null ? (num(b.owed.base) ?? 0) * price + (num(b.owed.quote) ?? 0) : null;
   const lo = num(b.position?.lower), hi = num(b.position?.upper);
   const n = num(b.reranges);
+  const lr = lpResultOf(b, p, start);
   return finish({
     capitalSource: start == null ? null : 'start-value',
     capitalCoins: lpCapitalCoins(b),
     kind: 'lp', id: String(b.id), mode: modeOf(b), status: b.status ?? null, startedAt: num(b.startedAt), end: historyEnd({ ...b, kind: 'lp' }, now),
     capitalIn: start, currentValue: p ? value : null, paidOut: sent, extraCost: gas ?? 0,
-    realized: num(p?.net), unrealized: num(p?.price),
+    realized: lr?.net ?? null, unrealized: lr ? lr.price + lr.carry : null,
     feesEarned: num(p?.fees), feesCollected: num(b.totals?.fees), feesUncollected: owed,
     gas, swapCost: num(b.totals?.swapCost) ?? num(p?.swapCost),
     moveCount: n, fillCount: null,
     range: lo != null && hi != null && hi > lo ? { lower: lo, upper: hi, current: price, inRange: typeof b.inRange === 'boolean' ? b.inRange : inside(lo, hi, price) } : null,
     k: rate(b), symbol: unitOf(b.quote) ?? keySymbols(b.market)?.quote ?? null,
-    ...lpGenerated(b), dollarsMade: num(p?.net), rebalanceLoss: num(b.totals?.moveLoss) ?? num(p?.moveLoss), taxes: null,
+    ...lpGenerated(b), dollarsMade: lr?.net ?? null, rebalanceLoss: num(b.totals?.moveLoss) ?? num(p?.moveLoss), taxes: null, lpResult: lr,
     bridge: bridgeCostsOf(b),
   }, now);
 }

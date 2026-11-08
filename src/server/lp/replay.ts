@@ -7,7 +7,8 @@
  */
 import { DEFAULT_LIMITS } from '../../live/limits';
 import { gasInBase, LP_GAS } from '../../market/lp';
-import { positionFor, replayTable, type ReplayRow } from '../../market/lpReplay';
+import { positionFor, replayOrders, replayTable, type OrderReplayResult, type ReplayRow } from '../../market/lpReplay';
+import { marketPrice, sqrtPriceAt } from '../../live/v3Liquidity';
 import type { Hub } from '../chains/hub';
 import { LpPool } from './lpPool';
 import { DEFAULT_DAYS, REPLAY_DAYS, type ReplayDays } from './poolHistory';
@@ -22,6 +23,10 @@ export type ReplayAnswer =
   | {
     state: 'ready'; days: ReplayDays; from: number; to: number; swaps: number; capital: number; base: string; quote: string;
     feeTier: number; lpShare: number; gasOpen: number; gasMove: number; maxImpact: number; rows: ReplayRow[];
+    /** How far the price went up and down over the window, from its last price (the patient strategy's width) */
+    window: { hiPct: number; loPct: number };
+    /** Strategy "orders" over the same trades: buy and sell orders 1–3 steps wide, flipping at each fill */
+    orders: OrderReplayResult[];
   };
 
 /** The window asked for: one of REPLAY_DAYS, DEFAULT_DAYS when none is given. */
@@ -68,10 +73,17 @@ export class LpReplay {
     const table = await replayTable(rows, sides, { capital, gasOpen, gasMove, maxImpact }, REPLAY_BANDS);
     const active = Number(v.liquidity);
     const now = new Map(REPLAY_BANDS.map((b) => [b, positionFor(capital, b, v.tick, sides)]));
+    let hiTick = last.c, loTick = last.c;
+    for (const m of rows) { if (m.hi > hiTick) hiTick = m.hi; if (m.lo < loTick) loTick = m.lo; }
+    const px = (t: number) => marketPrice(sqrtPriceAt(t) ** 2, sides), lastPx = px(last.c);
+    // the base's price rises with the tick when it is token0 and falls when it is token1
+    const [up, down] = v.baseIs0 ? [px(hiTick) / lastPx - 1, 1 - px(loTick) / lastPx] : [px(loTick) / lastPx - 1, 1 - px(hiTick) / lastPx];
+    const orders = (['buy', 'sell'] as const).flatMap((side) => [1, 2, 3].map((steps) => replayOrders(rows, sides, { side, steps, flip: true, capital, gasMove })));
     const answer: ReplayAnswer = {
       state: 'ready', days, from: rows[0].t, to: rows[rows.length - 1].t, swaps: rows.reduce((a, m) => a + m.n, 0), capital,
       base: def.base.symbol, quote: def.quote.symbol, feeTier: pool.fee, lpShare, gasOpen, gasMove, maxImpact,
       rows: table.map((r) => { const at = now.get(r.bandPct)!; return { ...r, coinsNow: at.coins, poolShareNow: at.L / (at.L + active) }; }),
+      window: { hiPct: Math.max(0, up), loPct: Math.max(0, down) }, orders,
     };
     this.answers.set(slot, { key, at: this.now(), answer });
     return answer;

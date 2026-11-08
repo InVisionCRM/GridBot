@@ -33,6 +33,7 @@ import {
 } from './lpPolicy';
 import { lpShouldMove, type LpMoveInput } from './lpMove';
 import { amountsForLiquidity, coinsOfRaw, liquidityForAmounts, marketPrice, rangeTicks, rawOfCoins, sqrtPriceAt, type PoolSides } from '../live/v3Liquidity';
+import { orderState, orderTicks } from './lpStrategy';
 
 /** One minute of a V3 pool's trading. */
 export interface PoolMinute {
@@ -137,8 +138,10 @@ export interface ReplayResult {
   moveLoss: number;
   /** Mix loss of the position still open at the end, at the last price, quote. Not subtracted from what was earned. */
   openLoss: number;
-  /** Earned: fees − gas − swap costs, quote */
+  /** Fees − gas − swap costs, quote (the mix change left out) */
   net: number;
+  /** The result against holding the coins put in: net − moveLoss − openLoss, quote. What the table ranks by (Kyle 2026-11-08). */
+  result: number;
   /** Times waiting fees were collected and added back without moving the range. 0 when compounding is off. */
   compounds: number;
   /** Part of swapCost that is token tax (0 when no tax was configured) */
@@ -357,9 +360,81 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     bandPct: o.bandPct, rerange: o.rerange, days: (lastRow.t - first.t) / DAY_S,
     feeCoins, fees, gas, swapCost, swapCoins, moves, blocked, inRange: inTime / (rows.length - 1), moveLoss, openLoss,
     earnedCoins: { base: feeCoins.base - swapCoins.base, quote: feeCoins.quote - swapCoins.quote - gas },
-    net: fees - gas - swapCost, compounds, taxCost,
+    net: fees - gas - swapCost, result: fees - gas - swapCost - moveLoss - openLoss, compounds, taxCost,
     startCoins, endCoins: { base: endHeld.base + idle.base + owed.base, quote: endHeld.quote + idle.quote + owed.quote },
     priceStart: price(first.c), priceEnd: price(lastRow.c),
+  };
+}
+
+export interface OrderReplayOpts { side: 'buy' | 'sell'; steps: number; flip: boolean; capital: number; gasMove: number }
+export interface OrderReplayResult {
+  side: 'buy' | 'sell'; steps: number; flip: boolean; days: number;
+  /** Orders filled through: each a take-out, and with flip the opposite order placed at the price */
+  fills: number;
+  feeCoins: Coins; fees: number; gas: number;
+  /** Share of the minutes with trades that the price spent inside the order (filling it) */
+  inOrder: number;
+  startCoins: Coins; endCoins: Coins;
+  /** Against holding the coins put in, at the last price, less gas: quote */
+  result: number;
+  priceStart: number; priceEnd: number;
+}
+
+/**
+ * Strategy "orders" over `rows` (oldest first): one coin on one side of the price, `steps` pool steps wide, never
+ * swapped. It earns the pool's fees while the price is inside it; when the price goes through it (lpStrategy.orderState)
+ * it is taken out, and with `flip` the opposite order is placed at that price. A buy order starts with `capital` in the
+ * quote coin, a sell order with `capital` worth of the base coin at the first price.
+ */
+export function replayOrders(rows: PoolMinute[], pool: ReplayPool, o: OrderReplayOpts): OrderReplayResult {
+  if (rows.length < 2) throw new Error('need at least 2 minutes of trades');
+  if (!(o.capital > 0)) throw new Error('capital must be > 0');
+  const price = (tick: number) => priceAt(tick, pool);
+  const held = (L: number, tl: number, tu: number, tick: number) => heldBy(L, tl, tu, tick, pool);
+  const val = (c: Coins, p: number) => c.base * p + c.quote;
+  const first = rows[0], p0 = price(first.c);
+  let side = o.side;
+  let coins: Coins = side === 'buy' ? { base: 0, quote: o.capital } : { base: o.capital / p0, quote: 0 };
+  const startCoins = { ...coins };
+  const feeCoins: Coins = { base: 0, quote: 0 };
+  let fees = 0, gas = 0, fills = 0, inTime = 0;
+  let pos = { tl: 0, tu: 0, L: 0 }, owed: Coins = { base: 0, quote: 0 };
+  const place = (tick: number) => {
+    const { tickLower: tl, tickUpper: tu } = orderTicks(tick, pool.spacing, pool.baseIs0, side, o.steps);
+    const r = rawOfCoins(coins, pool);
+    const L = liquidityForAmounts(sqrtPriceAt(tick), sqrtPriceAt(tl), sqrtPriceAt(tu), r.a0, r.a1);
+    const used = held(L, tl, tu, tick);
+    pos = { tl, tu, L };
+    coins = { base: Math.max(0, coins.base - used.base), quote: Math.max(0, coins.quote - used.quote) }; // what the order did not take stays idle
+  };
+  place(first.c);
+  for (let i = 1; i < rows.length; i++) {
+    const m = rows[i], p = price(m.c);
+    const span = m.hi - m.lo + 1, inside = Math.max(0, Math.min(m.hi, pos.tu - 1) - Math.max(m.lo, pos.tl) + 1);
+    const r = pos.L > 0 ? inside / span : 0;
+    inTime += r;
+    if (r > 0) {
+      const dil = m.liq > 0 ? m.liq / (m.liq + pos.L) : 0;
+      const e = coinsOfRaw(pos.L * m.f0 * dil * r, pos.L * m.f1 * dil * r, pool);
+      owed = { base: owed.base + e.base, quote: owed.quote + e.quote };
+      feeCoins.base += e.base; feeCoins.quote += e.quote; fees += val(e, p);
+    }
+    if (pos.L === 0 || orderState(m.c, pos.tl, pos.tu, pool.baseIs0, side) !== 'filled') continue;
+    // filled through: the order holds only the other coin now; out it comes with its fees
+    const c = held(pos.L, pos.tl, pos.tu, m.c);
+    coins = { base: coins.base + c.base + owed.base, quote: coins.quote + c.quote + owed.quote };
+    owed = { base: 0, quote: 0 }; gas += o.gasMove; fills++;
+    pos = { tl: 0, tu: 0, L: 0 };
+    if (!o.flip) break;
+    side = side === 'buy' ? 'sell' : 'buy';
+    place(m.c);
+  }
+  const last = rows[rows.length - 1], pEnd = price(last.c);
+  const endHeld = pos.L > 0 ? held(pos.L, pos.tl, pos.tu, last.c) : { base: 0, quote: 0 };
+  const endCoins = { base: coins.base + endHeld.base + owed.base, quote: coins.quote + endHeld.quote + owed.quote };
+  return {
+    side: o.side, steps: o.steps, flip: o.flip, days: (last.t - first.t) / DAY_S, fills, feeCoins, fees, gas,
+    inOrder: inTime / (rows.length - 1), startCoins, endCoins, result: val(endCoins, pEnd) - gas - val(startCoins, pEnd), priceStart: p0, priceEnd: pEnd,
   };
 }
 

@@ -18,12 +18,12 @@ function bot(o: { startH?: number; rate?: (t: number) => number; feeRate?: unkno
   const at = (t: number) => { let x = 0; for (let s = start; s < t; s += M5) x += (rate(s) * Math.min(M5, t - s)) / H; return x; };
   for (let t = start; t < NOW; t += M5) {
     f = at(t);
-    if (o.noHistBefore == null || t >= o.noHistBefore) hist.push([t, f, f / 4, f / 2, 10 * f, 2]);
+    if (o.noHistBefore == null || t >= o.noHistBefore) hist.push([t, f, f / 4, f / 2, 10 * f, 2, 0]); // …, price, cost (none here)
   }
   const live = at(NOW);
   return {
     kind: 'lp', startedAt: start, price: 2, value: 1000, feeHist: hist, poolFees: 10 * live,
-    pnl: { fees: live, feeCoins: { base: live / 4, quote: live / 2 } },
+    pnl: { fees: live, feeCoins: { base: live / 4, quote: live / 2 }, gas: 0, swapCost: 0, moveLoss: 0 },
     lpFeeRate: o.feeRate === undefined ? { rate: 0.003 } : o.feeRate, done: o.done ?? [], position: null,
   };
 }

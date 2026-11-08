@@ -28,7 +28,7 @@ describe('one headline per bot page', () => {
   for (const page of ['LpDetail.tsx', 'GridDetail.tsx', 'TrendDetail.tsx']) {
     it(`${page}: the strip leads with Generated and has no Dollars made / Total P&L; Details holds them`, () => {
       const top = strip(page);
-      expect(top).toMatch(/>Generated/);
+      expect(top).toMatch(/>(Generated|Result)/); // liquidity pages lead with Result (2026-11-08)
       expect(top).not.toMatch(/Dollars made|Total P&amp;L|Price change/);
       expect(src(page)).toMatch(/<MoneyDetails b=\{/);
     });

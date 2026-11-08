@@ -141,16 +141,16 @@ export interface CandleReplayResult {
 /** Defaults, then the two named presets, then the ±1% range with auto-move off. */
 export function candlePolicies(): CandlePolicy[] {
   return [
-    { label: 'Defaults (±1%, move on the first close outside)', bandPct: 0.01, rerange: true },
+    { label: 'Defaults (±1%, move on the first close outside)', bandPct: 0.01, rerange: true, range: { costCheck: false } },
     {
       label: 'Preset A (±2%, 12h outside, 24h cooldown)',
       bandPct: LP_PRESET_A.bandPct, rerange: true,
-      range: { dwellMin: LP_PRESET_A.dwellMin, cooldownMin: LP_PRESET_A.cooldownMin },
+      range: { dwellMin: LP_PRESET_A.dwellMin, cooldownMin: LP_PRESET_A.cooldownMin, costCheck: false },
     },
     {
       label: 'Preset B (±3%, 4h outside, 12h cooldown)',
       bandPct: LP_PRESET_B.bandPct, rerange: true,
-      range: { dwellMin: LP_PRESET_B.dwellMin, cooldownMin: LP_PRESET_B.cooldownMin },
+      range: { dwellMin: LP_PRESET_B.dwellMin, cooldownMin: LP_PRESET_B.cooldownMin, costCheck: false },
     },
     { label: 'Stay put (±1%, auto-move off)', bandPct: 0.01, rerange: false },
   ];

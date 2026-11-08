@@ -56,7 +56,7 @@ export const DEFAULT_RANGE_POLICY: LpRangePolicy = {
   bufferPct: 0,
   atrMult: 0,
   atrPeriod: 14,
-  costCheck: false,
+  costCheck: true,
   feeHorizonH: 24,
   nearEdgeFrac: 0,
 };
@@ -90,7 +90,9 @@ export const LP_MOVE_PRESETS: readonly LpMovePreset[] = [LP_PRESET_A, LP_PRESET_
 /** A fee pace younger than this is not a pace yet: the cost check waits. */
 export const COST_MIN_HOURS = 10 / 60;
 
-export type RangeWait = 'in' | 'buffer' | 'off' | 'dwell' | 'cooldown' | 'need-cost' | 'cost';
+export type RangeWait = 'in' | 'buffer' | 'off' | 'dwell' | 'cooldown' | 'need-cost' | 'cost' | 'losing'
+  /** An order (strategy "orders"): the price is inside it, away from it, or went through it */
+  | 'order-filling' | 'order-waiting' | 'filled';
 
 export interface RangeMoveInput {
   /** Pool rule: tick < tickLower or tick >= tickUpper. This is today's trigger. */
@@ -115,6 +117,14 @@ export interface RangeMoveInput {
   moveCost?: number | null;
   /** Recent in-range fee pace, quote per hour. `null` = not enough history yet. */
   feePerHour?: number | null;
+  /**
+   * How long the next range should earn, hours: the median life of the last ranges. null = under 3 moves so far,
+   * so the policy's feeHorizonH is used. Ignored unless costCheck is on. (Kyle 2026-11-08: a 24 h horizon said "move"
+   * 48 times while ranges lived 21 minutes.)
+   */
+  horizonH?: number | null;
+  /** The last 24 hours' moves (3 or more) lost money together: fees under swaps, gas and what they locked in. No move. */
+  losingStreak?: boolean;
 }
 
 export interface RangeMoveDecision {
@@ -226,11 +236,12 @@ export function decideRangeMove(i: RangeMoveInput): RangeMoveDecision {
   if (pol.cooldownMin > 0 && i.lastMoveAt != null && i.now - i.lastMoveAt < pol.cooldownMin * 60_000) {
     return { move: false, outSince, wait: 'cooldown', nearEdge: false, toEdge };
   }
+  if (i.losingStreak) return { move: false, outSince, wait: 'losing', nearEdge: false, toEdge };
   if (pol.costCheck) {
     if (i.moveCost === undefined || i.feePerHour === undefined) {
       return { move: false, outSince, wait: 'need-cost', nearEdge: false, toEdge };
     }
-    const gain = i.feePerHour == null || i.moveCost == null ? 0 : i.feePerHour * pol.feeHorizonH;
+    const gain = i.feePerHour == null || i.moveCost == null ? 0 : i.feePerHour * (i.horizonH ?? pol.feeHorizonH);
     if (!(i.moveCost != null && i.feePerHour != null && gain > i.moveCost)) {
       return { move: false, outSince, wait: 'cost', nearEdge: false, toEdge };
     }
