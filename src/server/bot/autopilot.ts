@@ -31,6 +31,7 @@ import { findRoute, type CoinId, type Hop, type RouteMarket } from '../../market
 import { NATIVE } from '../../live/swapMath';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import type { Opportunity } from '../../market/scan';
+import { SMART_STRATEGY, SMART_STRATEGY_IDS, previewWeek, type SmartPreview, type SmartStrategyId } from '../../market/smartStrategy';
 import type { Generated } from '../../types/generated';
 
 export interface AutoOptions extends PlanOptions { stopLossPct: number }
@@ -253,13 +254,64 @@ export class Autopilot {
     return a && b ? findRoute(a, b, this.markets(chainId, pricing)) : null;
   }
   /** A coin from the budget's: the route's pool fees twice (in and back) and budget coins per unit (null: no price yet); null: no route */
-  private reach(a: Account) {
+  private reach(a: Account, rate: (sym: string) => number | null = (sym) => this.rate(a.budget.chainId, sym)) {
     const c = a.budget.chainId;
     return (coin: string): { cost: number; rate: number | null } | null => {
       if (coin === a.budget.coin) return { cost: 0, rate: 1 };
       const hops = this.route(c, a.budget.coin, coin);
-      return hops ? { cost: (2 * hops.reduce((s, h) => s + (this.hub.def(h.key).pool.feeBps ?? 30), 0)) / 10_000, rate: this.rate(c, coin) } : null;
+      return hops ? { cost: (2 * hops.reduce((s, h) => s + (this.hub.def(h.key).pool.feeBps ?? 30), 0)) / 10_000, rate: rate(coin) } : null;
     };
+  }
+  /**
+   * Every way to use `items` the options allow, best score first (market/autopilot.ts candidates), with the entry swap's
+   * cost at the size a bot would open at (a pool of unknown depth is taken as deep enough). `rate` prices a coin in the
+   * budget's coin: the shared rates, or a preview's own.
+   */
+  private ways(a: Account, items: Opportunity[], o: PlanOptions, rate: (sym: string) => number | null = (sym) => this.rate(a.budget.chainId, sym)) {
+    const piece = a.budget.amount / Math.max(1, o.slots), cap = this.d.bot.limits.maxPriceImpact;
+    return candidates(items, o, this.reach(a, rate), (x) => {
+      const liq = x.activity?.liquidityUsd ?? 0, usdPer = x.capital > 0 ? x.usd / x.capital : 0;
+      if (!(liq > 0) || !(usdPer > 0)) return 0;
+      return entryCostFraction({ capital: piece / rate(x.spend)!, quoteReserve: liq / 2 / usdPer, feeBps: x.feeBps, maxImpact: cap, maxPoolShare: DEFAULT_MAX_POOL_SHARE });
+    });
+  }
+  /**
+   * What each strategy (market/smartStrategy.ts) would open right now with `budget`, from today's scan and cash alone:
+   * the planner with no bots held. Prices are read into a map of their own, so a budget in another coin than a saved
+   * one never changes the rates the accounts use.
+   */
+  async strategies(budget: Budget): Promise<Record<SmartStrategyId, SmartPreview>> {
+    const c = budget.chainId;
+    if (!this.chainOn(c)) throw new Error('That chain is not on.');
+    if (!(budget.amount > 0) || !budget.coin) throw new Error('Enter an amount and its coin.');
+    const scan = await this.d.scan();
+    const chain = scan?.chains.find((x) => x.chainId === c);
+    const notReady = !scan ? 'the opportunity scan is off' : !chain ? (scan.running ? 'its first opportunity scan is running' : 'the chain is not in the scan') : chain.error ? `today's scan of it failed (${chain.error})` : chain.partial ? 'it is still being scanned' : null;
+    const out = {} as Record<SmartStrategyId, SmartPreview>;
+    if (notReady) {
+      for (const id of SMART_STRATEGY_IDS) out[id] = { ready: false, why: notReady, scanAt: chain?.at ?? null, pools: 0, allowed: 0, opens: [], waiting: budget.amount, waitWhy: null, weekPct: null, gone: [] };
+      return out;
+    }
+    const items = chain!.items.filter((x) => x.key != null || x.ref.pool);
+    const a: Account = { budget, coins: { [budget.coin]: budget.amount }, gasNative: 0, bots: [], pending: [], startedAt: this.now(), halted: null, killed: null, withdrawn: 0 };
+    const local = new Map<string, number>();
+    await this.refreshRates(a, [...new Set(items.map((x) => x.spend))], local);
+    const rate = (sym: string) => (sym === budget.coin ? 1 : local.get(`${c}:${sym}`) ?? null);
+    for (const id of SMART_STRATEGY_IDS) {
+      const o = SMART_STRATEGY[id].options;
+      const { cands, gone } = this.ways(a, items, o, rate);
+      const plan = planBudget({ now: this.now(), budget: budget.amount, cash: budget.amount, slots: o.slots, cands, gone, held: [], parked: [] });
+      const opens = plan.flatMap((d) => (d.kind === 'open' ? [{ label: d.cand.label, how: d.cand.how, dex: d.cand.o.dex, expected: d.cand.expected, cost: d.cand.cost, entry: d.cand.entry, score: d.cand.score, capital: d.capital, risk: d.cand.o.risk, movePct: d.cand.o.movePct }] : []));
+      const placed = opens.reduce((s, p) => s + p.capital, 0);
+      const count = new Map<string, number>();
+      for (const why of gone.values()) count.set(why, (count.get(why) ?? 0) + 1);
+      out[id] = {
+        ready: true, why: null, scanAt: chain!.at ?? null, pools: items.length, allowed: cands.length, opens,
+        waiting: Math.max(0, budget.amount - placed), waitWhy: plan.find((d) => d.kind === 'wait')?.why ?? null,
+        weekPct: previewWeek(opens, budget.amount), gone: [...count].map(([why, n]) => ({ why, n })).sort((x, y) => y.n - x.n),
+      };
+    }
+    return out;
   }
   /** Budget coins per unit of `sym` (1 for the budget's own coin) */
   private rate(chainId: number, sym: string): number | null {
@@ -267,7 +319,7 @@ export class Autopilot {
     return this.rates.get(`${chainId}:${sym}`) ?? null;
   }
   /** Budget coins per unit of every coin the account holds, its bots spend, its swaps move and `extra`, along the route, at mid prices. */
-  private async refreshRates(a: Account, extra: string[] = []) {
+  private async refreshRates(a: Account, extra: string[] = [], into = this.rates) {
     const c = a.budget.chainId;
     const syms = new Set([this.nativeSym(c), ...Object.keys(a.coins), ...a.bots.map((b) => b.spend), ...a.pending.flatMap((p) => [p.from, p.to]), ...extra]);
     syms.delete(a.budget.coin);
@@ -277,7 +329,7 @@ export class Autopilot {
       let k = 1;
       try {
         for (const h of hops) { const p = await this.hub.quoter(h.key).getPrice(); k *= h.side === 'sell' ? p : 1 / p; }
-        this.rates.set(`${c}:${sym}`, k);
+        into.set(`${c}:${sym}`, k);
       } catch { /* the last rate stays; a coin never priced has none */ }
     }
   }
@@ -696,13 +748,7 @@ export class Autopilot {
     await this.refreshRates(a, [...new Set(items.map((x) => x.spend))]);
     const now = this.now();
     for (const [id, until] of this.failed) if (until <= now) this.failed.delete(id);
-    // An entry swap's cost at the size it would open at (a pool of unknown depth is taken as deep enough)
-    const piece = a.budget.amount / Math.max(1, o.slots), cap = this.d.bot.limits.maxPriceImpact;
-    const { cands, gone } = candidates(items, o, this.reach(a), (x) => {
-      const liq = x.activity?.liquidityUsd ?? 0, usdPer = x.capital > 0 ? x.usd / x.capital : 0;
-      if (!(liq > 0) || !(usdPer > 0)) return 0;
-      return entryCostFraction({ capital: piece / this.rate(c, x.spend)!, quoteReserve: liq / 2 / usdPer, feeBps: x.feeBps, maxImpact: cap, maxPoolShare: DEFAULT_MAX_POOL_SHARE });
-    });
+    const { cands, gone } = this.ways(a, items, o);
     // Bots closing or not running (stopped by hand, KILL ALL, a safety pause) keep their slot and pair, but aren't judged.
     // One removed by hand since the last check isn't counted (the next settle drops it).
     const bots = a.bots.filter((b) => this.d.bot.hasBot(b.kind, b.id)), runs = (b: AutoBot) => this.d.bot.botStatus(b.kind, b.id).status === 'running';

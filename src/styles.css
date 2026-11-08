@@ -1874,15 +1874,6 @@ button.wl-row:hover { background: var(--surface-2); }
 .tk-step-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .tk-step-title { font: 700 0.95rem var(--font); }
 .tk-sub { font: 600 0.72rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-.tk-styles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.tk-style { --tone: var(--hold); position: relative; appearance: none; text-align: left; color: var(--text); font: inherit; cursor: pointer; display: flex; flex-direction: column; gap: 6px; padding: 14px; border-radius: 16px; border: 1px solid var(--line); background: linear-gradient(160deg, color-mix(in srgb, var(--tone) 14%, transparent), transparent 60%), var(--surface-2); transition: transform 0.2s cubic-bezier(0.2, 0.9, 0.2, 1), border-color 0.25s, box-shadow 0.25s; animation: tk-rise 0.5s both; }
-.tk-style.balanced { --tone: var(--warn); } .tk-style.wild { --tone: var(--loss); }
-.tk-style:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--tone) 60%, transparent); }
-.tk-style.on { border-color: var(--tone); box-shadow: 0 0 0 1px var(--tone), 0 10px 30px color-mix(in srgb, var(--tone) 25%, transparent); }
-.tk-style b { font: 700 1.05rem var(--font); color: var(--tone); }
-.tk-style small { color: var(--secondary); font-size: 0.78rem; line-height: 1.35; }
-.tk-style-tick { position: absolute; top: 12px; right: 12px; width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line-2); transition: all 0.25s; }
-.tk-style.on .tk-style-tick { border-color: var(--tone); background: var(--tone); box-shadow: inset 0 0 0 3px var(--surface-2); animation: tk-pop 0.35s cubic-bezier(0.2, 1.6, 0.4, 1); }
 .tk-amounts { display: grid; grid-template-columns: repeat(2, minmax(0, 220px)); gap: 10px; }
 .tk-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .tk-pill { appearance: none; display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); font: 500 0.82rem var(--font); cursor: pointer; transition: background 0.25s, color 0.25s, border-color 0.25s, transform 0.15s; }
@@ -2010,7 +2001,6 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
   .tk-hero-act > * { flex: 1 1 140px; }
 }
 @media (max-width: 600px) {
-  .tk-styles { grid-template-columns: 1fr; }
   .tk-amounts { grid-template-columns: 1fr 1fr; }
   .tk-hero { padding: 16px; gap: 14px; }
   .tk-orb { width: 64px; height: 64px; } .tk-orb b { width: 42px; height: 42px; }
@@ -2320,4 +2310,87 @@ main.stack > :nth-child(n+6) { animation-delay: 0.25s; }
   .sx-price { stroke-dashoffset: 0 !important; }
   .sx-fees, .sx-fill1, .sx-fill2 { transform: none !important; }
   .sx-sell-g, .sx-stop, .sx-cap .c1 { opacity: 1 !important; }
+}
+
+/* ── the two traders' strategy cards (ui/TraderStrategyCards.tsx) ───────── */
+.strat-card .strat-picks { color: var(--text); }
+.strat-rules { margin: 0; padding-left: 18px; color: var(--secondary); line-height: 1.45; display: grid; gap: 3px; }
+.strat-now { display: grid; gap: 6px; font-size: 0.82rem; padding: 8px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); }
+.strat-now-chain { display: grid; gap: 3px; }
+.strat-now ul { margin: 0; padding-left: 16px; display: grid; gap: 2px; }
+.strat-week { color: var(--accent); font-weight: 600; }
+.tk-strat { --tone: var(--hold); }
+.tk-strat.balanced { --tone: var(--warn); } .tk-strat.wild { --tone: var(--loss); }
+.tk-strat h3 b { color: var(--tone); }
+.tk-strat.on { border-color: var(--tone); box-shadow: 0 0 0 1px color-mix(in srgb, var(--tone) 30%, transparent); }
+.strat-ladder { margin-bottom: 14px; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); column-gap: 16px; }
+.strat-ladder .strat-pic { grid-row: 1 / span 4; align-self: start; }
+@media (max-width: 640px) { .strat-ladder { grid-template-columns: 1fr; } .strat-ladder .strat-pic { grid-row: auto; } }
+/* timings shared by the new pictures: a thing that appears at a step, a bar that grows, a late reveal */
+@keyframes sx-late { 0%, 81% { opacity: 0; } 82%, 100% { opacity: 1; } }
+@keyframes sx-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes sx-d1 { 0%, 11% { opacity: 0; } 12%, 100% { opacity: 1; } }
+@keyframes sx-d2 { 0%, 24% { opacity: 0; } 25%, 100% { opacity: 1; } }
+@keyframes sx-d3 { 0%, 36% { opacity: 0; } 37%, 100% { opacity: 1; } }
+@keyframes sx-d4 { 0%, 49% { opacity: 0; } 50%, 100% { opacity: 1; } }
+@keyframes sx-d5 { 0%, 61% { opacity: 0; } 62%, 100% { opacity: 1; } }
+@keyframes sx-d6 { 0%, 74% { opacity: 0; } 75%, 100% { opacity: 1; } }
+@keyframes sx-d7 { 0%, 86% { opacity: 0; } 87%, 100% { opacity: 1; } }
+/* fee farmer: three thin ranges earning; the weakest is swapped at the review */
+.sx-f .sx-f-price { stroke-dasharray: 260; stroke-dashoffset: 260; }
+.sx-f .sx-band { fill: rgba(92, 208, 141, 0.08); stroke: var(--profit); }
+.sx-f .sx-fees { transform-origin: 70px 0; }
+.sx-f-swap { opacity: 0; animation: sx-late 10s steps(1) infinite; }
+.sx-f-swap rect { fill: var(--bg); stroke: var(--accent); }
+.sx-f-swap text { fill: var(--accent); }
+/* swing grids: levels, a zigzag, a dot at each dip and rip, the round trips counting up */
+.sx-g-level { stroke: var(--line-2); stroke-dasharray: 2 3; }
+.sx-g .sx-g-price { stroke-dasharray: 560; stroke-dashoffset: 560; }
+.sx-g-dot { opacity: 0; animation-duration: 10s; animation-timing-function: steps(1); animation-iteration-count: infinite; }
+.sx-g-dot.buy { fill: var(--profit); } .sx-g-dot.sell { fill: var(--warn); }
+.sx-g-dot.d1 { animation-name: sx-d1; } .sx-g-dot.d2 { animation-name: sx-d2; } .sx-g-dot.d3 { animation-name: sx-d3; } .sx-g-dot.d4 { animation-name: sx-d4; }
+.sx-g-dot.d5 { animation-name: sx-d5; } .sx-g-dot.d6 { animation-name: sx-d6; } .sx-g-dot.d7 { animation-name: sx-d7; }
+.sx-g .sx-g-trips { animation-name: sx-grow; animation-timing-function: linear; }
+/* wide net: six chips ranked, a week bar, a sweep, the last chip replaced */
+.sx-n-chip { opacity: 0; animation-duration: 10s; animation-timing-function: steps(1); animation-iteration-count: infinite; }
+.sx-n-chip.c1 { animation-name: sx-d1; } .sx-n-chip.c2 { animation-name: sx-d2; } .sx-n-chip.c3 { animation-name: sx-d3; }
+.sx-n-chip.c4 { animation-name: sx-d4; } .sx-n-chip.c5 { animation-name: sx-d5; } .sx-n-chip.c6 { animation-name: sx-d6; }
+.sx-n-chip .grd { fill: rgba(91, 141, 239, 0.18); stroke: var(--hold); } .sx-n-chip .rng { fill: rgba(245, 184, 65, 0.14); stroke: var(--warn); }
+.sx-n-new { opacity: 0; animation: sx-late 10s steps(1) infinite; }
+.sx-n-new rect { fill: var(--bg); stroke: var(--accent); } .sx-n-new text { fill: var(--accent); }
+.sx-n-week { fill: var(--profit); transform-origin: 10px 0; animation: sx-grow 10s linear infinite; }
+.sx-n-sweep { stroke: var(--accent); stroke-width: 1.5; opacity: 0.7; animation: sx-sweep 10s linear infinite; }
+@keyframes sx-sweep { to { transform: translateX(300px); } }
+/* the token funnel: coins fall; most are knocked out at a gate; one lands in the buy box */
+.sx-t-gate line { stroke: var(--line-2); stroke-dasharray: 3 3; }
+.sx-t-gate text { fill: var(--muted); font-size: 9px; }
+.sx-t-coin { fill: var(--warn); animation-duration: 10s; animation-timing-function: linear; animation-iteration-count: infinite; }
+.sx-t-coin.f25 { animation-name: sx-k25; } .sx-t-coin.f50 { animation-name: sx-k50; } .sx-t-coin.f75 { animation-name: sx-k75; } .sx-t-coin.pass { animation-name: sx-kpass; fill: var(--profit); }
+@keyframes sx-k25 { 0% { transform: translateY(0); opacity: 1; } 17% { transform: translateY(22px); opacity: 1; } 22%, 100% { transform: translateY(22px); opacity: 0; } }
+@keyframes sx-k50 { 0% { transform: translateY(0); opacity: 1; } 35% { transform: translateY(44px); opacity: 1; } 40%, 100% { transform: translateY(44px); opacity: 0; } }
+@keyframes sx-k75 { 0% { transform: translateY(0); opacity: 1; } 52% { transform: translateY(66px); opacity: 1; } 57%, 100% { transform: translateY(66px); opacity: 0; } }
+@keyframes sx-kpass { 0% { transform: translateY(0); } 70%, 100% { transform: translateY(104px); } }
+.sx-t-buy { opacity: 0.35; animation: sx-buyon 10s steps(1) infinite; }
+.sx-t-buy rect { fill: rgba(92, 208, 141, 0.16); stroke: var(--profit); } .sx-t-buy text { fill: var(--profit); }
+@keyframes sx-buyon { 0%, 71% { opacity: 0.35; } 72%, 100% { opacity: 1; } }
+/* the exit ladder: a run sold in thirds, then a drop stopped out */
+.sx-l-level line { stroke: var(--line-2); stroke-dasharray: 2 3; }
+.sx-l .sx-l-run { stroke: var(--profit); stroke-dasharray: 300; stroke-dashoffset: 300; animation: sx-draw-early 10s linear infinite; }
+.sx-l .sx-l-drop { stroke: var(--loss); stroke-dasharray: 120; stroke-dashoffset: 120; animation: sx-draw-late 10s linear infinite; }
+@keyframes sx-draw-early { 0% { stroke-dashoffset: 300; } 60%, 100% { stroke-dashoffset: 0; } }
+@keyframes sx-draw-late { 0%, 70% { stroke-dashoffset: 120; } 100% { stroke-dashoffset: 0; } }
+.sx-l-sell { fill: var(--profit); } .sx-l-stop { fill: var(--loss); }
+.sx-l-txt { fill: var(--secondary); font-size: 9px; } .sx-l-txt.stop { fill: var(--loss); }
+.sx-l-sell, .sx-l-stop, .sx-l-txt { opacity: 0; animation-duration: 10s; animation-timing-function: steps(1); animation-iteration-count: infinite; }
+.sx-l .s1 { animation-name: sx-l-s1; } .sx-l .s2 { animation-name: sx-l-s2; } .sx-l .s3 { animation-name: sx-l-s3; } .sx-l .sx-l-stop, .sx-l .stop { animation-name: sx-l-stop; }
+@keyframes sx-l-s1 { 0%, 18% { opacity: 0; } 19%, 100% { opacity: 1; } }
+@keyframes sx-l-s2 { 0%, 35% { opacity: 0; } 36%, 100% { opacity: 1; } }
+@keyframes sx-l-s3 { 0%, 58% { opacity: 0; } 59%, 100% { opacity: 1; } }
+@keyframes sx-l-stop { 0%, 96% { opacity: 0; } 97%, 100% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .sx-f-price, .sx-g-price, .sx-l-run, .sx-l-drop { stroke-dashoffset: 0 !important; }
+  .sx-g-trips, .sx-n-week { transform: none !important; }
+  .sx-f-swap, .sx-g-dot, .sx-n-chip, .sx-n-new, .sx-t-buy, .sx-l-sell, .sx-l-stop, .sx-l-txt { opacity: 1 !important; }
+  .sx-t-coin { opacity: 0 !important; } .sx-t-coin.pass { opacity: 1 !important; transform: translateY(104px) !important; }
+  .sx-n-sweep { display: none; }
 }

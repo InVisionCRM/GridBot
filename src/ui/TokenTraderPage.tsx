@@ -1,7 +1,7 @@
 /**
  * Token trader page (Kyle, 2026-10-30: its own page like the Smart trader, easier to set up and more fun).
  * Top to bottom: the hero (on/off, paper/live, what it generated), the radar and the funnel (what it is looking at
- * right now and where each coin left), setup in three choices (style, how much, where) with every other setting under
+ * right now and where each coin left), setup in three choices (strategy, how much, where) with every other setting under
  * Advanced, open positions on their exit ladders, the scorecard, and the trades. Server: bot/tokenTrader.ts.
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
@@ -18,7 +18,9 @@ import { useEthUsd } from './units';
 import { CoinLogo } from './Wallet';
 import { VENUES } from '../live/venues';
 import { EthLimit, SpendDetails, TokenAdvanced, blockedNote, feePct, generatedText, modeLabel, offCompletely, startTrader } from './TokenTrader';
-import { STYLES, exitTrack, lookCycle, poolWatch, radarBlips, radarSectors, scorecard, shortSpan, styleOf, type ExitTrack, type PoolWatch, type TrackMark } from './tokenModel';
+import { exitTrack, lookCycle, poolWatch, radarBlips, radarSectors, scorecard, shortSpan, type ExitTrack, type PoolWatch, type TrackMark } from './tokenModel';
+import { tokenStrategyOf } from '../market/tokenStrategy';
+import { TokenStrategyCards } from './TraderStrategyCards';
 import { ask } from './Confirm';
 
 /** The two auto traders share the "Auto traders" tile: this switches between their pages. */
@@ -260,7 +262,7 @@ function StageCount({ n, out }: { n: number; out: boolean }) {
 // ── setup ───────────────────────────────────────────────────────────────
 function Setup({ s, t, save, ethUsd, savedAt }: { s: AnyObj; t: AnyObj; save: (p: AnyObj) => void; ethUsd: number | null; savedAt: number | null }) {
   const o = t.options;
-  const style = styleOf(o);
+  const style = tokenStrategyOf(o);
   const tradable: AnyObj[] = (s.chains ?? []).filter((c: AnyObj) => c.tradable);
   const chainOn = (id: number) => !o.chains?.length || o.chains.includes(id);
   const onCount = tradable.filter((c) => chainOn(c.id)).length;
@@ -272,14 +274,8 @@ function Setup({ s, t, save, ethUsd, savedAt }: { s: AnyObj; t: AnyObj; save: (p
   return (
     <section className="tk-card tk-setup">
       <h3><Icon name="gear" size={16} /> Set it up {savedAt != null && <span key={savedAt} className="tk-saved" role="status">Saved ✓</span>}<span className="muted small">three choices; each change saves when you tap it or leave its box</span></h3>
-      <Step n={1} title="Style" note={style ? null : 'Custom: set by hand under Advanced'}>
-        <div className="tk-styles">
-          {STYLES.map((st, i) => (
-            <button key={st.id} type="button" className={`tk-style ${st.id} ${style === st.id ? 'on' : ''}`} aria-pressed={style === st.id} style={{ animationDelay: `${i * 80}ms` }} onClick={() => save(st.patch)}>
-              <b>{st.name}</b><small>{st.line}</small><i className="tk-style-tick" aria-hidden="true" />
-            </button>
-          ))}
-        </div>
+      <Step n={1} title="Strategy" note={style ? null : 'Custom: set by hand under Advanced'}>
+        <TokenStrategyCards o={o} onChoose={(apply) => save(apply)} />
       </Step>
       <Step n={2} title="How much">
         <div className="tk-amounts">

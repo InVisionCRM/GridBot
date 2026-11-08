@@ -13,9 +13,11 @@ import { useOpportunities } from './Opportunities';
 import { TraderSwitch } from './TokenTraderPage';
 import { haltText } from './haltText';
 import { ask } from './Confirm';
+import { SmartStrategyCards, type PreviewRow, type PreviewState } from './TraderStrategyCards';
+import { smartStrategyOf, type SmartOptions } from '../market/smartStrategy';
 
 type Risk = 'safe' | 'medium' | 'any';
-interface Opts { grid: boolean; lp: boolean; newTokens: boolean; risk: Risk; slots: number; stopLossPct: number }
+type Opts = SmartOptions;
 interface BudgetRow { chainId: number; coin: string; amount: string }
 
 const RISK: [Risk, string, string][] = [
@@ -91,6 +93,8 @@ function Setup({ s, a, busy, run }: { s: AnyObj; a: AnyObj; busy: boolean; run: 
   const free = chains.filter((c) => !rows.some((r) => r.chainId === c.id));
   const liveBlocked = rows.some((r) => !chainOf(s, r.chainId)?.hasSigner);
   const set = (i: number, r: Partial<BudgetRow>) => setRows(rows.map((x, j) => (j === i ? { ...x, ...r } : x)));
+  const previewRows: PreviewRow[] = rows.map((r) => ({ chainId: r.chainId, chain: chainOf(s, r.chainId)?.name ?? String(r.chainId), coin: r.coin, amount: Number(r.amount) }));
+  const previews = usePreviews(previewRows);
   // Asked before anything is saved: cancelling leaves the settings as they were
   const start = async () => {
     if (mode === 'live' && !(await ask({
@@ -138,12 +142,40 @@ function Setup({ s, a, busy, run }: { s: AnyObj; a: AnyObj; busy: boolean; run: 
         )}
       </div>
 
+      <div className="smart-field">
+        <span className="k"><L tip="One choice sets everything below. Change any setting by hand and it shows as none of them.">Strategy</L></span>
+        <SmartStrategyCards chosen={smartStrategyOf(opts)} onChoose={setOpts} rows={previewRows} previews={previews} />
+      </div>
       <OptionsForm opts={opts} setOpts={setOpts} />
       <button type="button" className="btn primary smart-go" disabled={busy || !rows.length || rows.some((r) => !(Number(r.amount) > 0) || !r.coin) || (mode === 'live' && liveBlocked)} onClick={() => void start()}>
         Turn on {mode === 'live' ? '(live)' : '(paper)'}
       </button>
     </section>
   );
+}
+
+/**
+ * What each strategy would open now with each budget typed in (GET /api/autopilot/preview), read again half a second
+ * after the rows last changed; a chain whose preview failed says why.
+ */
+function usePreviews(rows: PreviewRow[]): Record<number, PreviewState | undefined> {
+  const [out, setOut] = useState<Record<number, PreviewState | undefined>>({});
+  const key = rows.filter((r) => r.amount > 0 && r.coin).map((r) => `${r.chainId}:${r.coin}:${r.amount}`).join('|');
+  useEffect(() => {
+    if (!key) { setOut({}); return; }
+    let gone = false;
+    const t = setTimeout(() => {
+      for (const r of rows) {
+        if (!(r.amount > 0) || !r.coin) continue;
+        http(`/api/autopilot/preview?chainId=${r.chainId}&coin=${encodeURIComponent(r.coin)}&amount=${r.amount}`)
+          .then((p) => { if (!gone) setOut((cur) => ({ ...cur, [r.chainId]: p })); })
+          .catch((e) => { if (!gone) setOut((cur) => ({ ...cur, [r.chainId]: { error: errMsg(e) } })); });
+      }
+    }, 500);
+    setOut({});
+    return () => { gone = true; clearTimeout(t); };
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  return out;
 }
 
 function OptionsForm({ opts, setOpts }: { opts: Opts; setOpts: (o: Opts) => void }) {

@@ -469,6 +469,8 @@ export function createApp(o: AppOpts) {
   app.post('/api/autopilot/off', wrap((req) => { ap().turnOff(req.body?.sell === true); void ap().tick(); return plain(ap().status()); }));
   // { chainId }: that budget opens and swaps again after Stop all / STOP chain
   app.post('/api/autopilot/review', wrap(async () => { await ap().review(true); void bot.tickAll(); return plain(ap().status()); }));
+  // ?chainId=&coin=&amount=: what each strategy (market/smartStrategy.ts) would open now with that budget, from today's scan
+  app.get('/api/autopilot/preview', wrap(async (req) => plain(await ap().strategies({ chainId: Number(req.query.chainId), coin: String(req.query.coin ?? ''), amount: Number(req.query.amount) }))));
 
   const tt = () => { if (!o.tokenTrader) throw new Error('The token trader is not available.'); return o.tokenTrader; };
   app.get('/api/token-trader', wrap(() => plain(tt().status())));

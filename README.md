@@ -285,6 +285,11 @@ Give it an amount on a chain and turn it on; it runs that money as grid and liqu
 - **Values:** in the budget's coin at today's prices (`MultiBot.botValue`: a grid's capital + realized + unrealized less the profit it sent away; a liquidity bot's coins less gas, also once closed after a restart). Coins are priced through any of the app's markets (one that failed a safety re-check still prices); a budget that can't be valued says its loss limit isn't checked. The gas its own swaps pay comes out of its own coin of the chain.
 - **Swaps:** every swap goes through the chain's transaction queue and nonce, and is saved before it is sent (a restart mid-swap finds it). One still unconfirmed when the wait ends is settled by its hash later: credited when it lands (a swap for a new bot then opens it), refunded if it reverted or never mined by its deadline. A swap's output is the receipt's own transfers to the wallet (in less out; for the chain's own coin, the router's last unwrap), not the wallet's balance change, which could include another transaction landing meanwhile. For a taxed coin, the balance change caps it (a token may log the gross amount).
 - **Turning it off:** *keep its bots* (they run on their own) or *close its bots* (all back to the budget's coin, also a bot that opens after the click). Mode and budgets change only once its accounts hold nothing but their budget's coin; the other settings change any time.
+- **Strategies (2026-11-08; `market/smartStrategy.ts`, `ui/TraderStrategyCards.tsx`).** Three cards on *Set it up*, each with a moving picture, what it picks, its settings in words and what can go wrong; *Use this* sets every option. A hand-changed option shows as none of them.
+  - **Fee farmer:** liquidity ranges only, coins already in the app, low risk only, 3 pools, loss limit 10%. Ranking ranges by what they earned last week is the best predictor the walk-forward found (0.73; the top tenth 14.1% expected, 12.5% earned).
+  - **Swing grids:** grids only, new coins from the scan too, up to medium risk, 4 pools, loss limit 15%. The daily swing predicts next week's grid earnings (0.43; 7.2% expected, 7.4% earned).
+  - **Wide net:** grids and ranges, any risk that can trade live, 6 pools, loss limit 20%.
+  - **What it would open now:** with a budget typed in, each card shows the pools that strategy would open with it right now and their estimates (`GET /api/autopilot/preview?chainId=&coin=&amount=`: the same `candidates` + `planBudget` as a review, from cash alone, no bots held; prices read into their own map so a budget in another coin than a saved one never changes the accounts' rates), the money that would wait and why, and the budget's expected first week (Σ score × capital ÷ amount, each pool's estimate after the swaps in and the entry).
 - **API:**
   - `GET /api/autopilot`
   - `PUT /api/autopilot {mode, options, budgets}` · `PUT /api/autopilot/options`
@@ -297,6 +302,16 @@ Give it an amount on a chain and turn it on; it runs that money as grid and liqu
     - It opened 3 liquidity ranges (one USDG pool, two ETH pools swapped into) and 3 grids (two in PLS, swapped into).
     - Turned off with *close*, all six came back and the PLS and ETH were swapped back: 992.79 USDG and 495.89 DAI, after ~10 minutes of opening and closing costs.
     - That run found a bug: a few wei of a coin left after a liquidity close made the sale's quote fail ("rounds to zero"), so the close never finished. Dust is now checked before quoting (test reproduces it).
+
+## Token trader strategies (Auto traders → Token trader, step 1)
+
+`market/tokenStrategy.ts` (the presets, the gate's rules in words, the exit-ladder arithmetic), `ui/TraderStrategyCards.tsx` (the cards and pictures). A strategy is the risk level plus the optional checks (`tokenStrategyOf` reads it back from the settings; a file without a check reads it as off), and *Use this* also sets the pool age a coin needs and whether the sniper runs:
+
+- **Careful · proven pools:** low risk, every check on (pool age ≥ 24 h and wash volume, owner powers, holders, the $50,000 liquidity floor, impact at your size), sniper off.
+- **Balanced · launch day:** up to medium risk (a tax within the cap; an upgradeable contract nobody can upgrade any more), age ≥ 1 h, wash, owner and size checks on, no holder check, no floor, sniper off.
+- **Wild · first blocks:** any risk the safety check lets trade, no extra checks, no age rule, **sniper on** (its timing as set under Advanced).
+
+Each card lists the coins it buys as the gate's rules with their numbers, and a funnel picture of coins dropping out at each gate. Under the cards, one panel for all three (every trade runs under the same `EXIT` rules): what a trade is worth when it drops (−25%, all out), goes nowhere (the 6 h time stop under +10%), or runs and turns (`ladderOutcome`: a third at +50%, a third at +100%, the rest 20% under the peak: +70% on a run to +100%, +97% on a run to +200%; `stopsPaidFor`: one such run pays for 2.8 or 3.9 stopped-out trades). The panel says these are what the rules make a trade worth, not a forecast: the Scorecard is the trader's own record.
 
 ## Capital router (settings only)
 
