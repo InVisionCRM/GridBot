@@ -5,8 +5,8 @@ import { AnimatedNumber, StatusDot } from './motion';
 import { Chart } from './Chart';
 import { StatTable } from './StatTable';
 import { MoneyDetails, type DetailRow } from './MoneyDetails';
-import { ago, bagFixed, cls, dur, num, pct, pctShown, px, qty } from './fmt';
-import { LP_BAND } from '../market/lp';
+import { ago, bagFixed, cls, dur, num, pct, pctShown, px, qty, usd } from './fmt';
+import { LP_BAND, LP_LOSS_LIMIT } from '../market/lp';
 import { ChainBadge, DexTag, chainOf } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
@@ -38,7 +38,8 @@ function moveNote(b: AnyObj): string {
   if (wait === 'dwell') return `Auto-move is on: it waits ${dwell} minute${dwell === 1 ? '' : 's'} outside before moving.`;
   if (wait === 'cooldown') return `Auto-move is on: it waits ${cool} minute${cool === 1 ? '' : 's'} after a move before it can move again.`;
   if (wait === 'buffer') return 'The price is outside the range but still inside the buffer, so the range stays.';
-  if (wait === 'cost') return 'Moving would cost more in gas and the swap than the fees it should earn, so it waits.';
+  if (wait === 'cost') return 'Moving would cost more (gas, the swap, and the loss the move would lock in) than the fees the next range should earn in the time ranges have lasted here, so it waits for the price to come back. Widen the range or move it yourself below.';
+  if (wait === 'losing') return "The last 24 hours' moves lost money together (fees under the swaps, gas and what they locked in), so auto-move holds. It waits for the price to come back; widen the range, move it yourself, or close.";
   if (dwell > 0 || cool > 0) return `Auto-move is on: it moves after ${dwell > 0 ? `${dwell} minutes outside` : 'the price leaves'}${cool > 0 ? `, and not again for ${cool} minutes` : ''}${b.config?.range?.bufferPct ? `, once the price is ${(b.config.range.bufferPct * 100).toFixed(2)}% past the edge` : ''}.`;
   return 'Auto-move is on: it moves the range to the price on its next check.';
 }
@@ -176,6 +177,9 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
   const [p, setP] = useState<ProfitsChoice>({ mode: cur.mode, to: cur.to ?? '' });
   const [pol, setPol] = useState<PolicyDraft>(() => draftFrom(b.config?.range, b.config?.compound));
   const [presetBand, setPresetBand] = useState<number | null>(null);
+  const savedLimit = (b.config?.lossLimitPct ?? LP_LOSS_LIMIT) as number;
+  const [ll, setLl] = useState(String(+(savedLimit * 100).toFixed(2)));
+  const llOk = Number(ll) > 0 && Number(ll) <= 50;
   const changed = p.mode !== cur.mode || (p.mode === 'send' && p.to !== (cur.to ?? ''));
   const q = b.quote;
   const saved = draftFrom(b.config?.range, b.config?.compound);
@@ -189,6 +193,12 @@ function LpSettings({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: bool
         {changed && <button type="button" className="btn small-btn primary" disabled={busy || (p.mode === 'send' && !isAddress(p.to))}
           onClick={() => act(() => botApi(`lps/${b.id}/profits`, 'PUT', profitsBody(p)))}>Save</button>}
         {b.totals.sent > 0 && <span className="small">Sent so far: {qty(b.totals.sent, q, 5, false)}{cur.mode === 'send' ? ` to ${cur.to}` : ''}.</span>}
+      </div>
+      <div className="follow-row">
+        <label><L tip="The bot pauses and tells you when its result (against holding what you put in, at today's price) is this far below zero. Never off; raise it here and resume if it stopped.">Loss limit %</L>
+          <input value={ll} inputMode="decimal" aria-label="Loss limit percent" onChange={(e) => setLl(e.target.value.replace(/[^\d.]/g, ''))} /></label>
+        {Math.abs(Number(ll) / 100 - savedLimit) > 1e-9 && <button type="button" className="btn small-btn primary" disabled={busy || !llOk}
+          onClick={() => act(() => botApi(`lps/${b.id}/policy`, 'PUT', { lossLimitPct: Number(ll) / 100 }))}>Save loss limit</button>}
       </div>
       <details className="more">
         <summary>Advanced</summary>
@@ -295,41 +305,49 @@ function GeneratedPace({ b }: { b: AnyObj }) {
 }
 
 /**
- * The top strip: Generated (per coin, rolling), today's fees against yesterday by this time, the APR at Generated's
- * pace (botMetrics; none under a day), the pool's last 24 hours, and what was put in with what it is worth now.
+ * The top strip (Kyle 2026-11-08): Result first, and the only figure in colour: what the bot's trading made or lost
+ * against holding the coins put in, both at today's price, with its parts. Then what was put in and what it holds now,
+ * fees after swaps and gas (a part, never the headline: it read green for two days while the bot lost 11%), today's
+ * result against yesterday by this time, the APR at the bot's pace (botMetrics; none under a day), and the pool.
  */
 function Hero({ b }: { b: AnyObj }) {
   const m = metricsOf(b);
   const q = b.quote as string;
+  const p = m?.lpResult ?? null;
   const day = (b.day ?? null) as LpDay | null;
-  const today = day?.today ?? null, y = day?.yesterdayByNow ?? null;
+  const startedToday = typeof b.startedAt === 'number' && day != null && b.startedAt >= day.dayStart;
+  const today = startedToday ? null : day?.today ?? null, y = day?.yesterdayByNow ?? null;
   const vsY = today != null && y != null && y > 0 ? today / y - 1 : null;
   const f = botFacts(b, Date.now(), { chain: null, dex: null, pool: null });
   const apr = f.aprPct;
   const pool = day?.pool ?? null;
+  // the dollar beside the Result: not for a dollar stablecoin quote (it would print the same figure twice), and from $1 up
+  const k = m?.quote?.usdPerQuote ?? null;
+  const frac = p && p.hold > 0 ? p.result / p.hold : null;
   return (
     <div className="lpb-hero" data-testid="top-strip">
-      <div className="lpb-card" data-testid="invested">
-        <span className="lpb-label"><L tip="What was put into this bot at the start, coin by coin.">Invested</L></span>
-        <div className="lpb-big coins">{bagFixed(m?.capitalCoins)}</div>
-        <span className="lpb-sub">put in at the start</span>
-        {b.value != null && <span className="lpb-sub">worth {qty(b.value, q, 5, false)} now</span>}
+      <div className={`lpb-card lead ${p && p.result < 0 ? 'neg' : ''}`} data-testid="result">
+        <span className="lpb-label"><L tip="What the bot's trading has made or lost against simply holding the coins you put in, both at today's price: fees, less swap fees, gas, what each range move locked in, and the mix it carried. The only figure that colours this page.">Result</L></span>
+        <div className={`lpb-big ${cls(p?.result)}`}><AnimatedNumber value={p?.result ?? null} format={(x) => qty(x, q, 4)} chip={false} /></div>
+        <span className="lpb-sub">{frac != null ? `${pctShown(frac, 2, true)} of what you put in` : 'against holding what you put in'}{p && k != null && k > 0 && Math.abs(k - 1) >= 0.02 && Math.abs(p.result * k) >= 1 ? ` · ${usd(p.result * k, true)}` : ''}</span>
+        <span className="lpb-sub">fees − gas − swaps − what the moves locked in − the mix carried: each in Details below</span>
       </div>
-      <div className="lpb-card lead">
-        <span className="lpb-label"><L tip={m?.calc ?? 'Generated'}>Generated</L></span>
-        {m?.generated ? Object.entries(m.generated).map(([sym, u], i) => <div key={sym} className={`lpb-big ${i ? 'second' : ''} ${cls(u)}`}><AnimatedNumber value={u} format={(x) => qty(x, sym, 5)} chip={false} /></div>) : <div className="lpb-big">—</div>}
-        <span className="lpb-sub">since the start: fees − gas − swap fees, per coin</span>
+      <div className="lpb-card" data-testid="invested">
+        <span className="lpb-label"><L tip="What was put into this bot at the start, coin by coin, and what the bot holds now at today's price: the position, fees waiting and coins outside the position.">Put in → have now</L></span>
+        <div className="lpb-big coins">{bagFixed(m?.capitalCoins)}</div>
+        {b.value != null && <div className="lpb-big second">→ {qty(b.value, q, 5, false)} now</div>}
+        {p && (b.config?.baseAmount ?? 0) > 0 && <span className="lpb-sub">holding them would be worth {qty(p.hold, q, 5, false)}</span>}
       </div>
       <div className="lpb-card">
-        <span className="lpb-label">Today</span>
-        <div className="lpb-big"><AnimatedNumber value={today} format={(x) => qty(x, q, 5)} /></div>
-        <span className="lpb-sub">fees since midnight</span>
+        <span className="lpb-label"><L tip="The result since midnight: fees earned today less gas, swap fees and what today's moves locked in.">Today</L></span>
+        <div className={`lpb-big ${cls(today)}`}><AnimatedNumber value={today} format={(x) => qty(x, q, 4)} /></div>
+        <span className="lpb-sub">{startedToday ? 'started today: the result above is today\'s' : 'result since midnight'}</span>
         {vsY != null && pctShown(vsY, 2) !== '—' && <span className={`lpb-delta ${vsY < 0 ? 'down' : ''}`}>{vsY >= 0 ? '▲' : '▼'} {pctShown(vsY, 2, true)} vs yesterday by now</span>}
       </div>
       <div className="lpb-card">
         <span className="lpb-label"><L tip={f.calc ?? 'APR'}>APR</L></span>
         <div className={`lpb-big ${cls(apr)}`}><AnimatedNumber value={apr} format={(x) => pctShown(x, 2, true)} chip={false} /></div>
-        <span className="lpb-sub">{apr != null ? "a year at Generated's pace so far" : f.estHint.d365 ?? 'shows after a day'}</span>
+        <span className="lpb-sub">{apr != null ? 'a year at its pace so far' : f.estHint.d365 ?? 'shows after a day'}</span>
       </div>
       <div className="lpb-card">
         <span className="lpb-label"><L tip="Read from the pool's own fee counters at every check: the fees it paid its liquidity providers, divided by its fee rate to them, is what traded. Only while this bot runs.">Pool · last {pool && pool.hours < 23.9 ? `${pool.hours.toFixed(1)} h` : '24 h'}</L></span>
@@ -432,7 +450,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         </div>
       </div>
 
-      <MoneyDetails b={b} breakdown={lpBreakdown(b)} hide={['Deposit', 'Value now', 'Price change', 'Open positions']} note="fees earned − costs = Generated, total P&L, price change" />
+      <MoneyDetails b={b} breakdown={lpBreakdown(b)} hide={['Deposit', 'Value now', 'Total P&L', 'Made at event prices', 'Open positions']} note="fees earned − gas, swaps and range moves = Generated per coin; what the coins' own price did" />
 
       <div className="lpb-card"><h3 className="lpb-label">Log</h3><BotLog events={events} botId={b.id} /></div>
     </main>

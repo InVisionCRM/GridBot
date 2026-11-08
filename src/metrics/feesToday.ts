@@ -35,21 +35,22 @@ export function localDayStart(now: number): number {
 }
 
 /**
- * A liquidity bot's fees earned today in its quote coin, from `feeHist` ([ms, pnl.fees]): now − the last sample
- * before midnight. A bot started today counts everything; with no sample before midnight (history began later) the
- * first sample is the baseline, so nothing older is counted as today.
+ * A liquidity bot's result today in its quote coin: fees earned less every cost of its own trades (gas, swaps, what the
+ * range moves locked in), from `feeHist` ([ms, fees, …, cost]): now − the last sample at or before midnight. A bot
+ * started today counts everything. Samples recorded before 2026-11-08 have no cost column: with no such baseline the
+ * figure is null (shown as —) until a new midnight sample exists, never a fees-only number dressed as a result.
  */
-export function lpFeesToday(b: Obj, dayStart: number): { quote: number; points: [number, number][] } | null {
-  const nowFees = typeof b.pnl?.fees === 'number' && Number.isFinite(b.pnl.fees) ? (b.pnl.fees as number) : null;
-  if (nowFees == null) return null;
-  const hist = ((b.feeHist ?? []) as [number, number][]).filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
+export function lpResultToday(b: Obj, dayStart: number): { quote: number; points: [number, number][] } | null {
+  const p = b.pnl;
+  const nowRes = [p?.fees, p?.gas, p?.swapCost, p?.moveLoss].every((x) => typeof x === 'number' && Number.isFinite(x)) ? p.fees - p.gas - p.swapCost - p.moveLoss : null;
+  if (nowRes == null) return null;
+  const hist = ((b.feeHist ?? []) as number[][]).filter((r) => r.length >= 7 && Number.isFinite(r[0]) && Number.isFinite(r[1]) && Number.isFinite(r[6])).map((r) => [r[0], r[1] - r[6]] as [number, number]);
   const before = hist.filter(([t]) => t <= dayStart); // a sample taken at midnight is the value at midnight
   let base: number;
   if (before.length) base = before[before.length - 1][1];
   else if (typeof b.startedAt === 'number' && b.startedAt >= dayStart) base = 0;
-  else if (hist.length) base = hist[0][1];
   else return null;
-  return { quote: nowFees - base, points: hist.filter(([t]) => t >= dayStart).map(([t, v]) => [t, v - base] as [number, number]) };
+  return { quote: nowRes - base, points: hist.filter(([t]) => t >= dayStart).map(([t, v]) => [t, v - base] as [number, number]) };
 }
 
 export function feesToday(bots: Obj[], now = Date.now()): FeesToday {
@@ -65,7 +66,7 @@ export function feesToday(bots: Obj[], now = Date.now()): FeesToday {
     // In coins every bot counts; the dollar figures (and the sparkline) only those with a dollar price, as before
     if (k != null || sym != null) out.byBot[String(b.id)] = row;
     if (b.kind === 'lp') {
-      const f = lpFeesToday(b, start);
+      const f = lpResultToday(b, start);
       if (!f) continue;
       row.earned = f.quote;
       if (k == null) continue;

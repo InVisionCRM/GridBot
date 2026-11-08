@@ -2031,6 +2031,9 @@ label.tk-toggle { flex-direction: row; align-items: center; gap: 10px; cursor: p
 .lpb { gap: 14px; }
 .lpb-card { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; animation: lpb-rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .lpb-card.lead { border-color: var(--profit); box-shadow: 0 0 0 1px rgba(92, 208, 141, 0.15), 0 0 24px rgba(92, 208, 141, 0.08); }
+.lpb-card.lead.neg { border-color: var(--loss); box-shadow: 0 0 0 1px rgba(242, 112, 107, 0.18), 0 0 24px rgba(242, 112, 107, 0.1); }
+.lpb-sub.lpb-parts { white-space: normal; }
+.warn-text { color: var(--warn); }
 .lpb-label { display: block; font: 500 0.72rem/1.3 var(--font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0; }
 .lpb-hint { font: 0.7rem/1.5 var(--mono); color: var(--muted); margin-top: 2px; }
 .lpb-sub { display: block; font: 0.74rem/1.45 var(--mono); color: var(--muted); margin-top: 4px; }

@@ -87,20 +87,18 @@ describe('MED 3: the LP page does not restate its headline under a day', () => {
   const strip = (html: string) => { const i = html.indexOf('data-testid="top-strip"'); return html.slice(i, html.indexOf('data-testid="generated-pace"', i) > 0 ? html.indexOf('data-testid="generated-pace"', i) : undefined); };
   /** The Pace card's text only. */
   const pace = (html: string) => { const t = text(html.slice(html.indexOf('data-testid="generated-pace"'))); return t.slice(0, t.indexOf('not a forecast')); };
-  it('under a day: Generated shows once in the top strip, with no "net over the run" sub-line, and no pace scaled up', () => {
+  it('under a day: Result shows once in the top strip, Generated only per coin in Details, and no pace scaled up', () => {
     const b = lp(8.8 * H);
     const html = page(b);
     const top = text(strip(html));
     expect(top).not.toMatch(/Earned after costs/);
     expect(top).not.toMatch(/over 8\.8h/);
-    expect(top).not.toMatch(/of what you put in/);
-    // each coin of Generated is printed once in the strip's Generated tile
-    const tile = text(top.slice(top.indexOf('Generated'), top.indexOf('Today'))); // the Generated tile (Invested before it, Today after)
-    for (const [sym, u] of Object.entries(b.metrics.generated as Record<string, number>)) {
-      expect(tile.split(` ${sym}`).length - 1, `${u} ${sym}`).toBe(1);
-    }
-    // Kyle (#73): no pace card at all under a day (botMetrics' day estimate is null then, #86)
-    expect(html).not.toMatch(/data-testid="generated-pace"/);
+    // the Result tile is the one coloured figure, printed once; Generated is no tile any more: Details holds one line per coin (2026-11-08)
+    expect(top.split('Result').length - 1).toBe(1);
+    expect(strip(html)).not.toMatch(/>Generated</); // no Generated tile; the word may sit inside a tip
+    const full = text(html);
+    // one Generated line per coin in Details: "= Generated, X" where X carries costs, else "Fees earned, X … all of it is Generated"
+    for (const sym of Object.keys(b.metrics.generated)) expect((full.match(new RegExp(`= Generated, ${sym}|Fees earned, ${sym}[^=]*?all of it is Generated`, 'g')) ?? []).length, sym).toBe(1);
   });
   it('from a day on, the pace rows are back', () => {
     const html = page(lp(2 * DAY_MS));

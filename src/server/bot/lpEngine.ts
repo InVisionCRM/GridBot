@@ -25,12 +25,14 @@ import type { LiveNetwork } from '../../live/networks';
 import { isLegacyKey, type MarketDef } from '../../live/markets';
 import { feesOwed } from '../../live/v3Liquidity';
 import { GAS_UNITS_RT } from '../../live/economics';
-import { gasInBase, LP_BAND, LP_GAS, LP_INCREASE_GAS, LP_MIN_SWAP_SHARE } from '../../market/lp';
+import { gasInBase, LP_BAND, LP_GAS, LP_INCREASE_GAS, LP_LOSS_LIMIT, LP_MIN_SWAP_SHARE } from '../../market/lp';
 import {
   checkRangePolicy, compoundPolicy, decideCompound, decideRangeMove, effectiveBand, feePace, rangePolicy,
   type LpCompoundPolicy, type LpRangePolicy, type RangeWait,
 } from '../../market/lpPolicy';
 import { atr } from '../../market/indicators';
+import { localDayStart } from '../../metrics/feesToday';
+import { dayKey } from '../../metrics/daily';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
 import { fromUnits } from '../../live/swapMath';
@@ -92,6 +94,8 @@ export interface LpStep {
   taken?: Coins;
   /** Gas + swap costs (quote) and fee coins collected when the step began: what it cost and collected is the difference */
   from?: { cost: number; fees: Coins };
+  /** What this step's exit locked in (quote, at that price): set by exited() for a move or a close, for the step log. */
+  lockIn?: number;
   /** You asked for it (Compound now, Move, Close, the start); absent: the bot's own rules */
   asked?: boolean;
   /** Tx sent for this stage and not settled yet: never resent while set */
@@ -122,8 +126,20 @@ export interface LpStep {
  * One finished step, for the page's "today's moves": when, what, who asked, the range it opened (open and move), what it
  * cost in gas and swap fees (quote) and the fees it collected (coins).
  */
-export interface LpDone { t: number; action: LpAction; asked: boolean; lower: number | null; upper: number | null; cost: number; fees: Coins }
+export interface LpDone {
+  t: number; action: LpAction; asked: boolean; lower: number | null; upper: number | null;
+  /** Gas + swap cost of the step (quote) */
+  cost: number;
+  fees: Coins;
+  /** What its exit locked in (the coins out against the coins in, quote at that price). Absent on steps logged before 2026-11-08. */
+  lockIn?: number;
+}
 const DONE_KEPT = 60;
+/** Tell once when the result first falls this far below zero (fraction of what was put in). */
+const RESULT_ALERT = 0.005;
+/** A signed figure for a notice, with the page's minus sign: +0.5302 / −0.4153 */
+const sgn = (x: number, p = 4) => `${x < 0 ? '−' : '+'}${Math.abs(x).toPrecision(p)}`;
+const pctOf = (x: number) => `${x < 0 ? '−' : ''}${Math.abs(x * 100).toFixed(2)}%`;
 
 /** Fees collected at once: taken out on a range move or the close, compounded back in, or sent to the payout address */
 export interface FeeCollection { t: number; base: number; quote: number; why: 'moved' | 'closed' | 'compounded' | 'sent' }
@@ -153,6 +169,11 @@ export interface LpState {
      * (Kyle 2026-11-04); the swap's price-impact cap still applies to every bot.
      */
     maxPoolShare?: number;
+    /**
+     * Pause when the result (what the bot has against holding the coins put in, at today's price) is this far below
+     * zero, as a fraction of what was put in. Never off: a save without it reads as LP_LOSS_LIMIT (Kyle 2026-11-08).
+     */
+    lossLimitPct?: number;
   } | null;
   limits: SafetyLimits;
   profits: ProfitMode;
@@ -165,6 +186,10 @@ export interface LpState {
    * where the cap, if the bot has one, is checked again. Old saves omit it.
    */
   aside?: Coins;
+  /** When the result first fell below −RESULT_ALERT of what was put in (told once per such stretch); null while it is not. Old saves omit it. */
+  resultNegativeAt?: number | null;
+  /** The local day (dayKey) whose day summary was told, so each day is told once. Old saves omit it. */
+  dailyNoted?: string;
   step: LpStep | null;
   /** Each time fees were collected, newest first (the last COLLECTIONS_KEPT): when, the coins, and why. Old saves omit it. */
   collections?: FeeCollection[];
@@ -233,6 +258,8 @@ export interface LpStartParams {
   compound?: Partial<LpCompoundPolicy>;
   /** The smart trader's bots only: the most of the pool's active liquidity the position may be (0–1). Omit for no cap. */
   maxPoolShare?: number;
+  /** Pause at this loss against holding, as a fraction of what is put in (0.03 = −3%). Omit for LP_LOSS_LIMIT. */
+  lossLimitPct?: number;
   profits?: ProfitMode;
   limits?: Partial<SafetyLimits>;
   /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
@@ -275,7 +302,7 @@ const UNREADABLE_READS = 10;
 const FEE_HIST_MS = 5 * 60_000;
 const FEE_HIST_CAP = 600;
 const FEE_HIST_SHOWN_MS = 50 * 3_600_000;
-export type FeeSample = [number, number] | [number, number, number, number, number | null, number];
+export type FeeSample = [number, number] | [number, number, number, number, number | null, number] | [number, number, number, number, number | null, number, number];
 /** Two pool readings further apart than this (the bot was down) measure no pool fees: the active liquidity may have changed */
 const POOL_FEE_GAP_MS = 10 * 60_000;
 /** A native base side keeps this many times the open's estimated gas out of the position, so the open can pay for itself. */
@@ -477,6 +504,7 @@ export class LpEngine {
     const range = p.range ? checkRangePolicy(p.range) : undefined;
     const compound = p.compound ? compoundPolicy(p.compound) : undefined;
     if (p.maxPoolShare !== undefined && !(p.maxPoolShare > 0 && p.maxPoolShare < 1)) throw new Error('Max pool share must be between 0 and 1.');
+    if (p.lossLimitPct !== undefined && !(p.lossLimitPct > 0 && p.lossLimitPct <= 0.5)) throw new Error('Loss limit must be between 0% and 50%.');
     const stoppedBy = p.guard?.();
     if (stoppedBy) {
       this.state.halt = { ...stoppedBy, at: this.now() };
@@ -486,7 +514,7 @@ export class LpEngine {
     }
     this.state = {
       ...this.state, status: 'running', config: {
-        bandPct: p.bandPct, capital: p.capital, baseAmount, rerange: p.rerange ?? true,
+        bandPct: p.bandPct, capital: p.capital, baseAmount, rerange: p.rerange ?? true, lossLimitPct: p.lossLimitPct ?? LP_LOSS_LIMIT,
         ...(range ? { range } : {}), ...(compound ? { compound } : {}), ...(p.maxPoolShare !== undefined ? { maxPoolShare: p.maxPoolShare } : {}),
       },
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },
@@ -507,6 +535,7 @@ export class LpEngine {
     this.state.status = 'stopped';
     this.state.closing = false;
     this.state.halt = halt;
+    this.noteUnopened();
     // A close that has not been sent yet is dropped. A tx already broadcast is still settled. While a tick runs it may be
     // sending that close right now: the tick drops it at its end only if nothing went out (the hash is never lost).
     if (!this.ticking && this.state.step?.action === 'close' && !this.state.step.hash && !this.state.step.swap) this.state.step = null;
@@ -546,6 +575,7 @@ export class LpEngine {
     if (this.state.archivedAt) return false;
     if (this.state.mode !== 'live') {
       this.noteClose(why);
+      this.noteUnopened();
       this.finishPaper();
       return false;
     }
@@ -555,6 +585,7 @@ export class LpEngine {
     const busy = this.ticking || !!(this.state.step?.hash || this.state.step?.swap);
     if (!this.state.position && !busy) {
       this.noteClose(why);
+      this.noteUnopened();
       this.markArchived();
       return false;
     }
@@ -633,9 +664,13 @@ export class LpEngine {
     this.save();
   }
   /** Replace the optional gates. Omitted side is left as saved. Absent fields inside a side use the defaults. */
-  setPolicy(next: { range?: Partial<LpRangePolicy>; compound?: Partial<LpCompoundPolicy>; bandPct?: number }) {
+  setPolicy(next: { range?: Partial<LpRangePolicy>; compound?: Partial<LpCompoundPolicy>; bandPct?: number; lossLimitPct?: number }) {
     const c = this.state.config;
     if (!c) throw new Error('Start it first.');
+    if (next.lossLimitPct != null) {
+      if (!(next.lossLimitPct > 0 && next.lossLimitPct <= 0.5)) throw new Error('Loss limit must be between 0% and 50%.');
+      c.lossLimitPct = next.lossLimitPct;
+    }
     if (next.bandPct != null) {
       if (!(next.bandPct >= LP_BAND.min && next.bandPct <= LP_BAND.max)) throw new Error(`Range must be ±${LP_BAND.min * 100}% to ±${LP_BAND.max * 100}%.`);
       c.bandPct = next.bandPct;
@@ -756,6 +791,7 @@ export class LpEngine {
       const st = this.state.step;
       if (this.state.status !== 'running' && st?.action === 'close' && !st.hash && !st.swap) this.state.step = null;
       await this.measure(pool, v);
+      this.guards(v);
       this.save();
       this.lastError = null;
     } catch (e) {
@@ -779,6 +815,7 @@ export class LpEngine {
     const base = {
       tickOut, price: v.price, lower: p.lower, upper: p.upper, outSince: this.state.outSince,
       lastMoveAt: this.state.lastRerangeAt, now: this.now(), rerange: c.rerange, policy,
+      losingStreak: this.losingStreak(v), horizonH: this.rangeLifeH(),
     };
     let d = decideRangeMove(base);
     if (d.wait === 'need-cost') {
@@ -787,6 +824,8 @@ export class LpEngine {
     }
     this.state.outSince = d.outSince;
     this.noteNear(d.nearEdge, v.price, p.lower, p.upper, d.toEdge);
+    if (d.wait === 'losing') this.noteOnce("not moving the range: the last 24 hours' moves lost money together (fees under the swaps, gas and what they locked in). It waits for the price to come back; widen the range, move it yourself, or close.");
+    if (d.wait === 'cost') this.noteOnce('not moving the range: gas, the swap and the loss the move would lock in come to more than the fees the next range should earn in the time ranges have lasted here. It waits for the price to come back; widen the range or move it yourself.');
     const suggested = policy.atrMult > 0 ? this.bandFor(v, policy) : null;
     this.hold = {
       wait: d.wait, toEdge: d.toEdge, near: d.nearEdge, compoundNeed: null, feesWaiting: null,
@@ -841,7 +880,12 @@ export class LpEngine {
     return feePace(pf.coins.base * v.price + pf.coins.quote, p.earningMs ?? 0);
   }
 
-  /** Gas to exit and re-open, plus the swap back to the mix (pool fee + half the quoted impact). null if the quote fails. */
+  /**
+   * What moving to ±`bandPct` costs now, quote: gas to exit and re-open, the swap back to the mix (pool fee + half the
+   * quoted impact), and the loss the move locks in: the coins the position holds now against the coins it went in with,
+   * at this price (known exactly here; Kyle 2026-11-08: it was 0.010 ETH a move against 0.006 of gas and swap, and
+   * was not counted). null if the quote fails.
+   */
   private async estimateMoveCost(pool: LpPool, v: PoolView, bandPct: number): Promise<number | null> {
     try {
       const snap = await this.hub.quoter(this.state.market).market();
@@ -854,10 +898,11 @@ export class LpEngine {
       const value = haveBase + coins.quote + idle.quote + owed.quote;
       const wantBase = pool.baseShare(range.tickLower, range.tickUpper, v) * value;
       const gap = Math.abs(wantBase - haveBase);
-      if (!(value > 0) || gap <= value * LP_MIN_SWAP_SHARE) return gas;
+      const lockIn = pos.putIn ? Math.max(0, (pos.putIn.base - coins.base) * v.price + (pos.putIn.quote - coins.quote)) : 0;
+      if (!(value > 0) || gap <= value * LP_MIN_SWAP_SHARE) return gas + lockIn;
       const side: 'buy' | 'sell' = wantBase > haveBase ? 'buy' : 'sell';
       const q = await this.executor.quote(side, side === 'buy' ? gap : gap / v.price, this.state.limits);
-      return gas + gap * (pool.fee / 1e6 + q.priceImpact / 2);
+      return gas + lockIn + gap * (pool.fee / 1e6 + q.priceImpact / 2);
     } catch {
       return null;
     }
@@ -961,7 +1006,8 @@ export class LpEngine {
     if (pnl && (!eq.length || this.now() - eq[eq.length - 1][0] >= 60_000)) pushCapped(eq, [this.now(), pnl.equity], 3000);
     if (pnl) {
       const fh = (this.state.feeHist ??= []);
-      const sample: FeeSample = [this.now(), pnl.fees, pnl.feeCoins.base, pnl.feeCoins.quote, this.state.poolFees ?? null, v.price];
+      const t = this.state.totals;
+      const sample: FeeSample = [this.now(), pnl.fees, pnl.feeCoins.base, pnl.feeCoins.quote, this.state.poolFees ?? null, v.price, t.gas + t.swapCost + t.moveLoss];
       if (!fh.length || this.now() - fh[fh.length - 1][0] >= FEE_HIST_MS) pushCapped(fh, sample, FEE_HIST_CAP);
     }
   }
@@ -1001,7 +1047,7 @@ export class LpEngine {
     const d = (this.state.done ??= []);
     d.unshift({
       t: this.now(), action: s.action, asked: !!s.asked, lower: range?.lower ?? null, upper: range?.upper ?? null,
-      cost: t.gas + t.swapCost - from.cost, fees: { base: t.feeCoins.base - from.fees.base, quote: t.feeCoins.quote - from.fees.quote },
+      cost: t.gas + t.swapCost - from.cost, fees: { base: t.feeCoins.base - from.fees.base, quote: t.feeCoins.quote - from.fees.quote }, lockIn: s.lockIn ?? 0,
     });
     if (d.length > DONE_KEPT) d.length = DONE_KEPT;
   }
@@ -1009,22 +1055,102 @@ export class LpEngine {
   /**
    * Where the money stands (null until the first reading), in the quote coin:
    *  feeCoins / fees = fees collected + waiting, per coin and their worth (collected: valued then; waiting: today)
-   *  net = fees − gas − swap costs: what it earned, the same measure as the replay. moveLoss (the coin mix the range
-   *    moves locked in) is reported beside it, not taken out: like the coins' own price change, it is in `price`
-   *  equity = the bot's coins (position + fees waiting + idle) at today's price + fees sent out − gas paid
-   *  price = equity − start value − net: what the coins' own price did
+   *  net = fees − gas − swap costs − moveLoss: the bot's trading, each event at its own price. moveLoss is the coin mix the
+   *    range moves locked in: the position sold the coin that rose and bought the one that fell, then the bot swapped
+   *    to re-centre. Those are the bot's own trades, so their loss is its cost (Kyle 2026-11-08: before, it sat in `price`
+   *    and the page read +0.30 ETH green while the bot was 0.42 ETH behind holding)
+   *  equity = the bot's coins (position + fees waiting + idle + set aside) at today's price + fees sent out − gas paid
+   *  hold = what holding the coins put in would be worth today
+   *  result = equity − hold: THE figure. What the bot's trading made or lost against holding, at today's price
+   *  carry = result − net: the mix the bot carried between events, at today's price against the events' prices
+   *  price = hold − start: what the coins' own price did to what was put in (the market, not the bot)
    */
-  pnl(): { equity: number; feeCoins: Coins; fees: number; gas: number; swapCost: number; moveLoss: number; net: number; price: number } | null {
+  pnl(): { equity: number; feeCoins: Coins; fees: number; gas: number; swapCost: number; moveLoss: number; net: number; hold: number; result: number; carry: number; price: number } | null {
     const c = this.state.config, vw = this.view, start = this.startValue();
     if (!c || !vw || start == null) return null;
     const t = this.state.totals;
     const equity = vw.value + t.sent - t.gas;
     const fees = t.fees + vw.owed.base * vw.v.price + vw.owed.quote;
-    const net = fees - t.gas - t.swapCost;
+    const net = fees - t.gas - t.swapCost - t.moveLoss;
+    const hold = c.capital + c.baseAmount * vw.v.price;
+    const result = equity - hold;
     return {
       equity, feeCoins: { base: t.feeCoins.base + vw.owed.base, quote: t.feeCoins.quote + vw.owed.quote }, fees,
-      gas: t.gas, swapCost: t.swapCost, moveLoss: t.moveLoss, net, price: equity - start - net,
+      gas: t.gas, swapCost: t.swapCost, moveLoss: t.moveLoss, net, hold, result, carry: result - net, price: hold - start,
     };
+  }
+
+  /**
+   * After each reading: the first-loss notice, the loss limit, the day summary. Kyle 2026-11-08: the page read green for
+   * two days while the bot fell 11% behind holding, and nothing in the app was built to say so or to stop.
+   */
+  private guards(v: PoolView) {
+    const p = this.pnl(), c = this.state.config;
+    if (!p || !c || !(p.hold > 0)) return;
+    const frac = p.result / p.hold;
+    const res = `${sgn(p.result)} ${this.quoteSym} (${pctOf(frac)}) against holding what was put in`;
+    if (frac <= -RESULT_ALERT) {
+      if (!this.state.resultNegativeAt) {
+        this.state.resultNegativeAt = this.now();
+        this.ev('info', `Liquidity ${this.label}: result ${res}. Fees ${sgn(p.fees)}, swaps ${sgn(-p.swapCost)}, gas ${sgn(-p.gas)}, locked in by moves ${sgn(-p.moveLoss)}, carry ${sgn(p.carry)} ${this.quoteSym}.`, { level: 'warn', notify: true });
+      }
+    } else if (frac >= 0) this.state.resultNegativeAt = null;
+    const limit = c.lossLimitPct ?? LP_LOSS_LIMIT;
+    if (frac <= -limit && this.state.status === 'running' && !this.state.closing && this.state.step?.action !== 'close') {
+      const pos = this.state.position;
+      const where = pos ? (v.tick >= pos.tickLower && v.tick < pos.tickUpper ? 'The position stays open and keeps earning' : 'The position stays open, out of range') : 'No position is open';
+      this.stop(systemHalt('loss-limit', `result ${res} is past the ${pctOf(limit)} loss limit. ${where}; close it, widen the range, or raise the limit in Settings and resume.`, this.now()));
+    }
+    this.dailyNote();
+  }
+
+  /** Once a day, the day before in one line: fees, costs, result, from the 5-minute samples (they carry the cost column from 2026-11-08 on). */
+  private dailyNote() {
+    const now = this.now(), today = localDayStart(now), key = dayKey(now);
+    if (this.state.dailyNoted === key) return;
+    this.state.dailyNoted = key;
+    const yStart = localDayStart(today - 12 * 3_600_000);
+    const fh = this.state.feeHist ?? [];
+    const at = (t: number) => { let x: FeeSample | undefined; for (const r of fh) { if (r[0] > t) break; x = r; } return x && x.length >= 7 ? { fees: x[1], cost: x[6] as number } : null; };
+    const a = at(yStart) ?? (this.state.startedAt != null && this.state.startedAt >= yStart ? { fees: 0, cost: 0 } : null), z = at(today);
+    if (!a || !z) return;
+    const fees = z.fees - a.fees, cost = z.cost - a.cost, r = fees - cost;
+    const moves = (this.state.done ?? []).filter((d) => d.action === 'rerange' && d.t >= yStart && d.t < today).length;
+    this.ev('info', `Liquidity ${this.label}, yesterday: fees ${sgn(fees)} ${this.quoteSym}, costs ${sgn(-cost)} (${moves} move${moves === 1 ? '' : 's'}: swaps, gas and what they locked in), result ${sgn(r)} ${this.quoteSym}.`, { level: r >= 0 ? 'success' : 'warn', notify: true });
+  }
+
+  /** The last 24 hours' range moves (3 or more) lost money together: their fees − swaps − gas − what they locked in. */
+  private losingStreak(v: PoolView): boolean {
+    const since = this.now() - 24 * 3_600_000;
+    const moves = (this.state.done ?? []).filter((d) => d.action === 'rerange' && d.t >= since);
+    if (moves.length < 3) return false;
+    return moves.reduce((a, d) => a + d.fees.base * v.price + d.fees.quote - d.cost - (d.lockIn ?? 0), 0) < 0;
+  }
+
+  /** How long the last ranges lived, hours: the median gap between the last 6 moves. null under 3 moves. */
+  private rangeLifeH(): number | null {
+    const t = (this.state.done ?? []).filter((d) => d.action === 'rerange').slice(0, 6).map((d) => d.t).sort((a, b) => a - b);
+    if (t.length < 3) return null;
+    const gaps = t.slice(1).map((x, i) => (x - t[i]) / 3_600_000).sort((a, b) => a - b);
+    return gaps[Math.floor(gaps.length / 2)];
+  }
+
+  /** The pool as it would read at `price`: √price and tick moved with it (the mix a range needs there). */
+  private viewAt(v: PoolView, price: number): PoolView {
+    const k = price / v.price, rawK = v.baseIs0 ? k : 1 / k;
+    const sqrtP = v.sqrtP * Math.sqrt(rawK);
+    return { ...v, price, sqrtP, tick: Math.floor(Math.log(sqrtP * sqrtP) / Math.log(1.0001)) };
+  }
+
+  /**
+   * An open whose swap went through but whose position never opened leaves the coins in the range's mix, in the wallet:
+   * said out loud, never quietly (Nov 5 19:52: 1.446 ETH swapped into CASHCAT, no position after, 72% in CASHCAT).
+   */
+  private noteUnopened() {
+    const s = this.state.step;
+    if (!s || s.action !== 'open' || s.stage === 'swap' || this.state.position) return;
+    const i = this.state.idle;
+    this.ev('info', `Liquidity ${this.label}: the coins were swapped for a position that never opened. Your wallet holds ${i.base.toPrecision(6)} ${this.baseSym} + ${i.quote.toPrecision(6)} ${this.quoteSym} in that mix.`, { level: 'warn', notify: true });
   }
   /** What the open position has earned in fees since it opened (collected + waiting), per coin: its own history. */
   positionFees(): { coins: Coins; since: number } | null {
@@ -1312,11 +1438,12 @@ export class LpEngine {
    * A position came out with `principal` against the `putIn` coins: the shortfall at this price is "lost to moves".
    * In coins it is charged to the coin the exit left too much of, i.e. the one the rebalance swap sells.
    */
-  private addMoveLoss(putIn: Coins, principal: Coins, price: number) {
+  private addMoveLoss(putIn: Coins, principal: Coins, price: number): number {
     const loss = (putIn.base - principal.base) * price + (putIn.quote - principal.quote);
     this.state.totals.moveLoss += loss;
     const soldBase = principal.base > putIn.base;
     this.addCoins('moveCoins', soldBase && price > 0 ? { base: loss / price, quote: 0 } : { base: 0, quote: loss });
+    return loss;
   }
 
   private addFees(f: Coins, price: number, why: FeeCollection['why']) {
@@ -1337,7 +1464,7 @@ export class LpEngine {
    */
   private exited(s: LpStep, fees: Coins, principal: Coins, v: PoolView) {
     const p = this.state.position!;
-    if (p.putIn) this.addMoveLoss(p.putIn, principal, v.price);
+    s.lockIn = p.putIn ? this.addMoveLoss(p.putIn, principal, v.price) : 0;
     this.state.position = null;
     this.state.outSince = null;
     this.blockMemo = null;
@@ -1396,6 +1523,15 @@ export class LpEngine {
     if (gap > value * LP_MIN_SWAP_SHARE) {
       let q = await this.executor.quote(side, side === 'buy' ? gap : gap / v.price, this.state.limits);
       if (!q.balanceOk) throw new Error(`can't swap to the range's mix: ${q.balanceNote}`);
+      // A live swap moves the pool's price, and with a narrow range a small move changes the mix the range needs (Nov 5:
+      // 5,103 CASHCAT bought past what the range took, left outside). Size it for the price it leaves behind: one more
+      // quote. A paper swap moves nothing, so paper keeps the first quote.
+      const after = this.viewAt(v, v.price * (1 + (side === 'buy' ? 1 : -1) * q.priceImpact));
+      const value2 = idle.base * after.price + idle.quote, want2 = pool.baseShare(s.range.tickLower, s.range.tickUpper, after) * value2 - idle.base * after.price;
+      if (this.state.mode === 'live' && (want2 > 0) === (side === 'buy') && Math.abs(Math.abs(want2) - gap) > value * 0.01) {
+        q = await this.executor.quote(side, side === 'buy' ? Math.abs(want2) : Math.abs(want2) / v.price, this.state.limits);
+        if (!q.balanceOk) throw new Error(`can't swap to the range's mix (sized for the price after the swap): ${q.balanceNote}`);
+      }
       if (q.priceImpact > this.state.limits.maxPriceImpact) {
         const cap = this.state.limits.maxPriceImpact;
         let lo = 0, hi = q.amountInHuman, best = 0;

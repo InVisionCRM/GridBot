@@ -20,7 +20,7 @@ const EPS = (x: number) => 1e-12 * Math.max(1, Math.abs(x));
 function identity(m: BotMetrics) {
   expect(m.breakdownByCoin, m.botId).not.toBeNull();
   for (const [sym, c] of Object.entries(m.breakdownByCoin!)) {
-    const sum = c.earned - c.gasSwap - c.taxes - c.bridge;
+    const sum = c.earned - c.gasSwap - c.moves - c.taxes - c.bridge;
     expect(Math.abs(sum - c.generated), `${m.botId} ${sym}`).toBeLessThanOrEqual(EPS(c.generated));
     expect(c.generated, `${m.botId} ${sym} = headline`).toBe(m.generated![sym] ?? 0);
     for (const v of Object.values(c)) expect(Number.isFinite(v)).toBe(true);
@@ -44,27 +44,29 @@ describe('the live LP lp-mvnm73sx-hghe, ETH', () => {
     expect(e.gasSwap).toBeCloseTo(0.002633, 6);
     expect(e.taxes).toBe(0);
     expect(e.bridge).toBe(0);
-    expect(e.generated).toBeCloseTo(0.024204, 6);
-    expect(m.quote.rebalanceLoss).toBeCloseTo(0.022473, 6); // shown, not taken out of Generated
+    expect(e.moves).toBeCloseTo(0.022473, 6); // what the 3 moves locked in, charged to ETH: a cost of Generated (2026-11-08)
+    expect(e.generated).toBeCloseTo(0.024204 - 0.022473, 6);
+    expect(m.quote.rebalanceLoss).toBeCloseTo(0.022473, 6);
     // the inputs: fees collected + owed and gas + swap cost the engine booked (quote-valued totals)
     expect(e.earned).toBe(l.pnl.feeCoins.quote);
     expect(e.gasSwap).toBe(l.totals.gas + l.totals.swapCost);
     expect(m.quote.rebalanceLoss).toBe(l.totals.moveLoss);
-    expect(m.breakdownByCoin!.USDC).toEqual({ earned: l.pnl.feeCoins.base, gasSwap: 0, taxes: 0, bridge: 0, generated: l.pnl.feeCoins.base });
+    expect(m.breakdownByCoin!.USDC).toEqual({ earned: l.pnl.feeCoins.base, gasSwap: 0, moves: 0, taxes: 0, bridge: 0, generated: l.pnl.feeCoins.base });
     expect(m.breakdownBasis).toMatchObject({ earned: 'lpFees', itemized: true });
   });
-  it('per-coin costs (gasCoins / swapCoins) land on the coin charged; moveCoins is not a cost of Generated', () => {
+  it('per-coin costs (gasCoins / swapCoins / moveCoins) land on the coin charged, moveCoins as a cost of Generated too', () => {
     const mm = lpMetrics({ ...l, totals: { ...l.totals, gasCoins: { base: 0.5, quote: 0.0001 }, swapCoins: { base: 1, quote: 0 }, moveCoins: { base: 0, quote: 0.02 } } }, AS_OF);
     expect(mm.breakdownByCoin!.USDC).toMatchObject({ gasSwap: 1.5 });
     expect(mm.breakdownByCoin!.ETH).toMatchObject({ gasSwap: 0.0001 });
-    expect(mm.breakdownByCoin!.ETH.generated).toBeCloseTo(mm.breakdownByCoin!.ETH.earned - 0.0001, 12);
+    expect(mm.breakdownByCoin!.ETH).toMatchObject({ moves: 0.02 });
+    expect(mm.breakdownByCoin!.ETH.generated).toBeCloseTo(mm.breakdownByCoin!.ETH.earned - 0.0001 - 0.02, 12);
     identity(mm);
   });
   it('bridge costs are a line of their own and still add up', () => {
     const mm = lpMetrics({ ...l, bridge: { costs: [{ at: 1, kind: 'bridgeFee', coin: 'ETH', units: 0.0001, usdAtEvent: 0.3 }] } }, AS_OF);
     expect(mm.breakdownByCoin!.ETH.bridge).toBe(0.0001);
     const e = mm.breakdownByCoin!.ETH;
-    expect(e.generated).toBeCloseTo(e.earned - e.gasSwap - 0.0001, 12); // 0.0241035370867 ETH
+    expect(e.generated).toBeCloseTo(e.earned - e.gasSwap - e.moves - 0.0001, 12); // 0.0016306553693 ETH
     identity(mm);
   });
 });
@@ -74,9 +76,9 @@ describe('grid / trend: trade profit before costs', () => {
   const sell = { side: 'sell', intervalIndex: 3, timestamp: 2, stableAmount: 110, gasQuote: 1, feeQuote: 0.33, lotCost: 101, roundTripNet: 8, realizedPnlQuote: 8 };
   it('a grid with no fills: 0 in every part', () => {
     const m = gridMetrics({ id: 'g0', kind: 'grid', status: 'running', quoteSym: 'DAI', stable: 'DAI', config: { totalCapitalQuote: 100 }, pnl: { realized: 0, unrealized: 0 }, stats: roundTripStats([]), trades: [] }, AS_OF);
-    expect(m.breakdownByCoin).toEqual({ DAI: { earned: 0, gasSwap: 0, taxes: 0, bridge: 0, generated: 0 } });
+    expect(m.breakdownByCoin).toEqual({ DAI: { earned: 0, gasSwap: 0, moves: 0, taxes: 0, bridge: 0, generated: 0 } });
     const hex = gridMetrics({ ...R.grids.find((g: Obj) => g.id === 'g-mvowdsys-i5iq'), kind: 'grid' }, AS_OF); // two buys, no sell yet
-    expect(hex.breakdownByCoin).toEqual({ PLS: { earned: 0, gasSwap: 0, taxes: 0, bridge: 0, generated: 0 } });
+    expect(hex.breakdownByCoin).toEqual({ PLS: { earned: 0, gasSwap: 0, moves: 0, taxes: 0, bridge: 0, generated: 0 } });
   });
   it('one round trip: profit before costs = sold − spent + pool fees; gas is both legs', () => {
     const c = roundTripCosts([sell, buy] as never);
@@ -157,15 +159,16 @@ describe('Details render: collapsed, per coin, adds up', () => {
     expect(text).toContain('+0.0268369 ETH');
     expect(text).toContain('− Gas + swap fees, ETH');
     expect(text).toContain('−0.0026334 ETH');
-    expect(text).not.toContain('− Range moves');
-    expect(text).toMatch(/Range moves \(in Price change\)\s+−0\.022473 ETH/); // the move loss is its own info row
+    expect(text).toContain('− Range moves, ETH'); // what the moves locked in is a cost line (2026-11-08)
+    expect(text).toMatch(/−0\.02247\d* ETH/);
+    expect(text).not.toContain('Range moves (in Price change)');
     expect(text).toContain('= Generated, ETH');
     expect(text).toMatch(/Fees earned, USDC\s+all of it is Generated/);
     expect(text).not.toMatch(/\$|\bUSD\b/);
   });
   it('the rows follow breakdownByCoin exactly (earned, each non-zero cost, = Generated)', () => {
     const rows = coinBreakdownRows(b.metrics).map(([k]) => k);
-    expect(rows).toEqual(['Fees earned, USDC', 'Fees earned, ETH', '− Gas + swap fees, ETH', '= Generated, ETH']);
+    expect(rows).toEqual(['Fees earned, USDC', 'Fees earned, ETH', '− Gas + swap fees, ETH', '− Range moves, ETH', '= Generated, ETH']);
   });
 });
 
@@ -185,13 +188,13 @@ describe('Invested fallback: legacy grid config.totalCapitalUsd (quote-coin unit
   });
 });
 
-describe('the closed Robinhood ETH/USDG LP: +89.51 USDG Generated (units), and its 105.82 USDG range-move loss reported beside it', () => {
+describe('the closed Robinhood ETH/USDG LP: −16.31 USDG Generated (+89.51 of fees after gas, −105.82 locked in by its 12 moves)', () => {
   const F = JSON.parse(readFileSync(new URL('./fixtures/real-2026-10-27.json', import.meta.url), 'utf8')) as Obj;
   const saved = F.lpClosedLegacy.state as Obj; // saved state: 12 moves, totals.moveLoss 0 (zeroed by the v5 upgrade)
   const fromOldServer = { ...F.lpClosedLegacy.status, ...saved, kind: 'lp', pnl: null, value: null }; // no load-time rebuild
   it('a payload that never had the rebuild: botMetrics rebuilds the move loss it reports (same math as the engine)', () => {
     const m = lpMetrics(fromOldServer, F.now);
-    expect(m.generated!.USDG).toBeCloseTo(89.51, 2);
+    expect(m.generated!.USDG).toBeCloseTo(89.51 - 105.82, 2);
     expect(m.quote.rebalanceLoss).toBeCloseTo(105.82, 2);
     identity(m);
   });
@@ -199,7 +202,7 @@ describe('the closed Robinhood ETH/USDG LP: +89.51 USDG Generated (units), and i
     const l = R.lps.find((x: Obj) => x.id === 'lp-mvfv3g7g-to6l');
     expect(l.totals.moveLossBackfill).toBeDefined();
     const m = lpMetrics(l, AS_OF);
-    expect(m.generated!.USDG).toBeCloseTo(-16.311152863527596 + l.totals.moveLoss, 9);
+    expect(m.generated!.USDG).toBeCloseTo(-16.311152863527596, 9); // fees − gas − what the moves locked in
     expect(m.quote.rebalanceLoss).toBe(l.totals.moveLoss);
   });
 });

@@ -137,8 +137,10 @@ export interface ReplayResult {
   moveLoss: number;
   /** Mix loss of the position still open at the end, at the last price, quote. Not subtracted from what was earned. */
   openLoss: number;
-  /** Earned: fees − gas − swap costs, quote */
+  /** Fees − gas − swap costs, quote (the mix change left out) */
   net: number;
+  /** The result against holding the coins put in: net − moveLoss − openLoss, quote. What the table ranks by (Kyle 2026-11-08). */
+  result: number;
   /** Times waiting fees were collected and added back without moving the range. 0 when compounding is off. */
   compounds: number;
   /** Part of swapCost that is token tax (0 when no tax was configured) */
@@ -357,7 +359,7 @@ export function replayLp(rows: PoolMinute[], pool: ReplayPool, o: ReplayOpts): R
     bandPct: o.bandPct, rerange: o.rerange, days: (lastRow.t - first.t) / DAY_S,
     feeCoins, fees, gas, swapCost, swapCoins, moves, blocked, inRange: inTime / (rows.length - 1), moveLoss, openLoss,
     earnedCoins: { base: feeCoins.base - swapCoins.base, quote: feeCoins.quote - swapCoins.quote - gas },
-    net: fees - gas - swapCost, compounds, taxCost,
+    net: fees - gas - swapCost, result: fees - gas - swapCost - moveLoss - openLoss, compounds, taxCost,
     startCoins, endCoins: { base: endHeld.base + idle.base + owed.base, quote: endHeld.quote + idle.quote + owed.quote },
     priceStart: price(first.c), priceEnd: price(lastRow.c),
   };

@@ -12,7 +12,7 @@ const minutes = (ticks: number[], f1 = 1e-9, liq = 1e24): PoolMinute[] =>
   ticks.map((c, i) => ({ t: T0 + i * 60, lo: c, hi: c, c, f0: 0, f1, liq, n: 1 }));
 const repeat = (tick: number, n: number) => Array.from({ length: n }, () => tick);
 
-describe('replay with an explicit default policy matches a replay with no policy', () => {
+describe('replay with an explicit policy, cost check off, matches a replay with no policy (the defaults now carry the cost check)', () => {
   const paths = [
     repeat(T, 80),
     [T, ...repeat(T + 2000, 40)],
@@ -23,7 +23,7 @@ describe('replay with an explicit default policy matches a replay with no policy
     const legacy = replayLp(minutes(ticks), POOL, opts);
     const explicit = replayLp(minutes(ticks), POOL, {
       ...opts,
-      range: { ...DEFAULT_RANGE_POLICY },
+      range: { ...DEFAULT_RANGE_POLICY, costCheck: false },
       compound: { enabled: false },
       gasCompound: 0.01,
     });
@@ -45,7 +45,7 @@ describe('replay gates', () => {
     const ticks = [T, ...repeat(T, 10), ...repeat(T + 2000, 5), ...repeat(T, 10)];
     const rows = minutes(ticks);
     const now = replayLp(rows, POOL, { ...BASE, bandPct: 0.05, rerange: true });
-    const dwell = replayLp(rows, POOL, { ...BASE, bandPct: 0.05, rerange: true, range: { dwellMin: 30 } });
+    const dwell = replayLp(rows, POOL, { ...BASE, bandPct: 0.05, rerange: true, range: { dwellMin: 30, costCheck: false } });
     // Out and back: today's rule moves twice. The dwell is longer than the trip, so it never moves.
     expect(now.moves).toBe(2);
     expect(dwell.moves).toBe(0);
@@ -58,7 +58,7 @@ describe('replay gates', () => {
     const ticks = [T, ...repeat(T, 5), ...repeat(T + 115, 3)];
     const rows = minutes(ticks);
     const now = replayLp(rows, POOL, { ...BASE, bandPct: 0.01, rerange: true });
-    const buffered = replayLp(rows, POOL, { ...BASE, bandPct: 0.01, rerange: true, range: { bufferPct: 0.003 } });
+    const buffered = replayLp(rows, POOL, { ...BASE, bandPct: 0.01, rerange: true, range: { bufferPct: 0.003, costCheck: false } });
     expect(now.moves).toBe(1);
     expect(buffered.moves).toBe(0);
   });
@@ -68,7 +68,7 @@ describe('replay gates', () => {
     const ticks = [T, T + 400, T + 400, T + 800];
     const rows = minutes(ticks);
     const now = replayLp(rows, POOL, { ...BASE, bandPct: 0.01, rerange: true });
-    const cooled = replayLp(rows, POOL, { ...BASE, bandPct: 0.01, rerange: true, range: { cooldownMin: 30 } });
+    const cooled = replayLp(rows, POOL, { ...BASE, bandPct: 0.01, rerange: true, range: { cooldownMin: 30, costCheck: false } });
     expect(now.moves).toBe(2);
     expect(cooled.moves).toBe(1);
     expect(cooled.moveLoss).toBeLessThan(now.moveLoss);

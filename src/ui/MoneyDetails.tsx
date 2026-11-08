@@ -16,7 +16,6 @@ import type { ReactNode } from 'react';
 import { echoes, metricsOf, unitsText } from './deskStats';
 import { bagFixed, pctShown, qty } from './fmt';
 
-const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 import type { AnyObj } from './model';
 import type { BotMetrics } from '../metrics/botMetrics';
 
@@ -33,7 +32,7 @@ export type DetailHide = 'Made at event prices' | 'Total P&L' | 'Price change' |
  * `waiting`: an open LP's fees waiting in the position, per coin. A coin whose fees earned are exactly what is waiting
  * (nothing collected yet) points to the position card instead of printing the same figure again.
  */
-export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'breakdownBasis'> | null | undefined, waiting?: Record<string, number>): DetailRow[] {
+export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'breakdownBasis' | 'kind' | 'lpResult'> | null | undefined, waiting?: Record<string, number>): DetailRow[] {
   const by = m?.breakdownByCoin, basis = m?.breakdownBasis;
   if (!by || !basis) return [];
   const earnedLabel = basis.earned === 'lpFees' ? 'Fees earned' : 'Trade profit before costs';
@@ -44,6 +43,7 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
   for (const [sym, c] of Object.entries(by)) {
     const costs: [string, number, string][] = ([
       ['Gas + swap fees', c.gasSwap, `Gas for every transaction and the pool fees / swap cost, charged in ${sym}.`],
+      ['Range moves', c.moves, `What the range moves locked in, charged in ${sym}: the coins each position gave back against the coins it took in, at that move's price (the position sold the coin that rose and bought the one that fell).`],
       ['Token taxes', c.taxes, `Fee-on-transfer tax taken on the fills, in ${sym}.`],
       ['Bridge', c.bridge, `Cross-chain move costs, in ${sym}.`],
     ] as [string, number, string][]).filter(([, v]) => v !== 0);
@@ -55,7 +55,11 @@ export function coinBreakdownRows(m: Pick<BotMetrics, 'breakdownByCoin' | 'break
     const allWaiting = w != null && w !== 0 && Math.abs(c.earned - w) <= 1e-9 * Math.max(Math.abs(c.earned), Math.abs(w));
     rows.push([`${earnedLabel}, ${sym}`, allWaiting ? <>same as Fees waiting (position card)</> : <>{qty(c.earned, sym, 6)}</>, earnedTip]);
     for (const [k, v, t] of costs) rows.push([`− ${k}, ${sym}`, <>{qty(-v, sym, 6)}</>, t]);
-    rows.push([`= Generated, ${sym}`, 'the headline above', `${earnedLabel} − ${costs.map(([k]) => k.toLowerCase()).join(' − ')}, in ${sym}.`]);
+    // a liquidity page leads with Result, so each coin's Generated is printed here, unless it is the Result itself (a quote-only
+    // deposit with nothing carried: then the headline says it); the other pages print Generated in their headline
+    const r = m.lpResult?.result;
+    const isResult = r != null && qty(c.generated, sym, 4) === qty(r, sym, 4); // the same print as the headline's
+    rows.push([`= Generated, ${sym}`, m.kind !== 'lp' ? 'the headline above' : isResult ? 'the Result above' : <>{qty(c.generated, sym, 6)}</>, `${earnedLabel} − ${costs.map(([k]) => k.toLowerCase()).join(' − ')}, in ${sym}.`]);
   }
   return rows;
 }
@@ -86,8 +90,7 @@ export function MoneyDetails({ b, breakdown, changes = [], hide = [], note }: { 
   const raw: [string, string, string][] = [
     ['Made at event prices', signed(q.made), `Fees / round-trip profit minus gas, swap fees and taxes, each in ${sym} at the time it happened. Generated is the same counted in coins, valued at today's price.`],
     ['Total P&L', signed(q.totalPnl), m.calc],
-    ['Price change', signed(q.priceChange), `Total P&L − Generated (in ${sym} at today's price): what the coins' own price did (impermanent loss and the inventory's market move).`],
-    ...(m.kind === 'lp' && q.rebalanceLoss ? [['Range moves (in Price change)', signed(-q.rebalanceLoss), `The coin mix the ${num(b.reranges) ?? 0} range move${num(b.reranges) === 1 ? '' : 's'} locked in, in ${sym} at each move's price: the position had sold the coin that rose and bought the one that fell. Part of Price change, not taken out of Generated.`] as [string, string, string]] : []),
+    ['Price change', signed(q.priceChange), `Total P&L − Generated (in ${sym} at today's price): what the coins' own price did to what was put in, plus the mix the bot carried between its moves.`],
     ...changes.map(([k, v, t]): [string, string, string] => [k, signed(v), t]),
     ['Open positions', signed(q.unrealized), 'Coins bought and not sold yet / the position\'s price side, at today\'s price minus what they cost. Not in Generated until they sell.'],
   ];

@@ -21,15 +21,15 @@ const page = (rerange: boolean) => text(renderToStaticMarkup(
 ));
 
 describe('liquidity replay page', () => {
-  it('earned in units per coin, gas and swap fees apart, and the mix change shown but not taken out', () => {
+  it('the result against holding leads; fees per coin, gas and swap fees apart; what the moves locked in is counted and shown', () => {
     const [on, off] = table;
     expect(off.openLoss).toBeGreaterThan(10);
     expect(off.openLoss).toBeCloseTo(on.moveLoss, 6); // same mix change, moved or left open
     for (const r of table) expect(r.net).toBeCloseTo(r.fees - r.gas - r.swapCost, 9);
     const shown = page(false);
     expect(shown).toMatch(/gas 0\.01 USDG · swap fees [\d.]+ USDG/);
-    expect(shown).toMatch(/mix change, not counted: −[\d.]+ USDG/);
-    expect(shown).toContain('Earned');
+    expect(shown).toMatch(/locked in by moves: −[\d.]+ USDG/);
+    expect(shown).toContain('Result');
     expect(page(true)).toMatch(/1 move/);
   });
 });
@@ -40,7 +40,7 @@ describe('replay windows', () => {
       <Ready a={{ state: 'ready', days: 30, from: T0, to: T0 + 200 * 60, swaps: 200, capital: 1000, base: 'ETH', quote: 'USDG', gasMove: 0.02, maxImpact: 1, rows: table }}
         band={0.01} rerange={false} usdPer={null} onPick={() => {}} />,
     ));
-    expect(young).toMatch(/The pool's trades only start on .*, so this covers 0\.1 days, not 30\. Earned is/);
+    expect(young).toMatch(/The pool's trades only start on .*, so this covers 0\.1 days, not 30\. Result is/);
   });
   it('the page opens on 7 days, with 24h, 30d and 365d to pick', async () => {
     const { LpReplay } = await import('../src/ui/LpReplay');

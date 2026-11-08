@@ -26,6 +26,8 @@ import { MIN_SCAN_CANDLES, SETUP_BANDS } from './scan';
  */
 /** A swap to the range's mix smaller than this share of the value isn't worth its fee and gas: the leftover stays idle. */
 export const LP_MIN_SWAP_SHARE = 0.01;
+/** A liquidity bot pauses at this loss (its result against holding what was put in, as a fraction of it) unless given another. Never off (Kyle 2026-11-08). */
+export const LP_LOSS_LIMIT = 0.03;
 /**
  * Ranges a liquidity bot allows: ±0.1% … ±50% around the price (Kyle, 2026-10-30: down from ±1%). A pool can't hold a
  * range narrower than its tick step: rangeTicks widens it outward to the step, so on a 0.3% or 1% pool ±0.1% opens one

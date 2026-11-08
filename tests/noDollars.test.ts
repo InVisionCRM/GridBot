@@ -70,7 +70,8 @@ describe('no dollar amounts on any screen (the "$" switch forced on)', () => {
     it(name, () => {
       const out = html();
       expect(out.length).toBeGreaterThan(200); // it rendered something
-      expect(dollarsIn(out)).toEqual([]);
+      // the one dollar figure on the site: beside a liquidity bot's Result, on the line with its share of what was put in (Kyle 2026-11-08)
+      expect(dollarsIn(out).filter((line) => !line.includes('of what you put in'))).toEqual([]);
     });
   }
 });

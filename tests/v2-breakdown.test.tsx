@@ -32,8 +32,8 @@ describe('breakdown rows come from botMetrics', () => {
     const generated = rows.find((r) => r.label === 'Generated')?.value ?? '';
     expect(earned).toContain('0.026837');
     expect(gas).toContain('−0.002633');
-    expect(rows.some((r) => r.label === 'Range-move loss')).toBe(false); // reported elsewhere, not a part of Generated
-    expect(generated).toContain('0.024204');
+    expect(rows.find((r) => r.label === 'Range-move loss')?.value).toContain('−0.022473'); // a part of Generated (2026-11-08)
+    expect(generated).toContain('0.001731'); // 0.026837 − 0.002633 − 0.022473 locked in by moves
     expect(rows.some((r) => r.value === 'Breakdown coming soon')).toBe(false);
     expect(rows.some((r) => r.value === 'USDC has no costs taken out.')).toBe(true);
     const coins = (line: string) => {
@@ -44,7 +44,8 @@ describe('breakdown rows come from botMetrics', () => {
       }
       return map;
     };
-    const eth = (coins(earned).get('ETH') ?? 0) + (coins(gas).get('ETH') ?? 0);
+    const moves = rows.find((r) => r.label === 'Range-move loss')?.value ?? '';
+    const eth = (coins(earned).get('ETH') ?? 0) + (coins(gas).get('ETH') ?? 0) + (coins(moves).get('ETH') ?? 0);
     expect(eth).toBeCloseTo(coins(generated).get('ETH') ?? 0, 8);
   });
 

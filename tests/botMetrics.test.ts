@@ -46,13 +46,14 @@ const lpLive: B = {
   startedAt: Date.UTC(2026, 9, 25, 4, 47), usdPerQuote: 1, price: ETH, value, startValue: capital, config: { capital },
   totals, owed, reranges: 4, inRange: true, position: { lower: 2307.72, upper: 2356.69 },
   pnl: lpPnl(value, capital, totals),
-  feeHist: [[localDayStart(now) - 600_000, 100], [now - 3_600_000, 120]],
+  // [ms, fees, fees base, fees quote, pool fees, price, cost]: the costs stood at 73.38 all day, so today's result is today's fees
+  feeHist: [[localDayStart(now) - 600_000, 100, 0, 0, null, 0, 73.38], [now - 3_600_000, 120, 0, 0, null, 0, 73.38]],
 };
 // Paper copy: half the size, $20 of fees sent out instead of re-deposited, state from before per-coin bookkeeping.
 const paperTotals = { ...totals, sent: 20, gasCoins: undefined, swapCoins: undefined, moveCoins: undefined } as unknown as typeof totals;
 const lpPaper: B = {
   ...lpLive, id: 'lp-paper', mode: 'paper', value: value / 2, startValue: 4000, config: { capital: 4000 },
-  totals: paperTotals, pnl: lpPnl(value / 2, 4000, paperTotals), feeHist: [[localDayStart(now) - 60_000, 50]],
+  totals: paperTotals, pnl: lpPnl(value / 2, 4000, paperTotals), feeHist: [[localDayStart(now) - 60_000, 50, 0, 0, null, 0, 73.38]],
 };
 // HEX/PLS grid: spends PLS (quote), "stacks" HEX (base). Capital and profit are in PLS; PLS ≈ $0.0000051.
 const PLS = 0.0000051;
@@ -84,18 +85,18 @@ const all = [lpLive, lpPaper, grid, trend, token].map(attach);
 const m = (id: string) => all.find((b) => b.id === id)!.metrics as BotMetrics;
 
 describe('generated: units per token, net of the costs charged in that token', () => {
-  it('liquidity (on-chain): fees collected + owed per coin − gas (ETH) − swap fees; range-move losses reported beside it', () => {
+  it('liquidity (on-chain): fees collected + owed per coin − gas (ETH) − swap fees − what the range moves locked in (2026-11-08)', () => {
     const x = m('lp-eth');
     expect(x.headline).toBe('generated');
     expect(HEADLINE).toBe('generated');
-    expect(x.generated!.ETH).toBeCloseTo(0.027861957 - 0.000712 - 0.0023232936, 9);
-    expect(x.generated!.ETH).toBeCloseTo(0.024827, 5);
-    expect(x.generated!.USDC).toBeCloseTo(64.648435 - 2.2100189, 6);
-    expect(x.generated!.USDC).toBeCloseTo(62.44, 2);
+    expect(x.generated!.ETH).toBeCloseTo(0.027861957 - 0.000712 - 0.0023232936 - moveLoss.base, 9);
+    expect(x.generated!.ETH).toBeCloseTo(0.024827 - 0.018566, 5);
+    expect(x.generated!.USDC).toBeCloseTo(64.648435 - 2.2100189 - moveLoss.quote, 6);
+    expect(x.generated!.USDC).toBeCloseTo(62.44 - 20.98, 2);
     expect(x.generatedUsd).toBeCloseTo(x.generated!.ETH * ETH + x.generated!.USDC, 9);
     // the event-priced dollars agree within the ETH price drift between events and now
-    expect(x.dollarsMadeUsd).toBeCloseTo(129.6 - 1.67 - 7.61, 1);
-    expect(Math.abs(x.dollarsMadeUsd! - x.generatedUsd!)).toBeLessThan(0.5);
+    expect(x.dollarsMadeUsd).toBeCloseTo(129.6 - 1.67 - 7.61 - 64.1, 1); // what the moves locked in is a cost (2026-11-08)
+    expect(Math.abs(x.dollarsMadeUsd! - x.generatedUsd!)).toBeLessThan(1); // the move coins' price drift since each move adds to the gap
     expect(x.feesUncollectedUsd).toBeCloseTo(37.62, 1);
     expect(x.feesEarnedUsd).toBeCloseTo(129.6, 1);
     expect(x.realizedRebalanceLossUsd).toBeCloseTo(64.1, 6); // receipts: 0.0185661 ETH + 20.98 USDC, reported on its own
@@ -107,7 +108,7 @@ describe('generated: units per token, net of the costs charged in that token', (
   it('liquidity state from before per-coin bookkeeping charges the costs to the quote coin', () => {
     const x = m('lp-paper');
     expect(x.generated!.ETH).toBeCloseTo(0.027861957, 9);
-    expect(x.generated!.USDC).toBeCloseTo(64.648435 - 1.67 - 7.61, 6);
+    expect(x.generated!.USDC).toBeCloseTo(64.648435 - 1.67 - 7.61 - 64.1, 6); // an old save: every cost, the moves' too, to the quote coin
   });
   it('grid: round-trip profit in the coin it spends (PLS), not the one it stacks', () => {
     const x = m('grid-hex');
@@ -134,8 +135,8 @@ describe('Total P&L = Generated + Price change (both sides recomputed from raw i
     // independent: value now − gas paid from the wallet − capital in
     const totalRaw = (position.base + owed.base) * ETH + position.quote + owed.quote - 1.67 - capital;
     // independent: the generated coins valued now, from the event amounts
-    const ethUnits = collected.base + owed.base - gasEth - swapFee.base;
-    const usdcUnits = collected.quote + owed.quote - swapFee.quote;
+    const ethUnits = collected.base + owed.base - gasEth - swapFee.base - moveLoss.base;
+    const usdcUnits = collected.quote + owed.quote - swapFee.quote - moveLoss.quote;
     const genRaw = ethUnits * ETH + usdcUnits;
     expect(x.totalPnlUsd).toBeCloseTo(totalRaw, 6);
     expect(x.generatedUsd).toBeCloseTo(genRaw, 6);
@@ -232,7 +233,7 @@ describe("rates (Kyle's rule): Generated ÷ age in days × 1 / 7 / 30 / 365 per 
 
 describe('fees today', () => {
   const ft = feesToday(all, now);
-  it('headline counts live liquidity fees earned since midnight; paper and fees paid stay separate', () => {
+  it('headline counts the live liquidity result since midnight (fees less costs); paper and fees paid stay separate', () => {
     expect(ft.liveEarnedUsd).toBeCloseTo(lpLive.pnl.fees - 100, 6);
     expect(ft.paperEarnedUsd).toBeCloseTo(lpPaper.pnl.fees - 50, 6);
     expect(ft.livePaidUsd).toBeCloseTo(1_000_000 * PLS, 9);

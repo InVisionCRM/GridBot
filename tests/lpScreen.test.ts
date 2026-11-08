@@ -34,13 +34,12 @@ describe('LP screen figures', () => {
     expect(html.match(/Fees waiting/g)).toHaveLength(1);
     expect(html).toContain('1.25 PLS');
     expect(html).toContain('3.5 DAI');
-    expect(html.match(/2 range moves/g)).toHaveLength(1);
     expect(html).not.toMatch(/Realized|Unrealized/);
     const waiting = html.slice(html.indexOf('Fees waiting'), html.indexOf('Compound at'));
-    // the range-move loss and its count are a Details info row inside Price change, not a cost of Generated or a KPI
-    expect(html).not.toContain('− Range moves');
-    expect(html).toMatch(/2 range moves locked in[^>]*><th>Range moves \(in Price change\)<\/th><td class="mono">−0\.4 DAI/);
-    const moves = html.slice(html.indexOf('Range moves (in Price change)'), html.indexOf('Open positions'));
+    // what the range moves locked in is a cost line of the Details breakdown (2026-11-08), not a KPI
+    expect(html).toMatch(/− Range moves, DAI<\/th><td class="mono">−0\.4 DAI/);
+    expect(html).not.toContain('Range moves (in Price change)');
+    const moves = html.slice(html.indexOf('− Range moves, DAI'), html.indexOf('Price change'));
     expect(waiting).not.toContain('$');
     expect(moves).not.toContain('$');
   });
@@ -53,7 +52,7 @@ describe('LP screen figures', () => {
           s: { lps: [{ ...both, metrics: botMetrics(both, 1) }], chains: [] }, id: 'lp1', events: [], ticks: null, nav: () => undefined, act: () => undefined, busy: false,
         })),
     );
-    const invested = html.slice(html.indexOf('data-testid="invested"'), html.indexOf('Generated'));
+    const invested = html.slice(html.indexOf('data-testid="invested"'), html.indexOf('Today'));
     expect(invested).toContain('1,000.0 DAI + 0.20000 PLS');
     expect(html).toContain('Set aside: 0 PLS + 150 DAI');
   });

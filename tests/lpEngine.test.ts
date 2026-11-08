@@ -48,7 +48,7 @@ const value = (lp: LpEngine) => lp.status().value!;
 describe('LP bot (paper): open, earn, re-range, send, close', () => {
   it('opens a ±10% position around the price with the right mix; value stays close to the amount', async () => {
     const { lp } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick(); // swap to the mix + mint
     const s = lp.status();
     expect(s.step).toBeNull();
@@ -66,7 +66,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it("fees come from the pool's counters, scaled by the share of the pool the position would be (its pool share)", async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     const v0 = value(lp);
     // the pool's in-range liquidity earns 1e-6 DAI per unit of liquidity (DAI is token1 here only if WPLS < DAI)
@@ -83,7 +83,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it("a bot you start is never cut back to a share of the pool: a thin pool sets nothing aside (Kyle 2026-11-04)", async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     const p = m.v3ByAddr(pool);
     p.r0 /= 1000n; p.r1 /= 1000n;
     await lp.tick();
@@ -103,7 +103,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     // mix fits the price-impact cap, so everything goes in
     const p = m.v3ByAddr(pool);
     p.r0 /= 10n; p.r1 /= 10n;
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     const s = lp.status();
     expect(s.aside).toEqual({ base: 0, quote: 0 });
@@ -114,7 +114,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('coins an older version set aside (no cap on the bot) all go back in at the next move', async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 600 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 600, range: { costCheck: false } });
     await lp.tick();
     // what a bot saved before 2026-11-04 looks like: 400 DAI set aside, no cap in its config
     lp.state.aside = { base: 0, quote: 400 };
@@ -130,12 +130,12 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('rejects a pool-share cap outside 0–1', async () => {
     const { lp } = world();
-    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, maxPoolShare: 1 })).rejects.toThrow(/between 0 and 1/);
+    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, maxPoolShare: 1, range: { costCheck: false } })).rejects.toThrow(/between 0 and 1/);
   });
 
   it("a smart trader bot's coins set aside for its pool-share cap go back in at the next re-open when the pool has room (Kyle 2026-11-04: CASHCAT/ETH)", async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, maxPoolShare: 0.1 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, maxPoolShare: 0.1, range: { costCheck: false } });
     // a thin pool when it opens: most of the 1000 DAI would be over 10% of the active liquidity, so it is set aside
     const p = m.v3ByAddr(pool);
     p.r0 /= 1000n; p.r1 /= 1000n;
@@ -158,7 +158,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it("measures the fees the pool paid between readings (for its volume), not across a gap where the bot was down", async () => {
     const { lp, m, pool, at } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     expect(lp.status().poolFees).toBe(0);
     const d = Q128 / 10n ** 6n;
@@ -181,7 +181,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(lp.status().poolFees).toBeCloseTo(2 * once, 9);
     // a sample every 5 minutes: [ms, fees, fees base, fees quote, the pool's fees so far, price]; the last is the 11-minute one
     const last = lp.status().feeHist.at(-1)!;
-    expect(last).toHaveLength(6);
+    expect(last).toHaveLength(7); // …, price, cost (gas + swaps + what the moves locked in)
     expect(last[0]).toBe(1_800_000_000_000 + 60_000 + 11 * 60_000);
     expect(last[4]).toBeCloseTo(once, 9);
     expect(last[5]).toBe(lp.status().price);
@@ -189,7 +189,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('logs each finished step, newest first: who asked, the range it opened, its gas + swap cost and the fees it collected', async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     let done = lp.status().done;
     expect(done).toHaveLength(1);
@@ -213,7 +213,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('a stale RPC answer with lower fee counters earns nothing, and fees resume from the highest reading (not ~2^128 × L)', async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     const d = Q128 / 10n ** 6n;
     m.addFees(pool, d, d);
@@ -284,7 +284,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('re-ranges on the first out-of-range reading, with the clock held still, and again with no cooldown', async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: true });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: true, lossLimitPct: 0.5, range: { costCheck: false } });
     await lp.tick();
     expect(lp.status()).toMatchObject({ reranges: 0, inRange: true });
     // The clock is not advanced. A dwell or a cooldown would leave the range where it is.
@@ -298,7 +298,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('out of range with Auto-move on it moves to the price at once, both ways, whatever moving costs; with it off it waits', async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     const first = lp.status().position!;
     m.movePrice(pool, 1.2); // PLS up 20% (DAI per PLS ↑ when WPLS is token0)
@@ -354,7 +354,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('fees per coin; a move locks in what the range did to the coin mix ("lost to moves", reported beside what it earned); earned = fees − gas − swap fees', async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     const s0 = lp.status(), p0 = s0.pnl!;
     // the position remembers the coins it went in with
@@ -376,7 +376,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
     expect(s2.reranges).toBe(1);
     // the range sold PLS on the way up; taken out at that mix, it's worth less than the coins it went in with
     expect(p2.moveLoss).toBeGreaterThan(0);
-    expect(p2.net).toBeCloseTo(p2.fees - p2.gas - p2.swapCost, 9); // the move loss is reported, not taken out
+    expect(p2.net).toBeCloseTo(p2.fees - p2.gas - p2.swapCost - p2.moveLoss, 9); // what the move locked in is a cost of the bot's trading (2026-11-08)
     // the fees collected at the move are counted per coin
     expect(s2.totals.feeCoins.base).toBeGreaterThan(0);
     expect(s2.totals.feeCoins.quote).toBeGreaterThan(0);
@@ -444,7 +444,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it("doesn't start a move whose swap would go over the price-impact cap (it would stop halfway, out of the position)", async () => {
     const { lp, m, pool, hub, store } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     const saved = store.load()!;
     store.save({ ...saved, limits: { ...saved.limits, maxPriceImpact: 1e-9 } });
@@ -463,7 +463,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
   it('a stale reading decides nothing: no move on it, the move comes with the next fresh one', async () => {
     const { lp, m, pool } = world();
     m.addFees(pool, STEP * 10n, STEP * 10n);
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     // the price left the range, read first by a node behind the chain: lower counters than last time
     m.movePrice(pool, 1.2);
@@ -477,7 +477,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('a stopped bot never re-ranges; the position stays open', async () => {
     const { lp, m, pool, at } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     lp.stop();
     m.movePrice(pool, 1.3);
@@ -489,7 +489,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('send mode collects the fees to the address once they are worth 10× the gas', async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, profits: { mode: 'send', to: '0x00000000000000000000000000000000000beef1' } });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, profits: { mode: 'send', to: '0x00000000000000000000000000000000000beef1' }, range: { costCheck: false } });
     await lp.tick();
     m.addFees(pool, Q128 / 10n ** 5n, Q128 / 10n ** 5n);
     await lp.tick(); // fees large enough → collect step
@@ -501,7 +501,7 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('close takes everything out to the wallet and ends the bot', async () => {
     const { lp, m, pool } = world();
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await lp.tick();
     m.addFees(pool, Q128 / 10n ** 6n, 0n);
     await lp.tick(); // fees land in the cached reading; close then settles from that, with no further tick
@@ -514,10 +514,10 @@ describe('LP bot (paper): open, earn, re-range, send, close', () => {
 
   it('refuses ranges outside ±0.1–50%, no amount, and markets that are not V3 pools', async () => {
     const { lp } = world();
-    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.6, capital: 100 })).rejects.toThrow(/±0\.1% to ±50%/);
-    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.0009, capital: 100 })).rejects.toThrow(/±0\.1% to ±50%/);
-    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0 })).rejects.toThrow(/amount/);
-    await expect(lp.start({ mode: 'paper', market: 'DAI', bandPct: 0.1, capital: 100 })).rejects.toThrow(/needs a V3 pool/);
+    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.6, capital: 100, range: { costCheck: false } })).rejects.toThrow(/±0\.1% to ±50%/);
+    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.0009, capital: 100, range: { costCheck: false } })).rejects.toThrow(/±0\.1% to ±50%/);
+    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0, range: { costCheck: false } })).rejects.toThrow(/amount/);
+    await expect(lp.start({ mode: 'paper', market: 'DAI', bandPct: 0.1, capital: 100, range: { costCheck: false } })).rejects.toThrow(/needs a V3 pool/);
   });
 });
 
@@ -584,7 +584,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('approve → mint: each sent once, nothing resent while unmined, position from the receipt; a restart resumes by hash', async () => {
     const w = live();
     const a = w.make();
-    await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (a as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor; // start() rebuilt it
     await a.tick();
     expect(w.sent).toHaveLength(1);
@@ -618,7 +618,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     async function pending(close: boolean, rec: Rec, basePerNative?: number) {
       const w = live();
       const a = w.make();
-      await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
       const ex = (w.make() as unknown as { executor: Exec }).executor;
       (a as unknown as { executor: unknown }).executor = ex;
       const args: unknown[][] = [];
@@ -668,7 +668,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     it("a swap left pending saves the quote's basePerNative in the step", async () => {
       const w = live();
       const a = w.make();
-      await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
       const ex = (w.make() as unknown as { executor: Exec }).executor;
       (a as unknown as { executor: unknown }).executor = ex;
       const quote = ex.quote;
@@ -684,7 +684,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it("live fees are the position manager's own collect quote, asked once as the position's owner (not rebuilt from several reads)", async () => {
     const w = live();
     const a = w.make();
-    await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await a.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (a as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     await a.tick();
     w.approve(); w.ok(w.sent[0].hash);
@@ -721,7 +721,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('close: one multicall (remove all, collect via the manager, unwrap PLS, sweep DAI, burn); fees = collected − principal', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick();
@@ -749,7 +749,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     const w = live();
     const e = w.make();
     const msgs: string[] = [];
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     (e as unknown as { d: { emit?: (x: { msg: string }) => void } }).d.emit = (x) => msgs.push(x.msg);
     w.approve();
@@ -771,7 +771,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('a deposit never asks for more of a token than the wallet holds or allowed ("STF", CASHCAT 2026-11-03: 1,304,170 wei over)', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     // the wallet holds a hair less DAI than the bot's floating-point idle says, as on Kyle's wallet
@@ -797,7 +797,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('Pause during a close whose exit is being sent: the exit is kept by hash and settles; the position is not left behind (a039)', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     const ex = (w.make() as unknown as { executor: { sendTx: (r: { to: string; data: string; value: bigint }) => Promise<{ hash: string; nonce: number }> } }).executor;
     (e as unknown as { executor: unknown }).executor = ex;
     w.approve();
@@ -819,7 +819,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('Pause during a close that has not gone out yet drops it (nothing sent); Resume does not close (a039)', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick();
@@ -837,7 +837,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('Profits can not be switched while a fee send is in flight; the sent fees are booked (a031)', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, profits: { mode: 'send', to: '0x00000000000000000000000000000000000beef1' } });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, profits: { mode: 'send', to: '0x00000000000000000000000000000000000beef1' }, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick();
@@ -858,7 +858,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     // 1000 DAI at 2400 DAI per PLS: about half (≈0.21 PLS) is bought for the position; the wallet already had 0.46 PLS for gas.
     const w = live({ price: 2400, balances: { pls: 0.46 + 0.2083, stable: 500 } });
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.05, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.05, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick();
@@ -877,7 +877,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     const w = live({ price: 2400, balances: { pls: 0.2, stable: 500 } });
     w.m.getFeeData = async () => ({ gasPrice: 20_700_000n, maxFeePerGas: 40_996_000n });
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.05, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.05, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick();
@@ -892,7 +892,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     w.m.native = 10n ** 18n * 1000n; // 1000 PLS in the wallet
     const bot = new MultiBot({ net: NET, reader: w.m, signer: w.signer as never, store: new MemoryStore<MultiState>(), log: new Logger(true), hub: w.hub });
     w.m.addToken({ ...DAI });
-    await expect(bot.addLp({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0, baseAmount: 1500 }))
+    await expect(bot.addLp({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0, baseAmount: 1500, range: { costCheck: false } }))
       .rejects.toThrow('Not enough PLS in your wallet. This needs 1500 PLS (1500 for this bot), and the wallet has 1000 PLS.');
     expect(bot.status().lps).toHaveLength(0);
   });
@@ -900,7 +900,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('KILL ALL during a close: the exit already sent is settled and the bot ends; nothing new is sent', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     const ex = (w.make() as unknown as { executor: { execute: (...a: unknown[]) => unknown } }).executor;
     let sales = 0;
     const execute = ex.execute;
@@ -928,7 +928,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it("a close asked while a step's transaction is being sent waits for it (the transaction is never lost)", async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     const ex = (w.make() as unknown as { executor: { sendTx: (r: unknown) => Promise<{ hash: string; nonce: number }> } }).executor;
     (e as unknown as { executor: unknown }).executor = ex;
     w.approve();
@@ -952,7 +952,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it("selling a native base back leaves room for the sale's gas when the wallet holds less than the bot counts", async () => {
     const w = live({ balances: { pls: 900, stable: 1e9 } });
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     const ex = (w.make() as unknown as { executor: { quote: (s: 'buy' | 'sell', a: number) => Promise<Record<string, unknown>> } }).executor;
     const quote = ex.quote, asked: number[] = [];
     ex.quote = async (side, amount) => { asked.push(amount); return { ...(await quote(side, amount)), gasPlsEstimate: 5 }; };
@@ -968,7 +968,8 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   /** A live bot with its position open (minted as id 5) */
   async function opened(w: ReturnType<typeof live>) {
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    // these hand-build states far below any loss limit: give them room
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, lossLimitPct: 0.5, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick();
@@ -982,7 +983,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('a close asked while a transaction confirms, then KILL ALL: the transaction is settled, nothing is sent, and the close is dropped (Close again)', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick(); // the mint is sent
@@ -1037,7 +1038,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     const wallet = { pls: 900, stable: 1e9 };
     const w = live({ balances: wallet });
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     const ex = (w.make() as unknown as { executor: Record<string, (...a: never[]) => Promise<Record<string, unknown>>> }).executor;
     const quote = ex.quote, execute = ex.execute;
     ex.quote = async (side: never, amount: never) => ({ ...(await quote(side, amount)), gasPlsEstimate: 5 });
@@ -1054,7 +1055,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('a mined mint whose receipt has no readable events yet is never sent again: it settles when they appear, gas booked once', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick();
@@ -1078,7 +1079,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('a mined step whose events never become readable stops the bot and names the hash; nothing is sent again', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     await e.tick();
@@ -1095,7 +1096,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
     for (const fate of ['dropped', 'stuck', 'used'] as const) {
       const w = live();
       const e = w.make();
-      await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+      await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
       const ex = (w.make() as unknown as { executor: { txFate: () => Promise<string> } }).executor;
       (e as unknown as { executor: unknown }).executor = ex;
       await e.tick();
@@ -1121,7 +1122,7 @@ describe('LP bot (live): every step sent once, settled by hash, safe across rest
   it('a step that keeps reverting stops the bot after 3 tries (nothing lost)', async () => {
     const w = live();
     const e = w.make();
-    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await e.start({ mode: 'live', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     (e as unknown as { executor: unknown }).executor = (w.make() as unknown as { executor: unknown }).executor;
     w.approve();
     for (let i = 0; i < 3; i++) {
@@ -1148,7 +1149,7 @@ describe('LP bot funded with coins already in the wallet', () => {
     void pool;
     const share = p.baseShare(t.tickLower, t.tickUpper, v);
     // 600 DAI + 400 DAI worth of PLS: only ~76 DAI (share × 1000 − 400) is swapped to PLS, not ~476
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 600, baseAmount: 400 / PRICE });
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 600, baseAmount: 400 / PRICE, range: { costCheck: false } });
     expect(lp.status().equityHist[0][1]).toBeCloseTo(1000, 6);
     expect(lp.status()).not.toHaveProperty('equity'); // the home series reads equityHist from every engine
     await lp.tick();
@@ -1158,15 +1159,15 @@ describe('LP bot funded with coins already in the wallet', () => {
     expect(s.pnl!.net + s.pnl!.price).toBeCloseTo(s.pnl!.equity - 1000, 9); // counted from what it was given
     // the same 1000 given only as DAI swaps ~6× more, so it starts with less (fee + price impact)
     const only = world().lp;
-    await only.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000 });
+    await only.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, range: { costCheck: false } });
     await only.tick();
     expect(s.value!).toBeGreaterThan(only.status().value!);
     expect(only.status().pnl!.swapCost).toBeGreaterThan(4 * s.pnl!.swapCost);
   });
   it('only coins, no amount of the spend coin, works too; nothing at all is refused', async () => {
     const { lp } = world();
-    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0 })).rejects.toThrow('Enter an amount.');
-    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0, baseAmount: 1000 / PRICE });
+    await expect(lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0, range: { costCheck: false } })).rejects.toThrow('Enter an amount.');
+    await lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 0, baseAmount: 1000 / PRICE, range: { costCheck: false } });
     await lp.tick();
     expect(lp.status().position).not.toBeNull();
     expect(lp.status().coins!.quote).toBeGreaterThan(490);
@@ -1398,7 +1399,7 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       expect(p.gas).toBeGreaterThan(0);
       expect(p.net).toBeCloseTo(p.fees - p.gas - p.swapCost - p.moveLoss, 9);
       expect(p.equity).toBeCloseTo(st.value! + st.totals.sent - st.totals.gas, 9);
-      expect(p.price).toBeCloseTo(p.equity - st.startValue! - p.net, 9);
+      expect(p.price + p.carry).toBeCloseTo(p.equity - st.startValue! - p.net, 9); // the market on the deposit + the mix carried
       const row = a.bot.overview('paper').bots.find((x) => x.kind === 'lp')!;
       expect(a.bot.overview('live').bots).toEqual([]); // a paper bot never shows up in live analytics
       expect((await a.call('GET', '/api/analytics/overview')).status).toBe(400); // a mode is required
@@ -1406,7 +1407,7 @@ describe('LP bot in the app: API, status, restart, money split', () => {
       expect(row.capital).toBe(1000);
       expect(row.equity).toBeCloseTo(p.equity, 9);
       expect(row.realized).toBeCloseTo(p.net, 9);
-      expect(row.unrealized).toBeCloseTo(p.price, 9);
+      expect(row.unrealized).toBeCloseTo(p.price + p.carry, 9);
     } finally { await a.close(); }
   });
 });
@@ -1414,24 +1415,27 @@ describe('LP bot in the app: API, status, restart, money split', () => {
 describe('LP range gates and compounding (off unless set)', () => {
   const open = async (opt?: Parameters<typeof world>[0], start?: Partial<Parameters<LpEngine['start']>[0]>) => {
     const w = world(opt);
-    await w.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: true, ...start });
+    await w.lp.start({ mode: 'paper', market: 'pulsechain:PLS/DAI#9mm', bandPct: 0.1, capital: 1000, rerange: true, lossLimitPct: 0.5, range: { costCheck: false }, ...start });
     await w.lp.tick();
     return w;
   };
 
-  it('a start without the new fields saves the old config shape and still moves on the first reading outside', async () => {
-    const { lp, m, pool } = await open();
-    expect(Object.keys(lp.state.config!).sort()).toEqual(['bandPct', 'baseAmount', 'capital', 'rerange']);
+  it('a start without the new fields saves the old config shape plus the loss limit; the default cost check holds the first move until the position has a fee pace (Kyle 2026-11-08)', async () => {
+    const { lp, m, pool } = await open(undefined, { range: undefined, lossLimitPct: undefined });
+    expect(Object.keys(lp.state.config!).sort()).toEqual(['bandPct', 'baseAmount', 'capital', 'lossLimitPct', 'rerange']);
+    expect(lp.state.config!.lossLimitPct).toBe(0.03);
     const saved = JSON.parse(JSON.stringify(lp.state)) as LpState;
     expect(saved.config).not.toHaveProperty('range');
     expect(saved.config).not.toHaveProperty('compound');
     m.movePrice(pool, 1.2);
     await lp.tick();
-    expect(lp.status()).toMatchObject({ reranges: 1, inRange: true });
+    const s = lp.status();
+    expect(s.reranges).toBe(0);
+    expect(['need-cost', 'cost']).toContain(s.hold.wait);
   });
 
   it('dwells outside for the configured minutes, then moves', async () => {
-    const { lp, m, pool, at } = await open(undefined, { range: { dwellMin: 30 } });
+    const { lp, m, pool, at } = await open(undefined, { range: { costCheck: false, dwellMin: 30 } });
     m.movePrice(pool, 1.2);
     await lp.tick();
     expect(lp.status()).toMatchObject({ reranges: 0, inRange: false, hold: { wait: 'dwell' } });
@@ -1444,7 +1448,7 @@ describe('LP range gates and compounding (off unless set)', () => {
   });
 
   it('a price buffer holds a poke just past the edge', async () => {
-    const { lp, m, pool } = await open(undefined, { range: { bufferPct: 0.05 } });
+    const { lp, m, pool } = await open(undefined, { range: { costCheck: false, bufferPct: 0.05 } });
     m.movePrice(pool, 1.12); // about 12% up, only ~2% past a ±10% edge
     await lp.tick();
     expect(lp.status().inRange).toBe(false);
@@ -1504,7 +1508,7 @@ describe('LP range gates and compounding (off unless set)', () => {
 
   it('warns once as the price nears the edge, and not again until it comes back', async () => {
     const msgs: string[] = [];
-    const { lp, m, pool } = await open({ emit: (e) => msgs.push(e.msg) }, { range: { nearEdgeFrac: 0.25 } });
+    const { lp, m, pool } = await open({ emit: (e) => msgs.push(e.msg) }, { range: { costCheck: false, nearEdgeFrac: 0.25 } });
     m.movePrice(pool, 1.08);
     await lp.tick();
     expect(lp.status().inRange).toBe(true);
@@ -1520,7 +1524,7 @@ describe('LP range gates and compounding (off unless set)', () => {
   it('an ATR multiple widens the open beyond the configured band', async () => {
     const px = PRICE;
     const candles = Array.from({ length: 30 }, () => ({ o: px, h: px * 1.02, l: px * 0.98, c: px }));
-    const { lp } = await open({ candles: () => candles }, { bandPct: 0.01, range: { atrMult: 2, atrPeriod: 14 } });
+    const { lp } = await open({ candles: () => candles }, { bandPct: 0.01, range: { costCheck: false, atrMult: 2, atrPeriod: 14 } });
     const pos = lp.status().position!;
     expect(pos.upper / pos.lower).toBeGreaterThan(1.1); // ±1% would be ~1.02; 2× a 4% ATR is about ±8%
     expect(lp.state.config!.bandPct).toBe(0.01); // the setting is unchanged
@@ -1537,7 +1541,7 @@ describe('LP range gates and compounding (off unless set)', () => {
   });
 
   it('a cooldown holds the next move, and a preset only changes the saved width', async () => {
-    const { lp, m, pool, at } = await open(undefined, { range: { cooldownMin: 60 } });
+    const { lp, m, pool, at } = await open(undefined, { range: { costCheck: false, cooldownMin: 60 } });
     m.movePrice(pool, 1.2);
     await lp.tick();
     expect(lp.status().reranges).toBe(1);

@@ -41,28 +41,29 @@ const lpLive = (): Obj => {
   return { ...b, metrics: lpMetrics(b, NOW) };
 };
 
-describe('real snapshot: LP Generated is units earned; range-move losses are reported beside it, not taken out', () => {
-  it('Fees paid = gas + swaps, so fees earned − fees paid = what it made', () => {
+describe('real snapshot: LP Generated is units earned after every cost of its own trades, range moves included (2026-11-08)', () => {
+  it('Fees paid = gas + swaps; fees earned − fees paid − what the moves locked in = what it made', () => {
     const b = lpLive(), k = b.usdPerQuote, t = b.totals;
     const f = botFacts(b, NOW);
     expect(f.feesPaidUsd!).toBeCloseTo((t.gas + t.swapCost) * k, 6);
     expect(f.feesPaidUsd! / k).toBeCloseTo(0.002633, 5); // gas + swaps (actuals)
-    expect(f.feesEarnedUsd! - f.feesPaidUsd!).toBeCloseTo(b.metrics.dollarsMadeUsd, 6);
-    expect(b.metrics.dollarsMadeUsd / k).toBeCloseTo(0.028842 + 0.022473, 5); // fees − gas − swaps, ETH
-    expect(b.metrics.realizedRebalanceLossUsd / k).toBeCloseTo(0.022473, 5); // the 3 moves, reported on their own
+    expect(f.feesEarnedUsd! - f.feesPaidUsd! - t.moveLoss * k).toBeCloseTo(b.metrics.dollarsMadeUsd, 6);
+    expect(b.metrics.dollarsMadeUsd / k).toBeCloseTo(0.028842, 5); // fees − gas − swaps − what the 3 moves locked in, ETH
+    expect(b.metrics.realizedRebalanceLossUsd / k).toBeCloseTo(0.022473, 5); // the 3 moves, also shown on their own
   });
-  it('generated per coin = fees − gas − swaps', () => {
+  it('generated per coin = fees − gas − swaps − what the moves locked in', () => {
     const b = lpLive(), m = b.metrics;
     const gen = m.generated!;
     expect(gen.USDC).toBeCloseTo(b.pnl.feeCoins.base, 6);
-    expect(gen.ETH).toBeCloseTo(b.pnl.feeCoins.quote - b.totals.gas - b.totals.swapCost, 9);
+    expect(gen.ETH).toBeCloseTo(b.pnl.feeCoins.quote - b.totals.gas - b.totals.swapCost - (b.totals.moveCoins?.quote ?? b.totals.moveLoss), 9);
   });
-  it('the LP page has no "Lost to range moves" tile; the loss is a Details info row, not a cost line', () => {
+  it('the LP page has no "Lost to range moves" tile; the loss is a cost line of the Details breakdown', () => {
     const src = readFileSync(new URL('../src/ui/LpDetail.tsx', import.meta.url), 'utf8');
     expect(src).not.toContain('>Lost to range moves<');
     expect(src).toMatch(/metrics\.breakdownByCoin/);
     const md = readFileSync(new URL('../src/ui/MoneyDetails.tsx', import.meta.url), 'utf8');
-    expect(md).toContain("'Range moves (in Price change)'");
+    expect(md).toContain("['Range moves', c.moves"); // a cost line of Generated, no longer an info row inside Price change
+    expect(md).not.toContain('Range moves (in Price change)');
     expect(md).not.toMatch(/rangeMoveLoss/);
   });
 });
@@ -76,10 +77,10 @@ describe('real snapshot: closed Robinhood ETH/USDG LP move loss is rebuilt at lo
     expect(saved.totals.fees - saved.totals.gas).toBeCloseTo(89.51, 2);
     // … which is Generated again under the units rule; the rebuilt move loss is reported beside it even when no server rebuilt it
     const m = lpClosedStatus(clone(saved)).metrics;
-    expect(m.generated.USDG).toBeCloseTo(89.51, 2);
+    expect(m.generated.USDG).toBeCloseTo(89.51 - 105.82, 2); // the bot lost 16.31 USDG: fees − gas − what its 12 moves locked in
     expect(m.realizedRebalanceLossUsd).toBeCloseTo(105.82, 2);
   });
-  it('load rebuilds ≈105.8 USDG lost to moves, reported beside its +89.51 USDG Generated (fees − gas)', () => {
+  it('load rebuilds ≈105.8 USDG lost to moves, so Generated reads −16.31 USDG (fees − gas − moves), not +89.51', () => {
     const before = clone(saved);
     const up = upgradeLp(clone(saved));
     expect(saved).toEqual(before); // never edits the saved object
@@ -87,15 +88,15 @@ describe('real snapshot: closed Robinhood ETH/USDG LP move loss is rebuilt at lo
     expect(up.totals.moveLoss).toBeCloseTo(105.82, 2);
     expect(up.totals.moveLossBackfill).toMatchObject({ price: saved.lastPrice });
     const m = lpClosedStatus(up).metrics;
-    expect(m.generated!.USDG).toBeCloseTo(89.51, 2);
+    expect(m.generated!.USDG).toBeCloseTo(89.51 - 105.82, 2);
     expect(m.generated!.ETH).toBe(0);
     expect(m.realizedRebalanceLossUsd!).toBeCloseTo(105.82, 2);
-    expect(m.dollarsMadeUsd!).toBeCloseTo(89.51, 2);
+    expect(m.dollarsMadeUsd!).toBeCloseTo(89.51 - 105.82, 2);
     // Total P&L = idle coins at the exit price − gas − start ≈ −53.2 USDG; price change = the rest. (The actuals' −141.51
     // price effect was taken against the app's uncorrected +89.51 net: −141.51 + 105.82 ≈ −35.7, the gap being the exit
     // price vs the last value point.)
     expect(m.totalPnlUsd!).toBeCloseTo(0.8717608375797146 * 2332.745368296711 + 117.28207 - 0.8165948 - 2203.2534147, 3);
-    expect(m.priceChangeUsd!).toBeCloseTo(-36.88 - 105.82, 1); // the move loss now sits in Price change
+    expect(m.priceChangeUsd!).toBeCloseTo(-36.88, 1); // what the moves locked in is in Generated (2026-11-08), so Price change is the market and the carry alone
     expect(m.generatedUsd! + m.priceChangeUsd!).toBeCloseTo(m.totalPnlUsd!, 9);
   });
   it('is idempotent and leaves bots it cannot rebuild exactly alone', () => {

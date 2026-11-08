@@ -37,6 +37,8 @@ export interface RangeBlock {
 export interface CoinBreakdown {
   earned: number;
   gasSwap: number;
+  /** Liquidity bots: what the range moves locked in, in this coin */
+  moves: number;
   taxes: number;
   bridge: number;
   generated: number;

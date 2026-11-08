@@ -1,4 +1,4 @@
-/** Optional LP range-move and compound settings. Every control defaults off. */
+/** Optional LP range-move and compound settings. Every control defaults off, except the cost check (on since 2026-11-08). */
 import { LP_MOVE_PRESETS, type LpCompoundPolicy, type LpMovePreset, type LpRangePolicy } from '../market/lpPolicy';
 import { L } from './Tip';
 
@@ -17,7 +17,7 @@ export interface PolicyDraft {
 }
 
 export const EMPTY_POLICY: PolicyDraft = {
-  dwellMin: '0', cooldownMin: '0', bufferPct: '0', atrMult: '0', atrPeriod: '14', costCheck: false, feeHorizonH: '24', nearEdgePct: '0', compound: false,
+  dwellMin: '0', cooldownMin: '0', bufferPct: '0', atrMult: '0', atrPeriod: '14', costCheck: true, feeHorizonH: '24', nearEdgePct: '0', compound: false,
 };
 
 export function draftFrom(range?: Partial<LpRangePolicy> | null, compound?: Partial<LpCompoundPolicy> | null): PolicyDraft {
@@ -27,7 +27,7 @@ export function draftFrom(range?: Partial<LpRangePolicy> | null, compound?: Part
     bufferPct: String(+((range?.bufferPct ?? 0) * 100).toPrecision(6)),
     atrMult: String(range?.atrMult ?? 0),
     atrPeriod: String(range?.atrPeriod ?? 14),
-    costCheck: range?.costCheck === true,
+    costCheck: range?.costCheck !== false,
     feeHorizonH: String(range?.feeHorizonH ?? 24),
     nearEdgePct: String(+((range?.nearEdgeFrac ?? 0) * 100).toPrecision(6)),
     compound: compound?.enabled === true,
@@ -53,7 +53,7 @@ export function payloadFrom(d: PolicyDraft): { range: LpRangePolicy; compound: L
 /** Nothing set: omit the objects so a new bot is saved in the same shape as before. */
 export function optionalPayload(d: PolicyDraft): { range?: LpRangePolicy; compound?: LpCompoundPolicy } {
   const p = payloadFrom(d);
-  const rangeOff = p.range.dwellMin === 0 && p.range.cooldownMin === 0 && p.range.bufferPct === 0 && p.range.atrMult === 0 && !p.range.costCheck && p.range.nearEdgeFrac === 0;
+  const rangeOff = p.range.dwellMin === 0 && p.range.cooldownMin === 0 && p.range.bufferPct === 0 && p.range.atrMult === 0 && p.range.costCheck && p.range.nearEdgeFrac === 0;
   return { ...(rangeOff ? {} : { range: p.range }), ...(p.compound.enabled ? { compound: p.compound } : {}) };
 }
 
@@ -95,7 +95,7 @@ export function LpPolicyFields({ d, set, onPreset }: {
       </div>
       <label className="check follow">
         <input type="checkbox" checked={d.costCheck} onChange={(e) => set({ ...d, costCheck: e.target.checked })} />
-        <span><b>Move only when the fees would cover it</b> <span className="muted">Estimated gas plus the swap back to the mix, against the recent fee pace carried over the horizon below. Until the position has a pace (10 minutes), it waits.</span></span>
+        <span><b>Move only when the fees would cover it</b> <span className="muted">Gas, the swap back to the mix and the loss the move would lock in, against the recent fee pace over the time ranges have lasted here (the horizon below until there have been 3 moves). Until the position has a pace (10 minutes), it waits. On by default.</span></span>
       </label>
       <div className="form-row">
         <label><L tip="How many hours of the recent fee pace to compare with the cost of a move.">Fee horizon (hours)</L>
