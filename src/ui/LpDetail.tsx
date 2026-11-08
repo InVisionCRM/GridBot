@@ -7,6 +7,7 @@ import { StatTable } from './StatTable';
 import { MoneyDetails, type DetailRow } from './MoneyDetails';
 import { ago, bagFixed, cls, dur, num, pct, pctShown, px, qty, usd } from './fmt';
 import { LP_BAND, LP_LOSS_LIMIT } from '../market/lp';
+import { STRATEGY, type OneSided } from '../market/lpStrategy';
 import { ChainBadge, DexTag, chainOf } from './chains';
 import type { ActivityEvent, Ticks } from './useStream';
 import { BotLog } from './GridDetail';
@@ -38,6 +39,9 @@ function moveNote(b: AnyObj): string {
   if (wait === 'dwell') return `Auto-move is on: it waits ${dwell} minute${dwell === 1 ? '' : 's'} outside before moving.`;
   if (wait === 'cooldown') return `Auto-move is on: it waits ${cool} minute${cool === 1 ? '' : 's'} after a move before it can move again.`;
   if (wait === 'buffer') return 'The price is outside the range but still inside the buffer, so the range stays.';
+  if (wait === 'order-waiting') return 'Your order sits where you placed it and fills when the price comes back to it. Re-place it at the price below, or leave it.';
+  if (wait === 'order-filling') return 'The price is inside your order: the pool is filling it and paying you the fee on every trade.';
+  if (wait === 'filled') return 'Filled: taking it out now.';
   if (wait === 'cost') return 'Moving would cost more (gas, the swap, and the loss the move would lock in) than the fees the next range should earn in the time ranges have lasted here, so it waits for the price to come back. Widen the range or move it yourself below.';
   if (wait === 'losing') return "The last 24 hours' moves lost money together (fees under the swaps, gas and what they locked in), so auto-move holds. It waits for the price to come back; widen the range, move it yourself, or close.";
   if (dwell > 0 || cool > 0) return `Auto-move is on: it moves after ${dwell > 0 ? `${dwell} minutes outside` : 'the price leaves'}${cool > 0 ? `, and not again for ${cool} minutes` : ''}${b.config?.range?.bufferPct ? `, once the price is ${(b.config.range.bufferPct * 100).toFixed(2)}% past the edge` : ''}.`;
@@ -106,6 +110,33 @@ function RangeControls({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: b
 }
 
 /** Range health: where the price sits in the band, fees waiting, and what a compound or a move would do. */
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+/** Strategy "orders": the card's title: the order's side and whether the pool is filling it. */
+function orderTitle(b: AnyObj, pos: AnyObj | null, closed: boolean): string {
+  const side = String(b.side ?? b.config?.oneSided?.side ?? 'buy');
+  const wait = b.hold?.wait as string | undefined;
+  if (closed) return 'Closed';
+  if (!pos) return b.status === 'stopped' && b.halt?.what === 'filled' ? `${cap(side)} order · filled` : `${cap(side)} order · placing`;
+  return `${cap(side)} order · ${wait === 'order-waiting' ? 'waiting for the price' : wait === 'filled' ? 'filled' : 'filling, earning'}`;
+}
+/** Strategy "orders": where the order sits, what the pool is doing with it, what happens when it fills, and a way to re-place it at the price. */
+function OrderCard({ b, pos, act, busy, closed }: { b: AnyObj; pos: AnyObj; act: Props['act']; busy: boolean; closed: boolean }) {
+  const o = b.config.oneSided as OneSided;
+  const side = String(b.side ?? o.side) as 'buy' | 'sell';
+  const base = b.base as string, q = b.quote as string;
+  const wait = b.hold?.wait as string | undefined;
+  const replace = () => act(async () => {
+    if (!(await ask({ title: 'Re-place the order at the price', body: `The ${side} order is taken out (its fees collected) and placed again ${o.steps} step${o.steps === 1 ? '' : 's'} ${side === 'buy' ? 'below' : 'above'} today's price. Nothing is swapped.`, action: 'Re-place' }))) return;
+    await botApi(`lps/${b.id}/move`, 'POST', {});
+  });
+  return (<>
+    <p className="small">{side === 'buy' ? `${q} waits from ${px(pos.lower)} to ${px(pos.upper)} ${q}/${base}: the pool buys ${base} with it on the way down, paying the fee on every trade.` : `${base} waits from ${px(pos.lower)} to ${px(pos.upper)} ${q}/${base}: the pool sells it for ${q} on the way up, paying the fee on every trade.`} {wait === 'order-waiting' ? `The price is ${side === 'buy' ? 'above' : 'below'} it now, so it sits until the price comes back.` : wait === 'filled' ? 'Filled: coming out now.' : 'The price is inside it: filling.'}</p>
+    <p className="small muted">{o.flip ? `When it is filled through, the bot places a ${side === 'buy' ? 'sell' : 'buy'} order just ${side === 'buy' ? 'above' : 'below'} the new price with what it got.` : 'When it is filled through, the bot pauses with the coins.'} Nothing is ever swapped.</p>
+    {!closed && b.status === 'running' && wait === 'order-waiting' && <button type="button" className="btn small-btn" disabled={busy} onClick={replace}>Re-place at the price</button>}
+    <p className="muted small">{openedText(b, pos)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · {o.steps} pool step{o.steps === 1 ? '' : 's'} wide</p>
+  </>);
+}
+
 function RangeHealth({ b, act, busy }: { b: AnyObj; act: Props['act']; busy: boolean }) {
   const pos = b.position as { lower: number; upper: number };
   const price = b.price as number | null;
@@ -411,7 +442,7 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
         {b.lastError && <div className="banner error"><span className="grow">{b.lastError}</span></div>}
         <TxProgress b={b} s={s} />
         {b.status === 'stopped' && pos && <div className="banner"><span className="grow"><b>Paused with the position open.</b> It keeps earning fees while the price is inside the range, but the range won't move and fees aren't sent until you resume.</span></div>}
-        {pos && b.inRange === false && !step && <div className="banner"><span className="grow"><b>The price is outside the range</b>, so the position isn't earning. {moveNote(b)}</span></div>}
+        {pos && b.inRange === false && !step && <div className="banner"><span className="grow"><b>{b.config?.oneSided ? 'The price is away from your order' : 'The price is outside the range'}</b>, so the position isn't earning. {moveNote(b)}</span></div>}
       </div>
 
       <Hero b={b} />
@@ -425,14 +456,15 @@ export function LpDetail({ s, id, events, ticks, nav, act, busy }: Props) {
           <StatTable b={b} s={s} hide={[...(metricsOf(b)?.generatedRate.d1 ? LP_SHOWN_ELSEWHERE : LP_SHOWN_ELSEWHERE.filter((k) => k !== 'Age')), 'APR']} />
         </div>
         <div className="lpb-card" data-testid="position-card">
-          <h3 className="lpb-label">{pos ? (b.inRange ? 'Position · in range, earning' : 'Position · out of range') : closed ? 'Closed' : 'No position open'}</h3>
+          <h3 className="lpb-label">{b.config?.oneSided ? orderTitle(b, pos, closed) : pos ? (b.inRange ? 'Position · in range, earning' : 'Position · out of range') : closed ? 'Closed' : 'No position open'}</h3>
+          {b.config?.strategy && STRATEGY[b.config.strategy as keyof typeof STRATEGY] && <p className="small muted">Strategy: {STRATEGY[b.config.strategy as keyof typeof STRATEGY].name}</p>}
           {/* first in the card: the coins below are the position only, and the set-aside part is still the bot's (Kyle 2026-11-04). Only smart trader bots set coins aside now; an older bot's go back in at its next move. */}
           {(b.aside?.base > 0 || b.aside?.quote > 0) && <p className="lpb-aside">Set aside: {num(b.aside.base, 6)} {base} + {num(b.aside.quote, 6)} {q}, in your wallet and still this bot's. {b.config?.maxPoolShare != null ? `It was kept out so the position stays under ${+(b.config.maxPoolShare * 100).toFixed(2)}% of the pool's trading liquidity (a smart trader bot); the next range move puts it back in if the pool has room, and it comes back to you when the bot closes.` : 'An older version kept it out to stay under 10% of the pool; the next range move puts it back in.'} The coins below are what is in the position.</p>}
-          {pos ? <>
+          {pos && b.config?.oneSided ? <OrderCard b={b} pos={pos} act={act} busy={busy} closed={closed} /> : pos ? <>
             <RangeHealth b={b} act={act} busy={busy} />
             {!closed && <RangeControls key={`${b.config.bandPct}`} b={b} act={act} busy={busy} />}
             <p className="muted small">{openedText(b, pos)} · {b.mode === 'live' ? `position #${pos.id}` : 'paper position'} · ±{+((b.config?.bandPct ?? 0) * 100).toFixed(2)}% wide</p>
-          </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : 'Opens on the next check.'}</p>}
+          </> : <p className="small muted">{closed ? 'Everything went back to the wallet.' : b.config?.oneSided && b.status === 'stopped' && b.halt?.what === 'filled' ? 'Filled. Resume to place the opposite order at the price, or close.' : 'Opens on the next check.'}</p>}
           {(b.idle.base > 0 || b.idle.quote > 0) && <p className="muted small">Outside the position: {num(b.idle.base, 6)} {base} + {num(b.idle.quote, 6)} {q} (left over from the mix{closed ? ', now in your wallet' : ''})</p>}
         </div>
       </div>

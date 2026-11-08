@@ -90,7 +90,9 @@ export const LP_MOVE_PRESETS: readonly LpMovePreset[] = [LP_PRESET_A, LP_PRESET_
 /** A fee pace younger than this is not a pace yet: the cost check waits. */
 export const COST_MIN_HOURS = 10 / 60;
 
-export type RangeWait = 'in' | 'buffer' | 'off' | 'dwell' | 'cooldown' | 'need-cost' | 'cost' | 'losing';
+export type RangeWait = 'in' | 'buffer' | 'off' | 'dwell' | 'cooldown' | 'need-cost' | 'cost' | 'losing'
+  /** An order (strategy "orders"): the price is inside it, away from it, or went through it */
+  | 'order-filling' | 'order-waiting' | 'filled';
 
 export interface RangeMoveInput {
   /** Pool rule: tick < tickLower or tick >= tickUpper. This is today's trigger. */

@@ -7,6 +7,8 @@ import { DEFAULT_GAS_RESERVE, parseGasRes, type GasReserveCfg } from '../live/ga
 import { humanAmount } from '../live/amount';
 import { PAYOUT_MIN_GAS_MULTIPLE } from '../live/payout';
 import { LP_BAND, LP_MIN_SWAP_SHARE, V3_STEP } from '../market/lp';
+import { correlatedPair, patientWidth, STRATEGY, type LpStrategyId, type OneSided, type WeekMove } from '../market/lpStrategy';
+import { OrderFields, StrategyCards } from './StrategyCards';
 import { EMPTY_POLICY, LpPolicyFields, optionalPayload } from './LpPolicyFields';
 import { rangeBaseShare } from '../live/v3Liquidity';
 import { L } from './Tip';
@@ -417,6 +419,9 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const [rerange, setRerange] = useState(true);
   const [lossLimit, setLossLimit] = useState('3');
   const [policy, setPolicy] = useState(EMPTY_POLICY);
+  const [strategy, setStrategy] = useState<LpStrategyId | null>(null);
+  const [week, setWeek] = useState<WeekMove | null>(null);
+  const [order, setOrder] = useState<OneSided>({ side: 'buy', steps: STRATEGY.orders.steps, flip: STRATEGY.orders.flip });
   const [profits, setProfits] = useState<ProfitsChoice>({ mode: 'reinvest', to: '' });
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [mode, setMode] = useState<Mode>('paper');
@@ -427,6 +432,8 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
     const ms = lpMarkets(chain);
     if (ms.length && !ms.some((x) => x.key === unflipKey(pair))) setPair(ms[0].key);
   }, [chain]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the patient width follows the week's move once the pool's trades are read
+  useEffect(() => { if (strategy === 'patient') setBand(String(+(patientWidth(week).pct * 100).toFixed(2))); }, [week, strategy]);
 
   if (!pair) return <div className="card"><p className="muted">No pair here can hold a liquidity position. It needs a V3 pool (Uniswap V3 on Ethereum or Robinhood, 9mm V3 on PulseChain). Pick another chain, or add a pair with a V3 pool under Tools → Markets.</p></div>;
 
@@ -442,15 +449,25 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
   const plan = spot && bandOk && q + a > 0 ? swapPlan(spot, b, q, a) : null;
   const impact = Number(limits.impact) / 100, impactOk = impact > 0 && impact < 1;
   const live = useLiveStart(act, busy);
+  // an order's width for the record: its steps in the pool's step (never under the narrowest range the bot takes)
+  const orderBand = Math.max(LP_BAND.min, order.steps * (step ?? 0.006));
+  const choose = (id: LpStrategyId) => {
+    setStrategy(id);
+    if (id === 'patient') { setRerange(true); setPolicy({ ...EMPTY_POLICY, dwellMin: String(STRATEGY.patient.range.dwellMin), cooldownMin: String(STRATEGY.patient.range.cooldownMin), costCheck: true }); setLossLimit(String(STRATEGY.patient.lossLimitPct * 100)); }
+    if (id === 'orders') { setRerange(true); setPolicy(EMPTY_POLICY); setLossLimit(String(STRATEGY.orders.lossLimitPct * 100)); }
+    if (id === 'stable') { setBand(String(STRATEGY.stable.bandPct * 100)); setRerange(STRATEGY.stable.rerange); setPolicy(EMPTY_POLICY); setLossLimit(String(STRATEGY.stable.lossLimitPct * 100)); }
+  };
+  const together = strategy === 'stable' ? lpMarkets('all').map((x) => ({ key: x.key, mm: mk(s, x.key) })).filter(({ mm }) => correlatedPair(String(mm.base), String(mm.quote))) : [];
   const start = async () => {
     if (mode === 'live' && !(await ask({
       title: `Start a live liquidity position on ${m.label}`, body: `It signs real transactions from ${chainOf(s, m.chainId)?.address ?? s.address}.`,
-      rows: [{ k: 'range', v: `±${+(b * 100).toFixed(2)}% around the price` }, { k: 'put in', v: `${q} ${m.quote}${a > 0 ? ` + ${a} ${m.base}` : ''}` }],
+      rows: [{ k: strategy === 'orders' ? 'order' : 'range', v: strategy === 'orders' ? `${order.side} ${m.base}, ${order.steps} step${order.steps === 1 ? '' : 's'} ${order.side === 'buy' ? 'below' : 'above'} the price` : `±${+(b * 100).toFixed(2)}% around the price` }, { k: 'put in', v: `${q} ${m.quote}${a > 0 ? ` + ${a} ${m.base}` : ''}` }],
       action: 'Start it', money: true,
     }))) return;
     live.run(mode === 'live', async (extra, from) => {
       const r = await botApi('lps', 'POST', {
-        mode, market: pair, bandPct: b, capital: q, baseAmount: a, rerange, lossLimitPct: Number(lossLimit) / 100, ...optionalPayload(policy), profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative), ...extra,
+        mode, market: pair, bandPct: strategy === 'orders' ? orderBand : b, capital: q, baseAmount: a, rerange, lossLimitPct: Number(lossLimit) / 100, ...optionalPayload(policy),
+        ...(strategy ? { strategy } : {}), ...(strategy === 'orders' ? { oneSided: order } : {}), profits: profitsBody(profits), limits: limitsBody(limits, !!m.quoteNative), ...extra,
       }, from);
       nav({ v: 'lp', id: r.id });
     });
@@ -458,32 +475,42 @@ function LpForm({ s, nav, act, busy, prefill }: Common & { prefill?: LpPrefill }
 
   return (
     <div className="card">
+      <StrategyCards chosen={strategy} onChoose={choose} week={week} base={String(m.base)} quote={String(m.quote)} stepPct={step} />
+      {strategy === 'stable' && (
+        <div className="quick" data-testid="together-pairs">
+          <span className="muted small">Pairs that move together:</span>
+          {together.length ? together.map(({ key, mm }) => <button key={key} type="button" className={`btn small-btn ${key === pair ? 'primary' : ''}`} onClick={() => setPair(key)}>{mm.label}{mm.chainId !== m.chainId ? ` · ${chainOf(s, mm.chainId)?.name ?? mm.chainId}` : ''}</button>)
+            : <span className="small">none among the pairs here: add one under Tools → Markets (USDC/USDT, USDG/USDC, WETH/wstETH …) and come back.</span>}
+        </div>
+      )}
       <div className="form-row">
         <PairPicker s={s} value={pair} onChange={setPair} lp />
-        <label><L tip="How far the range reaches each side of today's price. Narrower earns more fees per coin while the price is inside, and leaves the range sooner.">Range ± %</L><input value={band} inputMode="decimal" onChange={(e) => setBand(e.target.value.replace(/[%\s]/g, ''))} /></label>
+        {strategy !== 'orders' && <label><L tip="How far the range reaches each side of today's price. Narrower earns more fees per coin while the price is inside, and leaves the range sooner.">Range ± %</L><input value={band} inputMode="decimal" onChange={(e) => setBand(e.target.value.replace(/[%\s]/g, ''))} /></label>}
         <AmountField label={`Amount (${m.quote})`} value={amount} f={funds} onChange={setAmount} />
         <AmountField label={`Also use ${m.base} you hold (optional)`} value={baseAmt} f={baseFunds} onChange={setBaseAmt} />
       </div>
-      <div className="quick">
-        <span className="muted small">Range around {spot ? px(spot) : '—'} {m.quote}/{m.base}:</span>
-        {LP_BANDS.map((x) => <button key={x} type="button" className={`btn small-btn ${Math.abs(b - x) < 1e-9 ? 'primary' : ''}`} onClick={() => setBand(String(x * 100))}>±{x * 100}%</button>)}
-      </div>
+      {strategy === 'orders' ? <OrderFields o={order} set={setOrder} base={String(m.base)} quote={String(m.quote)} stepPct={step} spot={spot} /> : (
+        <div className="quick">
+          <span className="muted small">Range around {spot ? px(spot) : '—'} {m.quote}/{m.base}:</span>
+          {LP_BANDS.map((x) => <button key={x} type="button" className={`btn small-btn ${Math.abs(b - x) < 1e-9 ? 'primary' : ''}`} onClick={() => setBand(String(x * 100))}>±{x * 100}%</button>)}
+        </div>
+      )}
       {!bandOk && <p className="small neg">The range must be between ±{LP_BAND.min * 100}% and ±{LP_BAND.max * 100}%.</p>}
       {bandOk && step != null && 2 * b * 100 < step && (
         <p className="small warn">This pool moves in steps of {step}%: a range narrower than that opens one step wide ({step}% edge to edge) around the price, not ±{+(b * 100).toFixed(2)}%.</p>
       )}
       <div className="verdict ok">
-        <span>Puts your coins into the {m.dexName ?? m.dex} {feeLabel(m)} pool between <b>{spot && bandOk ? px(spot * (1 - b)) : '—'}</b> and <b>{spot && bandOk ? px(spot * (1 + b)) : '—'}</b> {m.quote}/{m.base}. {plan
+        <span>{strategy === 'orders' ? <>Places {order.side === 'buy' ? `${q || '—'} ${m.quote}` : `${a || '—'} ${m.base}`} in the {m.dexName ?? m.dex} {feeLabel(m)} pool as a <b>{order.side} order</b>, {order.steps} pool step{order.steps === 1 ? '' : 's'} {order.side === 'buy' ? 'below' : 'above'} the price. <b>Nothing is swapped.</b> It earns the {feeLabel(m)} fee on every trade that fills it{order.flip ? ', then places the opposite order at the new price' : ', then pauses with the coins'}.</> : <>Puts your coins into the {m.dexName ?? m.dex} {feeLabel(m)} pool between <b>{spot && bandOk ? px(spot * (1 - b)) : '—'}</b> and <b>{spot && bandOk ? px(spot * (1 + b)) : '—'}</b> {m.quote}/{m.base}. {plan
           ? plan.side == null ? <>Your {m.base} and {m.quote} already match the range's mix, so <b>nothing is swapped</b>.</>
             : <>The range needs about {pct(plan.share, 0)} of the value in {m.base}, so it first swaps about <b>{plan.side === 'buy' ? `${humanAmount(plan.amount)} ${m.quote} → ${m.base}` : `${humanAmount(plan.amount)} ${m.base} → ${m.quote}`}</b>{a > 0 ? '' : `. Add ${m.base} you already hold above to swap less`}.</>
-          : <>The range needs both coins: what's missing is swapped first. {m.base} you already hold can go in too, so less is swapped.</>}</span>
+          : <>The range needs both coins: what's missing is swapped first. {m.base} you already hold can go in too, so less is swapped.</>}</>}</span>
         <span className="detail">It earns its share of the {feeLabel(m)} fee on every trade while the price is inside the range. Like a grid, it ends up holding more of whichever coin fell. Outside the range it earns nothing until the price comes back or the range moves. It goes in at the amount you choose; only the swap to the range's mix is cut if it would move the price more than the price-impact cap. Gas: opening is a swap plus about 480k; moving the range is a take-out (about 250k), a swap and a new open; closing is about 250k.</span>
       </div>
       <Rerange on={rerange} set={setRerange} />
       <label><L tip="The bot pauses and tells you when its result against holding what you put in is this far below zero. 3% unless you change it; never off.">Loss limit %</L>
         <input value={lossLimit} inputMode="decimal" aria-label="Loss limit percent" onChange={(e) => setLossLimit(e.target.value.replace(/[^\d.]/g, ''))} /></label>
       <LpReplay pair={pair} capital={spot ? q + a * spot : q} maxImpact={impactOk ? impact : null} band={b} rerange={rerange} usdPer={m.usdPerQuote ?? null}
-        onPick={(nb, nr) => { setBand(String(+(nb * 100).toFixed(4))); setRerange(nr); }} />
+        onPick={(nb, nr) => { setBand(String(+(nb * 100).toFixed(4))); setRerange(nr); }} onWindow={setWeek} strategy={strategy} orderSide={order.side} />
       <ProfitsField p={profits} set={setProfits} kind="lp" />
       <details className="more">
         <summary>Advanced</summary>

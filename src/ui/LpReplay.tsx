@@ -8,19 +8,32 @@ import type { ReplayRow } from '../market/lpReplay';
 import { L, Tip } from './Tip';
 import { cls, num, pct, qty, time } from './fmt';
 import { Usd } from './money';
+import { useEffect } from 'react';
 import { ReplayFrame, youngNote, type Days } from './ReplayWindow';
+import type { OrderReplayResult } from '../market/lpReplay';
+import type { LpStrategyId, WeekMove } from '../market/lpStrategy';
 
-type Ready = { days: Days; from: number; to: number; swaps: number; capital: number; base: string; quote: string; gasMove: number; maxImpact: number; rows: ReplayRow[] };
+type Ready = {
+  days: Days; from: number; to: number; swaps: number; capital: number; base: string; quote: string; gasMove: number; maxImpact: number; rows: ReplayRow[];
+  /** How far the price went up and down over the window (the patient strategy's width); older servers omit it */
+  window?: WeekMove;
+  /** Strategy "orders" over the same trades; older servers omit it */
+  orders?: OrderReplayResult[];
+};
 
-export function LpReplay({ pair, capital, maxImpact, band, rerange, usdPer, onPick }: {
+export function LpReplay({ pair, capital, maxImpact, band, rerange, usdPer, onPick, onWindow, strategy = null, orderSide = 'buy' }: {
   pair: string; capital: number; maxImpact: number | null; band: number; rerange: boolean; usdPer: number | null; onPick: (band: number, rerange: boolean) => void;
+  /** Told the window's move when the replay is ready (the patient strategy's width) */
+  onWindow?: (w: WeekMove) => void;
+  strategy?: LpStrategyId | null;
+  orderSide?: 'buy' | 'sell';
 }) {
   const params: Record<string, string> = { market: pair };
   if (capital > 0) params.capital = String(capital);
   if (maxImpact != null) params.maxImpact = String(maxImpact);
   return (
     <ReplayFrame<Ready> title={(w) => `What it would have earned over ${w}`} path="/api/lp/replay" params={params}
-      ready={(a) => <Ready a={a} band={band} rerange={rerange} usdPer={usdPer} onPick={onPick} />} />
+      ready={(a) => <Ready a={a} band={band} rerange={rerange} usdPer={usdPer} onPick={onPick} onWindow={onWindow} strategy={strategy} orderSide={orderSide} />} />
   );
 }
 
@@ -33,8 +46,13 @@ function Units({ c, base, quote, sig, sign = true }: { c: { base: number; quote:
   return <>{parts.map(([v, sym]) => <span key={sym} className="coin-line">{qty(v, sym, sig, sign)}</span>)}</>;
 }
 
-export function Ready({ a, band, rerange, usdPer, onPick }: { a: Ready; band: number; rerange: boolean; usdPer: number | null; onPick: (band: number, rerange: boolean) => void }) {
+export function Ready({ a, band, rerange, usdPer, onPick, onWindow, strategy = null, orderSide = 'buy' }: {
+  a: Ready; band: number; rerange: boolean; usdPer: number | null; onPick: (band: number, rerange: boolean) => void; onWindow?: (w: WeekMove) => void; strategy?: LpStrategyId | null; orderSide?: 'buy' | 'sell';
+}) {
   const q = a.quote;
+  const hi = a.window?.hiPct, lo = a.window?.loPct;
+  useEffect(() => { if (hi != null && lo != null) onWindow?.({ hiPct: hi, loPct: lo }); }, [hi, lo]); // eslint-disable-line react-hooks/exhaustive-deps
+  const orders = strategy === 'orders' ? (a.orders ?? []).filter((o) => o.side === orderSide) : [];
   const best = a.rows.reduce((b, r) => (r.result > b.result ? r : b), a.rows[0]);
   const mixOf = (r: ReplayRow) => r.moveLoss + r.openLoss;
   const sel = a.rows.find((r) => same(r, band, rerange)) ?? null;
@@ -51,6 +69,20 @@ export function Ready({ a, band, rerange, usdPer, onPick }: { a: Ready; band: nu
         the moves locked in (the coins a position gives back against the coins it took in). The coins' own price change
         is left out. Tap a row to use it.
       </p>
+      {orders.length > 0 && (
+        <div className="table-wrap" data-testid="order-replay"><table className="replay-table">
+          <thead><tr>
+            <th>{orderSide === 'buy' ? 'Buy' : 'Sell'} order <Tip>One coin on one side of the price, this many pool steps wide, flipping to the opposite order each time it is filled through. Nothing swapped.</Tip></th>
+            <th>Fills</th>
+            <th>Fees</th>
+            <th className="narrow-hide">Filling <Tip>Share of the time the price was inside the order, so it was earning.</Tip></th>
+            <th>Result <Tip>Against holding the coin put in, at the last price, less gas, in {q}.</Tip></th>
+          </tr></thead>
+          <tbody>{orders.map((o) => (
+            <tr key={o.steps}><td>{o.steps} step{o.steps === 1 ? '' : 's'}</td><td className="txt">{o.fills}</td><td className="pos">{qty(o.fees, q, 4)}</td><td className="narrow-hide">{pct(o.inOrder, 0)}</td><td className={cls(o.result)}>{qty(o.result, q, 4)}</td></tr>
+          ))}</tbody>
+        </table></div>
+      )}
       {sel ? <Summary r={sel} a={a} days={days} usdPer={usdPer} /> : <p className="small muted">This range isn't in the replay (it tries ±1% to ±20%). Tap a row to see its numbers.</p>}
       <div className="table-wrap tall"><table className="replay-table">
         <thead><tr>

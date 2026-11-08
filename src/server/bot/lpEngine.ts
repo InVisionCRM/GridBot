@@ -32,6 +32,7 @@ import {
 } from '../../market/lpPolicy';
 import { atr } from '../../market/indicators';
 import { localDayStart } from '../../metrics/feesToday';
+import { checkOneSided, LP_STRATEGY_IDS, orderState, orderTicks, type LpStrategyId, type OneSided } from '../../market/lpStrategy';
 import { dayKey } from '../../metrics/daily';
 import { gasReserve, reserveCfg } from '../../live/gasReserve';
 import { amountToUnits } from '../../live/decimals';
@@ -98,6 +99,8 @@ export interface LpStep {
   lockIn?: number;
   /** You asked for it (Compound now, Move, Close, the start); absent: the bot's own rules */
   asked?: boolean;
+  /** An order's exit because the pool filled it (strategy "orders"): the coins are the other coin now, so the side flips */
+  filled?: boolean;
   /** Tx sent for this stage and not settled yet: never resent while set */
   hash?: string;
   sentAt?: number;
@@ -174,6 +177,10 @@ export interface LpState {
      * zero, as a fraction of what was put in. Never off: a save without it reads as LP_LOSS_LIMIT (Kyle 2026-11-08).
      */
     lossLimitPct?: number;
+    /** The strategy the bot was set up with (the page's name for its settings). Absent for a bot set up by hand. */
+    strategy?: LpStrategyId;
+    /** An order: one coin on one side of the price, never swapped (strategy "orders"). Absent: a range around the price. */
+    oneSided?: OneSided;
   } | null;
   limits: SafetyLimits;
   profits: ProfitMode;
@@ -190,6 +197,8 @@ export interface LpState {
   resultNegativeAt?: number | null;
   /** The local day (dayKey) whose day summary was told, so each day is told once. Old saves omit it. */
   dailyNoted?: string;
+  /** An order bot's current side: config.oneSided.side at the start, flipped at each fill when flip is on. */
+  side?: 'buy' | 'sell';
   step: LpStep | null;
   /** Each time fees were collected, newest first (the last COLLECTIONS_KEPT): when, the coins, and why. Old saves omit it. */
   collections?: FeeCollection[];
@@ -260,6 +269,9 @@ export interface LpStartParams {
   maxPoolShare?: number;
   /** Pause at this loss against holding, as a fraction of what is put in (0.03 = −3%). Omit for LP_LOSS_LIMIT. */
   lossLimitPct?: number;
+  strategy?: LpStrategyId;
+  /** Strategy "orders": one coin on one side of the price (lpStrategy.orderTicks); nothing is ever swapped. */
+  oneSided?: Partial<OneSided>;
   profits?: ProfitMode;
   limits?: Partial<SafetyLimits>;
   /** Set by MultiBot: a Stop all / STOP chain that landed while this start was under way (it then isn't started) */
@@ -505,6 +517,10 @@ export class LpEngine {
     const compound = p.compound ? compoundPolicy(p.compound) : undefined;
     if (p.maxPoolShare !== undefined && !(p.maxPoolShare > 0 && p.maxPoolShare < 1)) throw new Error('Max pool share must be between 0 and 1.');
     if (p.lossLimitPct !== undefined && !(p.lossLimitPct > 0 && p.lossLimitPct <= 0.5)) throw new Error('Loss limit must be between 0% and 50%.');
+    if (p.strategy !== undefined && !LP_STRATEGY_IDS.includes(p.strategy)) throw new Error(`Unknown strategy ${String(p.strategy)}.`);
+    const oneSided = p.oneSided ? checkOneSided(p.oneSided) : undefined;
+    if (oneSided?.side === 'buy' && !(p.capital > 0)) throw new Error(`A buy order is placed with ${this.quoteSym}: enter an amount of it.`);
+    if (oneSided?.side === 'sell' && !(baseAmount > 0)) throw new Error(`A sell order is placed with ${this.baseSym}: enter an amount of it.`);
     const stoppedBy = p.guard?.();
     if (stoppedBy) {
       this.state.halt = { ...stoppedBy, at: this.now() };
@@ -516,16 +532,18 @@ export class LpEngine {
       ...this.state, status: 'running', config: {
         bandPct: p.bandPct, capital: p.capital, baseAmount, rerange: p.rerange ?? true, lossLimitPct: p.lossLimitPct ?? LP_LOSS_LIMIT,
         ...(range ? { range } : {}), ...(compound ? { compound } : {}), ...(p.maxPoolShare !== undefined ? { maxPoolShare: p.maxPoolShare } : {}),
+        ...(p.strategy ? { strategy: p.strategy } : {}), ...(oneSided ? { oneSided } : {}),
       },
       limits: { ...this.state.limits, ...(p.limits ?? {}) }, profits, position: null, idle: { base: baseAmount, quote: p.capital },
-      step: { action: 'open', stage: 'swap', tries: 0, asked: true }, outSince: null, lastRerangeAt: null, reranges: 0, seen: null,
+      side: oneSided?.side, step: { action: 'open', stage: 'swap', tries: 0, asked: true }, outSince: null, lastRerangeAt: null, reranges: 0, seen: null,
       totals: { fees: 0, gas: 0, sent: 0, feeCoins: { base: 0, quote: 0 }, swapCost: 0, moveLoss: 0 }, startedAt: this.now(), startPrice: v.price, lastPrice: v.price, lastPriceAt: this.now(), equity: [[this.now(), p.capital + baseAmount * v.price]],
       closing: false, archivedAt: null, halt: null, startOverride: override,
     };
     this.lastError = null;
     this.save();
     // no amount here (Kyle): the page's Invested tile shows it once; the 'opened … with X + Y' line follows with what went in
-    this.ev('started', `Liquidity ${this.label}: opening ±${+(p.bandPct * 100).toFixed(2)}% around ${v.price.toPrecision(6)} (${p.mode})`, { level: 'success' });
+    if (oneSided) this.ev('started', `Liquidity ${this.label}: placing a ${oneSided.side} order ${oneSided.steps} pool step${oneSided.steps === 1 ? '' : 's'} ${oneSided.side === 'buy' ? 'below' : 'above'} ${v.price.toPrecision(6)} (${p.mode}); nothing is swapped`, { level: 'success' });
+    else this.ev('started', `Liquidity ${this.label}: opening ±${+(p.bandPct * 100).toFixed(2)}% around ${v.price.toPrecision(6)} (${p.mode})`, { level: 'success' });
   }
 
   /** Pause managing (no re-range, no sends); a position stays open and keeps earning. A tx already sent is still settled. */
@@ -562,6 +580,8 @@ export class LpEngine {
     this.state.archivedAt = null;
     this.state.halt = null;
     if (override !== undefined) this.state.startOverride = override;
+    // an order that filled and paused: the opposite order (the one its coins fill), at the price
+    if (this.state.config?.oneSided && !this.state.position && !this.state.step) this.state.step = { action: 'open', stage: 'swap', tries: 0, asked: true };
     this.save();
     this.ev('started', `Liquidity ${this.label} resumed`);
   }
@@ -810,6 +830,7 @@ export class LpEngine {
    */
   private async watchRange(pool: LpPool, v: PoolView) {
     const p = this.state.position!, c = this.state.config!;
+    if (c.oneSided) return this.watchOrder(v);
     const policy = rangePolicy(c.range);
     const tickOut = v.tick < p.tickLower || v.tick >= p.tickUpper;
     const base = {
@@ -836,6 +857,21 @@ export class LpEngine {
     if (await this.moveBlock(pool, v, band)) { this.hold = { ...this.hold, wait: 'blocked' }; return; }
     this.state.step = { action: 'rerange', stage: 'exit', tries: 0, rangeBand: band };
     this.ev('range', `Liquidity ${this.label}: price ${v.price.toPrecision(6)} is outside ${p.lower.toPrecision(6)}–${p.upper.toPrecision(6)}; moving the range to the price`, { level: 'info', notify: true });
+  }
+
+  /**
+   * An order (strategy "orders"): inside it the pool is filling it and paying fees; away from it the order sits; through
+   * it, it is filled: all of it is the other coin now, so it is taken out, and with flip the opposite order is placed at
+   * the price by swap(), which swaps nothing for an order. No dwell, cooldown or cost check: a fill is the trigger.
+   */
+  private watchOrder(v: PoolView) {
+    const p = this.state.position!, side = this.state.side!, o = this.state.config!.oneSided!;
+    const st = orderState(v.tick, p.tickLower, p.tickUpper, v.baseIs0, side);
+    this.hold = { wait: st === 'filled' ? 'filled' : st === 'waiting' ? 'order-waiting' : 'order-filling', toEdge: null, near: false, compoundNeed: null, feesWaiting: null, suggestedBand: null };
+    this.state.outSince = st === 'filling' ? null : (this.state.outSince ?? this.now());
+    if (st !== 'filled') return;
+    this.state.step = { action: 'rerange', stage: 'exit', tries: 0, filled: true };
+    this.ev('range', `Liquidity ${this.label}: the ${side} order ${p.lower.toPrecision(6)}–${p.upper.toPrecision(6)} is filled (price ${v.price.toPrecision(6)})${o.flip ? `; placing a ${side === 'buy' ? 'sell' : 'buy'} order at the price` : ''}`, { level: 'success', notify: true });
   }
 
   /** Half-width for the next open. ATR multiple 0 returns the configured band unchanged. */
@@ -1473,7 +1509,17 @@ export class LpEngine {
       this.finished(s, null);
       this.markArchived(true);
       this.ev('stopped', `Liquidity ${this.label}: closed (${f}); ${this.state.idle.base.toPrecision(6)} ${this.baseSym} + ${this.state.idle.quote.toPrecision(6)} ${this.quoteSym} back in the wallet`, { level: 'success', notify: true });
+    } else if (s.filled && !this.state.config!.oneSided!.flip) {
+      // an order that fills once: out, and the bot pauses with the coins, which fill the opposite order; Resume places it
+      const was = this.state.side!;
+      this.state.side = was === 'buy' ? 'sell' : 'buy';
+      this.finished(s, null);
+      this.state.step = null;
+      const i = this.state.idle;
+      this.stop(systemHalt('filled', `the ${was} order filled (${f}): ${i.base.toPrecision(6)} ${this.baseSym} + ${i.quote.toPrecision(6)} ${this.quoteSym} in the wallet. Resume to place a ${this.state.side} order at the price, or close.`, this.now()));
     } else {
+      // a filled order flips: the coins it got are the coins the opposite order needs. A move re-places the same order.
+      if (s.filled) this.state.side = this.state.side === 'buy' ? 'sell' : 'buy';
       s.stage = 'swap'; s.tries = 0; s.range = undefined;
       this.ev('filled', `Liquidity ${this.label}: took out ${p.lower.toPrecision(6)}–${p.upper.toPrecision(6)} (${f})`, { level: 'success' });
     }
@@ -1506,14 +1552,19 @@ export class LpEngine {
       s.stage = this.state.mode === 'live' ? 'approve' : 'mint';
       return;
     }
+    const order = this.state.config!.oneSided;
     if (!s.range) {
-      const band = s.rangeBand ?? this.bandFor(v);
-      s.range = pool.ticksFor(v.price * (1 - band), v.price * (1 + band), v);
+      if (order) s.range = orderTicks(v.tick, v.spacing, v.baseIs0, this.state.side!, order.steps);
+      else {
+        const band = s.rangeBand ?? this.bandFor(v);
+        s.range = pool.ticksFor(v.price * (1 - band), v.price * (1 + band), v);
+      }
     }
     // Coins set aside at an earlier open go back in at every open, so a smart trader bot's cap below keeps out only what
     // is over its share of the active liquidity now, and a bot without a cap puts it all back. Kept apart for good,
     // they sat in the wallet (Kyle's CASHCAT/ETH, 2026-11-04: 1.41 ETH + 3,501 CASHCAT out while the position was 6.4%).
     this.unpark();
+    if (order) { s.stage = this.state.mode === 'live' ? 'approve' : 'mint'; return; } // one coin on one side: nothing to swap, no cap
     this.parkOversize(pool, v, s.range.tickLower, s.range.tickUpper);
     const share = pool.baseShare(s.range.tickLower, s.range.tickUpper, v);
     const idle = this.state.idle, value = idle.base * v.price + idle.quote;
@@ -1878,7 +1929,7 @@ export class LpEngine {
     return {
       kind: 'lp' as const, id: s.id, mode: s.mode, market: s.market, label: this.label, chainId: this.chainId, base: this.baseSym, quote: this.quoteSym,
       dex: this.def?.pool.dex ?? null, dexName: this.def ? this.hub.dexName(this.def.chainId, this.def.pool.dex) : null, feeBps: this.def?.pool.feeBps ?? null, feeTier: this.def?.pool.feeTier ?? null,
-      status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, aside: s.aside ?? { base: 0, quote: 0 }, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
+      status: s.status, closing: !!s.closing, archivedAt: s.archivedAt ?? null, halt: s.halt ?? null, startOverride: s.startOverride ?? null, config: s.config, profits: s.profits, position: s.position, idle: s.idle, aside: s.aside ?? { base: 0, quote: 0 }, side: s.side ?? null, step: s.step ? { action: s.step.action, stage: s.step.stage, hash: s.step.hash ?? s.step.swap?.hash ?? null, sentAt: s.step.sentAt ?? null } : null,
       price: s.lastPrice, priceAt: s.lastPriceAt, inRange: vw?.inRange ?? null, coins: vw?.coins ?? null, owed: vw?.owed ?? null, value: vw?.value ?? null,
       outSince: s.outSince, move: this.moveStatus(), hold: this.hold, positionFees: this.positionFees(), lastRerangeAt: s.lastRerangeAt, reranges: s.reranges, totals: s.totals, collections: s.collections ?? [], done: s.done ?? [], poolFees: s.poolFees ?? null, lpFeeRate: this.lpFeeRate, pnl: this.pnl(), poolShare: this.poolShare(), startValue: this.startValue(), startedAt: s.startedAt, feeHist: (s.feeHist ?? []).filter(([t]) => t >= this.now() - FEE_HIST_SHOWN_MS), startPrice: s.startPrice, equityHist: downsampleByTime(s.equity, 600),
       usdPerQuote: this.def ? this.hub.usdPerQuote(this.state.market) : null, lastError: this.lastError, available: !(this.executor instanceof UnavailableExecutor),
